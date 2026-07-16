@@ -4110,19 +4110,7 @@ export default function ThreadPage() {
                       const whatsappPoll = thread.platform === "WHATSAPP" ? getWhatsAppPoll(message) : null;
                       const isAttachmentOnlyText = /^\[.+\]$/.test(displayText.trim());
                       const showText = !(hasInlineMedia && isAttachmentOnlyText) && !whatsappPoll;
-                      // Pilot R-0094: an image sent with no caption shouldn't
-                      // sit in the coloured message bubble - the operator wants
-                      // just the picture. When the message is nothing but
-                      // photos/stickers, drop the bubble chrome (background,
-                      // padding, tail) so the image floats on the thread. Video
-                      // and audio keep the bubble: video carries its own frame
-                      // and both surface a transcript line that needs it.
-                      const isImageOnly =
-                        hasInlineMedia &&
-                        !showText &&
-                        playableAttachments.every(
-                          (a) => a.kind === "photo" || a.kind === "sticker"
-                        );
+                      const isRichContentOnly = (hasInlineMedia || Boolean(whatsappPoll)) && !showText;
                       // #703. A message that is exactly one URL renders as a
                       // preview card instead of a bare-link bubble (same
                       // as iMessage). Mixed text keeps its bubble and
@@ -4166,7 +4154,7 @@ export default function ThreadPage() {
                           ) : (
                           <div
                             className={
-                              isImageOnly
+                              isRichContentOnly
                                 ? "flex flex-col gap-2"
                                 : `flex flex-col gap-2 px-4 py-3 text-[14.5px] leading-[1.5] ${
                                     message.direction === "OUT"
@@ -5226,7 +5214,7 @@ export default function ThreadPage() {
                               }
                               void scheduleSend(at);
                             }}
-                            className="mt-2 w-full rounded-pill bg-ink px-3 py-[7px] text-[12px] font-medium text-paper hover:bg-[oklch(28%_0.01_80)] disabled:cursor-not-allowed disabled:opacity-50"
+                            className="mt-2 w-full rounded-pill bg-ink px-3 py-[7px] text-[12px] font-medium text-paper hover:bg-ink-2 disabled:cursor-not-allowed disabled:opacity-50"
                           >
                             {scheduling ? "Scheduling…" : "Schedule"}
                           </button>
@@ -5548,7 +5536,7 @@ export default function ThreadPage() {
               {/* Split button: primary action + a chevron to flip the mode.
                   The mode switcher only appears when full AI drafts are on;
                   otherwise this is an Ask-only button. */}
-              <div className="relative inline-flex rounded-pill bg-ink text-paper transition-[background-color] duration-calm hover:bg-[oklch(28%_0.01_80)]">
+              <div className="relative inline-flex rounded-pill bg-ink text-paper transition-[background-color] duration-calm hover:bg-ink-2">
                 <button
                   type="button"
                   disabled={composing || !composeIntent.trim()}

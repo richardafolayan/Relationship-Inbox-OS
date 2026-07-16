@@ -486,7 +486,7 @@ export function PilotFeedbackModal() {
                 type="button"
                 onClick={() => void submit()}
                 disabled={!canSubmit}
-                className="inline-flex items-center gap-2 rounded-pill bg-ink px-[18px] py-[9px] text-[12.5px] font-medium text-paper transition-colors duration-calm hover:bg-[oklch(28%_0.01_80)] disabled:cursor-not-allowed disabled:opacity-50"
+                className="inline-flex items-center gap-2 rounded-pill bg-ink px-[18px] py-[9px] text-[12.5px] font-medium text-paper transition-colors duration-calm hover:bg-ink-2 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 Submit report
               </button>

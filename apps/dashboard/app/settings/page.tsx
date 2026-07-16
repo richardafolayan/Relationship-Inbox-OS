@@ -803,7 +803,7 @@ function PlatformSetupCard({
           type="button"
           onClick={onPrimary}
           disabled={busy || !enabled || !supported}
-          className="inline-flex items-center rounded-pill bg-ink px-3 py-[7px] text-[12.5px] font-medium text-paper hover:bg-[oklch(28%_0.01_80)] disabled:cursor-not-allowed disabled:opacity-50"
+          className="inline-flex items-center rounded-pill bg-ink px-3 py-[7px] text-[12.5px] font-medium text-paper hover:bg-ink-2 disabled:cursor-not-allowed disabled:opacity-50"
         >
           {busy ? "Working..." : actionLabel}
         </button>
@@ -830,7 +830,7 @@ function SetupGuideSection() {
         <button
           type="button"
           onClick={() => startSetupWizard()}
-          className="inline-flex items-center rounded-pill bg-ink px-3 py-[7px] text-[12.5px] font-medium text-paper hover:bg-[oklch(28%_0.01_80)]"
+          className="inline-flex items-center rounded-pill bg-ink px-3 py-[7px] text-[12.5px] font-medium text-paper hover:bg-ink-2"
         >
           Run setup assistant
         </button>
