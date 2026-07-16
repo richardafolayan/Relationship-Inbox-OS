@@ -105,7 +105,7 @@ Status terms:
 | At Risk route | Existing legacy/secondary | `/at-risk` still resolves and offers batch actions, but it is removed from pilot navigation and current strategy says not to build an At Risk dashboard. |
 | Presenter modes and full demo | Operator/demo | Safe seeded sandbox and live read-only presentation modes, plus guided tours and reset. External actions are server-guarded. |
 | Pilot feedback | Primary | User-entered report plus safe context; optional confirmed screenshot; webhook delivery with copy fallback and optional GitHub attachment. |
-| App updates | Primary in source install | Checks configured feed, stages a pending update, applies outside the running process, preserves local state, and relaunches. Developer checkouts are refused. A packaged DMG can check versions but deliberately requires replacing the app from a newer DMG. |
+| App updates | Primary | Source installs use the checksum-verified source updater. Free stable signed macOS builds use Electron's native updater with a complete pre-signed app. Ad-hoc packaged builds require manual replacement. Developer checkouts are refused. |
 | Source release publishing | Operator | Builds tracked-only ZIP, guards secret/user-data exclusions, creates manifest/checksum, publishes to stable Dropbox paths, and verifies live artifacts. |
 | Electron DMG | Operator/build | Produces an architecture-specific Electron app with bundled Node 22, prebuilt workspaces, hardened-runtime entitlements, strict code-sign verification, DMG verification, immutable code, and external user storage. Not the same as the published source ZIP. |
 

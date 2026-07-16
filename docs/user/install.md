@@ -156,9 +156,11 @@ untrusted Wi-Fi network. Quitting Tovi closes phone access.
 
 Use Settings, App updates, Check for updates. A source installation offers
 Update and relaunch; it verifies the manifest and ZIP, preserves `.env`,
-`.env.bak`, `data/`, and `logs/`, and retains a rollback backup. A packaged
-DMG build instead tells you to replace the app from a newer DMG. Its data and
-settings remain under `~/Library/Application Support/Relationship Inbox OS`.
+`.env.bak`, `data/`, and `logs/`, and retains a rollback backup. An ad-hoc DMG
+build tells you to replace the app from a newer DMG. A stable signed build can
+quit, install, and relaunch after its update certificate has been trusted once.
+Its data and settings remain under
+`~/Library/Application Support/Relationship Inbox OS`.
 
 Terminal equivalents:
 

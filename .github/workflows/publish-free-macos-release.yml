@@ -1,0 +1,110 @@
+name: Publish Free Signed macOS Release
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-free-macos-release
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: macos-free-dev
+  ZIP_NAME: Tovi-macos-arm64-latest.zip
+  DMG_NAME: Tovi-macos-arm64-latest.dmg
+  FEED_NAME: latest-macos.json
+
+jobs:
+  publish:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+          cache: npm
+
+      - name: Require the free signing secrets
+        env:
+          P12_BASE64: ${{ secrets.RIOS_FREE_MACOS_P12_BASE64 }}
+          CERT_BASE64: ${{ secrets.RIOS_FREE_MACOS_CERT_BASE64 }}
+          P12_PASSWORD: ${{ secrets.RIOS_FREE_MACOS_P12_PASSWORD }}
+          SIGNING_IDENTITY: ${{ secrets.RIOS_FREE_MACOS_IDENTITY }}
+        run: |
+          test -n "$P12_BASE64"
+          test -n "$CERT_BASE64"
+          test -n "$P12_PASSWORD"
+          test -n "$SIGNING_IDENTITY"
+
+      - name: Import the private signing identity
+        env:
+          P12_BASE64: ${{ secrets.RIOS_FREE_MACOS_P12_BASE64 }}
+          CERT_BASE64: ${{ secrets.RIOS_FREE_MACOS_CERT_BASE64 }}
+          P12_PASSWORD: ${{ secrets.RIOS_FREE_MACOS_P12_PASSWORD }}
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/tovi-build.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 24)"
+          printf '%s' "$P12_BASE64" | base64 --decode > "$RUNNER_TEMP/tovi-signing.p12"
+          printf '%s' "$CERT_BASE64" | base64 --decode > "$RUNNER_TEMP/tovi-signing.cer"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/tovi-signing.p12" -k "$KEYCHAIN" -P "$P12_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security add-trusted-cert -r trustRoot -p codeSign -k "$KEYCHAIN" "$RUNNER_TEMP/tovi-signing.cer"
+          security list-keychains -d user -s "$KEYCHAIN"
+
+      - name: Install and verify
+        run: |
+          npm ci
+          npm run db:generate
+          npm run lint
+          npm run test:all
+
+      - name: Build the signed app, DMG, update zip, and feed
+        env:
+          RIOS_CODESIGN_IDENTITY: ${{ secrets.RIOS_FREE_MACOS_IDENTITY }}
+          RIOS_CODESIGN_CERTIFICATE: ${{ runner.temp }}/tovi-signing.cer
+        run: |
+          UPDATE_BASE="https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}"
+          npm run build:macos-dmg -- \
+            --channel dev \
+            --update-feed-url "$UPDATE_BASE/$FEED_NAME" \
+            --update-url "$UPDATE_BASE/$ZIP_NAME" \
+            --note "Free signed macOS dev build ${GITHUB_SHA}."
+          test "$(uname -m)" = "arm64"
+          codesign --verify --deep --strict --verbose=2 release-dist/macos/Tovi.app
+          codesign -d -r- release-dist/macos/Tovi.app 2> "$RUNNER_TEMP/requirement.txt"
+          grep -F 'certificate leaf = H' "$RUNNER_TEMP/requirement.txt"
+          mv release-dist/macos/Tovi-*-mac.zip "release-dist/macos/$ZIP_NAME"
+          mv release-dist/macos/Tovi-*.dmg "release-dist/macos/$DMG_NAME"
+
+      - name: Publish zip first and feed last
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" --prerelease --target "$GITHUB_SHA" \
+              --title "Free signed macOS dev channel" \
+              --notes "Self-signed macOS build. Initial installation requires one trust step."
+          fi
+          gh release upload "$RELEASE_TAG" --clobber \
+            "release-dist/macos/$ZIP_NAME" \
+            "release-dist/macos/$DMG_NAME"
+          gh release upload "$RELEASE_TAG" --clobber "release-dist/macos/$FEED_NAME"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: free-signed-macos-release
+          path: |
+            release-dist/macos/*.dmg
+            release-dist/macos/*.zip
+            release-dist/macos/latest-macos.json
+          if-no-files-found: warn
+          retention-days: 14

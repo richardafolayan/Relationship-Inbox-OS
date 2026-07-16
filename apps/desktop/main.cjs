@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, dialog, shell } = require("electron");
+const { app, autoUpdater, BrowserWindow, Menu, dialog, shell } = require("electron");
 const { spawn, spawnSync } = require("node:child_process");
 const {
   chmodSync,
@@ -37,6 +37,14 @@ const {
   startAppArgs,
   startAppEnvironment
 } = require("./launcher.cjs");
+const {
+  consumeNativeUpdateRequest,
+  isSigningCertificateTrusted,
+  nativeUpdateRequestPath,
+  nativeUpdaterConfiguration,
+  signingCertificatePath,
+  trustSigningCertificate
+} = require("./updater.cjs");
 
 const APP_DIR = resolveAppDir(__dirname);
 const START_TIMEOUT_MS = 180_000;
@@ -66,6 +74,9 @@ let shuttingDown = false;
 let favouriteContacts = [];
 let currentTextSize = "normal";
 let menuRefreshTimer = null;
+let nativeUpdateInProgress = false;
+let nativeUpdateRequest = "";
+let nativeUpdateTimer = null;
 
 app.setName(APP_NAME);
 if (process.platform === "win32") app.setAppUserModelId(APP_ID);
@@ -342,7 +353,8 @@ function startLocalApp() {
     configDir: paths.configDir,
     dataDir: paths.dataDir,
     packaged: app.isPackaged,
-    stateDir: paths.stateDir
+    stateDir: paths.stateDir,
+    nativeUpdateRequest
   });
   rmSync(startupConflictPath(), { force: true });
   if (reclaimPortConflictsOnce) environment.RIOS_RECLAIM_PORT_CONFLICTS = "1";
@@ -387,6 +399,80 @@ function startLocalApp() {
     );
   });
   return generation;
+}
+
+async function configureNativeUpdater() {
+  const configuration = nativeUpdaterConfiguration({
+    appDir: APP_DIR,
+    isPackaged: app.isPackaged,
+    platform: process.platform
+  });
+  if (!configuration.enabled) return;
+
+  const certificatePath = signingCertificatePath(APP_DIR, configuration.release);
+  if (!isSigningCertificateTrusted(certificatePath)) {
+    const result = await showMessageBox({
+      type: "info",
+      title: `${APP_NAME} updates`,
+      message: "Enable seamless updates on this Mac?",
+      detail:
+        `${APP_NAME} uses its own free code-signing certificate because this build is not distributed through Apple's paid developer programme. ` +
+        "Trust it once and future updates can replace the app without resetting its macOS permissions.",
+      buttons: ["Enable seamless updates", "Not now"],
+      defaultId: 0,
+      cancelId: 1
+    });
+    if (result.response !== 0) return;
+    const trust = trustSigningCertificate(certificatePath);
+    if (!trust.ok) {
+      writeLog(`Could not trust update certificate: ${trust.error}`);
+      await showMessageBox({
+        type: "warning",
+        title: `${APP_NAME} updates`,
+        message: "Seamless updates could not be enabled.",
+        detail: "The app will keep working, but a future update may need a manual reinstall. Try again after unlocking your login keychain.",
+        buttons: ["OK"]
+      });
+      return;
+    }
+  }
+
+  nativeUpdateRequest = nativeUpdateRequestPath(storagePaths().stateDir);
+  autoUpdater.setFeedURL({ url: configuration.feedUrl, serverType: "json" });
+  autoUpdater.on("error", (error) => {
+    writeLog(`Native update failed: ${error.message}`);
+    nativeUpdateInProgress = false;
+  });
+  autoUpdater.on("update-not-available", () => {
+    nativeUpdateInProgress = false;
+  });
+  autoUpdater.on("update-downloaded", () => {
+    if (nativeUpdateTimer) {
+      clearInterval(nativeUpdateTimer);
+      nativeUpdateTimer = null;
+    }
+    shuttingDown = true;
+    ++lifecycleGeneration;
+    void stopLocalApp().finally(() => {
+      quitReady = true;
+      autoUpdater.quitAndInstall();
+    });
+  });
+
+  nativeUpdateTimer = setInterval(() => {
+    if (nativeUpdateInProgress) return;
+    const request = consumeNativeUpdateRequest(nativeUpdateRequest);
+    if (!request) return;
+    nativeUpdateInProgress = true;
+    writeLog(`Downloading signed update ${request.fromVersion || ""} -> ${request.toVersion}.`);
+    try {
+      autoUpdater.checkForUpdates();
+    } catch (error) {
+      nativeUpdateInProgress = false;
+      writeLog(`Could not start native update: ${error.message}`);
+    }
+  }, 500);
+  nativeUpdateTimer.unref?.();
 }
 
 async function showPortConflictRecovery(conflict) {
@@ -933,6 +1019,7 @@ if (!gotLock) {
     }
     createMenu();
     createWindow();
+    await configureNativeUpdater();
     menuRefreshTimer = setInterval(() => {
       if (!shuttingDown && appProcess && mainWindow && !mainWindow.isDestroyed()) {
         void refreshFavourites();
@@ -968,6 +1055,10 @@ if (!gotLock) {
     if (menuRefreshTimer) {
       clearInterval(menuRefreshTimer);
       menuRefreshTimer = null;
+    }
+    if (nativeUpdateTimer) {
+      clearInterval(nativeUpdateTimer);
+      nativeUpdateTimer = null;
     }
     void stopLocalApp().finally(() => {
       quitReady = true;

@@ -23,7 +23,9 @@ import {
   macArchToOpenSslArch,
   parseArgs,
   planPaths,
-  prunePackagedFootprint
+  prunePackagedFootprint,
+  squirrelManifest,
+  stableDesignatedRequirement
 } from "../scripts/build-macos-dmg.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -74,6 +76,32 @@ test("builder constants carry the desktop identity", () => {
   assert.equal(macArchToNodeArch("x64"), "x64");
   assert.equal(macArchToOpenSslArch("arm64"), "darwin64-arm64-cc");
   assert.equal(macArchToOpenSslArch("x64"), "darwin64-x86_64-cc");
+});
+
+test("free signed updates use one stable certificate requirement", () => {
+  const hash = "ab".repeat(20);
+  assert.equal(
+    stableDesignatedRequirement(hash),
+    `designated => certificate leaf = H"${hash.toUpperCase()}" and identifier "${BUNDLE_ID}"`
+  );
+  assert.throws(() => stableDesignatedRequirement("bad"), /40 hex/);
+});
+
+test("macOS update manifest serves both the existing checker and Squirrel", () => {
+  const manifest = squirrelManifest({
+    version: "0.1.15-dev.99",
+    build: "2026-07-16T09:00:00.000Z",
+    commit: "abc123",
+    channel: "dev",
+    updateUrl: "https://example.com/Tovi.zip",
+    sha256: "a".repeat(64),
+    notes: ["A safe update."]
+  });
+  assert.equal(manifest.zipUrl, manifest.url);
+  assert.equal(manifest.name, manifest.version);
+  assert.equal(manifest.minimumInstallerVersion, "0.0.1");
+  assert.equal(manifest.notes, "A safe update.");
+  assert.equal(manifest.pub_date, manifest.build);
 });
 
 test("packaging prune keeps runtime files for the target macOS architecture", () => {
