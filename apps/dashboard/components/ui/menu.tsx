@@ -63,7 +63,7 @@ export function Menu({ trigger, items, align = "end" }: MenuProps) {
               }}
               className={cn(
                 "flex w-full items-center px-3 py-[7px] text-left text-[13px] transition-colors duration-calm hover:bg-paper-2",
-                item.danger ? "text-[oklch(45%_0.18_28)]" : "text-ink-2 hover:text-ink"
+                item.danger ? "text-accent-ink hover:bg-accent-soft" : "text-ink-2 hover:text-ink"
               )}
             >
               {item.label}

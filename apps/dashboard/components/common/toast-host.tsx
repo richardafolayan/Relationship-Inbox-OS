@@ -18,9 +18,9 @@ const kindStyles: Record<Toast["kind"], { ring: string; dot: string; label: stri
     label: "text-ink-3"
   },
   success: {
-    ring: "ring-1 ring-[oklch(72%_0.13_150)]/40",
-    dot: "bg-[oklch(62%_0.16_150)]",
-    label: "text-[oklch(46%_0.12_150)]"
+    ring: "ring-1 ring-risk-fresh/40",
+    dot: "bg-risk-fresh",
+    label: "text-risk-fresh"
   },
   error: {
     ring: "ring-1 ring-hairline-strong",

@@ -11,7 +11,7 @@ const variantStyles: Record<ButtonVariant, string> = {
   primary: "bg-ink text-paper hover:bg-ink-2",
   ghost: "text-ink-2 hover:bg-paper-2 hover:text-ink",
   quiet: "border border-hairline text-ink-2 hover:border-hairline-strong hover:bg-paper-2 hover:text-ink",
-  danger: "border border-[oklch(70%_0.18_28)] text-[oklch(45%_0.18_28)] hover:bg-[oklch(94%_0.04_28)]"
+  danger: "border border-accent-ink/50 text-accent-ink hover:bg-accent-soft"
 };
 
 export function Button({ className, variant = "ghost", ...props }: ButtonProps) {

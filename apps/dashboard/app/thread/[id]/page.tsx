@@ -3487,7 +3487,7 @@ export default function ThreadPage() {
                     <span className="truncate text-ink-3">· {riskLabel}</span>
                     {thread.snoozedUntil && Date.parse(thread.snoozedUntil) > Date.now() ? (
                       <span
-                        className="ml-1 hidden shrink-0 rounded-full bg-[oklch(94%_0.03_85)] px-2 py-[1px] text-[9px] font-medium uppercase tracking-[0.04em] text-[oklch(45%_0.10_60)] sm:inline"
+                        className="ml-1 hidden shrink-0 rounded-full bg-risk-waiting/15 px-2 py-[1px] text-[9px] font-medium uppercase tracking-[0.04em] text-risk-waiting sm:inline"
                         title={`Hidden from active inbox until ${new Date(thread.snoozedUntil).toLocaleString()}`}
                       >
                         Snoozed · wakes {formatScheduledFor(thread.snoozedUntil)}
@@ -4110,7 +4110,6 @@ export default function ThreadPage() {
                       const whatsappPoll = thread.platform === "WHATSAPP" ? getWhatsAppPoll(message) : null;
                       const isAttachmentOnlyText = /^\[.+\]$/.test(displayText.trim());
                       const showText = !(hasInlineMedia && isAttachmentOnlyText) && !whatsappPoll;
-                      const isRichContentOnly = (hasInlineMedia || Boolean(whatsappPoll)) && !showText;
                       // #703. A message that is exactly one URL renders as a
                       // preview card instead of a bare-link bubble (same
                       // as iMessage). Mixed text keeps its bubble and
@@ -4119,6 +4118,8 @@ export default function ThreadPage() {
                         showText && !hasInlineMedia ? urlOnlyMessage(message.text) : null;
                       const inlineCardUrl =
                         showText && !soloLinkUrl ? (extractUrls(message.text)[0] ?? null) : null;
+                      const usesTransparentRichSurface =
+                        hasInlineMedia || Boolean(whatsappPoll) || Boolean(inlineCardUrl);
                       const nativeReactions =
                         (message.raw?.reactions as MessageReaction[] | undefined) ?? [];
                       const synthesizedReactions = synthesizedReactionsByParentId.get(message.id) ?? [];
@@ -4154,8 +4155,8 @@ export default function ThreadPage() {
                           ) : (
                           <div
                             className={
-                              isRichContentOnly
-                                ? "flex flex-col gap-2"
+                              usesTransparentRichSurface
+                                ? "flex flex-col gap-2 text-[14.5px] leading-[1.5] text-ink"
                                 : `flex flex-col gap-2 px-4 py-3 text-[14.5px] leading-[1.5] ${
                                     message.direction === "OUT"
                                       ? "rounded-2xl rounded-br-[6px] bg-ink text-paper"

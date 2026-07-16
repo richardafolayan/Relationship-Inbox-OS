@@ -38,7 +38,7 @@ export function FullDemoBanner() {
     tone = "warn";
   }
 
-  const ring = tone === "warn" ? "border-risk-overdue/40 bg-[oklch(98%_0.03_28)]" : "border-hairline bg-paper-2";
+  const ring = tone === "warn" ? "border-risk-overdue/40 bg-accent-soft" : "border-hairline bg-paper-2";
 
   return (
     <div
