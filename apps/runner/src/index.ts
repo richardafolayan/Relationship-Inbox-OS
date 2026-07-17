@@ -5901,7 +5901,14 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
     // remembers WHY the thread was snoozed when it returns.
     reminderText: thread.reminderText ?? null,
     unreadCount: thread.unreadCount,
-    needsReply: thread.needsReply,
+    // Merged reply state across the sibling cohort (same derivation as
+    // aiNeedsReply, the fallback brief, suggested replies, and the folded
+    // inbox needsReply). Using the requested row's stored needsReply left
+    // iMessage multi-handle conversations disagreeing with the list: the
+    // representative could look settled while another sibling still had the
+    // latest unanswered inbound (#890). Non-iMessage siblings are [id] only,
+    // so this is equivalent to deriving from that thread's own messages.
+    needsReply: aiNeedsReply,
     // AI-analysis fields come from the CANONICAL sibling (aiThread), so a
     // split iMessage conversation shows the live brief/summary/what-they-want
     // rather than a dormant sibling's stale state. dismissedOpenLoops stays on
