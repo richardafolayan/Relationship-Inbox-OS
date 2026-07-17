@@ -22,6 +22,11 @@ import {
   type ThreadCheckSnapshot
 } from "@/lib/thread-check-status";
 import type { HealthResponse, PlatformCard } from "@/lib/types";
+import {
+  type MobileStatusChrome,
+  shouldSurfaceHiddenStatus
+} from "@/lib/mobile-status-chrome";
+import { cn } from "@/lib/utils";
 
 // Single 44px status row. Mostly read-only in v1:
 //
@@ -34,6 +39,9 @@ import type { HealthResponse, PlatformCard } from "@/lib/types";
 // re-enrich / View logs / Manage platforms) and the iMessage "grant
 // access" affordance stay stripped; restore from
 // archive/pre-v1-stripback if any of those are also needed.
+//
+// Mobile density (#914) is route-aware via `mobileChrome`. Desktop (md+)
+// always keeps the full row.
 
 const POLL_INTERVAL_MS = 5000;
 const RECENT_FRESHNESS_MS = 8000;
@@ -372,7 +380,11 @@ function tickerDetail(state: TickerState): string | null {
   return null;
 }
 
-export function TopStatus() {
+export function TopStatus({
+  mobileChrome = "full"
+}: {
+  mobileChrome?: MobileStatusChrome;
+}) {
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [queue, setQueue] = useState<SendQueueResponse | null>(null);
   const [platforms, setPlatforms] = useState<PlatformCard[] | null>(null);
@@ -580,11 +592,34 @@ export function TopStatus() {
         ? "text-risk-fresh"
         : "text-ink-2";
 
+  // #914: secondary mobile routes hide the row unless degraded / offline /
+  // in-flight work needs a surface. Desktop always keeps the full row.
+  const forceSurface =
+    mobileChrome === "hidden" &&
+    shouldSurfaceHiddenStatus({
+      ready,
+      runnerOffline,
+      hasDegraded,
+      tickerKind: ticker.kind
+    });
+  const hideOnMobile = mobileChrome === "hidden" && !forceSurface;
+  // Compact (and attention-only re-entry on hidden routes): drop Focus /
+  // Scan chrome that is not required for the current signal.
+  const attentionOnlyMobile = mobileChrome === "hidden" && forceSurface;
+  const compactMobile = mobileChrome === "compact";
+
   return (
     <div
       role="status"
       aria-live="polite"
-      className="sticky top-0 z-30 flex h-[44px] items-center gap-2 border-b border-hairline bg-paper/95 px-4 font-mono text-[11px] tracking-[0.02em] text-ink-3 backdrop-blur md:gap-3 md:px-6"
+      data-mobile-chrome={mobileChrome}
+      data-mobile-surface={
+        hideOnMobile ? "suppressed" : forceSurface ? "attention" : mobileChrome
+      }
+      className={cn(
+        "sticky top-0 z-30 flex h-[44px] items-center gap-2 border-b border-hairline bg-paper/95 px-4 font-mono text-[11px] tracking-[0.02em] text-ink-3 backdrop-blur md:gap-3 md:px-6",
+        hideOnMobile && "hidden md:flex"
+      )}
     >
       {!ready ? (
         // #435: cold-mount placeholder. A grey pip + "Connecting…" instead
@@ -612,11 +647,21 @@ export function TopStatus() {
       ) : (
         <Link
           href="/settings#platforms"
-          className="inline-flex items-center gap-[6px] rounded-[6px] px-1 -mx-1 transition-colors duration-calm hover:bg-paper-2 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/35"
+          className={cn(
+            "inline-flex items-center gap-[6px] rounded-[6px] px-1 -mx-1 transition-colors duration-calm hover:bg-paper-2 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/35",
+            // Healthy connection is not the point of an attention re-entry.
+            attentionOnlyMobile && "hidden md:inline-flex"
+          )}
           title={`${connected}/${total} platforms connected, open platform settings`}
         >
           <span className={`h-[6px] w-[6px] rounded-full ${pip}`} aria-hidden />
-          <span className="text-ink-2 underline-offset-2 hover:underline">
+          <span
+            className={cn(
+              "text-ink-2 underline-offset-2 hover:underline",
+              // Compact mobile: pip only; full count returns at md.
+              compactMobile && "hidden md:inline"
+            )}
+          >
             {connected}/{total} connected
           </span>
         </Link>
@@ -668,21 +713,35 @@ export function TopStatus() {
       ) : null}
 
       <div className="ml-auto flex items-center gap-3">
-        <NotificationBell />
+        <span
+          className={cn(
+            // Notifications stay on Today + Inbox; secondary attention
+            // strips only carry the signal that forced them open.
+            attentionOnlyMobile && "hidden md:inline-flex"
+          )}
+        >
+          <NotificationBell />
+        </span>
         <button
           type="button"
           onClick={() => (focusActive ? openFocusReview() : openFocusSetup())}
           title={focusActive ? "Focus block active, review acknowledgements" : "Start a focus window"}
-          className={`inline-flex items-center gap-[6px] rounded-pill border px-[10px] py-[3px] font-sans text-[11.5px] tracking-[-0.005em] transition-colors duration-calm ${
+          className={cn(
+            "inline-flex items-center gap-[6px] rounded-pill border px-[10px] py-[3px] font-sans text-[11.5px] tracking-[-0.005em] transition-colors duration-calm",
             focusActive
               ? "border-[color-mix(in_srgb,var(--accent)_30%,transparent)] bg-accent-soft text-accent-ink"
-              : "border-hairline-strong text-ink-2 hover:border-[color-mix(in_srgb,var(--accent)_30%,transparent)] hover:text-ink"
-          }`}
+              : "border-hairline-strong text-ink-2 hover:border-[color-mix(in_srgb,var(--accent)_30%,transparent)] hover:text-ink",
+            // Compact: only show Focus when it is on. Attention-only: desktop.
+            attentionOnlyMobile && "hidden md:inline-flex",
+            compactMobile && !focusActive && "hidden md:inline-flex"
+          )}
         >
           <Moon className="h-[12px] w-[12px]" strokeWidth={1.7} />
-          {focusActive
-            ? `Focus${focusWindow.endsAt ? ` · until ${formatUntil(focusWindow.endsAt)}` : ""}`
-            : "Focus off"}
+          <span className={cn(compactMobile && "hidden md:inline")}>
+            {focusActive
+              ? `Focus${focusWindow.endsAt ? ` · until ${formatUntil(focusWindow.endsAt)}` : ""}`
+              : "Focus off"}
+          </span>
         </button>
         {/* #435: suppress "scan never" / "Scan now" until the first poll
             settles so a cold mount doesn't imply the runner has never run.
@@ -703,7 +762,9 @@ export function TopStatus() {
                 : "Start runner"}
           </button>
         ) : null}
-        {ready && !runnerOffline ? <span className="hidden sm:inline">{scanLabel}</span> : null}
+        {ready && !runnerOffline ? (
+          <span className="hidden sm:inline">{scanLabel}</span>
+        ) : null}
         {ready && !runnerOffline && ticker.kind !== "scanning" ? (
           <>
             <button
@@ -711,7 +772,11 @@ export function TopStatus() {
               onClick={onScanNow}
               disabled={scanTriggering}
               title="Scan every connected platform now to check for new replies."
-              className="font-mono text-[11px] text-ink-2 underline-offset-2 hover:text-ink hover:underline disabled:opacity-50"
+              className={cn(
+                "font-mono text-[11px] text-ink-2 underline-offset-2 hover:text-ink hover:underline disabled:opacity-50",
+                // Scan stays on Today + Inbox mobile; Settings also has scan.
+                attentionOnlyMobile && "hidden md:inline"
+              )}
             >
               {scanTriggering ? "scanning…" : "Scan now"}
             </button>

@@ -8,6 +8,7 @@ import { Sidebar } from "@/components/layout/sidebar";
 import { MobileDock } from "@/components/layout/mobile-dock";
 import { CommandPalette } from "@/components/layout/command-palette";
 import { TopStatus } from "@/components/layout/top-status";
+import { resolveMobileStatusChrome } from "@/lib/mobile-status-chrome";
 import { ConsumerRecovery } from "@/components/common/consumer-recovery";
 import { FullDiskAccessBanner } from "@/components/common/full-disk-access-banner";
 import { ToastHost } from "@/components/common/toast-host";
@@ -777,6 +778,11 @@ export function AppShell({ children }: { children: ReactNode }) {
   // 22:00 and 06:00, mute the sidebar attention dot and pause auto-scan
   // (gated above). Keeps the toggle honest with its label (#94).
   const sidebarAttention = isQuietHoursActive() ? 0 : attentionCount;
+  // #914: route-aware mobile status density. Desktop always keeps full chrome.
+  const mobileStatusChrome = useMemo(
+    () => resolveMobileStatusChrome(pathname),
+    [pathname]
+  );
 
   return (
     <div
@@ -805,7 +811,7 @@ export function AppShell({ children }: { children: ReactNode }) {
       />
       <div className="flex h-full min-h-0 flex-col overflow-hidden">
         <FullDemoBanner />
-        <TopStatus />
+        <TopStatus mobileChrome={mobileStatusChrome} />
         <FullDiskAccessBanner />
         {runtimeFailure ?? startupFailure ? (
           <div className="border-b border-hairline bg-paper px-3 py-2 sm:px-6">
