@@ -39,7 +39,21 @@ test("Settings hash routing activates the Platforms section", () => {
 });
 
 test("Settings can focus the WhatsApp connect card from deep links", () => {
+  // Stable anchor is always mounted on Platforms (not gated on whatsappRow).
   assert.match(SETTINGS_PAGE, /id="whatsapp-connect"/);
-  assert.match(SETTINGS_PAGE, /window\.location\.hash === "#whatsapp"/);
-  assert.match(SETTINGS_PAGE, /getElementById\("whatsapp-connect"\)/);
+  assert.doesNotMatch(
+    SETTINGS_PAGE,
+    /whatsappRow\s*\?\s*\(\s*<div id="whatsapp-connect"/,
+    "#whatsapp-connect must not be gated on whatsappRow (async platformRows race)"
+  );
+  assert.match(SETTINGS_PAGE, /window\.location\.hash === ["']#whatsapp["']/);
+  assert.match(SETTINGS_PAGE, /getElementById\(["']whatsapp-connect["']\)/);
+  // Scroll retries after paint / when platformRows arrive (not a one-shot setTimeout(0)).
+  assert.match(SETTINGS_PAGE, /pendingWhatsappScrollRef/);
+  assert.match(SETTINGS_PAGE, /requestAnimationFrame/);
+  assert.match(
+    SETTINGS_PAGE,
+    /\[activeTab,\s*platformRows\]/,
+    "must re-attempt scroll when platformRows load while hash is #whatsapp"
+  );
 });
