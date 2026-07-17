@@ -137,6 +137,27 @@ export function rankReconnectCandidates<T extends ReconnectCandidate>(
   });
 }
 
+/**
+ * AI reconnect reasons longer than this sit behind a "Why this person?"
+ * disclosure so list rows stay a consistent scan height on phones.
+ */
+export const RECONNECT_REASON_INLINE_MAX = 72;
+
+/**
+ * Whether the AI reason is long enough that the row should collapse it
+ * behind a progressive disclosure instead of always expanding the row.
+ */
+export function shouldDiscloseReconnectReason(
+  reason: string | null | undefined
+): boolean {
+  const text = reason?.trim() ?? "";
+  if (!text) return false;
+  return text.length > RECONNECT_REASON_INLINE_MAX;
+}
+
+/** sessionStorage key used to restore Reconnect list scroll after a thread visit. */
+export const RECONNECT_SCROLL_KEY = "reconnect-list-scroll";
+
 /** Status the runner's POST /control/reconnect/refresh-scores can return. */
 export type RefreshScoresStatus = "ok" | "ai_unavailable" | "disabled_by_settings";
 
