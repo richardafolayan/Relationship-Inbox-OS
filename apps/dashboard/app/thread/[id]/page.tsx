@@ -2865,15 +2865,17 @@ export default function ThreadPage() {
     if (!container || !target) return;
     // #465 (pilot R-0064): position the focused message as high as
     // possible so the message and replies beneath it read top-down.
-    // Header/brief live outside the scroller (#896); only the small
-    // focused-thread pill needs clearance. scrollTop clamps at the
-    // bottom, so a focused message near the end still lands as high as
-    // remaining content allows. Bubbles + dividers collapse over 150ms,
-    // so re-align on every layout change during that window.
+    // Header/brief live outside the scroller (#896); clearance is only
+    // for the sticky focused-thread pill (top-2 + ~28–36px tall). scrollTop
+    // clamps at the bottom, so a focused message near the end still lands
+    // as high as remaining content allows. Bubbles + dividers collapse
+    // over 150ms, so re-align on every layout change during that window.
     const realignToTop = () => {
       const containerRect = container.getBoundingClientRect();
       const targetRect = target.getBoundingClientRect();
-      const FOCUS_HEADER_OFFSET = 12;
+      // Pill is sticky top-2 (~8px) with py-[6px] mono label (~28–36px).
+      // 48px clears the pill bottom so the parent is not tucked under it.
+      const FOCUS_HEADER_OFFSET = 48;
       const delta = (targetRect.top - containerRect.top) - FOCUS_HEADER_OFFSET;
       container.scrollTop = container.scrollTop + delta;
     };
