@@ -158,11 +158,37 @@ test("rebrand pins storage and permissions to the pre-Tovi identifiers", () => {
     join(resolve("apps/desktop"), "main.cjs"),
     "utf8"
   );
-  const pin = /app\.setPath\(\s*"userData",\s*join\(app\.getPath\("appData"\),\s*STORAGE_DIR_NAME\)\s*\)/;
+  const pin =
+    /const userDataPath = join\(app\.getPath\("appData"\),\s*STORAGE_DIR_NAME\);[\s\S]*?app\.setPath\(\s*"userData",\s*userDataPath\s*\)/;
   assert.match(mainSource, pin, "main.cjs must pin userData before anything resolves storage paths");
   assert.ok(
     mainSource.indexOf('app.setPath("userData"') < mainSource.indexOf("function storagePaths"),
     "the userData pin must run before storagePaths() can be called"
+  );
+});
+
+test("main.cjs creates the pinned userData directory before app.setPath", () => {
+  // Electron requires the path passed to setPath("userData", ...) to already
+  // exist. Fresh installs crash if we only setPath without mkdir first.
+  const mainSource = readFileSync(
+    join(resolve("apps/desktop"), "main.cjs"),
+    "utf8"
+  );
+  const mkdirBeforeSetPath =
+    /mkdirSync\(\s*userDataPath\s*,\s*\{\s*recursive:\s*true\s*\}\s*\)[\s\S]*?app\.setPath\(\s*"userData",\s*userDataPath\s*\)/;
+  assert.match(
+    mainSource,
+    mkdirBeforeSetPath,
+    "main.cjs must mkdirSync the userData path before calling app.setPath"
+  );
+  assert.ok(
+    mainSource.indexOf("mkdirSync(userDataPath") < mainSource.indexOf('app.setPath("userData"'),
+    "mkdirSync(userDataPath) must appear before app.setPath(\"userData\")"
+  );
+  assert.match(
+    mainSource,
+    /dialog\.showErrorBox\([\s\S]*?could not create its data folder/,
+    "mkdir failure must surface a clear startup error via dialog.showErrorBox"
   );
 });
 

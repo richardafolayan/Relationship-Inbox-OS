@@ -72,7 +72,19 @@ if (process.platform === "win32") app.setAppUserModelId(APP_ID);
 // Pin storage to the pre-rebrand folder BEFORE anything resolves userData:
 // setName("Tovi") would otherwise move it to .../Application Support/Tovi and
 // every existing install would boot with an empty database.
-app.setPath("userData", join(app.getPath("appData"), STORAGE_DIR_NAME));
+// Electron requires the userData path to exist before setPath.
+const userDataPath = join(app.getPath("appData"), STORAGE_DIR_NAME);
+try {
+  mkdirSync(userDataPath, { recursive: true });
+} catch (error) {
+  const detail = error?.message || String(error);
+  dialog.showErrorBox(
+    APP_NAME,
+    `${APP_NAME} could not create its data folder.\n\nPath: ${userDataPath}\n\n${detail}`
+  );
+  throw error;
+}
+app.setPath("userData", userDataPath);
 app.setAppLogsPath(
   process.platform === "darwin"
     ? join(homedir(), "Library", "Logs", LOGS_DIR_NAME)
