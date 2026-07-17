@@ -19,6 +19,7 @@ import {
   validateScreenshotFile,
   type PilotReportType
 } from "@/lib/pilot";
+import { usePrimaryOverlay } from "@/components/common/mobile-overlay-provider";
 import { cn } from "@/lib/utils";
 
 interface StatusReport {
@@ -76,6 +77,17 @@ export function PilotFeedbackModal() {
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const screenshotIdRef = useRef(0);
+
+  const requestClose = useCallback(() => {
+    setOpen(false);
+  }, []);
+
+  usePrimaryOverlay({
+    kind: "feedback",
+    id: "pilot-feedback",
+    open,
+    onRequestClose: requestClose
+  });
 
   const resetForm = useCallback(() => {
     setTitle("");
@@ -233,9 +245,6 @@ export function PilotFeedbackModal() {
 
   // Close is always allowed: submit itself closes the modal too (issue
   // #383 / R-0030), so there is no in-flight state that needs locking.
-  const requestClose = () => {
-    setOpen(false);
-  };
 
   return (
     <div
