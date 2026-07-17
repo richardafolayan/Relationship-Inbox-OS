@@ -30,9 +30,11 @@ export function ThreadBriefBand({ onYou, whereItStands, openLoops }: ThreadBrief
   const showContext = context.length > 0 && context !== lead;
   const shownLoops = loops.slice(0, 3);
   const extraLoops = loops.length - shownLoops.length;
-  // Lead and loops are line-clamped when collapsed; never clamp without a
-  // mobile expand control (long onYou + few loops previously hid More).
-  const hasDisclosure = Boolean(lead) || loops.length > 0 || showContext;
+  // Collapsed mobile clamps lead/loops to 2 lines and hides context.
+  // Expand is sm:hidden, so never clamp at sm+ without a control there.
+  // Gate the button to cases that can actually hide content on phone.
+  const hasDisclosure =
+    showContext || loops.length > 0 || lead.length > 80;
 
   return (
     <div
@@ -46,7 +48,13 @@ export function ThreadBriefBand({ onYou, whereItStands, openLoops }: ThreadBrief
           <span className="shrink-0 font-mono text-[9px] uppercase tracking-[0.08em] text-ink-3 sm:text-[10px]">
             {job ? "Reply job" : "Where it stands"}
           </span>
-          <span className={`min-w-0 sm:text-balance ${expanded ? "" : "line-clamp-2"}`}>{lead}</span>
+          <span
+            className={`min-w-0 sm:text-balance ${
+              expanded ? "" : "line-clamp-2 sm:line-clamp-none"
+            }`}
+          >
+            {lead}
+          </span>
         </p>
       ) : null}
 

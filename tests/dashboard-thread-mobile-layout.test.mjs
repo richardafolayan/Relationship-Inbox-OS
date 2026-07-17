@@ -103,21 +103,43 @@ test("mobile reply brief is compact with a disclosure for deeper context", () =>
   assert.match(briefSrc, /Reply job/);
 });
 
-// F1: a long lead with 0–2 loops and no separate context still clamps the
-// lead. hasDisclosure must not be only showContext || loops.length > 2.
-test("mobile brief always offers expand when lead or loops can be clamped", () => {
+// F1: collapsed lead/loops clamp on mobile only. Expand is sm:hidden, so
+// clamp must clear at sm+ (line-clamp-2 sm:line-clamp-none). Never clamp
+// without a control at that breakpoint.
+test("collapsed lead uses mobile-only clamp pattern", () => {
+  assert.match(
+    briefSrc,
+    /line-clamp-2 sm:line-clamp-none/,
+    "lead and loops must clear clamp at sm+ where expand is hidden"
+  );
+  // Lead span must not use unconditional line-clamp-2 (desktop hole).
   assert.doesNotMatch(
     briefSrc,
-    /hasDisclosure\s*=\s*showContext\s*\|\|\s*loops\.length\s*>\s*2/,
+    /expanded\s*\?\s*["'`]["'`]\s*:\s*["'`]line-clamp-2["'`]/,
+    "lead must not use bare line-clamp-2 without sm:line-clamp-none"
+  );
+  assert.match(briefSrc, /data-testid="thread-brief-expand"/);
+  assert.match(briefSrc, /sm:hidden/, "expand control is mobile-only");
+});
+
+// Disclosure when mobile would hide something: context, any loops (clamped),
+// or a lead long enough to exceed ~2 lines. Not always-on for short one-liners.
+test("mobile brief offers expand when collapsed content can be hidden", () => {
+  assert.doesNotMatch(
+    briefSrc,
+    /hasDisclosure\s*=\s*showContext\s*\|\|\s*loops\.length\s*>\s*2\s*;/,
     "old hasDisclosure silently clamped long leads with few loops"
+  );
+  assert.doesNotMatch(
+    briefSrc,
+    /hasDisclosure\s*=\s*Boolean\(lead\)\s*\|\|\s*loops\.length\s*>\s*0/,
+    "disclosure must not be always-on for every non-empty band"
   );
   assert.match(
     briefSrc,
-    /hasDisclosure\s*=\s*Boolean\(lead\)\s*\|\|\s*loops\.length\s*>\s*0/,
-    "disclosure must trigger for non-empty lead or any loops"
+    /hasDisclosure\s*=\s*\n?\s*showContext\s*\|\|\s*loops\.length\s*>\s*0\s*\|\|\s*lead\.length\s*>\s*\d+/,
+    "disclosure when context, loops, or a long lead can be hidden on mobile"
   );
-  assert.match(briefSrc, /line-clamp-2/, "collapsed lead/loops still clamp");
-  assert.match(briefSrc, /data-testid="thread-brief-expand"/);
 });
 
 // F2: expanded brief is a shrink-0 layout row; without a height cap it can
