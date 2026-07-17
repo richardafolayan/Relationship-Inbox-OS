@@ -30,10 +30,17 @@ export function ThreadBriefBand({ onYou, whereItStands, openLoops }: ThreadBrief
   const showContext = context.length > 0 && context !== lead;
   const shownLoops = loops.slice(0, 3);
   const extraLoops = loops.length - shownLoops.length;
-  const hasDisclosure = showContext || loops.length > 2;
+  // Lead and loops are line-clamped when collapsed; never clamp without a
+  // mobile expand control (long onYou + few loops previously hid More).
+  const hasDisclosure = Boolean(lead) || loops.length > 0 || showContext;
 
   return (
-    <div data-testid="thread-brief-band" className="pt-1.5 sm:pt-2">
+    <div
+      data-testid="thread-brief-band"
+      className={`pt-1.5 sm:pt-2 ${
+        expanded ? "max-h-[30dvh] overflow-y-auto overscroll-contain" : ""
+      }`}
+    >
       {lead ? (
         <p className="m-0 flex items-baseline gap-2 text-[12px] leading-[1.35] text-ink sm:text-[13.5px] sm:leading-[1.5]">
           <span className="shrink-0 font-mono text-[9px] uppercase tracking-[0.08em] text-ink-3 sm:text-[10px]">

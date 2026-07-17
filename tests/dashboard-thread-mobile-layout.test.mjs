@@ -103,6 +103,33 @@ test("mobile reply brief is compact with a disclosure for deeper context", () =>
   assert.match(briefSrc, /Reply job/);
 });
 
+// F1: a long lead with 0–2 loops and no separate context still clamps the
+// lead. hasDisclosure must not be only showContext || loops.length > 2.
+test("mobile brief always offers expand when lead or loops can be clamped", () => {
+  assert.doesNotMatch(
+    briefSrc,
+    /hasDisclosure\s*=\s*showContext\s*\|\|\s*loops\.length\s*>\s*2/,
+    "old hasDisclosure silently clamped long leads with few loops"
+  );
+  assert.match(
+    briefSrc,
+    /hasDisclosure\s*=\s*Boolean\(lead\)\s*\|\|\s*loops\.length\s*>\s*0/,
+    "disclosure must trigger for non-empty lead or any loops"
+  );
+  assert.match(briefSrc, /line-clamp-2/, "collapsed lead/loops still clamp");
+  assert.match(briefSrc, /data-testid="thread-brief-expand"/);
+});
+
+// F2: expanded brief is a shrink-0 layout row; without a height cap it can
+// crush the message timeline on short phones.
+test("expanded mobile brief is height-capped with internal scroll", () => {
+  assert.match(briefSrc, /max-h-\[30dvh\]/);
+  assert.match(
+    briefSrc,
+    /expanded\s*\?\s*["'`][^"'`]*max-h-\[30dvh\][^"'`]*overflow-y-auto/
+  );
+});
+
 test("desktop rails remain separate grid columns behind breakpoints", () => {
   assert.match(
     threadSrc,
