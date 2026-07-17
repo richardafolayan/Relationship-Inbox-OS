@@ -199,13 +199,17 @@ export default function SettingsPage() {
   // eye finds it. Mount covers cross-page navigation; hashchange covers
   // manual edits and back/forward.
   // /settings#whatsapp: Platforms tab + scroll to the stable #whatsapp-connect
-  // anchor. Platform cards load async, so scroll is pending until the node
-  // exists (double-rAF + retries + re-attempt when platformRows updates).
+  // anchor. Other platform cards mount above WhatsApp only after platformRows
+  // loads, so a first successful scroll is not final. Keep re-scrolling for a
+  // short window whenever rows change (debounced) so layout growth cannot
+  // leave the QR card below the fold.
   const [highlightUpdates, setHighlightUpdates] = useState(false);
-  const pendingWhatsappScrollRef = useRef(false);
+  const whatsappScrollUntilRef = useRef(0);
+  const WHATSAPP_SCROLL_WINDOW_MS = 2000;
   useEffect(() => {
     let highlightTimer: number | undefined;
     let retryTimer: number | undefined;
+    let windowEndTimer: number | undefined;
     let raf1 = 0;
     let raf2 = 0;
     let cancelled = false;
@@ -218,27 +222,31 @@ export default function SettingsPage() {
       raf2 = 0;
     };
 
+    const inWhatsappScrollWindow = () =>
+      !cancelled &&
+      window.location.hash === "#whatsapp" &&
+      Date.now() < whatsappScrollUntilRef.current;
+
     const tryScrollWhatsapp = (attempt = 0) => {
-      if (cancelled || !pendingWhatsappScrollRef.current) return;
-      if (window.location.hash !== "#whatsapp") {
-        pendingWhatsappScrollRef.current = false;
-        return;
-      }
+      if (!inWhatsappScrollWindow()) return;
       const el = document.getElementById("whatsapp-connect");
       if (el) {
+        // Do not close the window on first paint: cards above may still load.
         el.scrollIntoView({ behavior: "smooth", block: "center" });
-        pendingWhatsappScrollRef.current = false;
         return;
       }
-      // Platforms tab may not have painted yet; retry briefly.
       if (attempt < 40) {
         retryTimer = window.setTimeout(() => tryScrollWhatsapp(attempt + 1), 50);
       }
     };
 
     const scheduleWhatsappScroll = () => {
-      pendingWhatsappScrollRef.current = true;
+      whatsappScrollUntilRef.current = Date.now() + WHATSAPP_SCROLL_WINDOW_MS;
       clearScrollSchedule();
+      window.clearTimeout(windowEndTimer);
+      windowEndTimer = window.setTimeout(() => {
+        whatsappScrollUntilRef.current = 0;
+      }, WHATSAPP_SCROLL_WINDOW_MS);
       raf1 = window.requestAnimationFrame(() => {
         raf2 = window.requestAnimationFrame(() => tryScrollWhatsapp(0));
       });
@@ -259,7 +267,8 @@ export default function SettingsPage() {
       if (window.location.hash === "#whatsapp") {
         scheduleWhatsappScroll();
       } else {
-        pendingWhatsappScrollRef.current = false;
+        whatsappScrollUntilRef.current = 0;
+        window.clearTimeout(windowEndTimer);
       }
       window.clearTimeout(highlightTimer);
       highlightTimer = window.setTimeout(() => setHighlightUpdates(false), 2400);
@@ -270,31 +279,44 @@ export default function SettingsPage() {
       cancelled = true;
       clearScrollSchedule();
       window.clearTimeout(highlightTimer);
+      window.clearTimeout(windowEndTimer);
       window.removeEventListener("hashchange", maybeHighlight);
     };
   }, []);
 
-  // Re-attempt #whatsapp scroll once Platforms is active and/or platform rows
-  // arrive (anchor is always mounted, but tab content only exists then).
+  // Re-scroll while the #whatsapp window is open whenever Platforms is active
+  // or platformRows changes (other cards inject above #whatsapp-connect).
   useEffect(() => {
-    if (!pendingWhatsappScrollRef.current) return;
     if (activeTab !== "platforms") return;
-    if (typeof window === "undefined" || window.location.hash !== "#whatsapp") return;
+    if (typeof window === "undefined") return;
+    if (window.location.hash !== "#whatsapp") return;
+    if (Date.now() >= whatsappScrollUntilRef.current) return;
+
     let cancelled = false;
     let raf1 = 0;
     let raf2 = 0;
-    raf1 = window.requestAnimationFrame(() => {
-      raf2 = window.requestAnimationFrame(() => {
-        if (cancelled || !pendingWhatsappScrollRef.current) return;
-        const el = document.getElementById("whatsapp-connect");
-        if (el) {
-          el.scrollIntoView({ behavior: "smooth", block: "center" });
-          pendingWhatsappScrollRef.current = false;
-        }
+    let debounceTimer: number | undefined;
+
+    const scrollToAnchor = () => {
+      if (cancelled) return;
+      if (window.location.hash !== "#whatsapp") return;
+      if (Date.now() >= whatsappScrollUntilRef.current) return;
+      const el = document.getElementById("whatsapp-connect");
+      if (el) {
+        el.scrollIntoView({ behavior: "smooth", block: "center" });
+      }
+    };
+
+    // Debounce so a burst of platformRows updates coalesces into one scroll.
+    debounceTimer = window.setTimeout(() => {
+      raf1 = window.requestAnimationFrame(() => {
+        raf2 = window.requestAnimationFrame(scrollToAnchor);
       });
-    });
+    }, 50);
+
     return () => {
       cancelled = true;
+      window.clearTimeout(debounceTimer);
       window.cancelAnimationFrame(raf1);
       window.cancelAnimationFrame(raf2);
     };
