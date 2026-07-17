@@ -1,8 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
 import { usePathname } from "next/navigation";
-import { ChevronLeft, ImageUp, X } from "lucide-react";
+import { ChevronLeft, ImageUp } from "lucide-react";
 import { apiGet, apiPost } from "@/lib/api";
 import { installClientErrorCapture } from "@/lib/client-error-log";
 import { showToast } from "@/lib/feedback";
@@ -11,9 +11,12 @@ import {
   ALLOWED_SCREENSHOT_TYPES,
   MAX_SCREENSHOTS,
   PILOT_REPORT_TYPES,
-  PILOT_REPORT_TYPE_LABELS,
+  PILOT_REPORT_TYPE_SHORT_LABELS,
   buildPilotReportPayload,
   collectPilotMeta,
+  formatPilotReportStatus,
+  formatPilotReportSubmittedAt,
+  formatPilotReportType,
   onPilotFeedback,
   mergeScreenshots,
   validateScreenshotFile,
@@ -46,11 +49,11 @@ function readFileAsDataUrl(file: File): Promise<string> {
   });
 }
 
-// Pilot feedback + bug report modal. Mounted once in the app shell; opened
-// from anywhere via openPilotFeedback(). It collects a tester's typed
-// report (and any screenshots they attach) and posts it to the
-// local runner, which forwards it to the feedback webhook. It never reads
-// or sends message content.
+// Pilot feedback + bug report sheet. Mounted once in the app shell; opened
+// from anywhere via openPilotFeedback(). Mobile: full-height sheet with
+// fixed Cancel/Submit chrome so the keyboard never covers actions. Desktop:
+// centred card. Collects only the tester's typed report and any screenshots
+// they attach. Never reads or sends message content.
 export function PilotFeedbackModal() {
   const pathname = usePathname();
   const [open, setOpen] = useState(false);
@@ -66,13 +69,12 @@ export function PilotFeedbackModal() {
   const [dragOver, setDragOver] = useState(false);
 
   // Submit closes the modal immediately and runs the POST in the
-  // background (issue #383 / R-0030 — reverses the earlier decision to
-  // lock the form while in flight). Result lands as a success / error
-  // toast so the operator can do other things while it sends. No local
-  // submitting state, no inline error, no close-lock.
+  // background (issue #383 / R-0030). Result lands as a success / error
+  // toast so the operator can do other things while it sends.
 
   const [reports, setReports] = useState<StatusReport[] | null>(null);
   const [reportsError, setReportsError] = useState<string | null>(null);
+  const [viewportHeight, setViewportHeight] = useState<number | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const screenshotIdRef = useRef(0);
@@ -106,6 +108,40 @@ export function PilotFeedbackModal() {
   useEffect(() => {
     if (screenshots.length === 0) setPrivacyAck(false);
   }, [screenshots.length]);
+
+  // Lock background scroll while the sheet is open.
+  useEffect(() => {
+    if (!open) return undefined;
+    const previous = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = previous;
+    };
+  }, [open]);
+
+  // Size the mobile sheet to the visual viewport so a raised keyboard still
+  // leaves Cancel and Submit visible above the soft keyboard (issue #911).
+  useEffect(() => {
+    if (!open) {
+      setViewportHeight(null);
+      return undefined;
+    }
+    const vv = window.visualViewport;
+    if (!vv) {
+      setViewportHeight(window.innerHeight);
+      return undefined;
+    }
+    const sync = () => {
+      setViewportHeight(Math.round(vv.height));
+    };
+    sync();
+    vv.addEventListener("resize", sync);
+    vv.addEventListener("scroll", sync);
+    return () => {
+      vv.removeEventListener("resize", sync);
+      vv.removeEventListener("scroll", sync);
+    };
+  }, [open]);
 
   const acceptFiles = useCallback(
     async (fileList: FileList | null | undefined) => {
@@ -170,17 +206,8 @@ export function PilotFeedbackModal() {
       meta: collectPilotMeta(pathname),
       screenshots: screenshots.map((shot) => ({ name: shot.name, dataUrl: shot.dataUrl }))
     });
-    // Issue #383 / R-0030. Reverses the #337 decision: pilot asked for
-    // the form to close immediately on submit so they can keep working
-    // while the report sends. The send runs in the background and the
-    // outcome (success / error) lands as a toast. There is no in-flight
-    // UI here — the toast surface owns the result.
-    //
-    // Issue #421 / R-0047. The trade-off above (no in-flight UI) left
-    // the operator with no signal that the report was still uploading,
-    // only a discrete completion toast. Signal in-flight to the
-    // TopStatus ticker so "Sending report…" appears alongside the
-    // other ticker states until the POST settles.
+    // Issue #383 / R-0030: close immediately; send in the background.
+    // Issue #421 / R-0047: signal in-flight to the TopStatus ticker.
     setOpen(false);
     resetForm();
     const stopReportSendSignal = signalReportSendStart();
@@ -195,10 +222,6 @@ export function PilotFeedbackModal() {
         showToast({ kind: "success", title: `Report sent: ${res.reportId}` });
       })
       .catch((err) => {
-        // Trade-off: closing immediately means we lose the form state on
-        // failure (the user has to re-type to retry). Failures should be
-        // rare (local runner) and the toast surfaces the error message
-        // and the report ID so the operator can resubmit if needed.
         showToast({
           kind: "error",
           title: "Couldn't send pilot feedback",
@@ -231,15 +254,21 @@ export function PilotFeedbackModal() {
 
   if (!open) return null;
 
-  // Close is always allowed: submit itself closes the modal too (issue
-  // #383 / R-0030), so there is no in-flight state that needs locking.
   const requestClose = () => {
     setOpen(false);
   };
 
+  // Visual-viewport height is only applied below the sm breakpoint via the
+  // CSS variable. Inline height would override sm:h-auto on desktop.
+  const mobileShellStyle =
+    viewportHeight != null
+      ? ({ ["--pilot-feedback-vvh" as string]: `${viewportHeight}px` } as CSSProperties)
+      : undefined;
+
   return (
     <div
-      className="fixed inset-0 z-[100] grid place-items-start justify-items-center bg-[color-mix(in_oklch,var(--ink)_38%,transparent)] pt-[10vh] backdrop-blur-md"
+      className="fixed inset-0 z-[100] grid place-items-stretch bg-paper pt-[env(safe-area-inset-top)] sm:place-items-start sm:justify-items-center sm:bg-[color-mix(in_oklch,var(--ink)_38%,transparent)] sm:pt-[10vh] sm:backdrop-blur-md"
+      data-pilot-feedback-overlay="true"
       onClick={requestClose}
       onKeyDown={(event) => {
         event.stopPropagation();
@@ -249,252 +278,319 @@ export function PilotFeedbackModal() {
       <div
         role="dialog"
         aria-modal="true"
-        aria-label="Pilot feedback"
-        className="flex max-h-[80vh] w-[min(560px,92vw)] flex-col overflow-hidden rounded-[18px] border border-hairline bg-paper shadow-pop"
+        aria-label="Send feedback"
+        data-pilot-feedback-sheet="true"
+        style={mobileShellStyle}
+        className="flex h-[var(--pilot-feedback-vvh,100dvh)] w-full flex-col overflow-hidden bg-paper pb-[env(safe-area-inset-bottom)] sm:h-auto sm:max-h-[min(80vh,720px)] sm:w-[min(560px,92vw)] sm:rounded-[18px] sm:border sm:border-hairline sm:pb-0 sm:shadow-pop"
         onClick={(event) => event.stopPropagation()}
       >
-        <header className="flex shrink-0 items-center gap-3 border-b border-hairline px-5 py-[14px]">
+        <header
+          className="flex shrink-0 items-center gap-3 border-b border-hairline px-4 py-[12px] sm:px-5 sm:py-[14px]"
+          data-pilot-feedback-header="true"
+        >
           {view === "reports" ? (
             <button
               type="button"
               onClick={() => setView("form")}
-              className="inline-flex items-center gap-1.5 text-[12.5px] font-medium text-ink-2 hover:text-ink"
+              className="inline-flex min-h-[40px] items-center gap-1.5 text-[13px] font-medium text-ink-2 hover:text-ink"
             >
               <ChevronLeft className="h-[15px] w-[15px]" strokeWidth={1.7} />
               Back
             </button>
           ) : (
-            <p className="m-0 text-[13px] font-semibold text-ink">Send pilot feedback</p>
+            <button
+              type="button"
+              onClick={requestClose}
+              className="min-h-[40px] text-[13px] font-medium text-ink-2 hover:text-ink"
+            >
+              Cancel
+            </button>
           )}
+          <p className="m-0 flex-1 text-center text-[13px] font-semibold text-ink">
+            {view === "reports" ? "Recent reports" : "Send feedback"}
+          </p>
           {view === "form" ? (
             <button
               type="button"
-              onClick={() => void openReports()}
-              className="text-[12px] font-medium text-ink-3 hover:text-ink"
+              onClick={() => void submit()}
+              disabled={!canSubmit}
+              data-pilot-feedback-submit="header"
+              className="min-h-[40px] text-[13px] font-semibold text-ink disabled:cursor-not-allowed disabled:text-ink-4"
             >
-              Recent reports
+              Submit
             </button>
-          ) : null}
-          <button
-            type="button"
-            onClick={requestClose}
-            aria-label="Close"
-            title="Close (Esc)"
-            className="ml-auto grid h-7 w-7 place-items-center rounded-[8px] text-ink-3 transition-colors duration-calm hover:bg-paper-2 hover:text-ink"
-          >
-            <X className="h-[15px] w-[15px]" strokeWidth={1.7} />
-          </button>
+          ) : (
+            <button
+              type="button"
+              onClick={requestClose}
+              className="min-h-[40px] text-[13px] font-medium text-ink-2 hover:text-ink"
+            >
+              Close
+            </button>
+          )}
         </header>
 
         {view === "reports" ? (
-          <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
+          <div
+            className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-4 sm:px-5"
+            data-pilot-feedback-scroll="reports"
+          >
             <p className="m-0 mb-3 text-[12.5px] leading-[1.55] text-ink-3">
-              Your recent reports and where they stand. Screenshots and message content are never
-              shown here.
+              Reports the product team has received from this install. Status
+              shows where each report stands with the team (Received, Under
+              review, Planned, Fixed, or Closed). Private message content and
+              screenshots are never shown here.
             </p>
             {reports === null && !reportsError ? (
-              <p className="font-mono text-[11px] text-ink-3">Loading…</p>
+              <p className="text-[12.5px] text-ink-3">Loading…</p>
             ) : reportsError ? (
               <p className="text-[12.5px] text-ink-3">{reportsError}</p>
             ) : reports && reports.length === 0 ? (
               <p className="text-[12.5px] text-ink-3">No reports yet.</p>
             ) : (
               <ul className="m-0 flex list-none flex-col gap-2 p-0">
-                {(reports ?? []).map((report) => (
-                  <li
-                    key={report.reportId}
-                    className="rounded-row border border-hairline px-3 py-[10px]"
-                  >
-                    <div className="flex items-baseline justify-between gap-3">
-                      <span className="text-[13px] font-medium text-ink">{report.title}</span>
-                      <span className="shrink-0 font-mono text-[10.5px] uppercase tracking-[0.06em] text-ink-3">
-                        {report.reportId}
-                      </span>
-                    </div>
-                    <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[10.5px] uppercase tracking-[0.06em] text-ink-3">
-                      <span>{report.type}</span>
-                      <span className="text-ink-2">{report.status}</span>
-                      <span>{report.createdAt}</span>
-                    </div>
-                    {report.note ? (
-                      <p className="m-0 mt-1.5 text-[12px] leading-[1.5] text-ink-2">{report.note}</p>
-                    ) : null}
-                  </li>
-                ))}
+                {(reports ?? []).map((report) => {
+                  const statusLabel = formatPilotReportStatus(report.status);
+                  const submittedLabel = formatPilotReportSubmittedAt(report.createdAt);
+                  const typeLabel = formatPilotReportType(report.type);
+                  return (
+                    <li
+                      key={report.reportId}
+                      className="rounded-row border border-hairline px-3 py-[12px]"
+                      data-pilot-report-row="true"
+                    >
+                      <p className="m-0 text-[13.5px] font-medium leading-[1.35] text-ink">
+                        {report.title || "Untitled report"}
+                      </p>
+                      <p className="m-0 mt-1 text-[12px] leading-[1.45] text-ink-3">
+                        {submittedLabel}
+                        {typeLabel ? ` · ${typeLabel}` : ""}
+                      </p>
+                      <p className="m-0 mt-1.5 text-[12.5px] font-medium leading-[1.4] text-ink-2">
+                        Status: {statusLabel}
+                      </p>
+                      {report.note ? (
+                        <p className="m-0 mt-1.5 text-[12px] leading-[1.5] text-ink-2">
+                          {report.note}
+                        </p>
+                      ) : null}
+                      {report.reportId ? (
+                        <p className="m-0 mt-2 text-[11px] leading-[1.4] text-ink-4">
+                          Ref: {report.reportId}
+                        </p>
+                      ) : null}
+                    </li>
+                  );
+                })}
               </ul>
             )}
           </div>
         ) : (
-          <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
-            {/* Issue #383 / R-0030: the inline error block was removed —
-                submit now closes the modal immediately and surfaces the
-                outcome via toast. The fallback form URL is still
-                referenced from the strategy docs if an operator wants
-                to bypass the in-app flow entirely. */}
+          <>
+            <div
+              className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-4 sm:px-5"
+              data-pilot-feedback-scroll="form"
+            >
+              <Field label="What happened?">
+                <div
+                  className="grid grid-cols-2 gap-2 sm:flex sm:flex-wrap"
+                  data-pilot-feedback-types="true"
+                >
+                  {PILOT_REPORT_TYPES.map((option) => (
+                    <button
+                      key={option}
+                      type="button"
+                      onClick={() => setType(option)}
+                      aria-pressed={type === option}
+                      className={cn(
+                        "rounded-pill border px-3 py-[8px] text-[12.5px] transition-colors duration-calm sm:py-[6px]",
+                        type === option
+                          ? "border-ink bg-ink text-paper"
+                          : "border-hairline text-ink-2 hover:border-hairline-strong hover:bg-paper-2"
+                      )}
+                    >
+                      {PILOT_REPORT_TYPE_SHORT_LABELS[option]}
+                    </button>
+                  ))}
+                </div>
+              </Field>
 
-            <Field label="What kind of report is this?">
-              <div className="flex flex-wrap gap-2">
-                {PILOT_REPORT_TYPES.map((option) => (
+              <Field label="Title">
+                <input
+                  type="text"
+                  value={title}
+                  onChange={(event) => setTitle(event.target.value)}
+                  placeholder="Short summary"
+                  maxLength={200}
+                  enterKeyHint="next"
+                  className="w-full rounded-row border border-hairline bg-paper px-3 py-2.5 text-[16px] text-ink outline-none transition-[border-color] duration-calm placeholder:text-ink-4 focus:border-hairline-strong sm:py-2 sm:text-[14px]"
+                />
+              </Field>
+
+              <Field
+                label="Details"
+                hint="In your own words. Please don't paste private message content."
+              >
+                <textarea
+                  value={description}
+                  onChange={(event) => setDescription(event.target.value)}
+                  rows={4}
+                  placeholder={
+                    type === "bug"
+                      ? "What were you doing, and what went wrong?"
+                      : "What did you notice?"
+                  }
+                  className="w-full resize-none rounded-row border border-hairline bg-paper px-3 py-2.5 text-[16px] leading-[1.55] text-ink outline-none transition-[border-color] duration-calm placeholder:text-ink-4 focus:border-hairline-strong sm:py-2 sm:text-[13.5px]"
+                />
+              </Field>
+
+              <Field label="Expected result" hint="Optional.">
+                <textarea
+                  value={expected}
+                  onChange={(event) => setExpected(event.target.value)}
+                  rows={2}
+                  placeholder="What you thought would happen instead"
+                  className="w-full resize-none rounded-row border border-hairline bg-paper px-3 py-2.5 text-[16px] leading-[1.55] text-ink outline-none transition-[border-color] duration-calm placeholder:text-ink-4 focus:border-hairline-strong sm:py-2 sm:text-[13.5px]"
+                />
+              </Field>
+
+              <Field
+                label={screenshots.length > 1 ? "Screenshots" : "Screenshot"}
+                hint={`Optional. Up to ${MAX_SCREENSHOTS}.`}
+              >
+                {screenshots.length > 0 ? (
+                  <ul className="m-0 flex list-none flex-col gap-2 p-0">
+                    {screenshots.map((shot) => (
+                      <li
+                        key={shot.id}
+                        className="flex items-center gap-3 rounded-row border border-hairline bg-paper-2/50 p-2"
+                      >
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                        <img
+                          src={shot.dataUrl}
+                          alt={`Attached screenshot preview: ${shot.name}`}
+                          className="h-[44px] w-[44px] shrink-0 rounded-[6px] object-cover"
+                        />
+                        <span className="min-w-0 flex-1 truncate text-[12.5px] text-ink-2">
+                          {shot.name}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => removeScreenshot(shot.id)}
+                          className="shrink-0 text-[12px] font-medium text-ink-3 hover:text-ink"
+                        >
+                          Remove
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+                {screenshots.length < MAX_SCREENSHOTS ? (
                   <button
-                    key={option}
                     type="button"
-                    onClick={() => setType(option)}
-                    aria-pressed={type === option}
+                    onClick={() => fileInputRef.current?.click()}
+                    onDragOver={(event) => {
+                      event.preventDefault();
+                      setDragOver(true);
+                    }}
+                    onDragLeave={() => setDragOver(false)}
+                    onDrop={(event) => {
+                      event.preventDefault();
+                      setDragOver(false);
+                      void acceptFiles(event.dataTransfer.files);
+                    }}
+                    data-pilot-feedback-add-screenshot="true"
                     className={cn(
-                      "rounded-pill border px-3 py-[6px] text-[12.5px] transition-colors duration-calm",
-                      type === option
-                        ? "border-ink bg-ink text-paper"
-                        : "border-hairline text-ink-2 hover:border-hairline-strong hover:bg-paper-2"
+                      "flex w-full items-center justify-center gap-2 rounded-row border border-dashed py-[14px] text-[12.5px] transition-colors duration-calm",
+                      screenshots.length > 0 && "mt-2",
+                      dragOver
+                        ? "border-hairline-strong bg-paper-2 text-ink"
+                        : "border-hairline text-ink-3 hover:border-hairline-strong hover:text-ink-2"
                     )}
                   >
-                    {PILOT_REPORT_TYPE_LABELS[option]}
+                    <ImageUp className="h-[15px] w-[15px]" strokeWidth={1.7} />
+                    <span className="sm:hidden">
+                      {screenshots.length > 0
+                        ? "Add another from Photos or Files"
+                        : "Add from Photos or Files"}
+                    </span>
+                    <span className="hidden sm:inline">
+                      {screenshots.length > 0
+                        ? "Add another image"
+                        : "Drag screenshots here, or choose files"}
+                    </span>
                   </button>
-                ))}
-              </div>
-            </Field>
+                ) : null}
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  multiple
+                  accept={[...ALLOWED_SCREENSHOT_TYPES, "image/*"].join(",")}
+                  className="hidden"
+                  data-pilot-feedback-file-input="true"
+                  onChange={(event) => {
+                    void acceptFiles(event.target.files);
+                    event.target.value = "";
+                  }}
+                />
+                {screenshotError ? (
+                  <p className="mt-1.5 text-[11.5px] text-risk-overdue">{screenshotError}</p>
+                ) : null}
+              </Field>
 
-            <Field label="Title">
-              <input
-                type="text"
-                value={title}
-                onChange={(event) => setTitle(event.target.value)}
-                placeholder="A short summary"
-                maxLength={200}
-                className="w-full rounded-row border border-hairline bg-paper px-3 py-2 text-[14px] text-ink outline-none transition-[border-color] duration-calm placeholder:text-ink-4 focus:border-hairline-strong"
-              />
-            </Field>
-
-            <Field
-              label={type === "bug" ? "What happened?" : "Tell us more"}
-              hint="In your own words. Please don't paste private message content."
-            >
-              <textarea
-                value={description}
-                onChange={(event) => setDescription(event.target.value)}
-                rows={4}
-                placeholder={
-                  type === "bug"
-                    ? "What were you doing, and what went wrong?"
-                    : "What did you notice?"
-                }
-                className="w-full resize-none rounded-row border border-hairline bg-paper px-3 py-2 text-[13.5px] leading-[1.55] text-ink outline-none transition-[border-color] duration-calm placeholder:text-ink-4 focus:border-hairline-strong"
-              />
-            </Field>
-
-            <Field label="What did you expect?" hint="Optional.">
-              <textarea
-                value={expected}
-                onChange={(event) => setExpected(event.target.value)}
-                rows={2}
-                placeholder="What you thought would happen instead"
-                className="w-full resize-none rounded-row border border-hairline bg-paper px-3 py-2 text-[13.5px] leading-[1.55] text-ink outline-none transition-[border-color] duration-calm placeholder:text-ink-4 focus:border-hairline-strong"
-              />
-            </Field>
-
-            <Field
-              label={screenshots.length > 1 ? "Screenshots" : "Screenshot"}
-              hint={`Optional. Up to ${MAX_SCREENSHOTS}. Drag images in, or choose files.`}
-            >
               {screenshots.length > 0 ? (
-                <ul className="m-0 flex list-none flex-col gap-2 p-0">
-                  {screenshots.map((shot) => (
-                    <li
-                      key={shot.id}
-                      className="flex items-center gap-3 rounded-row border border-hairline bg-paper-2/50 p-2"
-                    >
-                      {/* eslint-disable-next-line @next/next/no-img-element */}
-                      <img
-                        src={shot.dataUrl}
-                        alt={`Attached screenshot preview: ${shot.name}`}
-                        className="h-[44px] w-[44px] shrink-0 rounded-[6px] object-cover"
-                      />
-                      <span className="min-w-0 flex-1 truncate text-[12.5px] text-ink-2">
-                        {shot.name}
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => removeScreenshot(shot.id)}
-                        className="shrink-0 font-mono text-[10.5px] uppercase tracking-[0.06em] text-ink-3 hover:text-ink"
-                      >
-                        remove
-                      </button>
-                    </li>
-                  ))}
-                </ul>
+                <label className="mt-1 flex cursor-pointer items-start gap-2.5">
+                  <input
+                    type="checkbox"
+                    checked={privacyAck}
+                    onChange={(event) => setPrivacyAck(event.target.checked)}
+                    className="mt-[2px] h-[14px] w-[14px] cursor-pointer accent-ink"
+                  />
+                  <span className="text-[12px] leading-[1.5] text-ink-2">
+                    I understand screenshots may include private messages, so I have checked or
+                    blurred anything sensitive.
+                  </span>
+                </label>
               ) : null}
-              {screenshots.length < MAX_SCREENSHOTS ? (
+
+              <div className="mt-2 sm:hidden">
                 <button
                   type="button"
-                  onClick={() => fileInputRef.current?.click()}
-                  onDragOver={(event) => {
-                    event.preventDefault();
-                    setDragOver(true);
-                  }}
-                  onDragLeave={() => setDragOver(false)}
-                  onDrop={(event) => {
-                    event.preventDefault();
-                    setDragOver(false);
-                    void acceptFiles(event.dataTransfer.files);
-                  }}
-                  className={cn(
-                    "flex w-full items-center justify-center gap-2 rounded-row border border-dashed py-[14px] text-[12.5px] transition-colors duration-calm",
-                    screenshots.length > 0 && "mt-2",
-                    dragOver
-                      ? "border-hairline-strong bg-paper-2 text-ink"
-                      : "border-hairline text-ink-3 hover:border-hairline-strong hover:text-ink-2"
-                  )}
+                  onClick={() => void openReports()}
+                  className="text-[12.5px] font-medium text-ink-3 hover:text-ink"
                 >
-                  <ImageUp className="h-[15px] w-[15px]" strokeWidth={1.7} />
-                  {screenshots.length > 0
-                    ? "Add another image"
-                    : "Drag screenshots here, or choose files"}
+                  Recent reports
                 </button>
-              ) : null}
-              <input
-                ref={fileInputRef}
-                type="file"
-                multiple
-                accept={ALLOWED_SCREENSHOT_TYPES.join(",")}
-                className="hidden"
-                onChange={(event) => {
-                  void acceptFiles(event.target.files);
-                  event.target.value = "";
-                }}
-              />
-              {screenshotError ? (
-                <p className="mt-1.5 text-[11.5px] text-risk-overdue">{screenshotError}</p>
-              ) : null}
-            </Field>
+              </div>
+            </div>
 
-            {screenshots.length > 0 ? (
-              <label className="mt-1 flex cursor-pointer items-start gap-2.5">
-                <input
-                  type="checkbox"
-                  checked={privacyAck}
-                  onChange={(event) => setPrivacyAck(event.target.checked)}
-                  className="mt-[2px] h-[14px] w-[14px] cursor-pointer accent-ink"
-                />
-                <span className="text-[12px] leading-[1.5] text-ink-2">
-                  I understand screenshots may include private messages, so I have checked or
-                  blurred anything sensitive.
-                </span>
-              </label>
-            ) : null}
-
-            <div className="mt-4 flex items-center gap-[10px]">
+            <footer
+              className="flex shrink-0 flex-col gap-2 border-t border-hairline px-4 py-3 sm:flex-row sm:items-center sm:gap-[10px] sm:px-5 sm:py-[14px]"
+              data-pilot-feedback-footer="true"
+            >
               <button
                 type="button"
                 onClick={() => void submit()}
                 disabled={!canSubmit}
-                className="inline-flex items-center gap-2 rounded-pill bg-ink px-[18px] py-[9px] text-[12.5px] font-medium text-paper transition-colors duration-calm hover:bg-ink-2 disabled:cursor-not-allowed disabled:opacity-50"
+                data-pilot-feedback-submit="footer"
+                className="inline-flex w-full items-center justify-center gap-2 rounded-pill bg-ink px-[18px] py-[11px] text-[13px] font-medium text-paper transition-colors duration-calm hover:bg-ink-2 disabled:cursor-not-allowed disabled:opacity-50 sm:w-auto sm:py-[9px] sm:text-[12.5px]"
               >
                 Submit report
               </button>
-              <span className="text-[11.5px] leading-[1.45] text-ink-3">
-                Goes to the pilot log. No message content is included.
-              </span>
-            </div>
-          </div>
+              <div className="flex items-center justify-between gap-3 sm:contents">
+                <span className="text-[11.5px] leading-[1.45] text-ink-3">
+                  Goes to the pilot team. No message content is included unless you attach it.
+                </span>
+                <button
+                  type="button"
+                  onClick={() => void openReports()}
+                  className="hidden shrink-0 text-[12px] font-medium text-ink-3 hover:text-ink sm:inline"
+                >
+                  Recent reports
+                </button>
+              </div>
+            </footer>
+          </>
         )}
       </div>
     </div>
