@@ -64,7 +64,17 @@
 }
 
 * { box-sizing: border-box; }
-html, body { margin: 0; padding: 0; }
+/* Lock document scroll so only intentional route/content scrollers move.
+ * overscroll-behavior: none stops pull-to-refresh / rubber-band from
+ * shifting the whole app canvas on mobile browsers and standalone PWA. */
+html, body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  overscroll-behavior: none;
+}
 
 /* ───────────── Responsive scale ─────────────
  * The layout is designed at laptop width with px-based type. Very large
@@ -87,8 +97,13 @@ body { zoom: var(--effective-zoom); }
 @media (min-width: 3200px) {
   :root { --app-zoom: 1.8; }
 }
-/* Full-viewport height that stays correct under the zoom layer. */
-.h-app-screen { height: calc(100vh / var(--effective-zoom)); }
+/* Full-viewport height that stays correct under the zoom layer.
+ * 100vh is the fallback; 100dvh tracks the dynamic mobile viewport
+ * (browser chrome, keyboard) where supported and is ignored otherwise. */
+.h-app-screen {
+  height: calc(100vh / var(--effective-zoom));
+  height: calc(100dvh / var(--effective-zoom));
+}
 body {
   font-family: var(--font-text);
   background: var(--paper);
