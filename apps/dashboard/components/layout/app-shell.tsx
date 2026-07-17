@@ -15,6 +15,7 @@ import { PilotFeedbackModal } from "@/components/common/pilot-feedback-modal";
 import { PilotTour } from "@/components/common/PilotTour";
 import { SetupWizard } from "@/components/common/SetupWizard";
 import { FocusOverlays } from "@/components/common/focus/focus-overlays";
+import { usePrimaryOverlay } from "@/components/common/mobile-overlay-provider";
 import { FullDemoBanner } from "@/components/full-demo/FullDemoBanner";
 import { apiGet, apiGetRaw, apiPost } from "@/lib/api";
 import { startAppUpdate } from "@/lib/app-update-action";
@@ -157,6 +158,13 @@ export function AppShell({ children }: { children: ReactNode }) {
   const [runtimeFailure, setRuntimeFailure] = useState<ConsumerFailure | null>(null);
   const [recovering, setRecovering] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const closePalette = useCallback(() => setPaletteOpen(false), []);
+  usePrimaryOverlay({
+    kind: "search",
+    id: "command-palette",
+    open: paletteOpen,
+    onRequestClose: closePalette
+  });
   const [autoScanEnabled, setAutoScanEnabled] = useState(false);
   const [attentionCount, setAttentionCount] = useState(0);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -672,9 +680,9 @@ export function AppShell({ children }: { children: ReactNode }) {
     return () => source.close();
   }, []);
 
-  // ⌘K toggles the palette. Esc closes the palette and, when there is no
-  // palette open, navigates back from a thread to /today (matches the
-  // prototype's "Esc closes thread" behaviour).
+  // ⌘K toggles the palette. Escape for primary overlays is owned by
+  // MobileOverlayProvider (closes the top primary first). When no primary
+  // is open, Esc navigates back from a thread to /today.
   useEffect(() => {
     const onKeydown = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
@@ -684,6 +692,8 @@ export function AppShell({ children }: { children: ReactNode }) {
       }
       if (event.key === "Escape") {
         if (paletteOpen) {
+          // Provider capture-phase handler usually wins; keep this as a
+          // same-tick fallback when the palette is the open primary.
           setPaletteOpen(false);
           return;
         }

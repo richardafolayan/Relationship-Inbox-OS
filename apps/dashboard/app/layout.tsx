@@ -3,6 +3,7 @@ import "./globals.css";
 import { AppShell } from "@/components/layout/app-shell";
 import { FullDemoProvider } from "@/components/full-demo/FullDemoProvider";
 import { FullDemoOverlay } from "@/components/full-demo/FullDemoOverlay";
+import { MobileOverlayProvider } from "@/components/common/mobile-overlay-provider";
 import { UiScaleBridge } from "@/components/common/ui-scale-bridge";
 import { PwaStandaloneDebug } from "@/components/common/pwa-standalone-debug";
 import { APP_NAME } from "@/lib/branding";
@@ -60,10 +61,12 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
       </head>
       <body>
         <FullDemoProvider>
-          <UiScaleBridge />
-          <PwaStandaloneDebug />
-          <AppShell>{children}</AppShell>
-          <FullDemoOverlay />
+          <MobileOverlayProvider>
+            <UiScaleBridge />
+            <PwaStandaloneDebug />
+            <AppShell>{children}</AppShell>
+            <FullDemoOverlay />
+          </MobileOverlayProvider>
         </FullDemoProvider>
       </body>
     </html>
