@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ChevronDown } from "lucide-react";
 
 interface ThreadBriefBandProps {
@@ -10,6 +10,19 @@ interface ThreadBriefBandProps {
   whereItStands?: string | null;
   /** Active open loops (already filtered for dismissed). */
   openLoops: string[];
+  /**
+   * Thread identity for resetting local expand state when the operator
+   * switches threads without remounting via key.
+   */
+  threadId?: string | null;
+}
+
+const useIsoLayoutEffect = typeof window !== "undefined" ? useLayoutEffect : useEffect;
+
+function overflowsClamped(el: HTMLElement | null): boolean {
+  if (!el) return false;
+  // line-clamp sets max-height + overflow hidden; scrollHeight is full wrap.
+  return el.scrollHeight > el.clientHeight + 1;
 }
 
 // Compact reply-readiness strip under the thread header. Mirrors the
@@ -17,12 +30,49 @@ interface ThreadBriefBandProps {
 // the thread without opening the AI rail. On mobile it stays a short fixed
 // row (Reply job + To address); deeper context is behind a disclosure so
 // the brief never steals half the phone screen (#896).
-export function ThreadBriefBand({ onYou, whereItStands, openLoops }: ThreadBriefBandProps) {
+export function ThreadBriefBand({
+  onYou,
+  whereItStands,
+  openLoops,
+  threadId
+}: ThreadBriefBandProps) {
   const [expanded, setExpanded] = useState(false);
+  const [leadOverflows, setLeadOverflows] = useState(false);
+  const [loopsOverflows, setLoopsOverflows] = useState(false);
+  const leadRef = useRef<HTMLSpanElement | null>(null);
+  const loopsRef = useRef<HTMLParagraphElement | null>(null);
 
   const job = (onYou ?? "").trim();
   const context = (whereItStands ?? "").trim();
   const loops = openLoops.filter((loop) => loop.trim().length > 0);
+
+  useEffect(() => {
+    setExpanded(false);
+  }, [threadId]);
+
+  useIsoLayoutEffect(() => {
+    // Overflow is only meaningful while clamp is applied. Keep the last
+    // measurement while expanded so the Less control stays available.
+    if (expanded) return;
+
+    const measure = () => {
+      setLeadOverflows(overflowsClamped(leadRef.current));
+      setLoopsOverflows(overflowsClamped(loopsRef.current));
+    };
+
+    measure();
+
+    const observed: HTMLElement[] = [];
+    if (leadRef.current) observed.push(leadRef.current);
+    if (loopsRef.current) observed.push(loopsRef.current);
+    if (observed.length === 0) return;
+
+    const observer = new ResizeObserver(() => {
+      measure();
+    });
+    for (const el of observed) observer.observe(el);
+    return () => observer.disconnect();
+  }, [expanded, job, context, loops.join("\0")]);
 
   if (!job && !context && loops.length === 0) return null;
 
@@ -30,11 +80,9 @@ export function ThreadBriefBand({ onYou, whereItStands, openLoops }: ThreadBrief
   const showContext = context.length > 0 && context !== lead;
   const shownLoops = loops.slice(0, 3);
   const extraLoops = loops.length - shownLoops.length;
-  // Collapsed mobile clamps lead/loops to 2 lines and hides context.
-  // Expand is sm:hidden, so never clamp at sm+ without a control there.
-  // Gate the button to cases that can actually hide content on phone.
-  const hasDisclosure =
-    showContext || loops.length > 0 || lead.length > 80;
+  // Disclosure only when expand actually reveals something: hidden context,
+  // or lead/loops that overflow their two-line mobile clamp (measured).
+  const hasDisclosure = showContext || leadOverflows || loopsOverflows;
 
   return (
     <div
@@ -49,6 +97,7 @@ export function ThreadBriefBand({ onYou, whereItStands, openLoops }: ThreadBrief
             {job ? "Reply job" : "Where it stands"}
           </span>
           <span
+            ref={leadRef}
             className={`min-w-0 sm:text-balance ${
               expanded ? "" : "line-clamp-2 sm:line-clamp-none"
             }`}
@@ -60,6 +109,7 @@ export function ThreadBriefBand({ onYou, whereItStands, openLoops }: ThreadBrief
 
       {shownLoops.length > 0 ? (
         <p
+          ref={loopsRef}
           className={`m-0 mt-1 flex flex-wrap items-baseline gap-x-2 gap-y-[3px] text-[12px] leading-[1.35] sm:mt-1.5 sm:text-[12.5px] sm:leading-[1.4] ${
             expanded ? "" : "line-clamp-2 sm:line-clamp-none"
           }`}
