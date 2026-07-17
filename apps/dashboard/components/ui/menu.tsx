@@ -7,6 +7,7 @@ export interface MenuItem {
   label: string;
   onSelect: () => void;
   danger?: boolean;
+  disabled?: boolean;
 }
 
 interface MenuProps {
@@ -57,12 +58,14 @@ export function Menu({ trigger, items, align = "end" }: MenuProps) {
               key={item.label}
               type="button"
               role="menuitem"
+              disabled={item.disabled}
               onClick={() => {
+                if (item.disabled) return;
                 setOpen(false);
                 item.onSelect();
               }}
               className={cn(
-                "flex w-full items-center px-3 py-[7px] text-left text-[13px] transition-colors duration-calm hover:bg-paper-2",
+                "flex w-full items-center px-3 py-[7px] text-left text-[13px] transition-colors duration-calm hover:bg-paper-2 disabled:cursor-not-allowed disabled:opacity-45",
                 item.danger ? "text-accent-ink hover:bg-accent-soft" : "text-ink-2 hover:text-ink"
               )}
             >
