@@ -165,28 +165,161 @@ test("closeTop and close(id) invoke onRequestClose unless silent", () => {
   assert.equal(c.isPrimaryActive(), false);
 });
 
-test("history popstate (system Back) closes the active overlay via onBack", () => {
+/** Session-history stack with deferred traversal (models real browsers). */
+function createAsyncHistoryStack(initialState = null) {
+  const stack = [{ state: initialState }];
+  let index = 0;
   const listeners = new Set();
-  let state = null;
+  let backCalls = 0;
+  let pushCalls = 0;
+  let replaceCalls = 0;
+  const pending = [];
+
+  const flushLater = (fn) => {
+    pending.push(fn);
+    setTimeout(() => {
+      const i = pending.indexOf(fn);
+      if (i >= 0) pending.splice(i, 1);
+      fn();
+    }, 0);
+  };
+
   const history = {
     get state() {
-      return state;
+      return stack[index]?.state ?? null;
+    },
+    get index() {
+      return index;
+    },
+    get length() {
+      return stack.length;
+    },
+    get backCalls() {
+      return backCalls;
+    },
+    get pushCalls() {
+      return pushCalls;
+    },
+    get replaceCalls() {
+      return replaceCalls;
     },
     pushState(data) {
-      state = data;
+      pushCalls += 1;
+      stack.splice(index + 1);
+      stack.push({ state: data });
+      index = stack.length - 1;
+    },
+    replaceState(data) {
+      replaceCalls += 1;
+      stack[index] = { state: data };
     },
     back() {
-      state = null;
-      for (const listener of [...listeners]) listener({ state });
+      backCalls += 1;
+      if (index <= 0) return;
+      const nextIndex = index - 1;
+      flushLater(() => {
+        index = nextIndex;
+        const state = stack[index]?.state ?? null;
+        for (const listener of [...listeners]) listener({ state });
+      });
+    },
+    /** User/system Back: same async popstate path as history.back(). */
+    userBack() {
+      if (index <= 0) return;
+      const nextIndex = index - 1;
+      flushLater(() => {
+        index = nextIndex;
+        const state = stack[index]?.state ?? null;
+        for (const listener of [...listeners]) listener({ state });
+      });
     },
     addEventListener(_type, listener) {
       listeners.add(listener);
     },
     removeEventListener(_type, listener) {
       listeners.delete(listener);
+    },
+    listenerCount() {
+      return listeners.size;
     }
   };
 
+  return history;
+}
+
+function waitForMacrotask() {
+  return new Promise((resolve) => setTimeout(resolve, 30));
+}
+
+/**
+ * Mirrors MobileOverlayProvider history lifecycle: one frame for the primary
+ * lifetime, retarget on replace, deferred release only when idle.
+ */
+function createProviderHistoryLifecycle(history, controller) {
+  let binding = null;
+  let activeId = null;
+  let releaseTimer = null;
+
+  const sync = () => {
+    const top = controller.getTop();
+    const primaryActive = controller.isPrimaryActive();
+
+    if (!primaryActive || !top) {
+      if (binding && releaseTimer == null) {
+        const current = binding;
+        releaseTimer = setTimeout(() => {
+          releaseTimer = null;
+          if (binding === current) {
+            binding.release();
+            binding = null;
+            activeId = null;
+          }
+        }, 0);
+      }
+      return;
+    }
+
+    if (releaseTimer != null) {
+      clearTimeout(releaseTimer);
+      releaseTimer = null;
+    }
+
+    if (binding && !binding.isActive()) {
+      binding = null;
+      activeId = null;
+    }
+
+    if (!binding) {
+      activeId = top.id;
+      binding = bindOverlayHistory({
+        history,
+        overlayId: top.id,
+        onBack: () => controller.handleDismiss()
+      });
+    } else if (activeId !== top.id) {
+      binding.retarget(top.id);
+      activeId = top.id;
+    }
+  };
+
+  return {
+    sync,
+    getBinding: () => binding,
+    getActiveId: () => activeId,
+    forceRelease() {
+      if (releaseTimer != null) {
+        clearTimeout(releaseTimer);
+        releaseTimer = null;
+      }
+      binding?.release();
+      binding = null;
+      activeId = null;
+    }
+  };
+}
+
+test("history popstate (system Back) closes the active overlay via onBack", async () => {
+  const history = createAsyncHistoryStack(null);
   const c = createMobileOverlayController();
   let closed = false;
   const opened = c.open({
@@ -204,10 +337,10 @@ test("history popstate (system Back) closes the active overlay via onBack", () =
     onBack: () => c.handleDismiss()
   });
 
-  assert.equal(state?.[MOBILE_OVERLAY_HISTORY_KEY], "sheet-1");
+  assert.equal(history.state?.[MOBILE_OVERLAY_HISTORY_KEY], "sheet-1");
 
-  // Simulate system Back: popstate without going through history.back() from us.
-  for (const listener of [...listeners]) listener({ state: null });
+  history.userBack();
+  await waitForMacrotask();
 
   assert.equal(closed, true);
   assert.equal(c.isPrimaryActive(), false);
@@ -215,30 +348,8 @@ test("history popstate (system Back) closes the active overlay via onBack", () =
   binding.release();
 });
 
-test("programmatic history release calls history.back without re-dismissing", () => {
-  const listeners = new Set();
-  let state = { prior: true };
-  let backCalls = 0;
-  const history = {
-    get state() {
-      return state;
-    },
-    pushState(data) {
-      state = data;
-    },
-    back() {
-      backCalls += 1;
-      state = { prior: true };
-      for (const listener of [...listeners]) listener({ state });
-    },
-    addEventListener(_type, listener) {
-      listeners.add(listener);
-    },
-    removeEventListener(_type, listener) {
-      listeners.delete(listener);
-    }
-  };
-
+test("programmatic history release calls history.back without re-dismissing", async () => {
+  const history = createAsyncHistoryStack({ prior: true });
   let onBackCalls = 0;
   const binding = bindOverlayHistory({
     history,
@@ -250,8 +361,184 @@ test("programmatic history release calls history.back without re-dismissing", ()
   });
 
   binding.release();
-  assert.equal(backCalls, 1);
+  assert.equal(history.backCalls, 1);
+  await waitForMacrotask();
   assert.equal(onBackCalls, 0, "UI close must not re-fire onBack via popstate");
+  assert.equal(history.state?.prior, true);
+});
+
+test("replace retargets history in place and does not auto-dismiss the new primary", async () => {
+  const history = createAsyncHistoryStack({ page: true });
+  const c = createMobileOverlayController();
+  const closed = [];
+  const lifecycle = createProviderHistoryLifecycle(history, c);
+
+  c.open({
+    kind: "search",
+    id: "command-palette",
+    onRequestClose: () => closed.push("search")
+  });
+  lifecycle.sync();
+
+  assert.equal(history.pushCalls, 1);
+  assert.equal(history.state?.[MOBILE_OVERLAY_HISTORY_KEY], "command-palette");
+  assert.equal(history.length, 2);
+  assert.equal(history.index, 1);
+
+  // Search → Feedback (replace policy): provider must retarget, not release+push.
+  c.open({
+    kind: "feedback",
+    id: "pilot-feedback",
+    policy: "replace",
+    onRequestClose: () => closed.push("feedback")
+  });
+  lifecycle.sync();
+
+  assert.equal(c.getTop()?.id, "pilot-feedback");
+  assert.equal(c.isPrimaryActive(), true);
+  assert.deepEqual(closed, ["search"]);
+  assert.equal(history.pushCalls, 1, "replace must not push a second overlay frame");
+  assert.equal(history.replaceCalls, 1);
+  assert.equal(history.backCalls, 0, "replace must not call history.back");
+  assert.equal(history.state?.[MOBILE_OVERLAY_HISTORY_KEY], "pilot-feedback");
+
+  // Deferred microtasks from a buggy release+back would fire here and dismiss feedback.
+  await waitForMacrotask();
+
+  assert.equal(c.isPrimaryActive(), true, "feedback must survive async history drain");
+  assert.equal(c.getTop()?.id, "pilot-feedback");
+  assert.deepEqual(closed, ["search"], "feedback must not receive auto-dismiss");
+  assert.equal(history.index, 1);
+  assert.equal(history.length, 2, "stack is [page, overlay-marker]");
+
+  // Idle: single back returns to the pre-overlay entry.
+  c.close("pilot-feedback", { silent: true });
+  lifecycle.sync();
+  await waitForMacrotask();
+
+  assert.equal(c.isPrimaryActive(), false);
+  assert.equal(history.backCalls, 1);
+  assert.equal(history.index, 0);
+  assert.equal(history.state?.page, true);
+});
+
+test("open → UI close → idle drains one back without re-dismiss", async () => {
+  const history = createAsyncHistoryStack({ page: true });
+  const c = createMobileOverlayController();
+  let closed = 0;
+  const lifecycle = createProviderHistoryLifecycle(history, c);
+
+  c.open({
+    kind: "search",
+    id: "command-palette",
+    onRequestClose: () => {
+      closed += 1;
+    }
+  });
+  lifecycle.sync();
+
+  c.close("command-palette", { silent: true });
+  lifecycle.sync();
+  await waitForMacrotask();
+
+  assert.equal(closed, 0, "silent UI close does not re-enter onRequestClose via history");
+  assert.equal(history.backCalls, 1);
+  assert.equal(history.index, 0);
+  assert.equal(c.isPrimaryActive(), false);
+});
+
+test("open → system Back dismisses once and returns to pre-overlay entry", async () => {
+  const history = createAsyncHistoryStack({ page: true });
+  const c = createMobileOverlayController();
+  let closed = 0;
+  const lifecycle = createProviderHistoryLifecycle(history, c);
+
+  c.open({
+    kind: "feedback",
+    id: "pilot-feedback",
+    onRequestClose: () => {
+      closed += 1;
+    }
+  });
+  lifecycle.sync();
+
+  history.userBack();
+  await waitForMacrotask();
+
+  assert.equal(closed, 1);
+  assert.equal(c.isPrimaryActive(), false);
+  assert.equal(history.index, 0);
+  assert.equal(history.state?.page, true);
+
+  lifecycle.sync();
+  await waitForMacrotask();
+  // Deferred idle release must not back again (already at pre-overlay).
+  assert.ok(history.backCalls <= 1, "no extra back after system dismiss");
+});
+
+test("retarget updates marker without push or back", async () => {
+  const history = createAsyncHistoryStack({ page: true });
+  let onBackCalls = 0;
+  const binding = bindOverlayHistory({
+    history,
+    overlayId: "a",
+    onBack: () => {
+      onBackCalls += 1;
+      return true;
+    }
+  });
+
+  binding.retarget("b");
+  assert.equal(history.pushCalls, 1);
+  assert.equal(history.replaceCalls, 1);
+  assert.equal(history.backCalls, 0);
+  assert.equal(history.state?.[MOBILE_OVERLAY_HISTORY_KEY], "b");
+  assert.equal(onBackCalls, 0);
+
+  binding.release();
+  await waitForMacrotask();
+  assert.equal(onBackCalls, 0);
+});
+
+test("legacy release+rebind would dismiss replacement; retarget path does not", async () => {
+  const history = createAsyncHistoryStack({ page: true });
+  const c = createMobileOverlayController();
+  const closed = [];
+
+  c.open({
+    kind: "search",
+    id: "command-palette",
+    onRequestClose: () => closed.push("search")
+  });
+  const first = bindOverlayHistory({
+    history,
+    overlayId: "command-palette",
+    onBack: () => c.handleDismiss()
+  });
+
+  // Buggy provider path: release (async back) then bind the replacement.
+  c.open({
+    kind: "feedback",
+    id: "pilot-feedback",
+    policy: "replace",
+    onRequestClose: () => closed.push("feedback")
+  });
+  first.release();
+  const second = bindOverlayHistory({
+    history,
+    overlayId: "pilot-feedback",
+    onBack: () => c.handleDismiss()
+  });
+
+  await waitForMacrotask();
+
+  // Absorber must swallow the deferred back from first.release so feedback stays.
+  assert.equal(c.isPrimaryActive(), true);
+  assert.equal(c.getTop()?.id, "pilot-feedback");
+  assert.ok(!closed.includes("feedback"), "replacement must not auto-dismiss");
+
+  second.release();
+  await waitForMacrotask();
 });
 
 // ─────────────────────────── scroll lock ───────────────────────────

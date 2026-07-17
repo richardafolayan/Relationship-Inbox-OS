@@ -76,11 +76,11 @@ export function MobileOverlayProvider({ children }: { children: ReactNode }) {
   const historyBindingRef = useRef<HistoryBinding | null>(null);
   const viewportBindingRef = useRef<ReturnType<typeof bindVisualViewport> | null>(null);
   const activeIdRef = useRef<string | null>(null);
+  /** Deferred history.back when the primary stack empties; cancelled if a replace re-opens. */
+  const historyReleaseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     if (!primaryActive || !top) {
-      historyBindingRef.current?.release();
-      historyBindingRef.current = null;
       viewportBindingRef.current?.release();
       viewportBindingRef.current = null;
       if (focusRestoreRef.current) {
@@ -88,8 +88,27 @@ export function MobileOverlayProvider({ children }: { children: ReactNode }) {
         focusRestoreRef.current = null;
         requestAnimationFrame(() => restore());
       }
-      activeIdRef.current = null;
+      // Defer history.back until we know another primary is not about to open
+      // (Search close + Feedback open in consecutive renders). Immediate
+      // release + rebind races: browsers apply back asynchronously and the new
+      // listener would treat it as a user Back.
+      if (historyBindingRef.current && historyReleaseTimerRef.current == null) {
+        const binding = historyBindingRef.current;
+        historyReleaseTimerRef.current = setTimeout(() => {
+          historyReleaseTimerRef.current = null;
+          if (historyBindingRef.current === binding) {
+            binding.release();
+            historyBindingRef.current = null;
+            activeIdRef.current = null;
+          }
+        }, 0);
+      }
       return;
+    }
+
+    if (historyReleaseTimerRef.current != null) {
+      clearTimeout(historyReleaseTimerRef.current);
+      historyReleaseTimerRef.current = null;
     }
 
     const releaseScroll = scrollLocks.current.acquire();
@@ -99,11 +118,17 @@ export function MobileOverlayProvider({ children }: { children: ReactNode }) {
       if (focusHost) focusRestoreRef.current = captureFocus(focusHost);
     }
 
-    // Rebind history only when the top primary identity changes so a
-    // Strict Mode remount (same id) does not push a second history entry.
-    if (activeIdRef.current !== top.id) {
-      historyBindingRef.current?.release();
+    // One history frame for the whole primary-active lifetime. Replace policy
+    // retargets the marker in place (replaceState); never release+push on
+    // identity change or a deferred back from the old binding dismisses the new primary.
+    // System Back deactivates the binding before React re-renders; drop it so we
+    // push a fresh frame instead of retargeting a dead listener.
+    if (historyBindingRef.current && !historyBindingRef.current.isActive()) {
       historyBindingRef.current = null;
+      activeIdRef.current = null;
+    }
+
+    if (!historyBindingRef.current) {
       activeIdRef.current = top.id;
       const historyHost = browserHistoryHost();
       if (historyHost) {
@@ -113,6 +138,9 @@ export function MobileOverlayProvider({ children }: { children: ReactNode }) {
           onBack: () => controller.handleDismiss()
         });
       }
+    } else if (activeIdRef.current !== top.id) {
+      historyBindingRef.current.retarget(top.id);
+      activeIdRef.current = top.id;
     }
 
     if (!viewportBindingRef.current) {
@@ -142,6 +170,10 @@ export function MobileOverlayProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     const locks = scrollLocks.current;
     return () => {
+      if (historyReleaseTimerRef.current != null) {
+        clearTimeout(historyReleaseTimerRef.current);
+        historyReleaseTimerRef.current = null;
+      }
       historyBindingRef.current?.release();
       historyBindingRef.current = null;
       viewportBindingRef.current?.release();
