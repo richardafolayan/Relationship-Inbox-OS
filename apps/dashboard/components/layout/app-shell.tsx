@@ -680,13 +680,19 @@ export function AppShell({ children }: { children: ReactNode }) {
     return () => source.close();
   }, []);
 
-  // ⌘K toggles the palette. Escape for primary overlays is owned by
-  // MobileOverlayProvider (closes the top primary first). When no primary
-  // is open, Esc navigates back from a thread to /today.
+  // ⌘K opens the desktop palette or the dedicated phone Search route.
+  // Escape for primary overlays is owned by MobileOverlayProvider; when no
+  // primary is open, it returns a thread to Today.
   useEffect(() => {
     const onKeydown = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
         event.preventDefault();
+        const phoneSearch = typeof window !== "undefined" && window.matchMedia("(max-width: 767px)").matches;
+        if (phoneSearch) {
+          setPaletteOpen(false);
+          if (pathname !== "/search") router.push("/search");
+          return;
+        }
         setPaletteOpen((value) => !value);
         return;
       }
@@ -832,7 +838,7 @@ export function AppShell({ children }: { children: ReactNode }) {
         {/* Dock is a real shell row on phone so pages do not need large
             bottom padding to clear a fixed overlay. Hidden on md+ where
             the sidebar owns navigation; returns null inside /thread. */}
-        <MobileDock attentionCount={sidebarAttention} onOpenSearch={() => setPaletteOpen(true)} />
+        <MobileDock attentionCount={sidebarAttention} />
       </div>
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
       <ToastHost />

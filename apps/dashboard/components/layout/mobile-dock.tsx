@@ -8,12 +8,12 @@ import { cn } from "@/lib/utils";
 
 interface MobileDockProps {
   attentionCount: number;
-  onOpenSearch: () => void;
 }
 
 const tabs = [
   { href: "/today", label: "Today", icon: Sun, attention: true },
   { href: "/inbox", label: "Inbox", icon: Inbox },
+  { href: "/search", label: "Search", icon: Search },
   { href: "/reconnect", label: "Reconnect", icon: Sparkles },
   { href: "/settings", label: "Settings", icon: SettingsIcon }
 ] as const;
@@ -22,11 +22,13 @@ const tabs = [
 // rendered as a shell layout row (the sidebar itself is hidden below
 // md). Not position:fixed so list pages can fill the remaining height
 // without guessing bottom padding. Hidden inside a thread so the
-// conversation + composer get the full height. The dock is the sole
+// conversation + composer get the full height, and hidden on /search so
+// the dedicated Search surface owns the viewport. The dock is the sole
 // owner of env(safe-area-inset-bottom) for primary navigation.
-export function MobileDock({ attentionCount, onOpenSearch }: MobileDockProps) {
+export function MobileDock({ attentionCount }: MobileDockProps) {
   const pathname = usePathname();
   if (pathname.startsWith("/thread/")) return null;
+  if (pathname === "/search" || pathname.startsWith("/search/")) return null;
 
   return (
     <nav
@@ -34,29 +36,12 @@ export function MobileDock({ attentionCount, onOpenSearch }: MobileDockProps) {
       data-testid="mobile-dock"
       className="relative z-30 flex shrink-0 items-stretch justify-around border-t border-hairline bg-[color-mix(in_oklch,var(--paper)_92%,transparent)] px-2 pb-[env(safe-area-inset-bottom)] backdrop-blur-md backdrop-saturate-150 md:hidden"
     >
-      {tabs.slice(0, 2).map((tab) => (
+      {tabs.map((tab) => (
         <DockTab
           key={tab.href}
           {...tab}
           active={pathname === tab.href || pathname.startsWith(`${tab.href}/`)}
           badge={"attention" in tab && tab.attention ? attentionCount : 0}
-        />
-      ))}
-      <button
-        type="button"
-        onClick={onOpenSearch}
-        className="flex flex-1 flex-col items-center gap-[3px] px-1 pb-[6px] pt-[8px] text-ink-3 transition-colors duration-calm hover:text-ink"
-        aria-label="Search (⌘K)"
-      >
-        <Search className="h-[21px] w-[21px]" strokeWidth={1.6} />
-        <span className="font-mono text-[10px] tracking-[0.04em]">Search</span>
-      </button>
-      {tabs.slice(2).map((tab) => (
-        <DockTab
-          key={tab.href}
-          {...tab}
-          active={pathname === tab.href || pathname.startsWith(`${tab.href}/`)}
-          badge={0}
         />
       ))}
     </nav>
