@@ -40,3 +40,10 @@ test("WhatsApp can be reset to a clean session with inline feedback", () => {
   assert.match(runner, /clearPersistedWhatsAppSession/);
   assert.match(runner, /RESET_WHATSAPP_SESSION/);
 });
+
+test("WhatsApp uses the same connected badge and primary scan action as other platform cards", () => {
+  assert.match(component, /bg-risk-fresh\/15 text-risk-fresh/);
+  assert.match(component, /Scan WhatsApp/);
+  assert.match(component, /Scan ready/);
+  assert.match(component, /scanBusy \? "Working\.\.\."/);
+});
