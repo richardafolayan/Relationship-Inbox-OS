@@ -250,14 +250,19 @@ export default function SettingsPage() {
     };
   }, [syncFromLocation]);
 
+  // AppShell scrolls <main> (overflow-y-auto); document scroll is locked.
   useEffect(() => {
+    const scroller = document.querySelector("main");
     if (mobileDetailOpen) {
-      window.scrollTo(0, 0);
+      if (scroller) scroller.scrollTop = 0;
       return;
     }
     const y = listScrollYRef.current;
     if (y <= 0) return;
-    const id = window.requestAnimationFrame(() => window.scrollTo(0, y));
+    const id = window.requestAnimationFrame(() => {
+      const el = document.querySelector("main");
+      if (el) el.scrollTop = y;
+    });
     return () => window.cancelAnimationFrame(id);
   }, [mobileDetailOpen]);
 
@@ -382,7 +387,7 @@ export default function SettingsPage() {
   };
 
   const openMobileCategory = (tab: SettingsTabId) => {
-    listScrollYRef.current = window.scrollY;
+    listScrollYRef.current = document.querySelector("main")?.scrollTop ?? 0;
     setActiveTab(tab);
     setMobileDetailOpen(true);
     const url = new URL(window.location.href);
