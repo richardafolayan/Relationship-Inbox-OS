@@ -331,45 +331,50 @@ export default function ArchivedPage() {
 
   return (
     // Mobile (#897): same contained list shell as Inbox. Header + controls
-    // stay put; rows are the only long scroller. Desktop long-page stays.
+    // pin as a capped layout row; rows are the primary scroller. Short
+    // viewports can scroll the upper controls so search stays reachable.
+    // Desktop long-page stays.
     <Canvas className="flex h-full min-h-0 flex-col overflow-hidden pb-0 md:block md:h-auto md:overflow-visible md:pb-[120px]">
-      <div className="shrink-0" data-testid="archived-controls">
-        <Link
-          href="/inbox"
-          className="mb-[12px] inline-flex items-center gap-[5px] font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3 transition-colors duration-calm hover:text-ink"
-        >
-          <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth={1.8}>
-            <path d="M15 18l-6-6 6-6" strokeLinecap="round" strokeLinejoin="round" />
-          </svg>
-          Back to inbox
-        </Link>
+      <div
+        data-testid="archived-controls"
+        className="flex min-h-0 max-h-[42dvh] shrink flex-col md:max-h-none md:shrink-0"
+      >
+        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain md:flex-none md:overflow-visible">
+          <Link
+            href="/inbox"
+            className="mb-[12px] inline-flex items-center gap-[5px] font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3 transition-colors duration-calm hover:text-ink"
+          >
+            <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth={1.8}>
+              <path d="M15 18l-6-6 6-6" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+            Back to inbox
+          </Link>
 
-        <header className="mb-[16px] flex items-start justify-between gap-4 sm:mb-[20px] sm:gap-6">
-          <div className="min-w-0">
-            <p className="mb-1 font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">
-              Done &amp; dusted
-            </p>
-            <h1 className="m-0 font-display text-[24px] font-semibold leading-[1.1] tracking-[-0.02em] sm:text-[40px] sm:leading-[1.04] sm:tracking-[-0.035em]">
-              Archived
-            </h1>
-          </div>
-          {rows && rows.length > 0 ? (
-            <div className="shrink-0 pt-1 text-right font-mono text-[11px] text-ink-3 sm:text-[12.5px]">
-              <strong className="font-medium text-ink">{visible.length}</strong> of {rows.length} threads
-              {oldestMonthLabel ? (
-                <>
-                  <br />
-                  oldest {oldestMonthLabel}
-                </>
-              ) : null}
+          <header className="mb-[16px] flex items-start justify-between gap-4 sm:mb-[20px] sm:gap-6">
+            <div className="min-w-0">
+              <p className="mb-1 font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">
+                Done &amp; dusted
+              </p>
+              <h1 className="m-0 font-display text-[24px] font-semibold leading-[1.1] tracking-[-0.02em] sm:text-[40px] sm:leading-[1.04] sm:tracking-[-0.035em]">
+                Archived
+              </h1>
             </div>
-          ) : null}
-        </header>
+            {rows && rows.length > 0 ? (
+              <div className="shrink-0 pt-1 text-right font-mono text-[11px] text-ink-3 sm:text-[12.5px]">
+                <strong className="font-medium text-ink">{visible.length}</strong> of {rows.length} threads
+                {oldestMonthLabel ? (
+                  <>
+                    <br />
+                    oldest {oldestMonthLabel}
+                  </>
+                ) : null}
+              </div>
+            ) : null}
+          </header>
 
-        {error ? <p className="mb-4 rounded-row border border-hairline bg-paper-2 px-4 py-3 text-[12px] leading-[1.5] text-ink-2 sm:mb-6">{error}</p> : null}
+          {error ? <p className="mb-4 rounded-row border border-hairline bg-paper-2 px-4 py-3 text-[12px] leading-[1.5] text-ink-2 sm:mb-6">{error}</p> : null}
 
-        {!isEmpty ? (
-          <>
+          {!isEmpty ? (
             <label
               className={cn(
                 "mb-[16px] flex items-center gap-[10px] rounded-[12px] border bg-transparent px-[14px] py-[10px] transition-colors duration-calm",
@@ -401,7 +406,11 @@ export default function ArchivedPage() {
                 </button>
               ) : null}
             </label>
+          ) : null}
+        </div>
 
+        {!isEmpty ? (
+          <div className="shrink-0 bg-paper">
             {/* Outcome tabs + tools. On phone tools sit above a horizontally
                 scrollable tab strip so the bar stays two calm rows. */}
             <div className="flex flex-col-reverse gap-1 border-b border-hairline sm:flex-row sm:flex-wrap sm:items-end sm:gap-[14px]">
@@ -457,31 +466,32 @@ export default function ArchivedPage() {
                 ) : null}
               </div>
             </div>
-
-            {platformFilter !== "all" ? (
-              <div className="flex flex-wrap items-center gap-2 pt-[14px]">
-                <span className="inline-flex items-center gap-[6px] rounded-pill border border-hairline bg-paper px-[10px] py-[4px] font-mono text-[11.5px] text-ink-2">
-                  <span className="opacity-60">Platform</span>
-                  {PLATFORM_FILTERS.find((p) => p.key === platformFilter)?.label}
-                  <button
-                    type="button"
-                    onClick={() => setPlatformFilter("all")}
-                    aria-label="Remove platform filter"
-                    className="ml-[1px] rounded p-[1px] opacity-70 transition-opacity duration-calm hover:opacity-100"
-                  >
-                    <XIcon />
-                  </button>
-                </span>
-              </div>
-            ) : null}
-          </>
+          </div>
         ) : null}
       </div>
 
       <div
         data-testid="archived-list-scroller"
-        className="min-h-0 flex-1 overflow-y-auto overscroll-contain pb-4 md:overflow-visible md:pb-0"
+        data-scroll-owner="list"
+        className="min-h-[7rem] flex-1 overflow-y-auto overscroll-contain pb-4 md:min-h-0 md:overflow-visible md:pb-0"
       >
+        {!isEmpty && platformFilter !== "all" ? (
+          <div className="flex flex-wrap items-center gap-2 pt-[14px]">
+            <span className="inline-flex items-center gap-[6px] rounded-pill border border-hairline bg-paper px-[10px] py-[4px] font-mono text-[11.5px] text-ink-2">
+              <span className="opacity-60">Platform</span>
+              {PLATFORM_FILTERS.find((p) => p.key === platformFilter)?.label}
+              <button
+                type="button"
+                onClick={() => setPlatformFilter("all")}
+                aria-label="Remove platform filter"
+                className="ml-[1px] rounded p-[1px] opacity-70 transition-opacity duration-calm hover:opacity-100"
+              >
+                <XIcon />
+              </button>
+            </span>
+          </div>
+        ) : null}
+
         {isEmpty ? (
           <CaughtUp title="No archived threads yet." body="Threads you mark as handled land here." />
         ) : visible.length === 0 ? (

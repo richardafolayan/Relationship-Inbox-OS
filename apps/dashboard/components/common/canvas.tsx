@@ -7,12 +7,13 @@ import { cn } from "@/lib/utils";
 // viewport (20 → 32 → 48px) and the canvas widens on big screens so a
 // large monitor isn't a thin strip of content. Phone bottom padding is
 // modest: the MobileDock owns its shell row and safe-area, so pages no
-// longer reserve ~132px for a fixed overlay.
+// longer reserve ~132px for a fixed overlay. pb-10 still leaves a calm
+// gap above the in-flow dock on long scrolling pages (People, Settings).
 export function Canvas({ children, className, ...rest }: HTMLAttributes<HTMLDivElement>) {
   return (
     <div
       className={cn(
-        "mx-auto w-full max-w-[920px] px-5 pb-8 sm:px-8 md:pb-[120px] lg:px-12 3xl:max-w-[1080px]",
+        "mx-auto w-full max-w-[920px] px-5 pb-10 sm:px-8 md:pb-[120px] lg:px-12 3xl:max-w-[1080px]",
         className
       )}
       {...rest}

@@ -5,6 +5,8 @@ import { readFileSync } from "node:fs";
 // #897: mobile Inbox / Archived use a contained list scroller. Dock is a
 // shell layout row (not a fixed overlay every page pads for). Safe-area
 // bottom has one owner. Desktop Canvas long-page model stays intact.
+// Controls are a capped layout row (not sticky); list is the primary
+// scroller. Main does not double-scroll on mobile list routes.
 
 const read = (rel) => readFileSync(new URL(rel, import.meta.url), "utf8");
 
@@ -69,13 +71,19 @@ test("Canvas no longer reserves huge mobile padding for a fixed dock", () => {
     /pb-\[calc\(96px\+env\(safe-area-inset-bottom\)\)\]/,
     "Today must not keep a separate dock-clearance pad once dock owns its row"
   );
+  // Modest cushion above the in-flow dock on long pages (People/Settings).
+  assert.match(
+    canvas,
+    /pb-10/,
+    "default Canvas keeps a calm bottom pad above the in-flow dock"
+  );
 });
 
-test("Inbox mobile layout: sticky controls + independent list scroller", () => {
+test("Inbox mobile layout: capped controls row + independent list scroller", () => {
   assert.match(
     inbox,
     /data-testid="inbox-controls"/,
-    "controls cluster is a named, non-scrolling region"
+    "controls cluster is a named layout region"
   );
   assert.match(
     inbox,
@@ -92,15 +100,69 @@ test("Inbox mobile layout: sticky controls + independent list scroller", () => {
     /md:block md:h-auto md:overflow-visible md:pb-\[120px\]/,
     "desktop keeps the long-page Canvas model"
   );
-  const scrollerClass = inbox.match(
-    /data-testid="inbox-list-scroller"\s*className="([^"]+)"/
+
+  // Controls are a flex layout row that can shrink and scroll on short
+  // viewports — not a pure shrink-0 block that clips with no escape, and
+  // not sticky (sticky was a mislabel of the layout-row model).
+  const controlsBlock = inbox.match(
+    /data-testid="inbox-controls"\s*className="([^"]+)"/
   );
-  assert.ok(scrollerClass, "list scroller has a className");
+  assert.ok(controlsBlock, "inbox-controls has a className");
+  assert.match(controlsBlock[1], /max-h-\[42dvh\]/, "controls cap height on short viewports");
+  assert.match(controlsBlock[1], /\bshrink\b/, "controls may shrink when space is tight");
+  assert.match(controlsBlock[1], /md:max-h-none/, "desktop drops the controls height cap");
+  assert.match(controlsBlock[1], /md:shrink-0/, "desktop controls stay natural height");
+  assert.doesNotMatch(
+    controlsBlock[1],
+    /\bsticky\b/,
+    "controls are a layout row, not position:sticky"
+  );
+
+  // Upper controls (title/search/chips) nest a scroller so content is not
+  // clipped when the cap is hit; tabs/tools stay outside that scrollport.
+  assert.match(
+    inbox,
+    /min-h-0 flex-1 overflow-y-auto overscroll-contain md:flex-none md:overflow-visible/,
+    "upper controls scroll under the height cap on mobile"
+  );
+
+  const scrollerClass = inbox.match(
+    /data-testid="inbox-list-scroller"\s*data-scroll-owner="list"\s*className="([^"]+)"/
+  );
+  assert.ok(scrollerClass, "list scroller has data-scroll-owner=list and className");
   assert.match(scrollerClass[1], /overflow-y-auto/);
   assert.match(scrollerClass[1], /overscroll-contain/);
-  assert.match(scrollerClass[1], /min-h-0/);
   assert.match(scrollerClass[1], /flex-1/);
+  assert.match(scrollerClass[1], /min-h-\[7rem\]/, "list keeps a minimum height when controls grow");
   assert.match(scrollerClass[1], /md:overflow-visible/);
+});
+
+test("AppShell main is not a second scroller on mobile list routes", () => {
+  assert.match(
+    shell,
+    /data-scroll-owner=\{/,
+    "main declares a scroll-owner invariant"
+  );
+  assert.match(
+    shell,
+    /overflow-hidden md:overflow-y-auto/,
+    "contained routes: main clips on mobile, long-page on desktop"
+  );
+  assert.match(
+    shell,
+    /pathname === "\/inbox"/,
+    "inbox opts into contained main scroll"
+  );
+  assert.match(
+    shell,
+    /pathname === "\/archived"/,
+    "archived opts into contained main scroll"
+  );
+  assert.match(
+    shell,
+    /pathname\.startsWith\("\/thread\/"\)/,
+    "thread opts into contained main scroll"
+  );
 });
 
 test("Inbox keeps search, filters, select, pagination and bulk actions", () => {
@@ -122,12 +184,20 @@ test("Archived shares the mobile contained-list shell", () => {
   assert.match(archived, /data-testid="archived-list-scroller"/);
   assert.match(archived, /flex h-full min-h-0 flex-col overflow-hidden/);
   assert.match(archived, /md:block md:h-auto md:overflow-visible md:pb-\[120px\]/);
+  const controlsBlock = archived.match(
+    /data-testid="archived-controls"\s*className="([^"]+)"/
+  );
+  assert.ok(controlsBlock, "archived-controls has a className");
+  assert.match(controlsBlock[1], /max-h-\[42dvh\]/);
+  assert.match(controlsBlock[1], /\bshrink\b/);
+  assert.match(controlsBlock[1], /md:max-h-none/);
   const scrollerClass = archived.match(
-    /data-testid="archived-list-scroller"\s*className="([^"]+)"/
+    /data-testid="archived-list-scroller"\s*data-scroll-owner="list"\s*className="([^"]+)"/
   );
   assert.ok(scrollerClass);
   assert.match(scrollerClass[1], /overflow-y-auto/);
   assert.match(scrollerClass[1], /overscroll-contain/);
+  assert.match(scrollerClass[1], /min-h-\[7rem\]/);
   assert.match(archived, /data-testid="archived-bulk-bar"/);
   assert.match(archived, /SelectGlyph/);
   assert.match(archived, /placeholder="Search archived/);
