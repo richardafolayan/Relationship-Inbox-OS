@@ -1,0 +1,236 @@
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import test from "node:test";
+
+const {
+  classifyNotificationClient,
+  messageNotificationsTitle,
+  messageNotificationsDeviceLine,
+  messageNotificationsDescription,
+  messageNotificationsPermissionCaption,
+  phoneNotificationsGroupHead,
+  macNotificationsGroupHead,
+  macNotificationsGroupSubhead,
+  quietHoursDescription,
+  digestDescription,
+  digestFrequencyLabel,
+  digestPreviewLabel,
+  digestPreviewHint,
+  digestBackgroundPingHint,
+  DIGEST_CADENCE_OPTIONS
+} = await import("../apps/dashboard/lib/notifications-settings.ts");
+
+const {
+  parseTimeToMinutes,
+  formatMinutesAsTime,
+  normaliseQuietTime,
+  formatQuietHoursRange,
+  isWithinQuietWindow,
+  isQuietHoursEnabled,
+  writeQuietHoursEnabled,
+  readQuietHoursWindow,
+  writeQuietHoursWindow,
+  isQuietHoursActive,
+  DEFAULT_QUIET_HOURS_WINDOW,
+  QUIET_HOURS_KEY,
+  QUIET_HOURS_WINDOW_KEY
+} = await import("../apps/dashboard/lib/quiet-hours.ts");
+
+const read = (path) => readFileSync(new URL(`../${path}`, import.meta.url), "utf8");
+
+function memoryStorage(seed = {}) {
+  const map = new Map(Object.entries(seed));
+  return {
+    getItem: (key) => (map.has(key) ? map.get(key) : null),
+    setItem: (key, value) => {
+      map.set(key, String(value));
+    },
+    removeItem: (key) => {
+      map.delete(key);
+    }
+  };
+}
+
+test("classifies phone and Mac clients for device labels", () => {
+  assert.equal(
+    classifyNotificationClient({
+      userAgent:
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15"
+    }),
+    "phone"
+  );
+  assert.equal(
+    classifyNotificationClient({
+      userAgent: "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36"
+    }),
+    "phone"
+  );
+  assert.equal(
+    classifyNotificationClient({
+      userAgent:
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+      viewportWidth: 1280
+    }),
+    "mac"
+  );
+  assert.equal(
+    classifyNotificationClient({
+      userAgent: "Mozilla/5.0",
+      maxTouchPoints: 5,
+      pointerCoarse: true,
+      viewportWidth: 390
+    }),
+    "phone"
+  );
+});
+
+test("message notification copy names the device, not the browser, on phone", () => {
+  assert.equal(messageNotificationsTitle("phone"), "Message notifications");
+  assert.equal(messageNotificationsDeviceLine("phone"), "On this phone");
+  assert.equal(messageNotificationsDeviceLine("mac"), "On this Mac");
+  assert.match(messageNotificationsDescription("phone"), /this app is in the background/i);
+  assert.doesNotMatch(messageNotificationsDescription("phone"), /desktop/i);
+  assert.doesNotMatch(messageNotificationsDescription("phone"), /browser/i);
+
+  assert.equal(
+    messageNotificationsPermissionCaption("granted", "phone"),
+    "On · turn off in phone settings"
+  );
+  assert.equal(
+    messageNotificationsPermissionCaption("denied", "phone"),
+    "Blocked · re-enable in phone settings"
+  );
+  assert.equal(
+    messageNotificationsPermissionCaption("granted", "mac"),
+    "On · turn off in System Settings"
+  );
+  assert.equal(messageNotificationsPermissionCaption("default", "mac"), "Off");
+  assert.doesNotMatch(
+    messageNotificationsPermissionCaption("granted", "phone"),
+    /browser/i
+  );
+});
+
+test("settings groups separate phone notifications from Mac scanning", () => {
+  assert.equal(phoneNotificationsGroupHead("phone"), "Phone notifications");
+  assert.equal(phoneNotificationsGroupHead("mac"), "This device");
+  assert.equal(macNotificationsGroupHead(), "Mac notifications and scanning");
+  assert.match(macNotificationsGroupSubhead(), /Mac where the app is open/i);
+  assert.match(quietHoursDescription(), /Mac scanning/i);
+});
+
+test("digest frequency options and non-interactive preview copy", () => {
+  assert.deepEqual(
+    DIGEST_CADENCE_OPTIONS.map((o) => o.id),
+    ["off", "daily", "weekly"]
+  );
+  assert.equal(digestFrequencyLabel(), "How often");
+  assert.match(digestDescription(), /notification bell/i);
+  assert.equal(digestPreviewLabel(), "Who would be included");
+  assert.match(digestPreviewHint(), /Preview only/i);
+  assert.match(digestBackgroundPingHint("phone"), /message notifications/i);
+  assert.doesNotMatch(digestBackgroundPingHint("phone"), /desktop notifications/i);
+});
+
+test("quiet hours window parse, format, and overnight membership", () => {
+  assert.equal(parseTimeToMinutes("22:00"), 22 * 60);
+  assert.equal(parseTimeToMinutes("6:30"), 6 * 60 + 30);
+  assert.equal(parseTimeToMinutes("25:00"), null);
+  assert.equal(formatMinutesAsTime(22 * 60 + 5), "22:05");
+  assert.equal(normaliseQuietTime("9:05"), "09:05");
+  assert.equal(formatQuietHoursRange(DEFAULT_QUIET_HOURS_WINDOW), "22:00 to 06:00");
+
+  const overnight = { start: "22:00", end: "06:00" };
+  assert.equal(isWithinQuietWindow(new Date(2026, 0, 1, 22, 0), overnight), true);
+  assert.equal(isWithinQuietWindow(new Date(2026, 0, 1, 23, 30), overnight), true);
+  assert.equal(isWithinQuietWindow(new Date(2026, 0, 1, 5, 59), overnight), true);
+  assert.equal(isWithinQuietWindow(new Date(2026, 0, 1, 6, 0), overnight), false);
+  assert.equal(isWithinQuietWindow(new Date(2026, 0, 1, 12, 0), overnight), false);
+
+  const daytime = { start: "13:00", end: "17:00" };
+  assert.equal(isWithinQuietWindow(new Date(2026, 0, 1, 13, 0), daytime), true);
+  assert.equal(isWithinQuietWindow(new Date(2026, 0, 1, 16, 59), daytime), true);
+  assert.equal(isWithinQuietWindow(new Date(2026, 0, 1, 17, 0), daytime), false);
+  assert.equal(isWithinQuietWindow(new Date(2026, 0, 1, 22, 0), daytime), false);
+});
+
+test("quiet hours enable flag and custom window round-trip through storage", () => {
+  const storage = memoryStorage();
+  assert.equal(isQuietHoursEnabled(storage), false);
+  writeQuietHoursEnabled(true, storage);
+  assert.equal(storage.getItem(QUIET_HOURS_KEY), "1");
+  assert.equal(isQuietHoursEnabled(storage), true);
+
+  assert.deepEqual(readQuietHoursWindow(storage), DEFAULT_QUIET_HOURS_WINDOW);
+  const saved = writeQuietHoursWindow({ start: "21:30", end: "07:15" }, storage);
+  assert.deepEqual(saved, { start: "21:30", end: "07:15" });
+  assert.deepEqual(readQuietHoursWindow(storage), { start: "21:30", end: "07:15" });
+  assert.ok(storage.getItem(QUIET_HOURS_WINDOW_KEY));
+
+  // Active only when toggle is on and local time is inside the window.
+  assert.equal(
+    isQuietHoursActive(new Date(2026, 0, 1, 22, 0), storage),
+    true
+  );
+  writeQuietHoursEnabled(false, storage);
+  assert.equal(
+    isQuietHoursActive(new Date(2026, 0, 1, 22, 0), storage),
+    false
+  );
+});
+
+test("settings page wires phone vs Mac sections, switches, and digest controls", () => {
+  const page = read("apps/dashboard/app/settings/page.tsx");
+
+  assert.match(page, /data-testid="notifications-settings"/);
+  assert.match(page, /phoneNotificationsGroupHead/);
+  assert.match(page, /macNotificationsGroupHead/);
+  assert.match(page, /messageNotificationsDeviceLine/);
+  assert.match(page, /testId="quiet-hours-row"/);
+  assert.match(page, /data-testid="quiet-hours-time-editors"/);
+  assert.match(page, /type="time"/);
+  assert.match(page, /data-testid="message-notifications-row"/);
+  assert.match(page, /data-testid="digest-cadence-group"/);
+  assert.match(page, /data-testid="digest-preview"/);
+  assert.match(page, /DIGEST_CADENCE_OPTIONS/);
+  assert.match(page, /digestPreviewHint/);
+
+  // Mobile switch rows: title-aligned toggle, 44px touch target.
+  assert.match(page, /min-h-\[44px\]/);
+  assert.match(page, /MobileSwitchRow/);
+
+  // No desktop/browser-only captions or repeated snooze links in Settings.
+  assert.doesNotMatch(page, /Desktop notifications/);
+  assert.doesNotMatch(page, /turn off in your browser/);
+  assert.doesNotMatch(page, /Snooze 7 days/);
+  assert.doesNotMatch(page, /snoozePerson/);
+  assert.doesNotMatch(page, /unsnoozePerson/);
+  assert.doesNotMatch(page, /Enable desktop notifications/);
+});
+
+test("user-facing notification settings copy has no em or en dashes", () => {
+  const helpers = read("apps/dashboard/lib/notifications-settings.ts");
+  const page = read("apps/dashboard/app/settings/page.tsx");
+  const banned = /[—–]/;
+  for (const sample of [
+    messageNotificationsPermissionCaption("granted", "phone"),
+    messageNotificationsPermissionCaption("denied", "mac"),
+    messageNotificationsDescription("phone"),
+    quietHoursDescription(),
+    digestDescription(),
+    digestPreviewHint(),
+    digestBackgroundPingHint("phone"),
+    macNotificationsGroupSubhead(),
+    formatQuietHoursRange()
+  ]) {
+    assert.ok(!banned.test(sample), `banned dash in ${JSON.stringify(sample)}`);
+  }
+  // Helper source strings used as UI copy should stay dash-clean too.
+  assert.doesNotMatch(helpers, /—|–/);
+  // The notifications panel itself should not introduce UI em/en dashes.
+  const panelSlice = page.slice(
+    page.indexOf("function NotificationsSettingsPanel"),
+    page.indexOf("function SegmentedControl")
+  );
+  assert.doesNotMatch(panelSlice, /—|–/);
+});
