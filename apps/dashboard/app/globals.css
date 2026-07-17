@@ -53,6 +53,8 @@
   --tovi-mark-stroke: #f7f2e8;
   --accent-soft: #301313;
   --accent-ink: #df7676;
+  /* Lighter than oxblood so overdue/failed text meets normal-text contrast on black. */
+  --risk-overdue: #df7676;
 }
 
 /* Native form controls (<audio>, <video>) render their chrome based on
