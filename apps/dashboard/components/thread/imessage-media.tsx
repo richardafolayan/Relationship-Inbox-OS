@@ -3,8 +3,10 @@
 import { useEffect, useState } from "react";
 import { apiPost } from "@/lib/api";
 import { isLinkedInVoiceGuid } from "@/lib/linkedin-voice-guid";
+import { attachmentMediaPath, mediaKindLabel, rewriteLocalMediaUrl } from "@/lib/media-url";
 import type { ThreadMessage } from "@/lib/types";
 import { PhotoViewer } from "@/components/thread/photo-viewer";
+import { PlayableMedia } from "@/components/thread/playable-media";
 
 interface IMessageMediaProps {
   attachment: ThreadMessage["attachments"][number];
@@ -207,16 +209,24 @@ export function IMessageMedia({ attachment }: IMessageMediaProps) {
   // (`li-msg-<index>`). iMessage guids are UUID-shaped (none of the above),
   // so `isLinkedInVoiceGuid` disambiguates without needing a `platform`
   // prop here. It is kept in lockstep with the runner's predicate.
+  // attachmentMediaPath always returns a same-origin `/runner/data/...`
+  // path so phone-accessible clients never see a localhost URL.
   const isLinkedInVoice = isLinkedInVoiceGuid(attachment.guid);
-  const url = isLinkedInVoice
-    ? `/runner/data/linkedin-voice-message/${encodeURIComponent(attachment.guid)}`
-    : `/runner/data/imessage-attachment/${encodeURIComponent(attachment.guid)}`;
+  const url = rewriteLocalMediaUrl(
+    attachmentMediaPath({
+      guid: attachment.guid,
+      platform: isLinkedInVoice ? "linkedin_voice" : "imessage",
+      isLinkedInVoice
+    })
+  );
 
   if (attachment.kind === "photo" || attachment.kind === "sticker") {
     return (
       <PhotoViewer
         src={url}
         alt={attachment.rawLabel ?? "iMessage photo"}
+        kind={attachment.kind}
+        filename={attachment.rawLabel}
         className="max-h-[320px] max-w-full rounded-[12px] object-contain"
       />
     );
@@ -224,10 +234,11 @@ export function IMessageMedia({ attachment }: IMessageMediaProps) {
 
   if (attachment.kind === "video") {
     return (
-      <video
+      <PlayableMedia
+        as="video"
         src={url}
-        controls
-        preload="metadata"
+        kind={attachment.kind}
+        filename={attachment.rawLabel}
         className="max-h-[320px] max-w-full rounded-[12px] bg-ink"
       />
     );
@@ -239,14 +250,13 @@ export function IMessageMedia({ attachment }: IMessageMediaProps) {
     // width - `w-full` then resolves to 0 and the player collapses to a
     // sliver). max-w-full keeps it shrinking on mobile.
     return (
-      <audio
+      <PlayableMedia
+        as="audio"
         src={url}
-        controls
-        preload="metadata"
+        kind={attachment.kind}
+        filename={attachment.rawLabel}
         className="w-[300px] max-w-full"
-      >
-        <a href={url}>Download</a>
-      </audio>
+      />
     );
   }
 
@@ -258,19 +268,11 @@ export function IMessageMedia({ attachment }: IMessageMediaProps) {
       className="inline-flex items-center gap-2 rounded border border-hairline bg-transparent px-3 py-2 text-[13px] text-ink hover:bg-paper-2"
     >
       <span>📎</span>
-      <span>{attachment.rawLabel ?? labelFor(attachment.kind)}</span>
+      <span>{attachment.rawLabel ?? mediaKindLabel(attachment.kind)}</span>
     </a>
   );
 }
 
 function labelFor(kind: ThreadMessage["attachments"][number]["kind"]): string {
-  switch (kind) {
-    case "voice_note": return "Voice note";
-    case "photo": return "Photo";
-    case "video": return "Video";
-    case "audio": return "Audio";
-    case "pdf": return "PDF";
-    case "sticker": return "Sticker";
-    default: return "Attachment";
-  }
+  return mediaKindLabel(kind);
 }
