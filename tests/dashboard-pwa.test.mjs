@@ -12,6 +12,17 @@ const sha256 = (buf) => createHash("sha256").update(buf).digest("hex");
 
 const { default: createManifest } = await import("../apps/dashboard/app/manifest.ts");
 const { APP_NAME } = await import("../apps/dashboard/lib/branding.ts");
+const {
+  appleStatusBarStyleForTheme,
+  themeColorForTheme
+} = await import("../apps/dashboard/lib/apple-status-bar.ts");
+const {
+  capturePwaStandaloneSnapshot,
+  formatPwaStandaloneLog,
+  parsePwaDebugQuery,
+  readPwaDebugEnabled,
+  syncPwaDebugFromLocation
+} = await import("../apps/dashboard/lib/pwa-standalone-debug.ts");
 
 test("web app manifest launches as a scoped standalone app from /today", () => {
   const manifest = createManifest();
@@ -57,11 +68,68 @@ test("root layout declares Apple standalone metadata and manifest link", () => {
   // Opaque status bar until the shell owns env(safe-area-inset-top).
   assert.match(layout, /statusBarStyle:\s*["']default["']/);
   assert.doesNotMatch(layout, /statusBarStyle:\s*["']black-translucent["']/);
+  // Theme bootstrap may set opaque "black" for dark mode, never translucent.
+  assert.match(layout, /var bar=t==='dark'\?'black':'default'/);
+  assert.doesNotMatch(layout, /['"]black-translucent['"]/);
+  assert.match(layout, /PwaStandaloneDebug/);
   assert.match(layout, /formatDetection:\s*\{/);
   assert.match(layout, /telephone:\s*false/);
   assert.match(layout, /applicationName:\s*APP_NAME/);
   assert.match(layout, /title:\s*APP_NAME/);
   assert.match(layout, /\/icons\/tovi-180\.png/);
+});
+
+test("opaque Apple status bar follows app theme without translucent notch draw", () => {
+  assert.equal(appleStatusBarStyleForTheme("light"), "default");
+  assert.equal(appleStatusBarStyleForTheme("dark"), "black");
+  assert.equal(themeColorForTheme("light"), "#f7f2e8");
+  assert.equal(themeColorForTheme("dark"), "#000000");
+
+  const toggle = read("apps/dashboard/components/layout/theme-toggle.tsx");
+  assert.match(toggle, /applyAppleChromeForTheme/);
+});
+
+test("pwa debug helper opts in via query and logs standalone snapshot fields", () => {
+  assert.equal(parsePwaDebugQuery("?pwaDebug=1"), "on");
+  assert.equal(parsePwaDebugQuery("pwaDebug=0"), "off");
+  assert.equal(parsePwaDebugQuery(""), null);
+
+  const store = new Map();
+  const storage = {
+    getItem: (key) => (store.has(key) ? store.get(key) : null),
+    setItem: (key, value) => {
+      store.set(key, String(value));
+    },
+    removeItem: (key) => {
+      store.delete(key);
+    }
+  };
+
+  assert.equal(syncPwaDebugFromLocation("?pwaDebug=1", storage), true);
+  assert.equal(readPwaDebugEnabled("", storage), true);
+  assert.equal(syncPwaDebugFromLocation("?pwaDebug=0", storage), false);
+  assert.equal(readPwaDebugEnabled("", storage), false);
+
+  const snapshot = capturePwaStandaloneSnapshot({
+    href: "https://pilot.example/today",
+    origin: "https://pilot.example",
+    pathname: "/today",
+    matchMediaStandalone: true,
+    iosStandalone: true
+  });
+  assert.equal(snapshot.standalone, true);
+  assert.equal(snapshot.iosStandalone, true);
+  const line = formatPwaStandaloneLog(snapshot);
+  assert.match(line, /\[pwa-debug\]/);
+  assert.match(line, /href=https:\/\/pilot\.example\/today/);
+  assert.match(line, /origin=https:\/\/pilot\.example/);
+  assert.match(line, /standalone=true/);
+  assert.match(line, /iosStandalone=true/);
+
+  const component = read("apps/dashboard/components/common/pwa-standalone-debug.tsx");
+  assert.match(component, /syncPwaDebugFromLocation/);
+  assert.match(component, /logPwaStandaloneSnapshot/);
+  assert.match(component, /usePathname/);
 });
 
 // Primary same-origin nav must stay inside the installed PWA (Link / router.push,
