@@ -28,6 +28,111 @@ export const PILOT_REPORT_TYPE_LABELS: Record<PilotReportType, string> = {
   feature_idea: "Feature idea"
 };
 
+// Compact pill labels for the mobile-first form (issue #911). Long labels
+// stay in PILOT_REPORT_TYPE_LABELS for copy/export text.
+export const PILOT_REPORT_TYPE_SHORT_LABELS: Record<PilotReportType, string> = {
+  bug: "Broken",
+  feedback: "Feedback",
+  confusing: "Confusing",
+  feature_idea: "Idea"
+};
+
+// User-facing lifecycle labels for Recent reports. Sheet status is free text
+// (starts as "new"); map known aliases and pass other values through cleaned.
+export const PILOT_REPORT_USER_STATUSES = [
+  "Received",
+  "Under review",
+  "Planned",
+  "Fixed",
+  "Closed"
+] as const;
+
+export type PilotReportUserStatus = (typeof PILOT_REPORT_USER_STATUSES)[number];
+
+const PILOT_REPORT_STATUS_ALIASES: Record<string, PilotReportUserStatus> = {
+  "": "Received",
+  new: "Received",
+  received: "Received",
+  submitted: "Received",
+  open: "Received",
+  "under review": "Under review",
+  underreview: "Under review",
+  reviewing: "Under review",
+  "in review": "Under review",
+  inreview: "Under review",
+  triage: "Under review",
+  planned: "Planned",
+  "planned fix": "Planned",
+  todo: "Planned",
+  backlog: "Planned",
+  fixed: "Fixed",
+  done: "Fixed",
+  resolved: "Fixed",
+  shipped: "Fixed",
+  closed: "Closed",
+  wontfix: "Closed",
+  "wont fix": "Closed",
+  "won't fix": "Closed",
+  declined: "Closed",
+  duplicate: "Closed"
+};
+
+/**
+ * Map a raw Sheet status into a short user-facing label for Recent reports.
+ * Known aliases collapse to Received / Under review / Planned / Fixed /
+ * Closed. Unknown free-text values are trimmed and lightly title-cased.
+ */
+export function formatPilotReportStatus(raw: string | null | undefined): string {
+  const trimmed = (raw ?? "").trim();
+  const key = trimmed.toLowerCase().replace(/[_-]+/g, " ").replace(/\s+/g, " ");
+  const compact = key.replace(/\s+/g, "");
+  const mapped =
+    PILOT_REPORT_STATUS_ALIASES[key] ?? PILOT_REPORT_STATUS_ALIASES[compact];
+  if (mapped) return mapped;
+  if (!trimmed) return "Received";
+  return trimmed.replace(/\b\w/g, (ch) => ch.toUpperCase());
+}
+
+/**
+ * Format a report's createdAt as "Submitted 13 July" (year included when
+ * not the current year). Accepts ISO dates, timestamps, or plain strings
+ * from the status endpoint.
+ */
+export function formatPilotReportSubmittedAt(
+  createdAt: string | null | undefined,
+  now: Date = new Date()
+): string {
+  const raw = (createdAt ?? "").trim();
+  if (!raw) return "Submitted";
+
+  let date: Date | null = null;
+  if (/^\d{4}-\d{2}-\d{2}/.test(raw)) {
+    const parsed = new Date(raw.length === 10 ? `${raw}T12:00:00` : raw);
+    if (!Number.isNaN(parsed.getTime())) date = parsed;
+  } else {
+    const parsed = new Date(raw);
+    if (!Number.isNaN(parsed.getTime())) date = parsed;
+  }
+
+  if (!date) return `Submitted ${raw}`;
+
+  const day = date.getDate();
+  const month = date.toLocaleString("en-GB", { month: "long" });
+  if (date.getFullYear() !== now.getFullYear()) {
+    return `Submitted ${day} ${month} ${date.getFullYear()}`;
+  }
+  return `Submitted ${day} ${month}`;
+}
+
+/** Short label for a report type row; falls back to the raw type string. */
+export function formatPilotReportType(type: string | null | undefined): string {
+  const raw = (type ?? "").trim();
+  if ((PILOT_REPORT_TYPES as readonly string[]).includes(raw)) {
+    return PILOT_REPORT_TYPE_SHORT_LABELS[raw as PilotReportType];
+  }
+  return raw || "Report";
+}
+
 // --- Screenshot validation ----------------------------------------------
 
 export const ALLOWED_SCREENSHOT_TYPES = [

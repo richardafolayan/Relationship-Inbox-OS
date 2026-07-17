@@ -7,10 +7,14 @@ const {
   buildPilotReportPayload,
   validateScreenshotFile,
   formatReportForCopy,
+  formatPilotReportStatus,
+  formatPilotReportSubmittedAt,
+  formatPilotReportType,
   describeRoute,
   extractThreadId,
   MAX_SCREENSHOT_BYTES,
-  MAX_SCREENSHOTS
+  MAX_SCREENSHOTS,
+  PILOT_REPORT_TYPE_SHORT_LABELS
 } = await import("../apps/dashboard/lib/pilot.ts");
 
 const META = {
@@ -187,4 +191,44 @@ test("extractThreadId returns the id only on a thread route", () => {
   assert.equal(extractThreadId("/thread/abc-123?focus=1"), "abc-123");
   assert.equal(extractThreadId("/today"), null);
   assert.equal(extractThreadId(""), null);
+});
+
+test("formatPilotReportStatus maps sheet aliases to user-facing labels", () => {
+  assert.equal(formatPilotReportStatus("new"), "Received");
+  assert.equal(formatPilotReportStatus("NEW"), "Received");
+  assert.equal(formatPilotReportStatus("received"), "Received");
+  assert.equal(formatPilotReportStatus("under_review"), "Under review");
+  assert.equal(formatPilotReportStatus("Under Review"), "Under review");
+  assert.equal(formatPilotReportStatus("planned"), "Planned");
+  assert.equal(formatPilotReportStatus("fixed"), "Fixed");
+  assert.equal(formatPilotReportStatus("resolved"), "Fixed");
+  assert.equal(formatPilotReportStatus("closed"), "Closed");
+  assert.equal(formatPilotReportStatus("wontfix"), "Closed");
+  assert.equal(formatPilotReportStatus(""), "Received");
+  assert.equal(formatPilotReportStatus(null), "Received");
+  // Free-text operator notes pass through with light title case.
+  assert.equal(formatPilotReportStatus("waiting on repro"), "Waiting On Repro");
+});
+
+test("formatPilotReportSubmittedAt renders a calm Submitted date", () => {
+  // Use local noon anchors so day/month labels do not shift with timezone.
+  const now = new Date(2026, 6, 18, 12, 0, 0);
+  assert.equal(formatPilotReportSubmittedAt("2026-07-13", now), "Submitted 13 July");
+  assert.equal(formatPilotReportSubmittedAt("2025-12-01", now), "Submitted 1 December 2025");
+  assert.equal(formatPilotReportSubmittedAt("", now), "Submitted");
+  assert.equal(formatPilotReportSubmittedAt("not-a-date", now), "Submitted not-a-date");
+});
+
+test("formatPilotReportType and short labels stay compact for mobile pills", () => {
+  assert.equal(formatPilotReportType("bug"), "Broken");
+  assert.equal(formatPilotReportType("confusing"), "Confusing");
+  assert.equal(formatPilotReportType("feedback"), "Feedback");
+  assert.equal(formatPilotReportType("feature_idea"), "Idea");
+  assert.equal(formatPilotReportType("unknown"), "unknown");
+  assert.deepEqual(PILOT_REPORT_TYPE_SHORT_LABELS, {
+    bug: "Broken",
+    feedback: "Feedback",
+    confusing: "Confusing",
+    feature_idea: "Idea"
+  });
 });
