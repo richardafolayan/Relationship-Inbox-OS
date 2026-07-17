@@ -605,7 +605,7 @@ export class WhatsAppAdapter implements PlatformAdapter {
       const myId =
         (client as unknown as { info?: { wid?: { _serialized?: string } } }).info?.wid
           ?._serialized ?? null;
-      return Promise.all(
+      return await Promise.all(
         votes.map(async (vote) => {
           const voterId = vote.voter ?? "";
           let voterName: string | null = null;
@@ -613,7 +613,9 @@ export class WhatsAppAdapter implements PlatformAdapter {
             try {
               const contact = await client.getContactById(voterId);
               voterName = contact.pushname || contact.name || null;
-            } catch {
+            } catch (error) {
+              // Session detach/closed must not be treated as an unknown contact.
+              if (isWhatsAppSessionUnavailableError(error)) throw error;
               // Left-the-group / unknown voters keep the bare JID.
             }
           }
