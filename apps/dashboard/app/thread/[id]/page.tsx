@@ -731,7 +731,7 @@ export default function ThreadPage() {
   // Abort in-flight format-dictation-messages fetch (timeout or Cancel).
   const dictationFormatAbortRef = useRef<AbortController | null>(null);
   const dictationFormatAbortReasonRef = useRef<"timeout" | "cancel" | null>(null);
-  // Bumped on keep/dismiss/thread switch so a late format response cannot reapply.
+  // Bumped on keep/dismiss/new dictation/thread switch so a late format response cannot reapply.
   const dictationFormatGenerationRef = useRef(0);
   // Source of the current composer text: empty / explicit draft typed
   // by the operator / AI predraft (first suggested reply auto-filled
@@ -1901,8 +1901,12 @@ export default function ThreadPage() {
       switch (outcome.kind) {
         case "text": {
           failedDictationWavRef.current = null;
-          // #880: park the transcript for the Keep / Turn-into-messages
-          // choice. Do not auto-insert into the composer.
+          // #880: a new parked transcript must invalidate any in-flight
+          // format so a late response cannot pair old bubbles with this text.
+          dictationFormatAbortReasonRef.current = "cancel";
+          dictationFormatAbortRef.current?.abort();
+          dictationFormatAbortRef.current = null;
+          dictationFormatGenerationRef.current += 1;
           setPendingDictationTranscript(outcome.text);
           setDictationMessages(null);
           setDictationMessageWarnings([]);
@@ -2227,6 +2231,15 @@ export default function ThreadPage() {
     // A fresh recording supersedes any earlier failed clip + retry banner.
     failedDictationWavRef.current = null;
     setDictationRetry(null);
+    // Invalidate in-flight format before a new clip can park a transcript.
+    dictationFormatAbortReasonRef.current = "cancel";
+    dictationFormatAbortRef.current?.abort();
+    dictationFormatAbortRef.current = null;
+    dictationFormatGenerationRef.current += 1;
+    setDictationMessages(null);
+    setDictationMessageWarnings([]);
+    setDictationFormatStatus("idle");
+    setDictationFormatError(null);
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       // webm/opus is the broadly-supported recording format (incl. Firefox);
@@ -5515,12 +5528,21 @@ export default function ThreadPage() {
                     onClick={() =>
                       dictationStatus === "recording" ? stopDictation() : void startDictation()
                     }
-                    disabled={!dictationAvailable || dictationStatus === "transcribing"}
+                    disabled={
+                      !dictationAvailable ||
+                      dictationStatus === "transcribing" ||
+                      dictationFormatStatus === "formatting" ||
+                      sending
+                    }
                     title={
                       dictationAvailable
                         ? dictationStatus === "recording"
                           ? "Stop and transcribe"
-                          : "Dictate your reply"
+                          : dictationFormatStatus === "formatting"
+                            ? "Wait for message formatting to finish"
+                            : sending
+                              ? "Wait for send to finish"
+                              : "Dictate your reply"
                         : "Voice dictation needs transcription enabled on the runner"
                     }
                     aria-label="Dictate"
