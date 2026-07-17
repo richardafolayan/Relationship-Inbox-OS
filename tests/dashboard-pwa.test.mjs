@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -6,6 +7,8 @@ import test from "node:test";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const read = (path) => readFileSync(join(ROOT, path), "utf8");
+const readBinary = (path) => readFileSync(join(ROOT, path));
+const sha256 = (buf) => createHash("sha256").update(buf).digest("hex");
 
 const { default: createManifest } = await import("../apps/dashboard/app/manifest.ts");
 const { APP_NAME } = await import("../apps/dashboard/lib/branding.ts");
@@ -18,6 +21,8 @@ test("web app manifest launches as a scoped standalone app from /today", () => {
   assert.equal(manifest.scope, "/");
   assert.equal(manifest.display, "standalone");
   assert.equal(manifest.id, "/");
+  // No portrait lock: landscape phones/tablets stay usable for the pilot.
+  assert.equal(manifest.orientation, undefined);
   assert.ok(manifest.icons.some((icon) => icon.sizes === "192x192"));
   assert.ok(manifest.icons.some((icon) => icon.sizes === "512x512"));
   assert.ok(manifest.icons.some((icon) => icon.purpose === "maskable"));
@@ -28,6 +33,20 @@ test("web app manifest launches as a scoped standalone app from /today", () => {
       `missing icon file: ${icon.src}`
     );
   }
+
+  const any512 = manifest.icons.find(
+    (icon) => icon.sizes === "512x512" && icon.purpose !== "maskable"
+  );
+  const maskable = manifest.icons.find((icon) => icon.purpose === "maskable");
+  assert.ok(any512, "expected a non-maskable 512 icon");
+  assert.ok(maskable, "expected a maskable icon");
+  const anyHash = sha256(readBinary(join("apps/dashboard/public", any512.src)));
+  const maskHash = sha256(readBinary(join("apps/dashboard/public", maskable.src)));
+  assert.notEqual(
+    anyHash,
+    maskHash,
+    "maskable 512 must differ from the full-bleed 512 (needs safe-zone padding)"
+  );
 });
 
 test("root layout declares Apple standalone metadata and manifest link", () => {
@@ -35,7 +54,9 @@ test("root layout declares Apple standalone metadata and manifest link", () => {
   assert.match(layout, /manifest:\s*["']\/manifest\.webmanifest["']/);
   assert.match(layout, /appleWebApp:\s*\{/);
   assert.match(layout, /capable:\s*true/);
-  assert.match(layout, /statusBarStyle:\s*["']black-translucent["']/);
+  // Opaque status bar until the shell owns env(safe-area-inset-top).
+  assert.match(layout, /statusBarStyle:\s*["']default["']/);
+  assert.doesNotMatch(layout, /statusBarStyle:\s*["']black-translucent["']/);
   assert.match(layout, /formatDetection:\s*\{/);
   assert.match(layout, /telephone:\s*false/);
   assert.match(layout, /applicationName:\s*APP_NAME/);
@@ -43,6 +64,12 @@ test("root layout declares Apple standalone metadata and manifest link", () => {
   assert.match(layout, /\/icons\/tovi-180\.png/);
 });
 
+// Primary same-origin nav must stay inside the installed PWA (Link / router.push,
+// never target=_blank or window.open). Intentional leave-PWA exits remain elsewhere
+// and are out of scope for this regression: receipts/media open attachments with
+// target=_blank, message body links and the in-app browser fallback use window.open
+// / _blank, setup wizard links to Google AI Studio externally, people page profile
+// links, etc. Those are deliberate exits from standalone scope.
 test("primary nav stays same-origin so standalone PWA scope is preserved", () => {
   const dock = read("apps/dashboard/components/layout/mobile-dock.tsx");
   const sidebar = read("apps/dashboard/components/layout/sidebar.tsx");

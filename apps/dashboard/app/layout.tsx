@@ -21,7 +21,10 @@ export const metadata: Metadata = {
   appleWebApp: {
     capable: true,
     title: APP_NAME,
-    statusBarStyle: "black-translucent"
+    // "default" keeps the status bar opaque so TopStatus and page
+    // chrome sit below the notch / Dynamic Island. Do not switch to
+    // black-translucent until the shell owns env(safe-area-inset-top).
+    statusBarStyle: "default"
   },
   formatDetection: {
     telephone: false
