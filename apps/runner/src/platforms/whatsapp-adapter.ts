@@ -253,6 +253,7 @@ export class WhatsAppAdapter implements PlatformAdapter {
     // don't re-check the per-recipient interval between the media sends
     // because they're all part of one operator action.
     const sentAttachments: AttachmentPlaceholder[] = [];
+    const claimedMessageIds: string[] = [];
     let firstSentTs: number | undefined;
     let firstMessageKey: string | undefined;
     let everyMessageAcknowledged = true;
@@ -284,6 +285,8 @@ export class WhatsAppAdapter implements PlatformAdapter {
       if (a.kind === "voice_note") opts.sendAudioAsVoice = true;
       if (a.kind === "gif") opts.sendVideoAsGif = true;
       if (a.kind === "sticker") opts.sendMediaAsSticker = true;
+      const expectedType = expectedWhatsAppTypeForOutbound(a, opts);
+      const expectedMimetype = mimetypeFromMediaPayload(payload) ?? a.mimeType;
       const sendStartedAt = Date.now();
       const sent = await this.resolveSendResult(
         await (client as unknown as {
@@ -295,7 +298,12 @@ export class WhatsAppAdapter implements PlatformAdapter {
         }).sendMessage(thread.platformThreadId, payload, opts),
         thread.platformThreadId,
         sendStartedAt,
-        i === 0 ? text : undefined
+        i === 0 ? text : undefined,
+        expectedType,
+        {
+          excludeMessageIds: claimedMessageIds,
+          expectedMimetype
+        }
       );
       acknowledgedAt ??= new Date().toISOString();
       const messageVerification = await this.waitForAcknowledgement(sent);
@@ -304,6 +312,7 @@ export class WhatsAppAdapter implements PlatformAdapter {
       }
       if (firstSentTs === undefined) firstSentTs = sent.timestamp;
       const rawGuid = sent.id?._serialized ?? "";
+      if (rawGuid) claimedMessageIds.push(rawGuid);
       firstMessageKey ??= rawGuid || undefined;
       const safeGuid = rawGuid ? safeIdForFilename(rawGuid) : "";
 
@@ -473,20 +482,34 @@ export class WhatsAppAdapter implements PlatformAdapter {
     chatId: string,
     sendStartedAt: number,
     expectedText?: string,
-    expectedType?: string
+    expectedType?: string,
+    recovery?: {
+      excludeMessageIds?: readonly string[];
+      expectedMimetype?: string;
+    }
   ): Promise<WaMessage> {
     if (sent) return sent;
 
     const client = this.requireClient();
     if (client.pupPage) {
       try {
+        const excludeMessageIds = [...(recovery?.excludeMessageIds ?? [])];
+        const expectedMimetype = recovery?.expectedMimetype;
         const model = await client.pupPage.evaluate(
-          async (targetChatId, earliestTimestamp, targetText, targetType) => {
+          async (
+            targetChatId,
+            earliestTimestamp,
+            targetText,
+            targetType,
+            excludedIds,
+            targetMimetype
+          ) => {
             type BrowserMessage = {
               id?: { fromMe?: boolean; _serialized?: string; toString?: () => string };
               t?: number;
               body?: string;
               type?: string;
+              mimetype?: string;
             };
             type BrowserChat = {
               msgs: { getModelsArray: () => BrowserMessage[] };
@@ -501,6 +524,9 @@ export class WhatsAppAdapter implements PlatformAdapter {
               };
             };
 
+            const normalizeMime = (value: string): string =>
+              value.split(";")[0]?.trim().toLowerCase() ?? "";
+            const excluded = new Set(excludedIds ?? []);
             const browserWindow = globalThis as BrowserWindow;
             const chat = await browserWindow.WWebJS.getChat(targetChatId, {
               getAsModel: false
@@ -508,13 +534,24 @@ export class WhatsAppAdapter implements PlatformAdapter {
             if (!chat) return null;
             const match = chat.msgs
               .getModelsArray()
-              .filter(
-                (message) =>
-                  message.id?.fromMe === true &&
-                  Number(message.t ?? 0) >= earliestTimestamp &&
-                  (targetText === undefined || message.body === targetText) &&
-                  (targetType === undefined || message.type === targetType)
-              )
+              .filter((message) => {
+                if (message.id?.fromMe !== true) return false;
+                if (Number(message.t ?? 0) < earliestTimestamp) return false;
+                const serializedId =
+                  message.id?._serialized ??
+                  (typeof message.id?.toString === "function" ? message.id.toString() : "");
+                if (serializedId && excluded.has(serializedId)) return false;
+                if (targetText !== undefined && message.body !== targetText) return false;
+                if (targetType !== undefined && message.type !== targetType) return false;
+                if (
+                  targetMimetype !== undefined &&
+                  message.mimetype &&
+                  normalizeMime(message.mimetype) !== normalizeMime(targetMimetype)
+                ) {
+                  return false;
+                }
+                return true;
+              })
               .sort((a, b) => Number(b.t ?? 0) - Number(a.t ?? 0))[0];
             if (!match) return null;
             const model = browserWindow.WWebJS.getMessageModel(match) as {
@@ -531,7 +568,9 @@ export class WhatsAppAdapter implements PlatformAdapter {
           chatId,
           Math.floor(sendStartedAt / 1000) - 2,
           expectedText,
-          expectedType
+          expectedType,
+          excludeMessageIds,
+          expectedMimetype
         );
         if (model) {
           const whatsapp = (await import("whatsapp-web.js")) as unknown as {
@@ -980,6 +1019,38 @@ export class WhatsAppAdapter implements PlatformAdapter {
 function isDetachedFrameError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return /detached\s+frame/i.test(message);
+}
+
+function mimetypeFromMediaPayload(payload: unknown): string | undefined {
+  if (!payload || typeof payload !== "object") return undefined;
+  const mimetype = (payload as { mimetype?: unknown }).mimetype;
+  return typeof mimetype === "string" && mimetype.length > 0 ? mimetype : undefined;
+}
+
+/**
+ * Map an outbound attachment to the wweb.js message `type` we expect the
+ * chat store to show after send. Used to scope send-result recovery so a
+ * later attachment in a multi-send cannot claim an earlier one.
+ */
+export function expectedWhatsAppTypeForOutbound(
+  attachment: Pick<OutboundAttachment, "kind" | "mimeType">,
+  opts: Record<string, unknown> = {}
+): string | undefined {
+  if (opts.sendMediaAsSticker === true || attachment.kind === "sticker") return "sticker";
+  if (opts.sendAudioAsVoice === true || attachment.kind === "voice_note") return "ptt";
+  if (attachment.kind === "photo") return "image";
+  if (attachment.kind === "video" || attachment.kind === "gif" || opts.sendVideoAsGif === true) {
+    return "video";
+  }
+  if (attachment.kind === "audio") return "audio";
+  if (attachment.kind === "pdf") return "document";
+
+  const mime = (attachment.mimeType ?? "").split(";")[0]?.trim().toLowerCase() ?? "";
+  if (mime.startsWith("image/")) return "image";
+  if (mime.startsWith("video/")) return "video";
+  if (mime.startsWith("audio/")) return "audio";
+  if (mime.length > 0) return "document";
+  return undefined;
 }
 
 /**
