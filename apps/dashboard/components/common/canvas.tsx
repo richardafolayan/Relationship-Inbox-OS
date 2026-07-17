@@ -15,6 +15,7 @@ import { cn } from "@/lib/utils";
 export function Canvas({ children, className, ...rest }: HTMLAttributes<HTMLDivElement>) {
   return (
     <div
+      data-scroll-owner="canvas"
       className={cn(
         "mx-auto h-full min-h-0 w-full max-w-[920px] overflow-y-auto overscroll-y-contain px-5 pb-[calc(132px+env(safe-area-inset-bottom))] sm:px-8 md:h-auto md:overflow-visible md:overscroll-auto md:pb-[120px] lg:px-12 3xl:max-w-[1080px]",
         className

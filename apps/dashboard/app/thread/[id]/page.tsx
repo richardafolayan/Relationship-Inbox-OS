@@ -3406,6 +3406,7 @@ export default function ThreadPage() {
         <div
           ref={timelineRef}
           onScroll={onTimelineScroll}
+          data-scroll-owner="thread-messages"
           // overflow-x-hidden is load-bearing: overflow-y-auto alone makes
           // the browser compute overflow-x as auto, so any too-wide child
           // (an unbroken URL, a future embed) turns into a horizontal

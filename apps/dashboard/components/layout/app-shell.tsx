@@ -78,6 +78,7 @@ import type { HealthResponse, InboxResponse, InboxRow, OperatorProfile } from "@
 import { recordThreadSource } from "@/lib/thread-source";
 import { isInTodayQueue } from "@/lib/today";
 import { recordClientError } from "@/lib/client-error-log";
+import { installAppVisualViewport } from "@/lib/app-visual-viewport";
 import {
   classifyConsumerFailure,
   logConsumerFailure,
@@ -738,6 +739,13 @@ export function AppShell({ children }: { children: ReactNode }) {
     };
   }, []);
 
+  // Keep .h-app-screen matched to the visual viewport (iOS keyboard /
+  // browser chrome). Falls back to the height:100% chain when unavailable.
+  useEffect(() => {
+    const { disconnect } = installAppVisualViewport();
+    return disconnect;
+  }, []);
+
   // Quiet hours: when the toggle is on AND the local time is between
   // 22:00 and 06:00, mute the sidebar attention dot and pause auto-scan
   // (gated above). Keeps the toggle honest with its label (#94).
@@ -749,7 +757,13 @@ export function AppShell({ children }: { children: ReactNode }) {
       // over). The sidebar width lives in a CSS var so the inline style
       // can't override the phone layout — a plain gridTemplateColumns
       // style would keep reserving the sidebar track at every width.
+      //
+      // Scroll model (mobile): document is locked; shell clips; Canvas
+      // owns list scroll; thread owns its message scroller. data-scroll-owner
+      // markers coordinate with #928 / #897 so later PRs do not restore two
+      // nested scrollers.
       className="grid h-app-screen grid-cols-1 overflow-hidden bg-paper text-ink md:[grid-template-columns:var(--shell-cols)]"
+      data-scroll-owner="shell"
       style={{
         "--shell-cols": sidebarCollapsed ? "56px 1fr" : "200px 1fr"
       } as CSSProperties}
@@ -778,7 +792,10 @@ export function AppShell({ children }: { children: ReactNode }) {
             />
           </div>
         ) : null}
-        <main className="min-h-0 flex-1 overflow-x-hidden overflow-y-hidden md:overflow-y-auto md:overscroll-y-contain">
+        <main
+          className="min-h-0 flex-1 overflow-x-hidden overflow-y-hidden md:overflow-y-auto md:overscroll-y-contain"
+          data-scroll-owner="shell-main"
+        >
           {children}
         </main>
       </div>
