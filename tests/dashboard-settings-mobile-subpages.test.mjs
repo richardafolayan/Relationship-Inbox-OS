@@ -36,7 +36,11 @@ test("phone Settings opens as a category landing list without in-page section gr
     /<nav aria-label="Settings sections" className="md:hidden">/
   );
   assert.match(SOURCE, /onMobileChoose=\{openMobileCategory\}/);
-  assert.match(SOURCE, /listScrollYRef\.current = window\.scrollY/);
+  // Capture list offset from the shell scroller (<main>), not window.
+  assert.match(
+    SOURCE,
+    /listScrollYRef\.current = document\.querySelector\(["']main["']\)\?\.scrollTop/
+  );
   // Landing is a simple vertical list (not the old 2-col card grid on phone).
   assert.doesNotMatch(
     SOURCE,
@@ -63,7 +67,13 @@ test("Back returns to the Settings list and preserves list scroll position", () 
   assert.match(SOURCE, /clearSettingsHashUrl/);
   assert.match(SOURCE, /setMobileDetailOpen\(false\)/);
   assert.match(SOURCE, /listScrollYRef/);
-  assert.match(SOURCE, /window\.scrollTo\(0, y\)/);
+  // Restore and detail open-to-top must target <main> (AppShell scroller).
+  // Document scroll APIs are false-green under the overflow-hidden shell.
+  assert.match(SOURCE, /document\.querySelector\(["']main["']\)/);
+  assert.match(SOURCE, /\.scrollTop\s*=\s*y/);
+  assert.match(SOURCE, /\.scrollTop\s*=\s*0/);
+  assert.doesNotMatch(SOURCE, /window\.scrollTo\s*\(/);
+  assert.doesNotMatch(SOURCE, /window\.scrollY\b/);
   assert.match(SOURCE, /window\.addEventListener\("popstate", onLocation\)/);
 });
 
