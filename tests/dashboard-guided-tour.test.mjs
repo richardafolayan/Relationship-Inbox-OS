@@ -5,12 +5,27 @@ import assert from "node:assert/strict";
 const {
   CARD_WIDTH,
   VIEWPORT_MARGIN,
+  MOBILE_TOUR_BREAKPOINT,
+  MOBILE_COACH_SHEET_HEIGHT,
+  MOBILE_TARGET_SHEET_GAP,
+  SPOTLIGHT_PAD,
   computeCardPosition,
   computeArrowGeometry,
   clampDragOffset,
   nextStepIndex,
   prevStepIndex,
-  isLastStep
+  isLastStep,
+  isMobileTourViewport,
+  computeMobileCoachLayout,
+  isTargetInTourBand,
+  computeTourScrollDelta,
+  shouldQueueLiveBanner,
+  shouldFreezeLiveListUpdates,
+  resolveFrozenListRows,
+  planTourOverlayConflicts,
+  isGuidedTourSurfaceActive,
+  setGuidedTourSurfaceActive,
+  GUIDED_TOUR_SURFACE_ACTIVE_KEY
 } = await import("../apps/dashboard/lib/guided-tour.ts");
 
 const viewport = { width: 1200, height: 800 };
@@ -243,4 +258,187 @@ test("isLastStep is true only on the final index", () => {
   assert.equal(isLastStep(steps, 0), false);
   assert.equal(isLastStep(steps, 1), false);
   assert.equal(isLastStep(steps, 2), true);
+});
+
+// ── Mobile coach layout (#910) ─────────────────────────────────────────
+
+const phone = { width: 390, height: 844 };
+
+test("isMobileTourViewport matches the Tailwind sm breakpoint", () => {
+  assert.equal(isMobileTourViewport(390), true);
+  assert.equal(isMobileTourViewport(MOBILE_TOUR_BREAKPOINT - 1), true);
+  assert.equal(isMobileTourViewport(MOBILE_TOUR_BREAKPOINT), false);
+  assert.equal(isMobileTourViewport(1200), false);
+});
+
+test("computeMobileCoachLayout places a stable bottom sheet that never covers the target band", () => {
+  const target = { top: 120, left: 16, width: 358, height: 72 };
+  const layout = computeMobileCoachLayout({
+    rect: target,
+    viewport: phone,
+    sheetHeight: MOBILE_COACH_SHEET_HEIGHT,
+    safeInsets: { top: 47, bottom: 34 },
+    dockVisible: true,
+    keyboardInset: 0
+  });
+  assert.equal(layout.mode, "sheet");
+  assert.equal(layout.showSpotlight, true);
+  assert.ok(layout.sheetTop > target.top + target.height + MOBILE_TARGET_SHEET_GAP - 1);
+  // Target band ends above the sheet with a gap so the spotlight stays clear.
+  assert.ok(layout.targetBand.bottom <= layout.sheetTop - MOBILE_TARGET_SHEET_GAP + 1);
+  assert.ok(layout.targetBand.height > target.height);
+});
+
+test("computeMobileCoachLayout falls back to fullscreen when the target cannot fit above the sheet", () => {
+  // Tall target that will not fit in the remaining band on a short phone.
+  const layout = computeMobileCoachLayout({
+    rect: { top: 40, left: 0, width: 390, height: 700 },
+    viewport: { width: 390, height: 640 },
+    sheetHeight: 260,
+    safeInsets: { top: 20, bottom: 20 },
+    dockVisible: true
+  });
+  assert.equal(layout.mode, "fullscreen");
+  assert.equal(layout.needsFullscreen, true);
+  assert.equal(layout.showSpotlight, false);
+});
+
+test("computeMobileCoachLayout uses fullscreen when there is no target", () => {
+  const layout = computeMobileCoachLayout({
+    rect: null,
+    viewport: phone,
+    sheetHeight: MOBILE_COACH_SHEET_HEIGHT
+  });
+  assert.equal(layout.mode, "fullscreen");
+  assert.equal(layout.showSpotlight, false);
+});
+
+test("computeMobileCoachLayout accounts for keyboard inset on the sheet bottom", () => {
+  const withoutKeyboard = computeMobileCoachLayout({
+    rect: { top: 80, left: 16, width: 350, height: 60 },
+    viewport: phone,
+    sheetHeight: 200,
+    safeInsets: { bottom: 34 },
+    dockVisible: false,
+    keyboardInset: 0
+  });
+  const withKeyboard = computeMobileCoachLayout({
+    rect: { top: 80, left: 16, width: 350, height: 60 },
+    viewport: phone,
+    sheetHeight: 200,
+    safeInsets: { bottom: 34 },
+    dockVisible: false,
+    keyboardInset: 280
+  });
+  assert.ok(withKeyboard.sheetBottomInset > withoutKeyboard.sheetBottomInset);
+  assert.ok(withKeyboard.sheetTop < withoutKeyboard.sheetTop);
+});
+
+test("isTargetInTourBand and computeTourScrollDelta keep the spotlight above the sheet", () => {
+  const band = { top: 60, bottom: 500 };
+  const inBand = { top: 120, height: 80 };
+  assert.equal(isTargetInTourBand(inBand, band), true);
+  assert.equal(computeTourScrollDelta(inBand, band), 0);
+
+  const belowBand = { top: 520, height: 80 };
+  assert.equal(isTargetInTourBand(belowBand, band), false);
+  const delta = computeTourScrollDelta(belowBand, band);
+  assert.ok(delta > 0, "target below the band should scroll down (positive delta)");
+
+  const aboveBand = { top: -40, height: 80 };
+  assert.equal(isTargetInTourBand(aboveBand, band), false);
+  const up = computeTourScrollDelta(aboveBand, band);
+  assert.ok(up < 0, "target above the band should scroll up (negative delta)");
+});
+
+test("live banners and list updates freeze while the tour is active", () => {
+  assert.equal(shouldQueueLiveBanner(true), true);
+  assert.equal(shouldQueueLiveBanner(false), false);
+  assert.equal(shouldFreezeLiveListUpdates(true), true);
+  assert.equal(shouldFreezeLiveListUpdates(false), false);
+
+  const first = [{ id: "a" }, { id: "b" }];
+  const second = [{ id: "b" }, { id: "c" }];
+  const frozen = resolveFrozenListRows({
+    tourActive: true,
+    nextRows: first,
+    frozenRows: null
+  });
+  assert.deepEqual(frozen.rows, first);
+  assert.deepEqual(frozen.nextFrozen, first);
+
+  const held = resolveFrozenListRows({
+    tourActive: true,
+    nextRows: second,
+    frozenRows: frozen.nextFrozen
+  });
+  assert.deepEqual(held.rows, first, "live update must not replace the frozen list");
+  assert.deepEqual(held.nextFrozen, first);
+
+  const released = resolveFrozenListRows({
+    tourActive: false,
+    nextRows: second,
+    frozenRows: first
+  });
+  assert.deepEqual(released.rows, second);
+  assert.equal(released.nextFrozen, null);
+});
+
+test("planTourOverlayConflicts closes AI Assist and blocks the palette while the tour is open", () => {
+  const idle = planTourOverlayConflicts({
+    tourActive: false,
+    aiAssistOpen: true,
+    paletteOpen: true
+  });
+  assert.equal(idle.closeAiAssist, false);
+  assert.equal(idle.closePalette, false);
+  assert.equal(idle.blockPaletteOpen, false);
+
+  const active = planTourOverlayConflicts({
+    tourActive: true,
+    aiAssistOpen: true,
+    paletteOpen: true
+  });
+  assert.equal(active.closeAiAssist, true);
+  assert.equal(active.closePalette, true);
+  assert.equal(active.blockPaletteOpen, true);
+
+  const alreadyClosed = planTourOverlayConflicts({
+    tourActive: true,
+    aiAssistOpen: false,
+    paletteOpen: false
+  });
+  assert.equal(alreadyClosed.closeAiAssist, false);
+  assert.equal(alreadyClosed.closePalette, false);
+  assert.equal(alreadyClosed.blockPaletteOpen, true);
+});
+
+test("guided tour surface active flag writes and clears storage", () => {
+  const map = new Map();
+  const storage = {
+    getItem: (k) => (map.has(k) ? map.get(k) : null),
+    setItem: (k, v) => map.set(k, String(v)),
+    removeItem: (k) => map.delete(k)
+  };
+  setGuidedTourSurfaceActive(true, { storage, variant: "pilot" });
+  assert.equal(isGuidedTourSurfaceActive(storage), true);
+  assert.equal(storage.getItem(GUIDED_TOUR_SURFACE_ACTIVE_KEY), "1");
+  setGuidedTourSurfaceActive(false, { storage, variant: "pilot" });
+  assert.equal(isGuidedTourSurfaceActive(storage), false);
+});
+
+test("GuidedTour source removes Reset position and uses mobile coach layout", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const source = await readFile(
+    new URL("../apps/dashboard/components/common/GuidedTour.tsx", import.meta.url),
+    "utf8"
+  );
+  assert.doesNotMatch(source, /tour-reset-position/);
+  assert.doesNotMatch(source, />\s*Reset position\s*</);
+  assert.match(source, /computeMobileCoachLayout/);
+  assert.match(source, /setGuidedTourSurfaceActive/);
+  assert.match(source, /mobile-sheet|mobile-fullscreen|data-tour-layout/);
+  assert.match(source, /Continue/);
+  // Spotlight pad constant keeps the ring from covering the coach sheet math.
+  assert.ok(SPOTLIGHT_PAD >= 4);
 });

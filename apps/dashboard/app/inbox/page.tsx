@@ -4,6 +4,12 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useFullDemo } from "@/components/full-demo/FullDemoProvider";
 import { scopeRowsToSandbox } from "@/lib/demo-threads";
+import {
+  GUIDED_TOUR_SURFACE_EVENT,
+  isGuidedTourSurfaceActive,
+  resolveFrozenListRows,
+  type GuidedTourSurfaceDetail
+} from "@/lib/guided-tour";
 import { Archive, Search, Star, Tags } from "lucide-react";
 import { apiGet, apiPost, runAction, ApiRequestError } from "@/lib/api";
 import { useCacheSeed } from "@/lib/use-cache-seed";
@@ -365,7 +371,7 @@ export default function InboxPage() {
   // only demo-seeded threads so the walkthrough stays inside sandbox data and
   // its targets resolve on a busy real inbox. Outside a sandbox flow this is a
   // no-op.
-  const allRows = useMemo(
+  const scopedRows = useMemo(
     () =>
       scopeRowsToSandbox(data?.rows ?? [], sandboxActive).map((row) => {
         const pid = row.personId;
@@ -375,6 +381,28 @@ export default function InboxPage() {
       }),
     [data, sandboxActive, favOverrides]
   );
+  const [tourSurfaceActive, setTourSurfaceActive] = useState(false);
+  const [frozenRows, setFrozenRows] = useState<typeof scopedRows | null>(null);
+  useEffect(() => {
+    setTourSurfaceActive(isGuidedTourSurfaceActive());
+    const onSurface = (event: Event) => {
+      const detail = (event as CustomEvent<GuidedTourSurfaceDetail>).detail;
+      setTourSurfaceActive(detail?.active ?? isGuidedTourSurfaceActive());
+    };
+    window.addEventListener(GUIDED_TOUR_SURFACE_EVENT, onSurface);
+    return () => window.removeEventListener(GUIDED_TOUR_SURFACE_EVENT, onSurface);
+  }, []);
+  useEffect(() => {
+    const resolved = resolveFrozenListRows({
+      tourActive: tourSurfaceActive,
+      nextRows: scopedRows,
+      frozenRows
+    });
+    if (resolved.nextFrozen !== frozenRows) {
+      setFrozenRows(resolved.nextFrozen);
+    }
+  }, [scopedRows, tourSurfaceActive, frozenRows]);
+  const allRows = tourSurfaceActive && frozenRows && frozenRows.length > 0 ? frozenRows : scopedRows;
 
   const priorityGroups = useMemo(() => {
     const groups = new Set<string>();
