@@ -28,6 +28,10 @@ interface PageHeadProps {
   title: string;
   subtitle?: ReactNode;
   meta?: ReactNode;
+  // Dense phone header for contained list screens (Inbox/Archived). On
+  // mobile it drops sticky glass padding so the page does not need a
+  // second controls scroller. Desktop keeps the normal sticky head.
+  compact?: boolean;
 }
 
 // Compact page header: title + optional one-line subtitle on the left,
@@ -35,15 +39,34 @@ interface PageHeadProps {
 // phone widths). Sticky + glassy, no decorative bottom rule - content
 // sections own their own dividers. The negative margins mirror the
 // Canvas gutters at every breakpoint so the glass runs edge to edge.
-export function PageHead({ eyebrow, title, subtitle, meta }: PageHeadProps) {
+export function PageHead({ eyebrow, title, subtitle, meta, compact }: PageHeadProps) {
   return (
-    <header className="sticky top-0 z-10 -mx-5 mb-6 flex flex-col gap-1 bg-[color-mix(in_oklch,var(--paper)_95%,transparent)] px-5 pb-3 pt-4 backdrop-blur-md backdrop-saturate-150 sm:-mx-8 sm:flex-row sm:items-baseline sm:justify-between sm:gap-6 sm:px-8 sm:pt-6 lg:-mx-12 lg:px-12">
+    <header
+      className={cn(
+        "z-10 -mx-5 flex flex-col bg-[color-mix(in_oklch,var(--paper)_95%,transparent)] px-5 backdrop-blur-md backdrop-saturate-150 sm:-mx-8 sm:flex-row sm:items-baseline sm:justify-between sm:gap-6 sm:px-8 lg:-mx-12 lg:px-12",
+        compact
+          ? "relative mb-3 gap-0.5 pb-1 pt-2 sm:sticky sm:top-0 sm:mb-6 sm:gap-1 sm:pb-3 sm:pt-6"
+          : "sticky top-0 mb-6 gap-1 pb-3 pt-4 sm:pt-6"
+      )}
+    >
       <div className="min-w-0">
         {eyebrow ? (
-          <p className="mb-1 font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">{eyebrow}</p>
+          <p
+            className={cn(
+              "font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3",
+              compact ? "mb-0.5 sm:mb-1" : "mb-1"
+            )}
+          >
+            {eyebrow}
+          </p>
         ) : null}
         <div className="flex flex-col gap-y-1">
-          <h1 className="m-0 font-display text-[24px] font-semibold leading-[1.15] tracking-[-0.02em] sm:text-[28px]">
+          <h1
+            className={cn(
+              "m-0 font-display font-semibold leading-[1.15] tracking-[-0.02em] sm:text-[28px]",
+              compact ? "text-[20px]" : "text-[24px]"
+            )}
+          >
             {title}
           </h1>
           {subtitle ? (
@@ -52,7 +75,14 @@ export function PageHead({ eyebrow, title, subtitle, meta }: PageHeadProps) {
         </div>
       </div>
       {meta ? (
-        <div className="shrink-0 font-mono text-[12px] text-ink-3 sm:text-right">{meta}</div>
+        <div
+          className={cn(
+            "shrink-0 font-mono text-ink-3 sm:text-right",
+            compact ? "text-[11px] sm:text-[12px]" : "text-[12px]"
+          )}
+        >
+          {meta}
+        </div>
       ) : null}
     </header>
   );

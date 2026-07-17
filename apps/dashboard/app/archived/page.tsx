@@ -330,141 +330,129 @@ export default function ArchivedPage() {
   const isEmpty = !rows || rows.length === 0;
 
   return (
-    // Mobile (#897): same contained list shell as Inbox. Header + controls
-    // pin as a capped layout row; rows are the primary scroller. Short
-    // viewports can scroll the upper controls so search stays reachable.
-    // Desktop long-page stays.
+    // Mobile (#897): same contained list shell as Inbox. Compact fixed
+    // header + one search row; conversation list is the only vertical
+    // scroller. Sort/platform stay in popovers. Desktop long-page stays.
     <Canvas className="flex h-full min-h-0 flex-col overflow-hidden pb-0 md:block md:h-auto md:overflow-visible md:pb-[120px]">
-      <div
-        data-testid="archived-controls"
-        className="flex min-h-0 max-h-[42dvh] shrink flex-col md:max-h-none md:shrink-0"
-      >
-        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain md:flex-none md:overflow-visible">
-          <Link
-            href="/inbox"
-            className="mb-[12px] inline-flex items-center gap-[5px] font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3 transition-colors duration-calm hover:text-ink"
-          >
-            <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth={1.8}>
-              <path d="M15 18l-6-6 6-6" strokeLinecap="round" strokeLinejoin="round" />
-            </svg>
-            Back to inbox
-          </Link>
+      <div data-testid="archived-controls" className="shrink-0">
+        <Link
+          href="/inbox"
+          className="mb-2 inline-flex items-center gap-[5px] font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3 transition-colors duration-calm hover:text-ink sm:mb-[12px]"
+        >
+          <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth={1.8}>
+            <path d="M15 18l-6-6 6-6" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+          Back to inbox
+        </Link>
 
-          <header className="mb-[16px] flex items-start justify-between gap-4 sm:mb-[20px] sm:gap-6">
-            <div className="min-w-0">
-              <p className="mb-1 font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">
-                Done &amp; dusted
-              </p>
-              <h1 className="m-0 font-display text-[24px] font-semibold leading-[1.1] tracking-[-0.02em] sm:text-[40px] sm:leading-[1.04] sm:tracking-[-0.035em]">
-                Archived
-              </h1>
-            </div>
-            {rows && rows.length > 0 ? (
-              <div className="shrink-0 pt-1 text-right font-mono text-[11px] text-ink-3 sm:text-[12.5px]">
-                <strong className="font-medium text-ink">{visible.length}</strong> of {rows.length} threads
-                {oldestMonthLabel ? (
-                  <>
-                    <br />
-                    oldest {oldestMonthLabel}
-                  </>
-                ) : null}
-              </div>
-            ) : null}
-          </header>
-
-          {error ? <p className="mb-4 rounded-row border border-hairline bg-paper-2 px-4 py-3 text-[12px] leading-[1.5] text-ink-2 sm:mb-6">{error}</p> : null}
-
-          {!isEmpty ? (
-            <label
-              className={cn(
-                "mb-[16px] flex items-center gap-[10px] rounded-[12px] border bg-transparent px-[14px] py-[10px] transition-colors duration-calm",
-                query
-                  ? "border-hairline-strong"
-                  : "border-hairline hover:border-hairline-strong focus-within:border-ink-3 focus-within:bg-paper"
-              )}
-            >
-              <svg viewBox="0 0 24 24" width="16" height="16" className="shrink-0 text-ink-3" fill="none" stroke="currentColor" strokeWidth={1.6}>
-                <circle cx="11" cy="11" r="7" />
-                <path d="M21 21l-4-4" strokeLinecap="round" />
-              </svg>
-              <input
-                type="text"
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                placeholder="Search archived…"
-                autoComplete="off"
-                className="min-w-0 flex-1 border-0 bg-transparent text-[14px] text-ink outline-none placeholder:text-ink-3"
-              />
-              {query ? (
-                <button
-                  type="button"
-                  onClick={() => setQuery("")}
-                  aria-label="Clear search"
-                  className="shrink-0 p-[2px] text-ink-3 transition-colors duration-calm hover:text-ink"
-                >
-                  <XIcon />
-                </button>
+        <header className="mb-3 flex items-start justify-between gap-4 sm:mb-[20px] sm:gap-6">
+          <div className="min-w-0">
+            <p className="mb-0.5 font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3 sm:mb-1">
+              Done &amp; dusted
+            </p>
+            <h1 className="m-0 font-display text-[20px] font-semibold leading-[1.1] tracking-[-0.02em] sm:text-[40px] sm:leading-[1.04] sm:tracking-[-0.035em]">
+              Archived
+            </h1>
+          </div>
+          {rows && rows.length > 0 ? (
+            <div className="shrink-0 pt-1 text-right font-mono text-[11px] text-ink-3 sm:text-[12.5px]">
+              <strong className="font-medium text-ink">{visible.length}</strong> of {rows.length} threads
+              {oldestMonthLabel ? (
+                <>
+                  <br />
+                  oldest {oldestMonthLabel}
+                </>
               ) : null}
-            </label>
+            </div>
           ) : null}
-        </div>
+        </header>
 
         {!isEmpty ? (
-          <div className="shrink-0 bg-paper">
-            {/* Outcome tabs + tools. On phone tools sit above a horizontally
-                scrollable tab strip so the bar stays two calm rows. */}
-            <div className="flex flex-col-reverse gap-1 border-b border-hairline sm:flex-row sm:flex-wrap sm:items-end sm:gap-[14px]">
-              <div className="flex min-w-0 flex-1 gap-[1px] overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden sm:flex-wrap sm:overflow-x-visible">
-                {OUTCOME_TABS.map((entry) => {
-                  const active = tab === entry.key;
-                  const count = counts[entry.key];
-                  const zero = count === 0;
-                  return (
-                    <button
-                      key={entry.key}
-                      type="button"
-                      onClick={() => setTab(entry.key)}
+          <label
+            className={cn(
+              "mb-3 flex items-center gap-[10px] rounded-[12px] border bg-transparent px-[14px] py-[9px] transition-colors duration-calm sm:mb-[16px] sm:py-[10px]",
+              query
+                ? "border-hairline-strong"
+                : "border-hairline hover:border-hairline-strong focus-within:border-ink-3 focus-within:bg-paper"
+            )}
+          >
+            <svg viewBox="0 0 24 24" width="16" height="16" className="shrink-0 text-ink-3" fill="none" stroke="currentColor" strokeWidth={1.6}>
+              <circle cx="11" cy="11" r="7" />
+              <path d="M21 21l-4-4" strokeLinecap="round" />
+            </svg>
+            <input
+              type="text"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search archived…"
+              autoComplete="off"
+              className="min-w-0 flex-1 border-0 bg-transparent text-[14px] text-ink outline-none placeholder:text-ink-3"
+            />
+            {query ? (
+              <button
+                type="button"
+                onClick={() => setQuery("")}
+                aria-label="Clear search"
+                className="shrink-0 p-[2px] text-ink-3 transition-colors duration-calm hover:text-ink"
+              >
+                <XIcon />
+              </button>
+            ) : null}
+          </label>
+        ) : null}
+
+        {!isEmpty ? (
+          <div className="flex flex-col-reverse gap-1 border-b border-hairline sm:flex-row sm:flex-wrap sm:items-end sm:gap-[14px]">
+            <div className="flex min-w-0 flex-1 gap-[1px] overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden sm:flex-wrap sm:overflow-x-visible">
+              {OUTCOME_TABS.map((entry) => {
+                const active = tab === entry.key;
+                const count = counts[entry.key];
+                const zero = count === 0;
+                return (
+                  <button
+                    key={entry.key}
+                    type="button"
+                    onClick={() => setTab(entry.key)}
+                    className={cn(
+                      "relative -mb-px shrink-0 whitespace-nowrap border-b-2 border-transparent px-[14px] py-[10px] text-[13px] transition-colors duration-calm",
+                      active
+                        ? "border-accent font-medium text-ink"
+                        : zero
+                          ? "text-ink-4 hover:text-ink-2"
+                          : "text-ink-3 hover:text-ink"
+                    )}
+                  >
+                    {entry.label}
+                    <span
                       className={cn(
-                        "relative -mb-px shrink-0 whitespace-nowrap border-b-2 border-transparent px-[14px] py-[10px] text-[13px] transition-colors duration-calm",
-                        active
-                          ? "border-accent font-medium text-ink"
-                          : zero
-                            ? "text-ink-4 hover:text-ink-2"
-                            : "text-ink-3 hover:text-ink"
+                        "ml-[5px] font-mono text-[11px]",
+                        active ? "text-accent-ink" : "text-ink-3"
                       )}
                     >
-                      {entry.label}
-                      <span
-                        className={cn(
-                          "ml-[5px] font-mono text-[11px]",
-                          active ? "text-accent-ink" : "text-ink-3"
-                        )}
-                      >
-                        {count}
-                      </span>
-                    </button>
-                  );
-                })}
-              </div>
-              <div className="flex items-center justify-end gap-[4px] pb-[6px]">
-                <SortMenu value={sortMode} options={ARCH_SORTS} onChange={setSortMode} />
-                <PlatformPopover
-                  platformOptions={platformOptions}
-                  platformFilter={platformFilter}
-                  onPlatform={setPlatformFilter}
-                />
-                {orderedIds.length > 0 || selectMode ? (
-                  <button
-                    type="button"
-                    onClick={() => (selectMode ? clearSelection() : setForceSelectMode(true))}
-                    className={cn(TOOL_CLASS, selectMode ? "bg-paper-2 text-ink" : "")}
-                    aria-pressed={selectMode}
-                  >
-                    <SelectGlyph />
-                    <span>Select</span>
+                      {count}
+                    </span>
                   </button>
-                ) : null}
-              </div>
+                );
+              })}
+            </div>
+            <div className="flex items-center justify-end gap-[4px] pb-[6px]">
+              <SortMenu value={sortMode} options={ARCH_SORTS} onChange={setSortMode} />
+              <PlatformPopover
+                platformOptions={platformOptions}
+                platformFilter={platformFilter}
+                onPlatform={setPlatformFilter}
+              />
+              {orderedIds.length > 0 || selectMode ? (
+                <button
+                  type="button"
+                  onClick={() => (selectMode ? clearSelection() : setForceSelectMode(true))}
+                  className={cn(TOOL_CLASS, selectMode ? "bg-paper-2 text-ink" : "")}
+                  aria-pressed={selectMode}
+                >
+                  <SelectGlyph />
+                  <span>Select</span>
+                </button>
+              ) : null}
             </div>
           </div>
         ) : null}
@@ -473,8 +461,14 @@ export default function ArchivedPage() {
       <div
         data-testid="archived-list-scroller"
         data-scroll-owner="list"
-        className="min-h-[7rem] flex-1 overflow-y-auto overscroll-contain pb-4 md:min-h-0 md:overflow-visible md:pb-0"
+        className="min-h-0 flex-1 overflow-y-auto overscroll-contain pb-4 md:overflow-visible md:pb-0"
       >
+        {error ? (
+          <p className="mb-4 mt-3 rounded-row border border-hairline bg-paper-2 px-4 py-3 text-[12px] leading-[1.5] text-ink-2 sm:mb-6">
+            {error}
+          </p>
+        ) : null}
+
         {!isEmpty && platformFilter !== "all" ? (
           <div className="flex flex-wrap items-center gap-2 pt-[14px]">
             <span className="inline-flex items-center gap-[6px] rounded-pill border border-hairline bg-paper px-[10px] py-[4px] font-mono text-[11.5px] text-ink-2">
