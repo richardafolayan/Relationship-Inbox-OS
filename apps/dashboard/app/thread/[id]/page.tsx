@@ -27,6 +27,7 @@ import {
   PanelLeftOpen,
   Paperclip,
   Pencil,
+  Plus,
   Quote,
   Save,
   Send,
@@ -744,7 +745,7 @@ export default function ThreadPage() {
   const [aiCoverageItems, setAiCoverageItems] = useState<
     Array<{ loop: string; status: "addressed" | "partial"; reason?: string }>
   >([]);
-  const chipsMenuRef = useRef<HTMLDivElement>(null);
+
   // AI assist rail starts collapsed so a 1-message thread doesn't burn 25%
   // of the viewport on duplicate paraphrases. Operator opens it explicitly.
   const [aiOpen, setAiOpen] = useState(false);
@@ -1059,6 +1060,9 @@ export default function ThreadPage() {
   // enqueuing immediately. The picker also exposes a custom datetime-local
   // input for arbitrary times.
   const [scheduleMenuOpen, setScheduleMenuOpen] = useState(false);
+  // Mobile progressive disclosure (#900): secondary composer actions live
+  // behind a + sheet so the default phone chrome stays [text] [+] [mic] [Send].
+  const [composerMoreOpen, setComposerMoreOpen] = useState(false);
   const [customScheduleValue, setCustomScheduleValue] = useState("");
   const [scheduling, setScheduling] = useState(false);
   const [cancellingScheduledId, setCancellingScheduledId] = useState<string | null>(null);
@@ -1073,7 +1077,12 @@ export default function ThreadPage() {
   const [editingScheduledTime, setEditingScheduledTime] = useState("");
   const [originalScheduledTime, setOriginalScheduledTime] = useState("");
   const [savingScheduledId, setSavingScheduledId] = useState<string | null>(null);
-  const scheduleMenuRef = useRef<HTMLDivElement>(null);
+  // Desktop + mobile each mount their own schedule/chips menus (one is
+  // display:none at a time). Outside-click must check both wrappers.
+  const scheduleMenuDesktopRef = useRef<HTMLDivElement>(null);
+  const scheduleMenuMobileRef = useRef<HTMLDivElement>(null);
+  const chipsMenuDesktopRef = useRef<HTMLDivElement>(null);
+  const chipsMenuMobileRef = useRef<HTMLDivElement>(null);
 
   // Coarse once-a-minute clock. The late-night LinkedIn schedule nudge below
   // the composer keys off the local time, so this lets it appear/disappear
@@ -1395,6 +1404,10 @@ export default function ThreadPage() {
     setWhatsAppPollAllowMultiple(true);
     setWhatsAppPollSending(false);
     setWhatsAppPollSent(false);
+    setComposerMoreOpen(false);
+    setScheduleMenuOpen(false);
+    setChipsMenuOpen(false);
+    setMemoryOpen(false);
     setComposerAttachments((prev) => {
       for (const a of prev) {
         if (a.previewUrl) URL.revokeObjectURL(a.previewUrl);
@@ -2336,7 +2349,11 @@ export default function ThreadPage() {
   useEffect(() => {
     if (!scheduleMenuOpen) return undefined;
     const onClick = (event: MouseEvent) => {
-      if (!scheduleMenuRef.current?.contains(event.target as Node)) {
+      const target = event.target as Node;
+      if (
+        !scheduleMenuDesktopRef.current?.contains(target) &&
+        !scheduleMenuMobileRef.current?.contains(target)
+      ) {
         setScheduleMenuOpen(false);
       }
     };
@@ -2355,7 +2372,11 @@ export default function ThreadPage() {
   useEffect(() => {
     if (!chipsMenuOpen) return undefined;
     const onClick = (event: MouseEvent) => {
-      if (!chipsMenuRef.current?.contains(event.target as Node)) {
+      const target = event.target as Node;
+      if (
+        !chipsMenuDesktopRef.current?.contains(target) &&
+        !chipsMenuMobileRef.current?.contains(target)
+      ) {
         setChipsMenuOpen(false);
       }
     };
@@ -5016,29 +5037,46 @@ export default function ThreadPage() {
                 >
                   <span className="flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-[0.06em] text-accent-ink">
                     <Sparkles className="h-[12px] w-[12px]" />
-                    {isReopenMode ? "AI opener · review before sending" : "AI predraft · review before sending"}
+                    <span className="md:hidden">AI draft</span>
+                    <span className="hidden md:inline">
+                      {isReopenMode
+                        ? "AI opener · review before sending"
+                        : "AI predraft · review before sending"}
+                    </span>
                   </span>
-                  {/* Bumped from a tiny "clear" link to a proper Discard
-                      button at body-text size with an icon (#350). Old
-                      treatment was easy to miss when the operator wanted
-                      to throw away the AI draft and write their own. */}
-                  <button
-                    type="button"
-                    onClick={() => {
-                      predraftDismissedRef.current.add(threadId);
-                      setComposer("");
-                      setComposerSource("empty");
-                    }}
-                    title="Discard the AI draft and start fresh"
-                    className="flex items-center gap-1 rounded-[6px] px-2 py-1 text-[12px] text-ink-2 transition-colors duration-calm hover:bg-paper-2 hover:text-ink"
-                  >
-                    <X className="h-[12px] w-[12px]" strokeWidth={1.6} />
-                    Discard
-                  </button>
+                  <div className="flex items-center gap-1">
+                    <button
+                      type="button"
+                      onClick={() => composerInputRef.current?.focus()}
+                      title="Edit the AI draft"
+                      className="flex items-center gap-1 rounded-[6px] px-2 py-1 text-[12px] text-ink-2 transition-colors duration-calm hover:bg-paper-2 hover:text-ink md:hidden"
+                    >
+                      <Pencil className="h-[12px] w-[12px]" strokeWidth={1.6} />
+                      Edit
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        predraftDismissedRef.current.add(threadId);
+                        setComposer("");
+                        setComposerSource("empty");
+                      }}
+                      title="Discard the AI draft and start fresh"
+                      className="flex items-center gap-1 rounded-[6px] px-2 py-1 text-[12px] text-ink-2 transition-colors duration-calm hover:bg-paper-2 hover:text-ink"
+                    >
+                      <X className="h-[12px] w-[12px]" strokeWidth={1.6} />
+                      Discard
+                    </button>
+                  </div>
                 </div>
               ) : null}
               {thread.platform === "WHATSAPP" ? (
-                <div className="mb-2 flex flex-wrap items-center gap-1.5">
+                <div
+                  className={cn(
+                    "mb-2 flex flex-wrap items-center gap-1.5",
+                    composerMoreOpen ? "flex" : "hidden md:flex"
+                  )}
+                >
                   <span className="mr-1 font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3">
                     WhatsApp
                   </span>
@@ -5279,139 +5317,157 @@ export default function ThreadPage() {
                 ref={(el) => {
                   composerInputRef.current = el;
                   if (!el) return;
-                  // Autosize up to min(160px, 28dvh). CSS max-height clamps
-                  // the viewport share on short phones; overflow scrolls
-                  // inside the field once the cap is reached (#896).
+                  // Autosize with a phone-safe cap (#900): min(160px, 28dvh)
+                  // so a long draft scrolls inside the field instead of
+                  // eating the message history.
+                  const capPx = Math.min(
+                    160,
+                    Math.round((typeof window !== "undefined" ? window.innerHeight : 640) * 0.28)
+                  );
                   el.style.height = "auto";
-                  el.style.height = `${Math.max(el.scrollHeight, 44)}px`;
+                  el.style.height = `${Math.min(Math.max(el.scrollHeight, 44), capPx)}px`;
                 }}
                 className="block w-full resize-none overflow-y-auto border-0 bg-transparent text-[14px] leading-[1.45] text-ink outline-none placeholder:text-ink-4"
                 style={{ minHeight: 44, maxHeight: "min(160px, 28dvh)" }}
               />
-              <div className="mt-1.5 flex flex-wrap items-center gap-2">
-                {/* Memory icon - opens the prior-conversations popover.
-                    Compact replacement for the old chip that used to sit
-                    above the composer and burn a row of vertical space. */}
-                {thread.relationshipMemory && thread.relationshipMemory.otherThreadCount > 0 ? (
-                  <div data-testid="memory-chip" className="relative">
-                    <button
-                      type="button"
-                      onClick={() => setMemoryOpen((prev) => !prev)}
-                      aria-expanded={memoryOpen}
-                      title={`Memory · ${thread.relationshipMemory.otherThreadCount} prior conversation${thread.relationshipMemory.otherThreadCount === 1 ? "" : "s"}${thread.relationshipMemory.tags.length > 0 ? ` · ${thread.relationshipMemory.tags.length} tag${thread.relationshipMemory.tags.length === 1 ? "" : "s"}` : ""}`}
-                      className="relative grid h-[30px] w-[30px] place-items-center rounded-full border border-hairline bg-paper text-ink-2 transition-colors duration-calm hover:border-hairline-strong hover:bg-paper-2 hover:text-ink"
-                    >
-                      <Sparkles className="h-[13px] w-[13px]" strokeWidth={1.6} />
-                      <span className="absolute -right-[2px] -top-[2px] grid h-[14px] min-w-[14px] place-items-center rounded-full bg-ink px-[3px] font-mono text-[9px] font-medium text-paper">
-                        {thread.relationshipMemory.otherThreadCount}
-                      </span>
-                    </button>
-                    {memoryOpen ? (
-                      <div className="absolute bottom-[calc(100%+8px)] left-0 z-20 w-[480px] max-w-[80vw] rounded-card border border-hairline bg-paper p-3 text-[12px] leading-snug shadow-card">
-                        <div className="mb-2 font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3">
-                          What the AI can lean on
-                        </div>
-                        {thread.relationshipMemory.tags.length > 0 ? (
-                          <div className="mb-2 flex flex-wrap gap-1">
-                            {thread.relationshipMemory.tags.map((tag) => (
-                              <span
-                                key={tag}
-                                className="rounded-full border border-hairline-strong px-2 py-[1px] text-[11px] text-ink-2"
-                              >
-                                {tag}
-                              </span>
-                            ))}
+              {(thread.platform === "IMESSAGE" ||
+                thread.platform === "WHATSAPP" ||
+                thread.platform === "GOOGLE_MESSAGES") && (
+                <input
+                  type="file"
+                  multiple
+                  accept={
+                    thread.platform === "WHATSAPP"
+                      ? "image/*,video/*,audio/*,application/pdf,.gif"
+                      : "image/*,video/*,audio/*,application/pdf"
+                  }
+                  className="hidden"
+                  id="composer-file-input"
+                  onChange={(e) => {
+                    if (e.target.files) addFiles(e.target.files);
+                    e.target.value = "";
+                  }}
+                />
+              )}
+              {/* Mobile secondary tools (#900): attachments, schedule, poll
+                  formatting (above), AI rewrite, suggestions. Hidden until
+                  the operator opens +. Desktop uses the full toolbar below. */}
+              {composerMoreOpen ? (
+                <div
+                  data-testid="composer-more-sheet"
+                  className="mt-1.5 flex flex-wrap items-center gap-2 border-t border-hairline pt-2 md:hidden"
+                >
+                  {thread.relationshipMemory && thread.relationshipMemory.otherThreadCount > 0 ? (
+                    <div data-testid="memory-chip-mobile" className="relative">
+                      <button
+                        type="button"
+                        onClick={() => setMemoryOpen((prev) => !prev)}
+                        aria-expanded={memoryOpen}
+                        title={`Memory · ${thread.relationshipMemory.otherThreadCount} prior conversation${thread.relationshipMemory.otherThreadCount === 1 ? "" : "s"}`}
+                        className="relative grid h-[30px] w-[30px] place-items-center rounded-full border border-hairline bg-paper text-ink-2 transition-colors duration-calm hover:border-hairline-strong hover:bg-paper-2 hover:text-ink"
+                      >
+                        <Sparkles className="h-[13px] w-[13px]" strokeWidth={1.6} />
+                        <span className="absolute -right-[2px] -top-[2px] grid h-[14px] min-w-[14px] place-items-center rounded-full bg-ink px-[3px] font-mono text-[9px] font-medium text-paper">
+                          {thread.relationshipMemory.otherThreadCount}
+                        </span>
+                      </button>
+                      {memoryOpen ? (
+                        <div className="absolute bottom-[calc(100%+8px)] left-0 z-20 w-[min(480px,calc(100vw-32px))] rounded-card border border-hairline bg-paper p-3 text-[12px] leading-snug shadow-card">
+                          <div className="mb-2 font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3">
+                            What the AI can lean on
                           </div>
-                        ) : null}
-                        {thread.relationshipMemory.notes ? (
-                          <p className="mb-2 text-ink-2">{thread.relationshipMemory.notes}</p>
-                        ) : null}
-                        <ul className="space-y-1">
-                          {thread.relationshipMemory.recentExchanges.map((ex) => (
-                            <li key={ex.threadId} className="text-ink-2">
-                              <span className="font-mono text-[10px] uppercase tracking-[0.04em] text-ink-3">
-                                {ex.platform.toLowerCase()}
-                                {ex.lastMessageAt ? ` · ${formatRelative(ex.lastMessageAt)}` : ""}
-                              </span>
-                              <br />
-                              <span className="text-ink-2">
-                                {ex.preview ?? ex.whatTheyWant ?? "(no recent message)"}
-                              </span>
-                            </li>
-                          ))}
-                        </ul>
-                      </div>
-                    ) : null}
-                  </div>
-                ) : null}
-                {/* Suggested-replies dropdown. Complete sendable drafts —
-                    shown only when the operator has opted into full AI
-                    drafts via the AI help level. Lower levels keep the
-                    composer centred on the operator's own writing. */}
-                {showFullDrafts ? (
-                <div className="relative" ref={chipsMenuRef}>
-                  <button
-                    type="button"
-                    onClick={() => setChipsMenuOpen((v) => !v)}
-                    disabled={repliesGenerating}
-                    className="inline-flex items-center gap-1.5 rounded-pill border border-hairline px-2.5 py-1 text-[11px] text-ink-2 transition-colors duration-calm hover:border-hairline-strong hover:bg-paper-2 hover:text-ink disabled:opacity-50"
-                  >
-                    {repliesGenerating ? (
-                      <Loader2 className="h-[13px] w-[13px] animate-spin" />
-                    ) : (
-                      <Sparkles className="h-[13px] w-[13px]" strokeWidth={1.6} />
-                    )}
-                    {repliesGenerating ? "Generating suggestions…" : "Suggested replies"}
-                    {repliesGenerating ? null : (
-                      <ChevronDown
-                        className={`h-[13px] w-[13px] transition-transform duration-calm ${chipsMenuOpen ? "rotate-180" : ""}`}
-                        strokeWidth={1.6}
-                      />
-                    )}
-                  </button>
-                  {chipsMenuOpen && !repliesGenerating ? (
-                    <div className="absolute bottom-[calc(100%+8px)] left-0 z-20 w-[min(360px,calc(100vw-32px))] overflow-hidden rounded-row border border-hairline bg-paper p-[6px] shadow-pop">
-                      {fallbackSource ? (
-                        <p
-                          className="m-0 mb-1 px-3 pb-2 pt-2 font-mono text-[10.5px] uppercase tracking-[0.06em] text-ink-3"
-                          title={fallbackSource.fellBackMessage ?? undefined}
-                        >
-                          generated with{" "}
-                          {fallbackSource.providerDisplayName ?? "fallback provider"} ·{" "}
-                          {fallbackSource.fellBackFromProviderDisplayName ??
-                            fallbackSource.fellBackFromProviderId}{" "}
-                          unavailable
-                          {fallbackSource.fellBackReason
-                            ? ` (${fallbackSource.fellBackReason.replace(/_/g, " ")})`
-                            : ""}
-                        </p>
+                          {thread.relationshipMemory.tags.length > 0 ? (
+                            <div className="mb-2 flex flex-wrap gap-1">
+                              {thread.relationshipMemory.tags.map((tag) => (
+                                <span
+                                  key={tag}
+                                  className="rounded-full border border-hairline-strong px-2 py-[1px] text-[11px] text-ink-2"
+                                >
+                                  {tag}
+                                </span>
+                              ))}
+                            </div>
+                          ) : null}
+                          {thread.relationshipMemory.notes ? (
+                            <p className="mb-2 text-ink-2">{thread.relationshipMemory.notes}</p>
+                          ) : null}
+                          <ul className="space-y-1">
+                            {thread.relationshipMemory.recentExchanges.map((ex) => (
+                              <li key={ex.threadId} className="text-ink-2">
+                                <span className="font-mono text-[10px] uppercase tracking-[0.04em] text-ink-3">
+                                  {ex.platform.toLowerCase()}
+                                  {ex.lastMessageAt ? ` · ${formatRelative(ex.lastMessageAt)}` : ""}
+                                </span>
+                                <br />
+                                <span className="text-ink-2">
+                                  {ex.preview ?? ex.whatTheyWant ?? "(no recent message)"}
+                                </span>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
                       ) : null}
-                      {chips.map((chip) => (
-                        <button
-                          key={chip.intent}
-                          type="button"
-                          onClick={() => {
-                            setComposer(chip.text);
-                            setChipsMenuOpen(false);
-                          }}
-                          className="block w-full rounded-[10px] px-3 py-[10px] text-left transition-colors duration-calm hover:bg-paper-2"
-                        >
-                          <p className="m-0 text-[13px] font-medium text-ink">{chip.intent}</p>
-                          <p className="m-0 mt-1 line-clamp-2 text-[12.5px] leading-[1.45] text-ink-3">
-                            {chip.text}
-                          </p>
-                        </button>
-                      ))}
                     </div>
                   ) : null}
-                </div>
-                ) : null}
-                {/* Tools take a full row of their own on phone (the cluster
-                    doesn't fit beside the suggestions pill), right-aligned
-                    like the design's composer foot. */}
-                <div className="flex w-full flex-wrap items-center justify-end gap-2 sm:w-auto sm:flex-1">
-                  {/* "shorten" / "warmer" rewrite the operator's OWN draft —
-                      writing support, shown unless AI help is memory-only. */}
+                  {showFullDrafts ? (
+                    <div className="relative" ref={chipsMenuMobileRef}>
+                      <button
+                        type="button"
+                        onClick={() => setChipsMenuOpen((v) => !v)}
+                        disabled={repliesGenerating}
+                        className="inline-flex items-center gap-1.5 rounded-pill border border-hairline px-2.5 py-1 text-[11px] text-ink-2 transition-colors duration-calm hover:border-hairline-strong hover:bg-paper-2 hover:text-ink disabled:opacity-50"
+                      >
+                        {repliesGenerating ? (
+                          <Loader2 className="h-[13px] w-[13px] animate-spin" />
+                        ) : (
+                          <Sparkles className="h-[13px] w-[13px]" strokeWidth={1.6} />
+                        )}
+                        {repliesGenerating ? "Generating suggestions…" : "Suggested replies"}
+                        {repliesGenerating ? null : (
+                          <ChevronDown
+                            className={`h-[13px] w-[13px] transition-transform duration-calm ${chipsMenuOpen ? "rotate-180" : ""}`}
+                            strokeWidth={1.6}
+                          />
+                        )}
+                      </button>
+                      {chipsMenuOpen && !repliesGenerating ? (
+                        <div className="absolute bottom-[calc(100%+8px)] left-0 z-20 w-[min(360px,calc(100vw-32px))] overflow-hidden rounded-row border border-hairline bg-paper p-[6px] shadow-pop">
+                          {fallbackSource ? (
+                            <p
+                              className="m-0 mb-1 px-3 pb-2 pt-2 font-mono text-[10.5px] uppercase tracking-[0.06em] text-ink-3"
+                              title={fallbackSource.fellBackMessage ?? undefined}
+                            >
+                              generated with{" "}
+                              {fallbackSource.providerDisplayName ?? "fallback provider"} ·{" "}
+                              {fallbackSource.fellBackFromProviderDisplayName ??
+                                fallbackSource.fellBackFromProviderId}{" "}
+                              unavailable
+                              {fallbackSource.fellBackReason
+                                ? ` (${fallbackSource.fellBackReason.replace(/_/g, " ")})`
+                                : ""}
+                            </p>
+                          ) : null}
+                          {chips.map((chip) => (
+                            <button
+                              key={chip.intent}
+                              type="button"
+                              onClick={() => {
+                                setComposer(chip.text);
+                                setChipsMenuOpen(false);
+                                setComposerMoreOpen(false);
+                              }}
+                              className="block w-full rounded-[10px] px-3 py-[10px] text-left transition-colors duration-calm hover:bg-paper-2"
+                            >
+                              <p className="m-0 text-[13px] font-medium text-ink">{chip.intent}</p>
+                              <p className="m-0 mt-1 line-clamp-2 text-[12.5px] leading-[1.45] text-ink-3">
+                                {chip.text}
+                              </p>
+                            </button>
+                          ))}
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : null}
                   {showWritingSupport ? (
                     <>
                       <button
@@ -5432,52 +5488,7 @@ export default function ThreadPage() {
                       </button>
                     </>
                   ) : null}
-                  {/* #462 (pilot R-0061): Dictate — record speech and have
-                      the runner transcribe it into the composer for review.
-                      Distinct from the iMessage voice-note mic (that attaches
-                      audio to send). Available on every platform; disabled
-                      with an explanation when transcription isn't configured. */}
-                  <button
-                    type="button"
-                    onClick={() =>
-                      dictationStatus === "recording" ? stopDictation() : void startDictation()
-                    }
-                    disabled={!dictationAvailable || dictationStatus === "transcribing"}
-                    title={
-                      dictationAvailable
-                        ? dictationStatus === "recording"
-                          ? "Stop and transcribe"
-                          : "Dictate your reply"
-                        : "Voice dictation needs transcription enabled on the runner"
-                    }
-                    aria-label="Dictate"
-                    className={`inline-flex items-center gap-1.5 rounded-pill border px-2.5 py-1 text-[11px] transition-colors duration-calm disabled:cursor-not-allowed disabled:opacity-50 ${
-                      dictationStatus === "recording"
-                        ? "border-risk-overdue bg-risk-overdue/10 text-risk-overdue"
-                        : "border-hairline text-ink-2 hover:border-hairline-strong hover:bg-paper-2 hover:text-ink"
-                    }`}
-                  >
-                    {dictationStatus === "transcribing" ? (
-                      <Loader2 className="h-[13px] w-[13px] animate-spin" strokeWidth={1.8} />
-                    ) : (
-                      <Mic
-                        className={`h-[13px] w-[13px] ${dictationStatus === "recording" ? "animate-pulse" : ""}`}
-                        strokeWidth={1.8}
-                      />
-                    )}
-                    {/* Icon-only at rest until the chat column is genuinely
-                        wide (2xl, matching the header labels); the running
-                        states keep their label at every width so the
-                        in-flight status stays visible. */}
-                    <span className={dictationStatus === "idle" ? "hidden 2xl:inline" : undefined}>
-                      {dictationStatus === "recording"
-                        ? "Stop"
-                        : dictationStatus === "transcribing"
-                          ? "Transcribing…"
-                          : "Dictate"}
-                    </span>
-                  </button>
-                  <div className="relative" ref={scheduleMenuRef}>
+                  <div className="relative" ref={scheduleMenuMobileRef}>
                     <button
                       type="button"
                       onClick={() => setScheduleMenuOpen((v) => !v)}
@@ -5543,22 +5554,280 @@ export default function ThreadPage() {
                   thread.platform === "WHATSAPP" ||
                   thread.platform === "GOOGLE_MESSAGES" ? (
                     <>
-                      <input
-                        type="file"
-                        multiple
-                        accept={thread.platform === "WHATSAPP" ? "image/*,video/*,audio/*,application/pdf,.gif" : "image/*,video/*,audio/*,application/pdf"}
-                        className="hidden"
-                        id="composer-file-input"
-                        onChange={(e) => {
-                          if (e.target.files) addFiles(e.target.files);
-                          e.target.value = "";
-                        }}
-                      />
                       <button
                         type="button"
                         onClick={() => document.getElementById("composer-file-input")?.click()}
                         className="grid h-[30px] w-[30px] place-items-center rounded-full border border-hairline bg-paper text-ink-2 hover:text-ink"
-                        title={thread.platform === "WHATSAPP" ? "Attach photos, GIFs, videos or files" : "Attach photos / files"}
+                        title={
+                          thread.platform === "WHATSAPP"
+                            ? "Attach photos, GIFs, videos or files"
+                            : "Attach photos / files"
+                        }
+                        aria-label="Attach files"
+                      >
+                        <Paperclip className="h-[13px] w-[13px]" strokeWidth={1.8} />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => (recording ? stopRecording() : void startRecording())}
+                        className={`grid h-[30px] w-[30px] place-items-center rounded-full border ${
+                          recording
+                            ? "border-risk-overdue bg-risk-overdue/10 text-risk-overdue animate-pulse"
+                            : "border-hairline bg-paper text-ink-2 hover:text-ink"
+                        }`}
+                        title={recording ? "Stop recording" : "Record voice note"}
+                        aria-label={recording ? "Stop recording" : "Record voice note"}
+                      >
+                        <Mic className="h-[13px] w-[13px]" strokeWidth={1.8} />
+                      </button>
+                    </>
+                  ) : null}
+                </div>
+              ) : null}
+              {/* Desktop full toolbar (unchanged layout at md+). */}
+              <div className="mt-1.5 hidden flex-wrap items-center gap-2 md:flex">
+                {thread.relationshipMemory && thread.relationshipMemory.otherThreadCount > 0 ? (
+                  <div data-testid="memory-chip" className="relative">
+                    <button
+                      type="button"
+                      onClick={() => setMemoryOpen((prev) => !prev)}
+                      aria-expanded={memoryOpen}
+                      title={`Memory · ${thread.relationshipMemory.otherThreadCount} prior conversation${thread.relationshipMemory.otherThreadCount === 1 ? "" : "s"}${thread.relationshipMemory.tags.length > 0 ? ` · ${thread.relationshipMemory.tags.length} tag${thread.relationshipMemory.tags.length === 1 ? "" : "s"}` : ""}`}
+                      className="relative grid h-[30px] w-[30px] place-items-center rounded-full border border-hairline bg-paper text-ink-2 transition-colors duration-calm hover:border-hairline-strong hover:bg-paper-2 hover:text-ink"
+                    >
+                      <Sparkles className="h-[13px] w-[13px]" strokeWidth={1.6} />
+                      <span className="absolute -right-[2px] -top-[2px] grid h-[14px] min-w-[14px] place-items-center rounded-full bg-ink px-[3px] font-mono text-[9px] font-medium text-paper">
+                        {thread.relationshipMemory.otherThreadCount}
+                      </span>
+                    </button>
+                    {memoryOpen ? (
+                      <div className="absolute bottom-[calc(100%+8px)] left-0 z-20 w-[480px] max-w-[80vw] rounded-card border border-hairline bg-paper p-3 text-[12px] leading-snug shadow-card">
+                        <div className="mb-2 font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3">
+                          What the AI can lean on
+                        </div>
+                        {thread.relationshipMemory.tags.length > 0 ? (
+                          <div className="mb-2 flex flex-wrap gap-1">
+                            {thread.relationshipMemory.tags.map((tag) => (
+                              <span
+                                key={tag}
+                                className="rounded-full border border-hairline-strong px-2 py-[1px] text-[11px] text-ink-2"
+                              >
+                                {tag}
+                              </span>
+                            ))}
+                          </div>
+                        ) : null}
+                        {thread.relationshipMemory.notes ? (
+                          <p className="mb-2 text-ink-2">{thread.relationshipMemory.notes}</p>
+                        ) : null}
+                        <ul className="space-y-1">
+                          {thread.relationshipMemory.recentExchanges.map((ex) => (
+                            <li key={ex.threadId} className="text-ink-2">
+                              <span className="font-mono text-[10px] uppercase tracking-[0.04em] text-ink-3">
+                                {ex.platform.toLowerCase()}
+                                {ex.lastMessageAt ? ` · ${formatRelative(ex.lastMessageAt)}` : ""}
+                              </span>
+                              <br />
+                              <span className="text-ink-2">
+                                {ex.preview ?? ex.whatTheyWant ?? "(no recent message)"}
+                              </span>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
+                {showFullDrafts ? (
+                  <div className="relative" ref={chipsMenuDesktopRef}>
+                    <button
+                      type="button"
+                      onClick={() => setChipsMenuOpen((v) => !v)}
+                      disabled={repliesGenerating}
+                      className="inline-flex items-center gap-1.5 rounded-pill border border-hairline px-2.5 py-1 text-[11px] text-ink-2 transition-colors duration-calm hover:border-hairline-strong hover:bg-paper-2 hover:text-ink disabled:opacity-50"
+                    >
+                      {repliesGenerating ? (
+                        <Loader2 className="h-[13px] w-[13px] animate-spin" />
+                      ) : (
+                        <Sparkles className="h-[13px] w-[13px]" strokeWidth={1.6} />
+                      )}
+                      {repliesGenerating ? "Generating suggestions…" : "Suggested replies"}
+                      {repliesGenerating ? null : (
+                        <ChevronDown
+                          className={`h-[13px] w-[13px] transition-transform duration-calm ${chipsMenuOpen ? "rotate-180" : ""}`}
+                          strokeWidth={1.6}
+                        />
+                      )}
+                    </button>
+                    {chipsMenuOpen && !repliesGenerating ? (
+                      <div className="absolute bottom-[calc(100%+8px)] left-0 z-20 w-[min(360px,calc(100vw-32px))] overflow-hidden rounded-row border border-hairline bg-paper p-[6px] shadow-pop">
+                        {fallbackSource ? (
+                          <p
+                            className="m-0 mb-1 px-3 pb-2 pt-2 font-mono text-[10.5px] uppercase tracking-[0.06em] text-ink-3"
+                            title={fallbackSource.fellBackMessage ?? undefined}
+                          >
+                            generated with{" "}
+                            {fallbackSource.providerDisplayName ?? "fallback provider"} ·{" "}
+                            {fallbackSource.fellBackFromProviderDisplayName ??
+                              fallbackSource.fellBackFromProviderId}{" "}
+                            unavailable
+                            {fallbackSource.fellBackReason
+                              ? ` (${fallbackSource.fellBackReason.replace(/_/g, " ")})`
+                              : ""}
+                          </p>
+                        ) : null}
+                        {chips.map((chip) => (
+                          <button
+                            key={chip.intent}
+                            type="button"
+                            onClick={() => {
+                              setComposer(chip.text);
+                              setChipsMenuOpen(false);
+                            }}
+                            className="block w-full rounded-[10px] px-3 py-[10px] text-left transition-colors duration-calm hover:bg-paper-2"
+                          >
+                            <p className="m-0 text-[13px] font-medium text-ink">{chip.intent}</p>
+                            <p className="m-0 mt-1 line-clamp-2 text-[12.5px] leading-[1.45] text-ink-3">
+                              {chip.text}
+                            </p>
+                          </button>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
+                <div className="flex w-full flex-wrap items-center justify-end gap-2 sm:w-auto sm:flex-1">
+                  {showWritingSupport ? (
+                    <>
+                      <button
+                        type="button"
+                        disabled={!composer.trim() || transforming !== null}
+                        onClick={() => void transform("SHORTEN")}
+                        className="font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3 hover:text-ink disabled:opacity-40"
+                      >
+                        {transforming === "SHORTEN" ? "shortening…" : "shorten"}
+                      </button>
+                      <button
+                        type="button"
+                        disabled={!composer.trim() || transforming !== null}
+                        onClick={() => void transform("MAKE_WARMER")}
+                        className="font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3 hover:text-ink disabled:opacity-40"
+                      >
+                        {transforming === "MAKE_WARMER" ? "warming…" : "warmer"}
+                      </button>
+                    </>
+                  ) : null}
+                  <button
+                    type="button"
+                    onClick={() =>
+                      dictationStatus === "recording" ? stopDictation() : void startDictation()
+                    }
+                    disabled={!dictationAvailable || dictationStatus === "transcribing"}
+                    title={
+                      dictationAvailable
+                        ? dictationStatus === "recording"
+                          ? "Stop and transcribe"
+                          : "Dictate your reply"
+                        : "Voice dictation needs transcription enabled on the runner"
+                    }
+                    aria-label="Dictate"
+                    className={`inline-flex items-center gap-1.5 rounded-pill border px-2.5 py-1 text-[11px] transition-colors duration-calm disabled:cursor-not-allowed disabled:opacity-50 ${
+                      dictationStatus === "recording"
+                        ? "border-risk-overdue bg-risk-overdue/10 text-risk-overdue"
+                        : "border-hairline text-ink-2 hover:border-hairline-strong hover:bg-paper-2 hover:text-ink"
+                    }`}
+                  >
+                    {dictationStatus === "transcribing" ? (
+                      <Loader2 className="h-[13px] w-[13px] animate-spin" strokeWidth={1.8} />
+                    ) : (
+                      <Mic
+                        className={`h-[13px] w-[13px] ${dictationStatus === "recording" ? "animate-pulse" : ""}`}
+                        strokeWidth={1.8}
+                      />
+                    )}
+                    <span className={dictationStatus === "idle" ? "hidden 2xl:inline" : undefined}>
+                      {dictationStatus === "recording"
+                        ? "Stop"
+                        : dictationStatus === "transcribing"
+                          ? "Transcribing…"
+                          : "Dictate"}
+                    </span>
+                  </button>
+                  <div className="relative" ref={scheduleMenuDesktopRef}>
+                    <button
+                      type="button"
+                      onClick={() => setScheduleMenuOpen((v) => !v)}
+                      disabled={!composer.trim() || sending || scheduling}
+                      title="Schedule send"
+                      aria-label="Schedule send"
+                      className="inline-flex h-[30px] w-[30px] items-center justify-center rounded-full border border-hairline text-ink-2 transition-colors duration-calm hover:border-hairline-strong hover:bg-paper-2 hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      <Clock className="h-[13px] w-[13px]" strokeWidth={1.8} />
+                    </button>
+                    {scheduleMenuOpen ? (
+                      <div className="absolute bottom-[calc(100%+8px)] right-0 z-20 w-[min(300px,calc(100vw-32px))] overflow-hidden rounded-row border border-hairline bg-paper p-[6px] shadow-pop">
+                        <p className="m-0 px-3 pb-2 pt-2 font-mono text-[10.5px] uppercase tracking-[0.06em] text-ink-3">
+                          Schedule send
+                        </p>
+                        {buildSchedulePresets(new Date()).map((preset) => (
+                          <button
+                            key={preset.label}
+                            type="button"
+                            onClick={() => void scheduleSend(preset.at)}
+                            disabled={scheduling}
+                            className="flex w-full items-center justify-between rounded-[10px] px-3 py-[10px] text-left transition-colors duration-calm hover:bg-paper-2 disabled:opacity-50"
+                          >
+                            <span className="text-[13px] font-medium text-ink">{preset.label}</span>
+                            <span className="font-mono text-[11px] text-ink-3">{preset.sub}</span>
+                          </button>
+                        ))}
+                        <div className="mx-2 my-2 border-t border-hairline" />
+                        <div className="px-3 pb-2 pt-1">
+                          <p className="mb-1 font-mono text-[10.5px] uppercase tracking-[0.06em] text-ink-3">
+                            Custom
+                          </p>
+                          <input
+                            type="datetime-local"
+                            value={customScheduleValue}
+                            onChange={(e) => setCustomScheduleValue(e.target.value)}
+                            className="w-full rounded-row border border-hairline bg-paper px-3 py-[7px] text-[13px] text-ink outline-none transition-[border-color] duration-calm focus:border-hairline-strong"
+                          />
+                          <button
+                            type="button"
+                            disabled={!customScheduleValue || scheduling}
+                            onClick={() => {
+                              const at = new Date(customScheduleValue);
+                              if (Number.isNaN(at.getTime())) {
+                                setError("Pick a valid date and time.");
+                                return;
+                              }
+                              if (at.getTime() <= Date.now()) {
+                                setError("Pick a time in the future.");
+                                return;
+                              }
+                              void scheduleSend(at);
+                            }}
+                            className="mt-2 w-full rounded-pill bg-ink px-3 py-[7px] text-[12px] font-medium text-paper hover:bg-ink-2 disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            {scheduling ? "Scheduling…" : "Schedule"}
+                          </button>
+                        </div>
+                      </div>
+                    ) : null}
+                  </div>
+                  {thread.platform === "IMESSAGE" ||
+                  thread.platform === "WHATSAPP" ||
+                  thread.platform === "GOOGLE_MESSAGES" ? (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => document.getElementById("composer-file-input")?.click()}
+                        className="grid h-[30px] w-[30px] place-items-center rounded-full border border-hairline bg-paper text-ink-2 hover:text-ink"
+                        title={
+                          thread.platform === "WHATSAPP"
+                            ? "Attach photos, GIFs, videos or files"
+                            : "Attach photos / files"
+                        }
                         aria-label="Attach files"
                       >
                         <Paperclip className="h-[13px] w-[13px]" strokeWidth={1.8} />
@@ -5584,10 +5853,94 @@ export default function ThreadPage() {
                     disabled={sending || (!composer.trim() && composerAttachments.length === 0)}
                     className="px-3.5 py-1.5 text-[12px]"
                   >
-                    {sending ? <Loader2 className="h-[13px] w-[13px] animate-spin" /> : <Send className="h-[13px] w-[13px]" strokeWidth={1.8} />}
+                    {sending ? (
+                      <Loader2 className="h-[13px] w-[13px] animate-spin" />
+                    ) : (
+                      <Send className="h-[13px] w-[13px]" strokeWidth={1.8} />
+                    )}
                     Send
                   </Button>
                 </div>
+              </div>
+              {/* Mobile primary actions: [+] [mic] ........ [Send] */}
+              <div
+                data-testid="composer-mobile-actions"
+                className="mt-1.5 flex items-center gap-2 md:hidden"
+              >
+                <button
+                  type="button"
+                  data-testid="composer-more-toggle"
+                  onClick={() => {
+                    setComposerMoreOpen((prev) => {
+                      if (prev) {
+                        setScheduleMenuOpen(false);
+                        setChipsMenuOpen(false);
+                        setMemoryOpen(false);
+                      }
+                      return !prev;
+                    });
+                  }}
+                  aria-expanded={composerMoreOpen}
+                  aria-label={composerMoreOpen ? "Hide more actions" : "More actions"}
+                  title={composerMoreOpen ? "Hide more actions" : "More actions"}
+                  className={cn(
+                    "grid h-[34px] w-[34px] shrink-0 place-items-center rounded-full border transition-colors duration-calm",
+                    composerMoreOpen
+                      ? "border-hairline-strong bg-paper-2 text-ink"
+                      : "border-hairline bg-paper text-ink-2 hover:border-hairline-strong hover:bg-paper-2 hover:text-ink"
+                  )}
+                >
+                  {composerMoreOpen ? (
+                    <X className="h-[15px] w-[15px]" strokeWidth={1.8} />
+                  ) : (
+                    <Plus className="h-[15px] w-[15px]" strokeWidth={1.8} />
+                  )}
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    dictationStatus === "recording" ? stopDictation() : void startDictation()
+                  }
+                  disabled={!dictationAvailable || dictationStatus === "transcribing"}
+                  title={
+                    dictationAvailable
+                      ? dictationStatus === "recording"
+                        ? "Stop and transcribe"
+                        : "Dictate your reply"
+                      : "Voice dictation needs transcription enabled on the runner"
+                  }
+                  aria-label="Dictate"
+                  className={cn(
+                    "grid h-[34px] w-[34px] shrink-0 place-items-center rounded-full border transition-colors duration-calm disabled:cursor-not-allowed disabled:opacity-50",
+                    dictationStatus === "recording"
+                      ? "border-risk-overdue bg-risk-overdue/10 text-risk-overdue"
+                      : "border-hairline bg-paper text-ink-2 hover:border-hairline-strong hover:bg-paper-2 hover:text-ink"
+                  )}
+                >
+                  {dictationStatus === "transcribing" ? (
+                    <Loader2 className="h-[15px] w-[15px] animate-spin" strokeWidth={1.8} />
+                  ) : (
+                    <Mic
+                      className={`h-[15px] w-[15px] ${dictationStatus === "recording" ? "animate-pulse" : ""}`}
+                      strokeWidth={1.8}
+                    />
+                  )}
+                </button>
+                <div className="min-w-0 flex-1" />
+                <Button
+                  variant="primary"
+                  onClick={() => void onSend()}
+                  disabled={sending || (!composer.trim() && composerAttachments.length === 0)}
+                  className="px-3.5 py-1.5 text-[12px]"
+                  data-testid="composer-mobile-send"
+                >
+                  {sending ? (
+                    <Loader2 className="h-[13px] w-[13px] animate-spin" />
+                  ) : (
+                    <Send className="h-[13px] w-[13px]" strokeWidth={1.8} />
+                  )}
+                  Send
+                </Button>
               </div>
               {showLateNightNudge && lateNightSlot ? (
                 <button
