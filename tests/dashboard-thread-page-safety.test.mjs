@@ -42,7 +42,7 @@ test("a [threadId]-keyed effect resets the composer cluster, pending sends, and 
 test("the timeline scroller clips horizontal overflow and bubble text wraps anywhere", () => {
   assert.match(
     src,
-    /className="relative min-h-0 flex-1 overflow-y-auto overflow-x-hidden"/,
+    /className="relative min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain"/,
     "timeline scroller must keep overflow-x-hidden alongside overflow-y-auto"
   );
   const preWrapLines = src
