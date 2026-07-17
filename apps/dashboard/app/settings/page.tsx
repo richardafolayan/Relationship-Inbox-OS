@@ -10,6 +10,7 @@ import {
   CircleHelp,
   MessageSquareText,
   MonitorCog,
+  MoreVertical,
   Plug,
   Send,
   SlidersHorizontal,
@@ -86,6 +87,8 @@ import { classifyConsumerFailure } from "@/lib/consumer-failure";
 import { isIMessageFullDiskAccessProblem } from "@/lib/platform-setup";
 import { startSetupWizard } from "@/lib/setup-wizard";
 import { OptionalComponents } from "@/components/settings/OptionalComponents";
+import { formatRelative } from "@/lib/time";
+import { Menu, type MenuItem } from "@/components/ui/menu";
 import {
   applyUiScale,
   onUiScaleChange,
@@ -872,49 +875,89 @@ function PlatformSettingsSection({
         {imessageRow ? (
           <PlatformSetupCard
             row={imessageRow}
-            fallbackPlatform="IMESSAGE"
             title="iMessage"
             body="Reads Messages on this Mac. macOS will not show a Full Disk Access pop-up."
-            actionLabel={imessageNeedsFullDiskAccess ? "Open Full Disk Access" : "Scan iMessage"}
+            primaryLabel={imessageNeedsFullDiskAccess ? "Open Full Disk Access" : "Scan now"}
             busy={busy === "IMESSAGE"}
             onPrimary={() =>
               onAction("IMESSAGE", imessageNeedsFullDiskAccess ? "full-disk-access" : "scan")
+            }
+            moreItems={
+              imessageNeedsFullDiskAccess
+                ? [
+                    {
+                      label: "Scan now",
+                      onSelect: () => onAction("IMESSAGE", "scan")
+                    }
+                  ]
+                : [
+                    {
+                      label: "Open Full Disk Access",
+                      onSelect: () => onAction("IMESSAGE", "full-disk-access")
+                    }
+                  ]
             }
           />
         ) : null}
         {googleMessagesRow ? (
           <PlatformSetupCard
             row={googleMessagesRow}
-            fallbackPlatform="GOOGLE_MESSAGES"
             title="Google Messages"
             body="Pairs with Google Messages on your Android phone. SMS, MMS, and RCS stay user-triggered."
-            actionLabel={googleMessagesRow.status === "CONNECTED" ? "Open Google Messages" : "Pair Android phone"}
+            primaryLabel={
+              googleMessagesRow.status === "CONNECTED" ? "Scan now" : "Pair Android phone"
+            }
             busy={busy === "GOOGLE_MESSAGES"}
             onPrimary={() =>
               onAction(
                 "GOOGLE_MESSAGES",
-                googleMessagesRow.status === "CONNECTED" ? "open-browser" : "connect"
+                googleMessagesRow.status === "CONNECTED" ? "scan" : "connect"
               )
+            }
+            moreItems={
+              googleMessagesRow.status === "CONNECTED"
+                ? [
+                    {
+                      label: "Open Google Messages",
+                      onSelect: () => onAction("GOOGLE_MESSAGES", "open-browser")
+                    }
+                  ]
+                : undefined
             }
           />
         ) : null}
         {linkedinRow ? (
           <PlatformSetupCard
             row={linkedinRow}
-            fallbackPlatform="LINKEDIN"
             title="LinkedIn"
             body={
               linkedinRow.browserProfileMode === "isolated"
                 ? `Uses a dedicated Chrome profile. Sign in when ${APP_NAME} opens it.`
                 : "Uses your normal Chrome session. Sign in there first."
             }
-            actionLabel={linkedinRow.status === "CONNECTED" ? "Open LinkedIn" : "Connect LinkedIn"}
+            primaryLabel={linkedinRow.status === "CONNECTED" ? "Scan now" : "Connect LinkedIn"}
             busy={busy === "LINKEDIN"}
             onPrimary={() =>
-              onAction(
-                "LINKEDIN",
-                linkedinRow.status === "CONNECTED" ? "open-browser" : "connect"
-              )
+              onAction("LINKEDIN", linkedinRow.status === "CONNECTED" ? "scan" : "connect")
+            }
+            moreItems={
+              linkedinRow.status === "CONNECTED"
+                ? [
+                    {
+                      label: "Open LinkedIn",
+                      onSelect: () => onAction("LINKEDIN", "open-browser")
+                    },
+                    {
+                      label: "Reconnect",
+                      onSelect: () => onAction("LINKEDIN", "connect")
+                    }
+                  ]
+                : [
+                    {
+                      label: "Open LinkedIn",
+                      onSelect: () => onAction("LINKEDIN", "open-browser")
+                    }
+                  ]
             }
           />
         ) : null}
@@ -922,6 +965,7 @@ function PlatformSettingsSection({
           <div className="rounded-[8px] bg-paper-2/45 px-4 py-4">
             <WhatsAppConnect
               scanBusy={busy === "WHATSAPP"}
+              lastScanAt={whatsappRow.lastScanAt}
               onScan={() => onAction("WHATSAPP", "scan")}
             />
           </div>
@@ -933,26 +977,26 @@ function PlatformSettingsSection({
 
 function PlatformSetupCard({
   row,
-  fallbackPlatform,
   title,
   body,
-  actionLabel,
+  primaryLabel,
   busy,
-  onPrimary
+  onPrimary,
+  moreItems
 }: {
   row?: PlatformCard;
-  fallbackPlatform: PlatformCard["platform"];
   title: string;
   body: string;
-  actionLabel: string;
+  primaryLabel: string;
   busy: boolean;
   onPrimary: () => void;
+  moreItems?: MenuItem[];
 }) {
   const status = row?.status ?? "NOT_CONNECTED";
   const connected = status === "CONNECTED";
   const enabled = row?.enabled ?? true;
   const supported = row?.supported !== false;
-  const runnerProcess = fallbackPlatform === "IMESSAGE" ? row?.runnerProcess : undefined;
+  const runnerProcess = row?.platform === "IMESSAGE" ? row?.runnerProcess : undefined;
   const platformFailure = row?.lastError
     ? classifyConsumerFailure(new Error(row.lastError), {
         path: "/runner/control/platform/connect",
@@ -962,30 +1006,40 @@ function PlatformSetupCard({
   const statusLabel = !supported
     ? "Not available"
     : !enabled
-    ? "Off"
+      ? "Off"
+      : connected
+        ? "Connected"
+        : status === "DEGRADED"
+          ? "Needs a look"
+          : status === "ERROR"
+            ? "Error"
+            : "Not connected";
+  const lastScanLabel = row?.lastScanAt
+    ? `Last scanned ${formatRelative(row.lastScanAt)}`
     : connected
-      ? "Connected"
-      : status === "DEGRADED"
-        ? "Needs a look"
-        : status === "ERROR"
-          ? "Error"
-          : "Not connected";
+      ? "Not scanned yet"
+      : null;
+  const secondaryItems = moreItems ?? [];
 
   return (
     <article className="rounded-[8px] bg-paper-2/45 px-4 py-4">
-      <div className="flex items-start justify-between gap-4">
-        <div className="min-w-0">
-          <h3 className="m-0 text-[16px] font-semibold text-ink">{title}</h3>
-          <p className="m-0 mt-1 text-[13.5px] leading-[1.45] text-ink-3">{body}</p>
-        </div>
-        <span
+      <div className="min-w-0">
+        <h3 className="m-0 text-[16px] font-semibold text-ink">{title}</h3>
+        <p
           className={cn(
-            "shrink-0 rounded-pill px-2 py-[3px] font-mono text-[10.5px]",
-            connected ? "bg-risk-fresh/15 text-risk-fresh" : "bg-paper-3 text-ink-3"
+            "m-0 mt-1 text-[13px] font-medium",
+            connected ? "text-risk-fresh" : "text-ink-2"
           )}
+          data-testid="platform-connection-status"
         >
           {statusLabel}
-        </span>
+        </p>
+        {lastScanLabel ? (
+          <p className="m-0 mt-0.5 font-mono text-[11px] text-ink-3" data-testid="platform-last-scan">
+            {lastScanLabel}
+          </p>
+        ) : null}
+        <p className="m-0 mt-2 text-[13.5px] leading-[1.45] text-ink-3">{body}</p>
       </div>
       {supported && platformFailure ? (
         <p className="m-0 mt-3 rounded-row border border-hairline bg-paper px-3 py-2 text-[12.5px] leading-[1.45] text-ink-2">
@@ -1003,14 +1057,25 @@ function PlatformSetupCard({
           type="button"
           onClick={onPrimary}
           disabled={busy || !enabled || !supported}
-          className="inline-flex items-center rounded-pill bg-ink px-3 py-[7px] text-[12.5px] font-medium text-paper hover:bg-ink-2 disabled:cursor-not-allowed disabled:opacity-50"
+          className="inline-flex min-h-[40px] items-center rounded-pill bg-ink px-4 py-[8px] text-[12.5px] font-medium text-paper hover:bg-ink-2 disabled:cursor-not-allowed disabled:opacity-50"
         >
-          {busy ? "Working..." : actionLabel}
+          {busy ? "Working..." : primaryLabel}
         </button>
-        {connected ? (
-          <span className="font-mono text-[11px] text-ink-3">
-            {row?.lastScanAt ? "Scan ready" : PLATFORM_DISPLAY[fallbackPlatform]}
-          </span>
+        {secondaryItems.length > 0 && supported ? (
+          <Menu
+            trigger={
+              <button
+                type="button"
+                aria-label="More actions"
+                disabled={busy || !enabled}
+                className="grid h-[40px] w-[40px] place-items-center rounded-[10px] border border-hairline bg-transparent text-ink-2 transition-colors duration-calm hover:bg-paper hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
+                title="More"
+              >
+                <MoreVertical className="h-[16px] w-[16px]" strokeWidth={2} />
+              </button>
+            }
+            items={secondaryItems}
+          />
         ) : null}
       </div>
     </article>

@@ -36,14 +36,19 @@ test("WhatsApp can be reset to a clean session with inline feedback", () => {
   assert.match(component, /Reset WhatsApp/);
   assert.match(component, /Resetting\.\.\./);
   assert.match(component, /WhatsApp reset\. Connect again to get a new QR code\./);
+  assert.match(component, /window\.confirm\(/);
   assert.match(runner, /app\.post\("\/control\/whatsapp\/reset"/);
   assert.match(runner, /clearPersistedWhatsAppSession/);
   assert.match(runner, /RESET_WHATSAPP_SESSION/);
 });
 
-test("WhatsApp uses the same connected badge and primary scan action as other platform cards", () => {
-  assert.match(component, /bg-risk-fresh\/15 text-risk-fresh/);
-  assert.match(component, /Scan WhatsApp/);
-  assert.match(component, /Scan ready/);
+test("WhatsApp uses connected status, last scan, primary Scan, and secondary More for reset", () => {
+  assert.match(component, /text-risk-fresh/);
+  assert.match(component, /Scan now/);
   assert.match(component, /scanBusy \? "Working\.\.\."/);
+  assert.match(component, /data-testid="platform-connection-status"/);
+  assert.match(component, /data-testid="platform-last-scan"/);
+  assert.match(component, /aria-label="More actions"/);
+  assert.match(component, /lastScanAt/);
+  assert.doesNotMatch(component, /Scan ready/);
 });
