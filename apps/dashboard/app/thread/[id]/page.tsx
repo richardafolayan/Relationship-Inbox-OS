@@ -788,19 +788,22 @@ export default function ThreadPage() {
     return () => mq.removeEventListener("change", update);
   }, []);
   // Escape closes the AI panel (compose mode menu wins first when open).
+  // Capture + stopImmediatePropagation so app-shell Esc→/today cannot also fire.
   useEffect(() => {
     if (!aiOpen) return;
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopPropagation();
+      event.stopImmediatePropagation();
       if (composeModeMenuOpen) {
         setComposeModeMenuOpen(false);
         return;
       }
-      event.preventDefault();
       closeAiAssist();
     };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => window.removeEventListener("keydown", onKeyDown, true);
   }, [aiOpen, closeAiAssist, composeModeMenuOpen]);
   // Focus moves into the panel on open (overlay modes) and returns to the
   // trigger on close so keyboard flow stays predictable.
@@ -820,6 +823,37 @@ export default function ThreadPage() {
     if (returnTo && document.contains(returnTo)) {
       returnTo.focus();
     }
+  }, [aiOpen, aiOverlayMode]);
+  // Overlay dialog: trap Tab inside the panel so focus cannot leave into
+  // scroll-locked background controls.
+  useEffect(() => {
+    if (!aiOpen || !aiOverlayMode) return;
+    const FOCUSABLE =
+      'a[href],button:not([disabled]),textarea:not([disabled]),input:not([disabled]),select:not([disabled]),[tabindex]:not([tabindex="-1"])';
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Tab") return;
+      const panel = document.getElementById("ai-assist-panel");
+      if (!panel) return;
+      const nodes = Array.from(panel.querySelectorAll<HTMLElement>(FOCUSABLE)).filter(
+        (el) => el.getClientRects().length > 0
+      );
+      if (nodes.length === 0) return;
+      const first = nodes[0]!;
+      const last = nodes[nodes.length - 1]!;
+      const active = document.activeElement as HTMLElement | null;
+      const inside = active ? panel.contains(active) : false;
+      if (event.shiftKey) {
+        if (!inside || active === first) {
+          event.preventDefault();
+          last.focus();
+        }
+      } else if (!inside || active === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
   }, [aiOpen, aiOverlayMode]);
   // Phone: system Back / browser back closes AI Assist before leaving the
   // thread. pushState on open; popstate closes; button/Escape close pops

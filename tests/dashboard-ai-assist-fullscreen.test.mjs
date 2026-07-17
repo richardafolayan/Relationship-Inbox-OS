@@ -18,6 +18,10 @@ const replyBrief = readFileSync(
   fileURLToPath(new URL("../apps/dashboard/components/thread/ReplyBriefPanel.tsx", import.meta.url)),
   "utf8"
 );
+const appShell = readFileSync(
+  fileURLToPath(new URL("../apps/dashboard/components/layout/app-shell.tsx", import.meta.url)),
+  "utf8"
+);
 
 test("phone AI Assist is full-screen; tablet keeps slide-over; desktop docks (#898)", () => {
   // Phone: covers the full app content area rather than leaving an 8% strip.
@@ -62,6 +66,42 @@ test("Escape and phone Back close AI Assist; focus is managed (#898)", () => {
   assert.match(threadPage, /aiCloseButtonRef\.current\?\.focus/);
   assert.match(threadPage, /aiReturnFocusRef/);
   assert.match(threadPage, /returnTo\.focus\(\)/);
+});
+
+test("Escape stops propagation so shell does not leave the thread (#898 F1)", () => {
+  // AI handler must consume Escape in capture phase before app-shell bubble.
+  assert.match(threadPage, /event\.stopImmediatePropagation\(\)/);
+  assert.match(threadPage, /event\.stopPropagation\(\)/);
+  assert.match(threadPage, /addEventListener\("keydown", onKeyDown, true\)/);
+  assert.match(threadPage, /removeEventListener\("keydown", onKeyDown, true\)/);
+  // App-shell must also skip Esc→/today when Escape was already handled or a modal is open.
+  assert.match(appShell, /event\.defaultPrevented/);
+  assert.match(appShell, /aria-modal="true"/);
+  assert.match(appShell, /router\.push\("\/today"\)/);
+  // Gating must sit on the Escape path before the thread→today push.
+  const escBlock = appShell.slice(
+    appShell.indexOf('if (event.key === "Escape")'),
+    appShell.indexOf('if (event.key === "[")')
+  );
+  assert.match(escBlock, /event\.defaultPrevented/);
+  assert.match(escBlock, /aria-modal="true"/);
+  assert.ok(
+    escBlock.indexOf("defaultPrevented") < escBlock.indexOf('router.push("/today")'),
+    "defaultPrevented gate must precede Esc→/today navigation"
+  );
+  assert.ok(
+    escBlock.indexOf('aria-modal="true"') < escBlock.indexOf('router.push("/today")'),
+    "aria-modal gate must precede Esc→/today navigation"
+  );
+});
+
+test("overlay AI Assist traps Tab focus inside the dialog (#898 F2)", () => {
+  assert.match(threadPage, /if \(!aiOpen \|\| !aiOverlayMode\) return/);
+  assert.match(threadPage, /event\.key !== "Tab"/);
+  assert.match(threadPage, /getElementById\("ai-assist-panel"\)/);
+  assert.match(threadPage, /panel\.contains\(active\)/);
+  assert.match(threadPage, /last\.focus\(\)/);
+  assert.match(threadPage, /first\.focus\(\)/);
 });
 
 test("mobile AI Assist subordinates repeated brief context (#898)", () => {

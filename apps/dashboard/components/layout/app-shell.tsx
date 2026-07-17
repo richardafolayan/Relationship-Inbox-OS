@@ -685,6 +685,9 @@ export function AppShell({ children }: { children: ReactNode }) {
           setPaletteOpen(false);
           return;
         }
+        // Nested overlays (AI Assist, modals) own Escape; do not also leave the thread.
+        if (event.defaultPrevented) return;
+        if (document.querySelector('[aria-modal="true"]')) return;
         if (pathname.startsWith("/thread/")) {
           router.push("/today");
         }
