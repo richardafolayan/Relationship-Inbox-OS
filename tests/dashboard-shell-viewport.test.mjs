@@ -31,10 +31,20 @@ test("document scroll is locked and the shell uses the dynamic viewport (#895)",
 });
 
 test("thread keeps its own message scroller rather than relying on shell main (#895)", () => {
-  // Read from HEAD of the base branch when the worktree has unrelated
-  // thread edits; the contract is structural and lives on strip-back-pr1.
   const thread = read("apps/dashboard/app/thread/[id]/page.tsx");
 
-  assert.match(thread, /h-full min-h-0[^"\n]*overflow-hidden/);
+  // Root grid and chat column clip; timeline is the only vertical scroller.
+  assert.match(thread, /grid h-full min-h-0 grid-cols-1 overflow-hidden/);
+  assert.match(thread, /relative flex h-full min-h-0 flex-col overflow-hidden/);
   assert.match(thread, /min-h-0 flex-1 overflow-y-auto overflow-x-hidden/);
+});
+
+test("error and not-found remain scrollable under a locked shell (#895)", () => {
+  const errorPage = read("apps/dashboard/app/error.tsx");
+  const notFound = read("apps/dashboard/app/not-found.tsx");
+  const globalError = read("apps/dashboard/app/global-error.tsx");
+
+  assert.match(errorPage, /h-full min-h-0 overflow-y-auto/);
+  assert.match(notFound, /h-full min-h-0 overflow-y-auto/);
+  assert.match(globalError, /overflowY:\s*"auto"/);
 });
