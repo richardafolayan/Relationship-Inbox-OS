@@ -93,6 +93,13 @@ import {
   DICTATION_LOST_CONNECTION_MESSAGE,
   type DictationResponseBody
 } from "@/lib/dictation-retry";
+import {
+  classifyFormatDictationResponse,
+  type DictationMessageBubble,
+  type DictationMessagesWarning,
+  type FormatDictationMessagesResponse
+} from "@/lib/dictation-messages";
+import { DictationMessagesReview } from "@/components/thread/dictation-messages-review";
 import { stopRecorderAndStream } from "@/lib/recorder-teardown";
 import { ThingsToRemember } from "@/components/thread/ThingsToRemember";
 import { LinkPreviewCard, type LinkPreviewData } from "@/components/thread/link-preview-card";
@@ -705,6 +712,17 @@ export default function ThreadPage() {
   // (non-null) drives the inline retry banner above the composer.
   const failedDictationWavRef = useRef<Blob | null>(null);
   const [dictationRetry, setDictationRetry] = useState<string | null>(null);
+  // #880: after a successful transcription, hold the raw transcript so the
+  // operator can choose "Keep as transcript" (current behaviour) or
+  // "Turn into messages" (voice-preserving bubble split). Never auto-send.
+  // The original is always retained even if formatting fails.
+  const [pendingDictationTranscript, setPendingDictationTranscript] = useState<string | null>(null);
+  const [dictationMessages, setDictationMessages] = useState<DictationMessageBubble[] | null>(null);
+  const [dictationMessageWarnings, setDictationMessageWarnings] = useState<DictationMessagesWarning[]>([]);
+  const [dictationFormatStatus, setDictationFormatStatus] = useState<
+    "idle" | "formatting" | "ready" | "error"
+  >("idle");
+  const [dictationFormatError, setDictationFormatError] = useState<string | null>(null);
   // Source of the current composer text: empty / explicit draft typed
   // by the operator / AI predraft (first suggested reply auto-filled
   // when no explicit draft exists). Drives the "AI predraft" badge.
@@ -1131,6 +1149,13 @@ export default function ThreadPage() {
     setComposeDraft("");
     setComposeError(null);
     setAskAnswer(null);
+    // #880: drop any in-flight dictation review from the previous thread.
+    setPendingDictationTranscript(null);
+    setDictationMessages(null);
+    setDictationMessageWarnings([]);
+    setDictationFormatStatus("idle");
+    setDictationFormatError(null);
+    setDictationRetry(null);
     // Clear the in-flight transform flag so the new thread's shorten/warmer
     // buttons aren't stranded disabled by the previous thread's pending call.
     setTransforming(null);
@@ -1823,12 +1848,13 @@ export default function ThreadPage() {
     };
   }, []);
 
-  // #462 follow-up: POST a prepared 16 kHz WAV to the runner and fold the
-  // returned transcript into the composer. Extracted so the initial
-  // dictation and the inline "Try again" both submit through one path.
-  // Nothing is persisted server-side; on a *transient* failure we keep the
-  // WAV in memory (failedDictationWavRef) and show a retry banner so the
-  // operator never loses a recording to a dropped connection.
+  // #462 follow-up / #880: POST a prepared 16 kHz WAV to the runner. On
+  // success, hold the transcript for a Keep / Turn-into-messages choice
+  // rather than auto-inserting. Extracted so the initial dictation and the
+  // inline "Try again" both submit through one path. Nothing is persisted
+  // server-side; on a *transient* failure we keep the WAV in memory
+  // (failedDictationWavRef) and show a retry banner so the operator never
+  // loses a recording to a dropped connection.
   const submitDictationWav = useCallback(async (wav: Blob) => {
     setDictationRetry(null);
     setDictationStatus("transcribing");
@@ -1857,9 +1883,13 @@ export default function ThreadPage() {
       switch (outcome.kind) {
         case "text": {
           failedDictationWavRef.current = null;
-          const spoken = outcome.text;
-          setComposer((prev) => (prev && !/\s$/.test(prev) ? `${prev} ${spoken}` : `${prev}${spoken}`));
-          setComposerSource("user");
+          // #880: park the transcript for the Keep / Turn-into-messages
+          // choice. Do not auto-insert into the composer.
+          setPendingDictationTranscript(outcome.text);
+          setDictationMessages(null);
+          setDictationMessageWarnings([]);
+          setDictationFormatStatus("idle");
+          setDictationFormatError(null);
           break;
         }
         case "empty":
@@ -1889,6 +1919,95 @@ export default function ThreadPage() {
     } finally {
       setDictationStatus("idle");
     }
+  }, []);
+
+  const keepDictationAsTranscript = useCallback(() => {
+    const spoken = pendingDictationTranscript;
+    if (!spoken) return;
+    setComposer((prev) => (prev && !/\s$/.test(prev) ? `${prev} ${spoken}` : `${prev}${spoken}`));
+    setComposerSource("user");
+    setPendingDictationTranscript(null);
+    setDictationMessages(null);
+    setDictationMessageWarnings([]);
+    setDictationFormatStatus("idle");
+    setDictationFormatError(null);
+  }, [pendingDictationTranscript]);
+
+  const dismissDictationTranscript = useCallback(() => {
+    setPendingDictationTranscript(null);
+    setDictationMessages(null);
+    setDictationMessageWarnings([]);
+    setDictationFormatStatus("idle");
+    setDictationFormatError(null);
+  }, []);
+
+  const turnDictationIntoMessages = useCallback(async () => {
+    const transcript = pendingDictationTranscript;
+    if (!transcript || dictationFormatStatus === "formatting") return;
+    const startThreadId = threadId;
+    setDictationFormatStatus("formatting");
+    setDictationFormatError(null);
+    setDictationMessages(null);
+    setDictationMessageWarnings([]);
+    try {
+      const personName = thread?.personName ?? null;
+      let resp: Response;
+      try {
+        resp = await fetch("/runner/control/format-dictation-messages", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            transcript,
+            personName
+          })
+        });
+      } catch {
+        if (!shouldApplyThreadScopedResult(startThreadId, transformRouteIdRef.current)) return;
+        setDictationFormatStatus("error");
+        setDictationFormatError(
+          "Lost connection while formatting. Your original transcript is still here."
+        );
+        return;
+      }
+      const data = (await resp.json().catch(() => ({}))) as FormatDictationMessagesResponse;
+      if (!shouldApplyThreadScopedResult(startThreadId, transformRouteIdRef.current)) return;
+      const outcome = classifyFormatDictationResponse({
+        ok: resp.ok,
+        status: resp.status,
+        data
+      });
+      if (outcome.kind === "error") {
+        setDictationFormatStatus("error");
+        setDictationFormatError(outcome.message);
+        return;
+      }
+      setDictationMessages(outcome.messages);
+      setDictationMessageWarnings(outcome.warnings);
+      setDictationFormatStatus("ready");
+    } catch (err) {
+      if (!shouldApplyThreadScopedResult(startThreadId, transformRouteIdRef.current)) return;
+      setDictationFormatStatus("error");
+      setDictationFormatError(
+        err instanceof Error && err.message
+          ? err.message
+          : "Could not turn the transcript into messages. Your original transcript is still here."
+      );
+    }
+  }, [pendingDictationTranscript, dictationFormatStatus, threadId, thread?.personName]);
+
+  const useDictationMessagesInComposer = useCallback((text: string) => {
+    if (!text.trim()) return;
+    setComposer((prev) => {
+      if (!prev.trim()) return text;
+      const sep = /\n$/.test(prev) ? "\n" : "\n\n";
+      return `${prev}${sep}${text}`;
+    });
+    setComposerSource("user");
+    setPendingDictationTranscript(null);
+    setDictationMessages(null);
+    setDictationMessageWarnings([]);
+    setDictationFormatStatus("idle");
+    setDictationFormatError(null);
   }, []);
 
   // #462: record a short clip, prepare it as 16 kHz mono WAV, and hand it to
@@ -4653,6 +4772,61 @@ export default function ThreadPage() {
                   <X className="h-3.5 w-3.5" strokeWidth={2} />
                 </button>
               </div>
+            ) : null}
+            {/* #880: after transcription succeeds, offer Keep as transcript
+                vs Turn into messages. Original is never lost. */}
+            {pendingDictationTranscript &&
+            dictationFormatStatus === "idle" &&
+            !dictationMessages ? (
+              <div className="mb-1.5 rounded-[10px] border border-hairline-strong bg-paper-2 px-2.5 py-2 text-[12px] text-ink-2">
+                <p className="m-0 text-[11px] font-medium text-ink">Dictation ready</p>
+                <p className="m-0 mt-1 max-h-[4.5rem] overflow-y-auto whitespace-pre-wrap text-[12px] leading-snug text-ink-2">
+                  {pendingDictationTranscript}
+                </p>
+                <div className="mt-2 flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={keepDictationAsTranscript}
+                    className="rounded-pill border border-hairline-strong bg-paper px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.06em] text-ink transition-colors duration-calm hover:bg-paper-2"
+                  >
+                    Keep as transcript
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void turnDictationIntoMessages()}
+                    className="rounded-pill border border-hairline bg-paper px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.06em] text-ink-2 transition-colors duration-calm hover:text-ink"
+                  >
+                    Turn into messages
+                  </button>
+                  <button
+                    type="button"
+                    onClick={dismissDictationTranscript}
+                    aria-label="Dismiss dictation"
+                    className="ml-auto text-ink-3 transition-colors duration-calm hover:text-ink"
+                  >
+                    <X className="h-3.5 w-3.5" strokeWidth={2} />
+                  </button>
+                </div>
+              </div>
+            ) : null}
+            {pendingDictationTranscript &&
+            (dictationFormatStatus === "formatting" ||
+              dictationFormatStatus === "error" ||
+              dictationFormatStatus === "ready") ? (
+              <DictationMessagesReview
+                originalTranscript={pendingDictationTranscript}
+                messages={dictationMessages ?? []}
+                warnings={dictationMessageWarnings}
+                formatting={dictationFormatStatus === "formatting"}
+                formatError={
+                  dictationFormatStatus === "error" ? dictationFormatError : null
+                }
+                onMessagesChange={setDictationMessages}
+                onUseInComposer={useDictationMessagesInComposer}
+                onKeepOriginal={keepDictationAsTranscript}
+                onRetryFormat={() => void turnDictationIntoMessages()}
+                onDismiss={dismissDictationTranscript}
+              />
             ) : null}
             {/* Focus Reply Buffer: when this thread arrived during the active
                 window, a one-tap acknowledgement sits above the composer. The

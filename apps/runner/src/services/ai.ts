@@ -55,6 +55,13 @@ import {
   validateMechanicalWritingRules
 } from "./ai-output-rules";
 import { preserveAmbiguousEvidence } from "./ai-ambiguity";
+import {
+  buildDictationMessagesUserPrompt,
+  DICTATION_MESSAGES_SYSTEM_PROMPT,
+  sanitiseDictationMessagesResponse,
+  type DictationMessagesResult,
+  type FormatDictationMessagesInput
+} from "./dictation-messages";
 
 // Re-exported so existing tests + callers continue to import from ai.ts.
 export const classifyLlmError = classifyLlmErrorImpl;
@@ -2875,6 +2882,60 @@ ${recentExchange || "(no recent messages)"}`;
   }
 
   /**
+   * #880: turn a raw dictation transcript into voice-preserving message
+   * bubbles. Prompt and sanitiser live in dictation-messages.ts. Returns
+   * null on provider/parse failure so the dashboard keeps the original
+   * transcript and can offer retry. Never auto-sends.
+   */
+  async function formatDictationMessages(
+    input: FormatDictationMessagesInput
+  ): Promise<DictationMessagesResult | null> {
+    const transcript = input.transcript?.trim() ?? "";
+    if (!transcript) return null;
+
+    const { client, model, provider } = await resolveActive();
+    if (!client) {
+      console.warn("[ai] formatDictationMessages: no AI client configured");
+      return null;
+    }
+
+    const userPrompt = buildDictationMessagesUserPrompt({
+      transcript,
+      personName: input.personName,
+      knownNames: input.knownNames
+    });
+
+    try {
+      const response = await client.chat.completions.create({
+        model,
+        ...(shouldUseJsonResponseFormat(provider, model)
+          ? { response_format: { type: "json_object" as const } }
+          : {}),
+        messages: [
+          { role: "system", content: DICTATION_MESSAGES_SYSTEM_PROMPT },
+          { role: "user", content: reinforceJsonPrompt(userPrompt, model) }
+        ],
+        ...providerOptions(provider, model),
+        ...geminiExtraBody(provider, model)
+      });
+      const content = response.choices[0]?.message?.content;
+      if (!content) {
+        console.warn(
+          `[ai] formatDictationMessages empty content (provider=${provider}, model=${model})`
+        );
+        return null;
+      }
+      const raw = parseAiJson(content, model);
+      return sanitiseDictationMessagesResponse(raw, transcript);
+    } catch (error) {
+      console.warn(
+        `[ai] formatDictationMessages failed (provider=${provider}, model=${model}); ${classifyLlmError(error, provider)}`
+      );
+      return null;
+    }
+  }
+
+  /**
    * Classify a thread as outreach (sales / recruitment / marketing / InMail
    * / cold solicitation) vs genuine (peer chats, ongoing relationships).
    * Returns null when the AI service is unavailable — callers should treat
@@ -4148,6 +4209,7 @@ ${safeTruncate(input.draft, 2000)}`;
     updateThreadSummary,
     generateSuggestedReplies,
     transformReply,
+    formatDictationMessages,
     classifyThreadCategory,
     classifyThreadClosed,
     scoreReconnectCandidate,
