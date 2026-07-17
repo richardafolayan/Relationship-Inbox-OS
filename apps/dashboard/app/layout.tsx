@@ -4,6 +4,7 @@ import { AppShell } from "@/components/layout/app-shell";
 import { FullDemoProvider } from "@/components/full-demo/FullDemoProvider";
 import { FullDemoOverlay } from "@/components/full-demo/FullDemoOverlay";
 import { UiScaleBridge } from "@/components/common/ui-scale-bridge";
+import { PwaStandaloneDebug } from "@/components/common/pwa-standalone-debug";
 import { APP_NAME } from "@/lib/branding";
 
 export const metadata: Metadata = {
@@ -21,9 +22,10 @@ export const metadata: Metadata = {
   appleWebApp: {
     capable: true,
     title: APP_NAME,
-    // "default" keeps the status bar opaque so TopStatus and page
-    // chrome sit below the notch / Dynamic Island. Do not switch to
-    // black-translucent until the shell owns env(safe-area-inset-top).
+    // Opaque "default" for the light SSR baseline so TopStatus sits below
+    // the notch. Client theme bootstrap + ThemeToggle switch to opaque
+    // "black" in dark mode. Avoid translucent styles until the shell owns
+    // safe-area-inset-top.
     statusBarStyle: "default"
   },
   formatDetection: {
@@ -46,7 +48,9 @@ export const viewport: Viewport = {
 
 // Runs before paint to apply the persisted theme and avoid a flash of
 // the wrong palette. Falls back to the OS preference on first load.
-const themeBootstrap = `(function(){try{var s=localStorage.getItem('inbox_os_theme');var t=s||(window.matchMedia&&window.matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');if(t==='dark')document.documentElement.setAttribute('data-theme','dark');var z=localStorage.getItem('inbox_os_ui_scale');if(z==='large'||z==='extra')document.documentElement.setAttribute('data-ui-scale',z);}catch(e){}})();`;
+// Also aligns opaque Apple status-bar style + theme-color with the app
+// theme so dark mode does not leave a light status strip.
+const themeBootstrap = `(function(){try{var s=localStorage.getItem('inbox_os_theme');var t=s||(window.matchMedia&&window.matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');if(t==='dark')document.documentElement.setAttribute('data-theme','dark');var bar=t==='dark'?'black':'default';var sb=document.querySelector('meta[name="apple-mobile-web-app-status-bar-style"]');if(sb)sb.setAttribute('content',bar);else{sb=document.createElement('meta');sb.setAttribute('name','apple-mobile-web-app-status-bar-style');sb.setAttribute('content',bar);document.head.appendChild(sb);}var color=t==='dark'?'#000000':'#f7f2e8';var tcs=document.querySelectorAll('meta[name="theme-color"]');if(tcs.length){for(var i=0;i<tcs.length;i++)tcs[i].setAttribute('content',color);}else{var tc=document.createElement('meta');tc.setAttribute('name','theme-color');tc.setAttribute('content',color);document.head.appendChild(tc);}var z=localStorage.getItem('inbox_os_ui_scale');if(z==='large'||z==='extra')document.documentElement.setAttribute('data-ui-scale',z);}catch(e){}})();`;
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
@@ -57,6 +61,7 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
       <body>
         <FullDemoProvider>
           <UiScaleBridge />
+          <PwaStandaloneDebug />
           <AppShell>{children}</AppShell>
           <FullDemoOverlay />
         </FullDemoProvider>

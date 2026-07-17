@@ -2,8 +2,9 @@
 
 import { useEffect, useState } from "react";
 import { Moon, Sun } from "lucide-react";
+import { applyAppleChromeForTheme, type AppTheme } from "@/lib/apple-status-bar";
 
-type Theme = "light" | "dark";
+type Theme = AppTheme;
 
 const STORAGE_KEY = "inbox_os_theme";
 
@@ -13,6 +14,7 @@ function applyTheme(theme: Theme) {
   } else {
     document.documentElement.removeAttribute("data-theme");
   }
+  applyAppleChromeForTheme(theme);
 }
 
 export function ThemeToggle() {
