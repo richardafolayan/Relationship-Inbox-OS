@@ -114,6 +114,7 @@ export function captureFocus(host: FocusRestoreHost): () => void {
 export interface HistoryHost {
   state: unknown;
   pushState: (data: unknown, unused: string, url?: string | null) => void;
+  replaceState: (data: unknown, unused: string, url?: string | null) => void;
   back: () => void;
   addEventListener: (type: "popstate", listener: (event: { state: unknown }) => void) => void;
   removeEventListener: (type: "popstate", listener: (event: { state: unknown }) => void) => void;
@@ -127,58 +128,107 @@ export interface HistoryBindingOptions {
 }
 
 export interface HistoryBinding {
+  /** False after system Back or release; provider must not retarget a dead binding. */
+  isActive: () => boolean;
+  /**
+   * Swap the overlay marker in place when one primary replaces another.
+   * Must not call history.back(): browsers fire popstate asynchronously, and
+   * a rebinding listener would treat that deferred traversal as a user Back.
+   */
+  retarget: (overlayId: string) => void;
   /** Call when the overlay is closed by UI (X, Escape), not by system Back. */
   release: () => void;
 }
 
+function overlayHistoryState(history: HistoryHost, overlayId: string): Record<string, unknown> {
+  const base =
+    typeof history.state === "object" && history.state !== null
+      ? (history.state as Record<string, unknown>)
+      : {};
+  return {
+    ...base,
+    [MOBILE_OVERLAY_HISTORY_KEY]: overlayId
+  };
+}
+
+/** Programmatic history.back() counts per host that must not dismiss overlays. */
+const programmaticPopsToIgnore = new WeakMap<object, number>();
+/** Per-host flag set by the absorber for the current popstate dispatch. */
+const suppressOverlayPop = new WeakMap<object, boolean>();
+const historyHostsWithAbsorber = new WeakSet<object>();
+
 /**
- * Push a history entry for the open overlay. System Back fires popstate and
- * calls onBack(); if onBack returns true the navigation is consumed (overlay
- * closed, no further route change). Programmatic close calls release(), which
- * history.back()s once without re-triggering onBack.
+ * Runs before overlay listeners (installed first) so a deferred history.back()
+ * from release is consumed even when a replacement binding already exists.
+ */
+function ensureProgrammaticPopAbsorber(history: HistoryHost): void {
+  const hostKey = history as object;
+  if (historyHostsWithAbsorber.has(hostKey)) return;
+  historyHostsWithAbsorber.add(hostKey);
+  history.addEventListener("popstate", () => {
+    const pending = programmaticPopsToIgnore.get(hostKey) ?? 0;
+    if (pending > 0) {
+      programmaticPopsToIgnore.set(hostKey, pending - 1);
+      suppressOverlayPop.set(hostKey, true);
+    } else {
+      suppressOverlayPop.set(hostKey, false);
+    }
+  });
+}
+
+/**
+ * Push a single history entry for the primary-overlay lifetime. System Back
+ * fires popstate and calls onBack(). When one primary replaces another, call
+ * retarget() (replaceState) so the deferred history.back from a release cannot
+ * dismiss the new surface. Programmatic close of the last primary calls
+ * release(), which history.back()s once without re-triggering onBack.
  */
 export function bindOverlayHistory(options: HistoryBindingOptions): HistoryBinding {
-  const { history, onBack, overlayId } = options;
+  const { history, onBack } = options;
+  const hostKey = history as object;
   let active = true;
-  let ignoringPop = false;
+  let overlayId = options.overlayId;
 
-  const marker = { [MOBILE_OVERLAY_HISTORY_KEY]: overlayId };
-
-  history.pushState(
-    {
-      ...(typeof history.state === "object" && history.state !== null
-        ? (history.state as Record<string, unknown>)
-        : {}),
-      ...marker
-    },
-    ""
-  );
+  ensureProgrammaticPopAbsorber(history);
+  history.pushState(overlayHistoryState(history, overlayId), "");
 
   const onPopState = () => {
-    if (ignoringPop) {
-      ignoringPop = false;
-      return;
-    }
+    if (suppressOverlayPop.get(hostKey)) return;
     if (!active) return;
     active = false;
+    history.removeEventListener("popstate", onPopState);
     onBack();
   };
 
   history.addEventListener("popstate", onPopState);
 
   return {
+    isActive: () => active,
+    retarget: (nextOverlayId: string) => {
+      if (!active) return;
+      overlayId = nextOverlayId;
+      try {
+        history.replaceState(overlayHistoryState(history, overlayId), "");
+      } catch {
+        // History may be unavailable; marker is best-effort.
+      }
+    },
     release: () => {
       if (!active) {
         history.removeEventListener("popstate", onPopState);
         return;
       }
       active = false;
-      ignoringPop = true;
       history.removeEventListener("popstate", onPopState);
+      programmaticPopsToIgnore.set(
+        hostKey,
+        (programmaticPopsToIgnore.get(hostKey) ?? 0) + 1
+      );
       try {
         history.back();
       } catch {
-        ignoringPop = false;
+        const pending = programmaticPopsToIgnore.get(hostKey) ?? 0;
+        programmaticPopsToIgnore.set(hostKey, Math.max(0, pending - 1));
       }
     }
   };
