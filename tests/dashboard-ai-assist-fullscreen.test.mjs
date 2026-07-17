@@ -135,14 +135,28 @@ test("compose draft and ask answer live in the scroll middle, not the fixed foot
   assert.match(footer, /composeFromIntent\(\)/);
 });
 
-test("phone overlay offsets panel for visualViewport keyboard (#898 F2)", () => {
+test("phone overlay sizes from visualViewport height so footer stays above keyboard (#898 F2)", () => {
   assert.match(threadPage, /window\.visualViewport/);
-  assert.match(threadPage, /visualViewport/);
   assert.match(threadPage, /vv\.addEventListener\("resize"/);
   assert.match(threadPage, /vv\.addEventListener\("scroll"/);
-  assert.match(threadPage, /panel\.style\.bottom/);
-  assert.match(threadPage, /innerHeight - vv\.height - vv\.offsetTop/);
+  assert.match(threadPage, /orientationchange/);
+  // Pin the panel box to the visual viewport (not only a bottom inset).
+  assert.match(threadPage, /panel\.style\.top/);
+  assert.match(threadPage, /panel\.style\.height/);
+  assert.match(threadPage, /panel\.style\.maxHeight/);
+  assert.match(threadPage, /panel\.style\.bottom = "auto"/);
+  assert.match(threadPage, /vv\.offsetTop/);
+  assert.match(threadPage, /vv\.height/);
+  // Must not rely on bottom-inset-only math as the sole keyboard strategy.
+  assert.doesNotMatch(
+    threadPage,
+    /innerHeight - vv\.height - vv\.offsetTop/
+  );
   assert.match(threadPage, /scrollIntoView/);
+  // Cleanup restores fixed inset-0 classes.
+  assert.match(threadPage, /panel\.style\.top = ""/);
+  assert.match(threadPage, /panel\.style\.height = ""/);
+  assert.match(threadPage, /panel\.style\.bottom = ""/);
 });
 
 test("phone AI history always pops on unmount and intercepts in-panel nav (#898 F3)", () => {
@@ -159,4 +173,30 @@ test("phone AI history always pops on unmount and intercepts in-panel nav (#898 
   assert.match(threadPage, /onNavClickCapture/);
   assert.match(threadPage, /closest\?\.\("a\[href\]"\)/);
   assert.match(threadPage, /router\.push\(path\)/);
+});
+
+test("close, Escape, and swipe-back only consume the synthetic history entry (#898 F4)", () => {
+  // Synthetic entry is marked and only popped while the ref is set.
+  assert.match(threadPage, /history\.pushState\(\{ aiAssist: true \}/);
+  assert.match(threadPage, /aiHistoryPushedRef\.current = true/);
+  // Swipe-back: ignore popstate once the ref is cleared (no second back).
+  assert.match(
+    threadPage,
+    /const onPopState = \(\) => \{\s*if \(!aiHistoryPushedRef\.current\) return;/
+  );
+  // Close button / Escape / unmount: history.back only when we still own the entry.
+  assert.match(
+    threadPage,
+    /if \(aiHistoryPushedRef\.current\) \{\s*aiHistoryPushedRef\.current = false;\s*window\.history\.back\(\)/
+  );
+  // In-panel nav clears the ref before back so onPopState does not also fire close.
+  const navBlockStart = threadPage.indexOf("onNavClickCapture");
+  assert.ok(navBlockStart >= 0, "in-panel nav capture present");
+  const navBlock = threadPage.slice(navBlockStart, navBlockStart + 1800);
+  assert.match(navBlock, /aiHistoryPushedRef\.current = false/);
+  assert.ok(
+    navBlock.indexOf("aiHistoryPushedRef.current = false") <
+      navBlock.indexOf("window.history.back()"),
+    "in-panel nav must clear the push ref before history.back"
+  );
 });

@@ -856,8 +856,9 @@ export default function ThreadPage() {
   }, [aiOpen, aiOverlayMode]);
   // Phone: system Back / browser back closes AI Assist before leaving the
   // thread. pushState on open; popstate closes; button/Escape close pops
-  // the extra history entry. In-panel navigations (e.g. Settings) pop first
-  // so a phantom aiAssist entry is not left under the destination.
+  // the extra history entry only (never the thread itself). In-panel
+  // navigations (e.g. Settings) pop first so a phantom aiAssist entry is
+  // not left under the destination.
   useEffect(() => {
     if (!aiOpen || !aiOverlayMode) return;
     const isPhone = window.matchMedia("(max-width: 639px)").matches;
@@ -866,7 +867,10 @@ export default function ThreadPage() {
     window.history.pushState({ aiAssist: true }, "");
     aiHistoryPushedRef.current = true;
 
+    // Swipe-back / browser Back: browser already consumed our synthetic
+    // entry. Close the panel without calling history.back again.
     const onPopState = () => {
+      if (!aiHistoryPushedRef.current) return;
       aiHistoryPushedRef.current = false;
       setAiOpen(false);
     };
@@ -899,6 +903,8 @@ export default function ThreadPage() {
 
       event.preventDefault();
       event.stopPropagation();
+      // Clear before back so onPopState does not also react; only our
+      // synthetic entry is popped, then we navigate.
       aiHistoryPushedRef.current = false;
       const path = `${url.pathname}${url.search}${url.hash}`;
       const onPopThenNav = () => {
@@ -914,17 +920,19 @@ export default function ThreadPage() {
     return () => {
       window.removeEventListener("popstate", onPopState);
       panel?.removeEventListener("click", onNavClickCapture, true);
+      // Close button / Escape / unmount: pop only the synthetic entry we
+      // pushed. Ref is already false after swipe-back or in-panel nav, so
+      // those paths never double-pop into the thread history.
       if (aiHistoryPushedRef.current) {
         aiHistoryPushedRef.current = false;
-        // Always pop the entry we pushed (button/Escape/unmount). Do not
-        // gate on history.state: after in-panel nav the ref is already clear.
         window.history.back();
       }
     };
   }, [aiOpen, aiOverlayMode, router]);
-  // Phone overlay: shrink the fixed panel above the software keyboard so
-  // Compose/Ask controls stay in the visual viewport (iOS does not resize
-  // layout viewport when the keyboard opens).
+  // Phone overlay: size the fixed panel from visualViewport so the action
+  // footer stays above the software keyboard. iOS often keeps the layout
+  // viewport tall while the keyboard covers the lower portion; bottom inset
+  // alone is not enough when offsetTop shifts, so pin top + height to vv.
   useEffect(() => {
     if (!aiOpen || !aiOverlayMode) return;
     const isPhone = window.matchMedia("(max-width: 639px)").matches;
@@ -934,21 +942,34 @@ export default function ThreadPage() {
     const panel = document.getElementById("ai-assist-panel");
     if (!panel) return;
 
-    const syncKeyboardInset = () => {
-      const inset = Math.max(0, window.innerHeight - vv.height - vv.offsetTop);
-      panel.style.bottom = inset > 0 ? `${inset}px` : "";
+    const clearViewportBox = () => {
+      panel.style.top = "";
+      panel.style.height = "";
+      panel.style.bottom = "";
+      panel.style.maxHeight = "";
+    };
+
+    const syncViewportBox = () => {
+      const top = Math.max(0, vv.offsetTop);
+      const height = Math.max(0, vv.height);
+      panel.style.top = `${top}px`;
+      panel.style.height = `${height}px`;
+      panel.style.maxHeight = `${height}px`;
+      panel.style.bottom = "auto";
       const active = document.activeElement as HTMLElement | null;
       if (active && panel.contains(active) && typeof active.scrollIntoView === "function") {
         active.scrollIntoView({ block: "nearest", inline: "nearest" });
       }
     };
-    vv.addEventListener("resize", syncKeyboardInset);
-    vv.addEventListener("scroll", syncKeyboardInset);
-    syncKeyboardInset();
+    vv.addEventListener("resize", syncViewportBox);
+    vv.addEventListener("scroll", syncViewportBox);
+    window.addEventListener("orientationchange", syncViewportBox);
+    syncViewportBox();
     return () => {
-      vv.removeEventListener("resize", syncKeyboardInset);
-      vv.removeEventListener("scroll", syncKeyboardInset);
-      panel.style.bottom = "";
+      vv.removeEventListener("resize", syncViewportBox);
+      vv.removeEventListener("scroll", syncViewportBox);
+      window.removeEventListener("orientationchange", syncViewportBox);
+      clearViewportBox();
     };
   }, [aiOpen, aiOverlayMode]);
   // How much AI writing help to surface is driven by the operator's
