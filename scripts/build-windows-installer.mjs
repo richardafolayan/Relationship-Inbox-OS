@@ -1,13 +1,16 @@
 import { execFileSync } from "node:child_process";
-import { dirname, resolve } from "node:path";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { prepareWindowsRuntime } from "./prepare-windows-runtime.mjs";
 import { resolveAppName } from "./lib/branding.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
-function run(command, args) {
-  execFileSync(command, args, { cwd: ROOT, stdio: "inherit" });
+export const WINDOWS_BRANDING_DIR = "build/windows-branding";
+
+function run(command, args, options = {}) {
+  execFileSync(command, args, { cwd: ROOT, stdio: "inherit", ...options });
 }
 
 export function npmInvocation(args, env = process.env) {
@@ -29,9 +32,38 @@ export function electronBuilderArgs(appName = resolveAppName()) {
   ];
 }
 
-function runNpm(args) {
-  const invocation = npmInvocation(args);
-  run(invocation.command, invocation.args);
+// Child npm/electron-builder processes do not load the repo .env. Always pass
+// the resolved display name so dashboard copy and the NSIS product name match.
+export function packagingEnv(appName = resolveAppName(), env = process.env) {
+  return {
+    ...env,
+    RIOS_APP_NAME: appName
+  };
+}
+
+// Write package-only branding files under build/ (never the developer's root
+// .env) so electron-builder can ship a minimal .env + release.json that the
+// launcher and runner read at runtime without embedding local secrets.
+export function writeWindowsBrandingArtifacts(root = ROOT, appName = resolveAppName()) {
+  const brandingDir = join(root, WINDOWS_BRANDING_DIR);
+  mkdirSync(brandingDir, { recursive: true });
+  const version = JSON.parse(readFileSync(join(root, "package.json"), "utf8")).version || "0.0.0";
+  const release = {
+    version,
+    appName,
+    build: new Date().toISOString(),
+    channel: "windows"
+  };
+  writeFileSync(join(brandingDir, "release.json"), `${JSON.stringify(release, null, 2)}\n`);
+  // Named without a leading dot so default ignore rules do not drop it; the
+  // electron-builder FileSet maps it to `.env` inside the package.
+  writeFileSync(join(brandingDir, "branding.env"), `RIOS_APP_NAME=${appName}\n`);
+  return { brandingDir, release, envBody: `RIOS_APP_NAME=${appName}\n` };
+}
+
+function runNpm(args, env = process.env) {
+  const invocation = npmInvocation(args, env);
+  run(invocation.command, invocation.args, { env });
 }
 
 function requireWindowsNode22() {
@@ -46,13 +78,16 @@ function requireWindowsNode22() {
 
 export async function buildWindowsInstaller() {
   requireWindowsNode22();
-  runNpm(["run", "db:generate"]);
-  runNpm(["run", "build", "--workspace", "@inbox-os/core"]);
-  runNpm(["run", "build", "--workspace", "@inbox-os/runner"]);
-  runNpm(["run", "build", "--workspace", "@inbox-os/dashboard"]);
-  run("node.exe", ["-e", "require('better-sqlite3')"]);
+  const appName = resolveAppName();
+  const env = packagingEnv(appName);
+  writeWindowsBrandingArtifacts(ROOT, appName);
+  runNpm(["run", "db:generate"], env);
+  runNpm(["run", "build", "--workspace", "@inbox-os/core"], env);
+  runNpm(["run", "build", "--workspace", "@inbox-os/runner"], env);
+  runNpm(["run", "build", "--workspace", "@inbox-os/dashboard"], env);
+  run("node.exe", ["-e", "require('better-sqlite3')"], { env });
   await prepareWindowsRuntime({ arch: "x64", root: ROOT });
-  runNpm(electronBuilderArgs());
+  runNpm(electronBuilderArgs(appName), env);
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

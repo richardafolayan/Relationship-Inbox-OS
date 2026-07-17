@@ -23,7 +23,8 @@ import {
   macArchToOpenSslArch,
   parseArgs,
   planPaths,
-  prunePackagedFootprint
+  prunePackagedFootprint,
+  stagedChildEnv
 } from "../scripts/build-macos-dmg.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -169,4 +170,10 @@ test("desktop icon is a local SVG with no remote assets", () => {
   assert.match(svg, /#F7F2E8/);
   assert.match(svg, /#202A35/);
   assert.match(svg, /#D9902F/);
+});
+
+test("staged macOS build env propagates a custom app name for dashboard builds", () => {
+  const env = stagedChildEnv("/opt/node", "Aria", { PATH: "/bin", RIOS_APP_NAME: "stale" });
+  assert.equal(env.RIOS_APP_NAME, "Aria");
+  assert.equal(env.PATH, "/opt/node/bin:/bin");
 });
