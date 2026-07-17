@@ -5,8 +5,9 @@ import { readFileSync } from "node:fs";
 // #897: mobile Inbox / Archived use a contained list scroller. Dock is a
 // shell layout row (not a fixed overlay every page pads for). Safe-area
 // bottom has one owner. Desktop Canvas long-page model stays intact.
-// Controls are a capped layout row (not sticky); list is the primary
-// scroller. Main does not double-scroll on mobile list routes.
+// Controls are a compact shrink-0 layout row (not a nested vertical
+// scroller). The conversation list is the only vertical scroll owner.
+// Main does not double-scroll on mobile list routes (#921-style).
 
 const read = (rel) => readFileSync(new URL(rel, import.meta.url), "utf8");
 
@@ -79,7 +80,7 @@ test("Canvas no longer reserves huge mobile padding for a fixed dock", () => {
   );
 });
 
-test("Inbox mobile layout: capped controls row + independent list scroller", () => {
+test("Inbox mobile layout: compact fixed controls + single list scroller", () => {
   assert.match(
     inbox,
     /data-testid="inbox-controls"/,
@@ -101,29 +102,48 @@ test("Inbox mobile layout: capped controls row + independent list scroller", () 
     "desktop keeps the long-page Canvas model"
   );
 
-  // Controls are a flex layout row that can shrink and scroll on short
-  // viewports — not a pure shrink-0 block that clips with no escape, and
-  // not sticky (sticky was a mislabel of the layout-row model).
+  // Controls are a fixed shrink-0 layout row. No height cap, no nested
+  // vertical scroller (that recreated the two-pane confusion of #897).
   const controlsBlock = inbox.match(
     /data-testid="inbox-controls"\s*className="([^"]+)"/
   );
   assert.ok(controlsBlock, "inbox-controls has a className");
-  assert.match(controlsBlock[1], /max-h-\[42dvh\]/, "controls cap height on short viewports");
-  assert.match(controlsBlock[1], /\bshrink\b/, "controls may shrink when space is tight");
-  assert.match(controlsBlock[1], /md:max-h-none/, "desktop drops the controls height cap");
-  assert.match(controlsBlock[1], /md:shrink-0/, "desktop controls stay natural height");
+  assert.match(controlsBlock[1], /\bshrink-0\b/, "controls stay natural height");
   assert.doesNotMatch(
     controlsBlock[1],
-    /\bsticky\b/,
-    "controls are a layout row, not position:sticky"
+    /max-h-\[42dvh\]/,
+    "controls must not cap height with a nested scroll budget"
+  );
+  assert.doesNotMatch(
+    controlsBlock[1],
+    /overflow-y-auto/,
+    "controls must not be a vertical scroller"
   );
 
-  // Upper controls (title/search/chips) nest a scroller so content is not
-  // clipped when the cap is hit; tabs/tools stay outside that scrollport.
-  assert.match(
+  // No nested controls scroller anywhere under the controls region.
+  assert.doesNotMatch(
     inbox,
     /min-h-0 flex-1 overflow-y-auto overscroll-contain md:flex-none md:overflow-visible/,
-    "upper controls scroll under the height cap on mobile"
+    "must not reintroduce the nested upper-controls scroller"
+  );
+  assert.doesNotMatch(
+    inbox,
+    /max-h-\[42dvh\]/,
+    "max-h-[42dvh] nested scroller pattern must stay removed"
+  );
+
+  // PageHead is compact on this contained list screen.
+  assert.match(
+    inbox,
+    /<PageHead[\s\S]*?\bcompact\b/,
+    "Inbox uses compact PageHead on mobile"
+  );
+
+  // Search input must allow shrinking on narrow widths (match Archived).
+  assert.match(
+    inbox,
+    /placeholder="Search people, keywords…"[\s\S]*?className="min-w-0 flex-1/,
+    "Inbox search input has min-w-0 like Archived"
   );
 
   const scrollerClass = inbox.match(
@@ -133,7 +153,7 @@ test("Inbox mobile layout: capped controls row + independent list scroller", () 
   assert.match(scrollerClass[1], /overflow-y-auto/);
   assert.match(scrollerClass[1], /overscroll-contain/);
   assert.match(scrollerClass[1], /flex-1/);
-  assert.match(scrollerClass[1], /min-h-\[7rem\]/, "list keeps a minimum height when controls grow");
+  assert.match(scrollerClass[1], /min-h-0/);
   assert.match(scrollerClass[1], /md:overflow-visible/);
 });
 
@@ -188,16 +208,26 @@ test("Archived shares the mobile contained-list shell", () => {
     /data-testid="archived-controls"\s*className="([^"]+)"/
   );
   assert.ok(controlsBlock, "archived-controls has a className");
-  assert.match(controlsBlock[1], /max-h-\[42dvh\]/);
-  assert.match(controlsBlock[1], /\bshrink\b/);
-  assert.match(controlsBlock[1], /md:max-h-none/);
+  assert.match(controlsBlock[1], /\bshrink-0\b/);
+  assert.doesNotMatch(controlsBlock[1], /max-h-\[42dvh\]/);
+  assert.doesNotMatch(controlsBlock[1], /overflow-y-auto/);
+  assert.doesNotMatch(
+    archived,
+    /max-h-\[42dvh\]/,
+    "Archived must not reintroduce nested controls height cap"
+  );
+  assert.match(
+    archived,
+    /placeholder="Search archived[\s\S]*?className="min-w-0 flex-1/,
+    "Archived search input has min-w-0"
+  );
   const scrollerClass = archived.match(
     /data-testid="archived-list-scroller"\s*data-scroll-owner="list"\s*className="([^"]+)"/
   );
   assert.ok(scrollerClass);
   assert.match(scrollerClass[1], /overflow-y-auto/);
   assert.match(scrollerClass[1], /overscroll-contain/);
-  assert.match(scrollerClass[1], /min-h-\[7rem\]/);
+  assert.match(scrollerClass[1], /min-h-0/);
   assert.match(archived, /data-testid="archived-bulk-bar"/);
   assert.match(archived, /SelectGlyph/);
   assert.match(archived, /placeholder="Search archived/);
