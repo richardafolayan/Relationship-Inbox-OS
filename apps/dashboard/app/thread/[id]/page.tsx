@@ -3221,7 +3221,7 @@ export default function ThreadPage() {
       // apply from lg/xl up. Setting gridTemplateColumns as a plain inline
       // style kept the 240px/360px rail tracks reserved at every width,
       // which crushed the conversation into a thin centre strip on phones.
-      className="grid h-full min-h-0 grid-cols-1 lg:[grid-template-columns:var(--thread-cols-lg)] xl:[grid-template-columns:var(--thread-cols-xl)]"
+      className="grid h-full min-h-0 grid-cols-1 overflow-hidden lg:[grid-template-columns:var(--thread-cols-lg)] xl:[grid-template-columns:var(--thread-cols-xl)]"
       style={
         {
           "--thread-cols-lg": gridColsLg,
@@ -3364,7 +3364,7 @@ export default function ThreadPage() {
 
       {/* ───── Chat column ───── */}
       <div
-        className="relative flex h-full min-h-0 flex-col border-r border-hairline"
+        className="relative flex h-full min-h-0 flex-col overflow-hidden border-r border-hairline"
         onDragEnter={onComposerDragEnter}
         onDragOver={onComposerDragOver}
         onDragLeave={onComposerDragLeave}
