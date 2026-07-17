@@ -71,7 +71,11 @@ test("WhatsApp keeps one primary action and moves reset behind More with confirm
 });
 
 test("platforms page uses Scan as primary when connected and recovery in More", () => {
-  assert.match(platforms, /connected\s*\?\s*"Scan now"\s*:\s*"Connect"/);
+  assert.match(
+    platforms,
+    /const scanEligible\s*=\s*[\s\S]{0,80}connected[\s\S]{0,40}DEGRADED[\s\S]{0,40}ERROR/
+  );
+  assert.match(platforms, /scanEligible\s*\?\s*"Scan now"\s*:\s*"Connect"/);
   assert.match(platforms, /aria-label="More actions"/);
   assert.match(platforms, /label: "Reset session…"/);
   assert.match(platforms, /window\.confirm\(/);
@@ -84,8 +88,25 @@ test("platforms page uses Scan as primary when connected and recovery in More", 
   const moreStart = platforms.indexOf("const moreItems");
   assert.ok(moreStart > 0);
   const moreBlock = platforms.slice(moreStart, moreStart + 1400);
+  assert.match(moreBlock, /scanEligible/);
   assert.match(moreBlock, /Open browser/);
   assert.match(moreBlock, /Reconnect/);
   assert.match(moreBlock, /Run selector tests/);
   assert.doesNotMatch(moreBlock, /label: "Scan now"/);
+});
+
+test("platforms and settings keep Scan for DEGRADED and ERROR, not only CONNECTED", () => {
+  assert.match(
+    platforms,
+    /const scanEligible\s*=\s*[\s\S]{0,80}connected[\s\S]{0,40}DEGRADED[\s\S]{0,40}ERROR/
+  );
+  assert.match(settings, /function platformScanEligible/);
+  assert.match(
+    settings,
+    /platformScanEligible\(googleMessagesRow\.status\)\s*\?\s*"Scan now"/
+  );
+  assert.match(
+    settings,
+    /platformScanEligible\(linkedinRow\.status\)\s*\?\s*"Scan now"/
+  );
 });
