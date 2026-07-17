@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { apiGetRaw, apiPost } from "@/lib/api";
+import { cn } from "@/lib/utils";
 
 // WhatsApp connect card (#774). Off unless the runner reports enabled
 // (WHATSAPP_ENABLED=true). "Connect" kicks the whatsapp-web.js session; the
@@ -15,7 +16,13 @@ interface WhatsAppStatus {
   hasPersistedSession?: boolean;
 }
 
-export function WhatsAppConnect() {
+export function WhatsAppConnect({
+  onScan,
+  scanBusy = false
+}: {
+  onScan?: () => void;
+  scanBusy?: boolean;
+} = {}) {
   const [status, setStatus] = useState<WhatsAppStatus | null>(null);
   const [connecting, setConnecting] = useState(false);
   const [refreshingQr, setRefreshingQr] = useState(false);
@@ -100,14 +107,35 @@ export function WhatsAppConnect() {
 
   const state = status?.state ?? "disconnected";
   const connected = state === "connected";
+  const statusLabel = connected
+    ? "Connected"
+    : refreshingQr
+      ? "Getting a new code"
+      : state === "qr_ready"
+        ? "Scan the code"
+        : state === "connecting"
+          ? "Connecting..."
+          : "Not connected";
 
   return (
-    <div className="grid grid-cols-1 gap-4">
+    <div>
+      <div className="flex items-start justify-between gap-4">
+        <div className="min-w-0">
+          <p className="m-0 text-[16px] font-semibold text-ink">WhatsApp</p>
+          <p className="m-0 mt-1 text-[13.5px] leading-[1.45] text-ink-3" style={{ textWrap: "pretty" }}>
+            Link WhatsApp from your phone. The app reads chats into your inbox. You still press send.
+          </p>
+        </div>
+        <span
+          className={cn(
+            "shrink-0 rounded-pill px-2 py-[3px] font-mono text-[10.5px]",
+            connected ? "bg-risk-fresh/15 text-risk-fresh" : "bg-paper-3 text-ink-3"
+          )}
+        >
+          {statusLabel}
+        </span>
+      </div>
       <div>
-        <p className="m-0 mb-[4px] text-[16px] font-semibold text-ink">WhatsApp</p>
-        <p className="m-0 text-[13.5px] leading-[1.45] text-ink-3" style={{ textWrap: "pretty" }}>
-          Link WhatsApp from your phone. The app reads chats into your inbox. You still press send.
-        </p>
         {state === "qr_ready" && status?.qrDataUrl ? (
           <div className="mt-[14px]">
             {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -126,18 +154,20 @@ export function WhatsAppConnect() {
         {error ? <p className="m-0 mt-[8px] rounded-row border border-hairline bg-paper px-3 py-2 text-[12px] leading-[1.45] text-ink-2">{error}</p> : null}
         {notice ? <p className="m-0 mt-[8px] font-mono text-[11px] text-risk-fresh">{notice}</p> : null}
       </div>
-      <div className="flex flex-wrap items-center gap-[10px]">
-        <span className="font-mono text-[11px] text-ink-3">
-          {connected
-            ? "Connected"
-            : refreshingQr
-              ? "Getting a new code"
-              : state === "qr_ready"
-              ? "Scan the code"
-              : state === "connecting"
-                ? "Connecting..."
-                : "Not connected"}
-        </span>
+      <div className="mt-4 flex flex-wrap items-center gap-2">
+        {connected && onScan ? (
+          <button
+            type="button"
+            onClick={onScan}
+            disabled={scanBusy || resetting}
+            className="inline-flex items-center rounded-pill bg-ink px-3 py-[7px] text-[12.5px] font-medium text-paper hover:bg-ink-2 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {scanBusy ? "Working..." : "Scan WhatsApp"}
+          </button>
+        ) : null}
+        {connected && onScan ? (
+          <span className="font-mono text-[11px] text-ink-3">Scan ready</span>
+        ) : null}
         {state === "qr_ready" ? (
           <button
             type="button"

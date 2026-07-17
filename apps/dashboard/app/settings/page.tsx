@@ -724,7 +724,10 @@ function PlatformSettingsSection({
         ) : null}
         {whatsappRow ? (
           <div className="rounded-[8px] bg-paper-2/45 px-4 py-4">
-            <WhatsAppConnect />
+            <WhatsAppConnect
+              scanBusy={busy === "WHATSAPP"}
+              onScan={() => onAction("WHATSAPP", "scan")}
+            />
           </div>
         ) : null}
       </div>
