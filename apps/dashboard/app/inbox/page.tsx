@@ -707,154 +707,172 @@ export default function InboxPage() {
   );
 
   return (
-    // Mobile (#897): header + controls stay put; conversation rows are the
-    // only long scroller. Desktop keeps the long-page Canvas model.
+    // Mobile (#897): header + controls pin as a capped layout row; conversation
+    // rows are the primary scroller. On short viewports the upper controls
+    // block can shrink and scroll so search/filters stay reachable. Filter
+    // menus stay outside that nested scrollport so absolute popovers are not
+    // clipped. Desktop keeps the long-page Canvas model.
     <Canvas className="flex h-full min-h-0 flex-col overflow-hidden pb-0 md:block md:h-auto md:overflow-visible md:pb-[120px]">
-      <div className="shrink-0" data-testid="inbox-controls">
-        <PageHead
-          eyebrow="All conversations"
-          title="Inbox"
-          meta={
-            selectMode ? (
-              <span data-testid="inbox-select-count">{selectedIds.length} selected</span>
-            ) : (
-              <span>
-                <strong className="font-medium text-ink">{visible.length}</strong> of {counts.all} threads
-              </span>
-            )
-          }
-        />
-
-        {/* Explains bare phone numbers when this Mac's Contacts app is empty
-            (issue #676). Renders nothing unless the runner confirms it. */}
-        <MacContactsHint />
-
-        {/* Ghost search — a subtle field, not a heavy box (the redesign's
-            calmer default). The border darkens on hover/focus; a clear
-            button appears once there's a query. */}
-        <label
-          className={cn(
-            "mb-[16px] flex items-center gap-[10px] rounded-[12px] border bg-transparent px-[14px] py-[10px] transition-colors duration-calm",
-            query
-              ? "border-hairline-strong"
-              : "border-hairline hover:border-hairline-strong focus-within:border-ink-3 focus-within:bg-paper"
-          )}
-        >
-          <Search className="h-[16px] w-[16px] shrink-0 text-ink-3" strokeWidth={1.6} />
-          <input
-            type="text"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search people, keywords…"
-            autoComplete="off"
-            className="flex-1 border-0 bg-transparent text-[14px] text-ink outline-none placeholder:text-ink-3"
+      <div
+        data-testid="inbox-controls"
+        className="flex min-h-0 max-h-[42dvh] shrink flex-col md:max-h-none md:shrink-0"
+      >
+        {/* Title / search / chips may grow (hints, chips, UI scale). Cap and
+            scroll this block only; tabs + tools stay pinned below so Sort /
+            Filters popovers are not clipped by an overflow ancestor. */}
+        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain md:flex-none md:overflow-visible">
+          <PageHead
+            eyebrow="All conversations"
+            title="Inbox"
+            meta={
+              selectMode ? (
+                <span data-testid="inbox-select-count">{selectedIds.length} selected</span>
+              ) : (
+                <span>
+                  <strong className="font-medium text-ink">{visible.length}</strong> of {counts.all} threads
+                </span>
+              )
+            }
           />
-          {query ? (
-            <button
-              type="button"
-              onClick={() => setQuery("")}
-              aria-label="Clear search"
-              className="shrink-0 p-[2px] text-ink-3 transition-colors duration-calm hover:text-ink"
-            >
-              <XIcon />
-            </button>
-          ) : null}
-        </label>
+
+          {/* Explains bare phone numbers when this Mac's Contacts app is empty
+              (issue #676). Renders nothing unless the runner confirms it. */}
+          <MacContactsHint />
+
+          {/* Ghost search — a subtle field, not a heavy box (the redesign's
+              calmer default). The border darkens on hover/focus; a clear
+              button appears once there's a query. */}
+          <label
+            className={cn(
+              "mb-[16px] flex items-center gap-[10px] rounded-[12px] border bg-transparent px-[14px] py-[10px] transition-colors duration-calm",
+              query
+                ? "border-hairline-strong"
+                : "border-hairline hover:border-hairline-strong focus-within:border-ink-3 focus-within:bg-paper"
+            )}
+          >
+            <Search className="h-[16px] w-[16px] shrink-0 text-ink-3" strokeWidth={1.6} />
+            <input
+              type="text"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search people, keywords…"
+              autoComplete="off"
+              className="flex-1 border-0 bg-transparent text-[14px] text-ink outline-none placeholder:text-ink-3"
+            />
+            {query ? (
+              <button
+                type="button"
+                onClick={() => setQuery("")}
+                aria-label="Clear search"
+                className="shrink-0 p-[2px] text-ink-3 transition-colors duration-calm hover:text-ink"
+              >
+                <XIcon />
+              </button>
+            ) : null}
+          </label>
+        </div>
 
         {/* Status tabs (the lens you switch most) + a compact tools cluster.
             Platform + Kind now live behind the Filters popover so this bar
             stays one calm row instead of the old stack of dropdowns. On
             phone the tools sit above a horizontally-scrollable tab strip
-            (no wrap) so the bar stays two calm rows instead of a tall pile. */}
-        <div className="flex flex-col-reverse gap-1 border-b border-hairline sm:flex-row sm:flex-wrap sm:items-end sm:gap-[14px]">
-          <div className="flex min-w-0 flex-1 gap-[1px] overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden sm:flex-wrap sm:overflow-x-visible">
-            {TABS.map((entry) => {
-              const active = tab === entry.key;
-              const count = counts[entry.key];
-              const zero = count === 0;
-              return (
-                <button
-                  key={entry.key}
-                  type="button"
-                  onClick={() => setTab(entry.key)}
-                  className={cn(
-                    "relative -mb-px shrink-0 whitespace-nowrap border-b-2 border-transparent px-[14px] py-[10px] text-[13px] transition-colors duration-calm",
-                    active
-                      ? "border-accent font-medium text-ink"
-                      : zero
-                        ? "text-ink-4 hover:text-ink-2"
-                        : "text-ink-3 hover:text-ink"
-                  )}
-                >
-                  {entry.label}
-                  <span
+            (no wrap) so the bar stays two calm rows instead of a tall pile.
+            Lives outside the upper overflow scrollport so Sort/Filters
+            absolute menus are not clipped. */}
+        <div className="shrink-0 bg-paper">
+          <div className="flex flex-col-reverse gap-1 border-b border-hairline sm:flex-row sm:flex-wrap sm:items-end sm:gap-[14px]">
+            <div className="flex min-w-0 flex-1 gap-[1px] overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden sm:flex-wrap sm:overflow-x-visible">
+              {TABS.map((entry) => {
+                const active = tab === entry.key;
+                const count = counts[entry.key];
+                const zero = count === 0;
+                return (
+                  <button
+                    key={entry.key}
+                    type="button"
+                    onClick={() => setTab(entry.key)}
                     className={cn(
-                      "ml-[5px] font-mono text-[11px]",
-                      active ? "text-accent-ink" : "text-ink-3"
+                      "relative -mb-px shrink-0 whitespace-nowrap border-b-2 border-transparent px-[14px] py-[10px] text-[13px] transition-colors duration-calm",
+                      active
+                        ? "border-accent font-medium text-ink"
+                        : zero
+                          ? "text-ink-4 hover:text-ink-2"
+                          : "text-ink-3 hover:text-ink"
                     )}
                   >
-                    {count}
-                  </span>
+                    {entry.label}
+                    <span
+                      className={cn(
+                        "ml-[5px] font-mono text-[11px]",
+                        active ? "text-accent-ink" : "text-ink-3"
+                      )}
+                    >
+                      {count}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+            <div className="flex items-center justify-end gap-[4px] pb-[6px]">
+              <SortMenu value={sortMode} options={SORT_MODES} onChange={setSortMode} />
+              <FiltersPopover
+                platformOptions={platformFilterOptions}
+                platformFilter={platformFilter}
+                category={category}
+                favouritesOnly={favouritesOnly}
+                priorityGroup={priorityGroup}
+                priorityGroups={priorityGroups}
+                onPlatform={setPlatformFilter}
+                onCategory={setCategory}
+                onFavouritesOnly={setFavouritesOnly}
+                onPriorityGroup={setPriorityGroup}
+                onClear={() => {
+                  setPlatformFilter("all");
+                  setCategory("any");
+                  setFavouritesOnly(false);
+                  setPriorityGroup("all");
+                }}
+              />
+              {orderedRows.length > 0 || selectMode ? (
+                <button
+                  type="button"
+                  onClick={() => (selectMode ? clearSelection() : setForceSelectMode(true))}
+                  className={cn(TOOL_CLASS, selectMode ? "bg-paper-2 text-ink" : "")}
+                  aria-pressed={selectMode}
+                >
+                  <SelectGlyph />
+                  <span>Select</span>
                 </button>
-              );
-            })}
-          </div>
-          <div className="flex items-center justify-end gap-[4px] pb-[6px]">
-            <SortMenu value={sortMode} options={SORT_MODES} onChange={setSortMode} />
-            <FiltersPopover
-              platformOptions={platformFilterOptions}
-              platformFilter={platformFilter}
-              category={category}
-              favouritesOnly={favouritesOnly}
-              priorityGroup={priorityGroup}
-              priorityGroups={priorityGroups}
-              onPlatform={setPlatformFilter}
-              onCategory={setCategory}
-              onFavouritesOnly={setFavouritesOnly}
-              onPriorityGroup={setPriorityGroup}
-              onClear={() => {
-                setPlatformFilter("all");
-                setCategory("any");
-                setFavouritesOnly(false);
-                setPriorityGroup("all");
-              }}
-            />
-            {orderedRows.length > 0 || selectMode ? (
-              <button
-                type="button"
-                onClick={() => (selectMode ? clearSelection() : setForceSelectMode(true))}
-                className={cn(TOOL_CLASS, selectMode ? "bg-paper-2 text-ink" : "")}
-                aria-pressed={selectMode}
-              >
-                <SelectGlyph />
-                <span>Select</span>
-              </button>
-            ) : null}
+              ) : null}
+            </div>
           </div>
         </div>
-
-        <ChipsRow
-          platformFilter={platformFilter}
-          category={category}
-          favouritesOnly={favouritesOnly}
-          priorityGroup={priorityGroup}
-          onClearPlatform={() => setPlatformFilter("all")}
-          onClearCategory={() => setCategory("any")}
-          onClearFavourites={() => setFavouritesOnly(false)}
-          onClearPriorityGroup={() => setPriorityGroup("all")}
-          onClearAll={() => {
-            setPlatformFilter("all");
-            setCategory("any");
-            setFavouritesOnly(false);
-            setPriorityGroup("all");
-          }}
-        />
       </div>
 
       <div
         data-testid="inbox-list-scroller"
-        className="min-h-0 flex-1 overflow-y-auto overscroll-contain pb-4 md:overflow-visible md:pb-0"
+        data-scroll-owner="list"
+        className="min-h-[7rem] flex-1 overflow-y-auto overscroll-contain pb-4 md:min-h-0 md:overflow-visible md:pb-0"
       >
+      {/* Chips live in the list scroller so a tall filter-chip row never
+          steals the capped controls budget on short phones. */}
+      <ChipsRow
+        platformFilter={platformFilter}
+        category={category}
+        favouritesOnly={favouritesOnly}
+        priorityGroup={priorityGroup}
+        onClearPlatform={() => setPlatformFilter("all")}
+        onClearCategory={() => setCategory("any")}
+        onClearFavourites={() => setFavouritesOnly(false)}
+        onClearPriorityGroup={() => setPriorityGroup("all")}
+        onClearAll={() => {
+          setPlatformFilter("all");
+          setCategory("any");
+          setFavouritesOnly(false);
+          setPriorityGroup("all");
+        }}
+      />
+
       {degraded ? (
         <DegradedBanner
           platform={degraded.platform}

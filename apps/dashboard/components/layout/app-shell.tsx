@@ -79,6 +79,7 @@ import { recordThreadSource } from "@/lib/thread-source";
 import { isInTodayQueue } from "@/lib/today";
 import { recordClientError } from "@/lib/client-error-log";
 import { installAppVisualViewport } from "@/lib/app-visual-viewport";
+import { cn } from "@/lib/utils";
 import {
   classifyConsumerFailure,
   logConsumerFailure,
@@ -792,7 +793,29 @@ export function AppShell({ children }: { children: ReactNode }) {
             />
           </div>
         ) : null}
-        <main className="min-h-0 flex-1 overflow-y-auto">{children}</main>
+        <main
+          // Inbox / Archived / Thread own an inner scroller on mobile. Keep
+          // main from also scrolling so a broken height chain cannot create
+          // two nested scroll owners. Desktop long-page routes still scroll
+          // on main (md:overflow-y-auto).
+          data-scroll-owner={
+            pathname === "/inbox" ||
+            pathname === "/archived" ||
+            pathname.startsWith("/thread/")
+              ? "child"
+              : "main"
+          }
+          className={cn(
+            "min-h-0 flex-1",
+            pathname === "/inbox" ||
+              pathname === "/archived" ||
+              pathname.startsWith("/thread/")
+              ? "overflow-hidden md:overflow-y-auto"
+              : "overflow-y-auto"
+          )}
+        >
+          {children}
+        </main>
         {/* Dock is a real shell row on phone so pages do not need large
             bottom padding to clear a fixed overlay. Hidden on md+ where
             the sidebar owns navigation; returns null inside /thread. */}
