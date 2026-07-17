@@ -4753,8 +4753,9 @@ app.get("/data/transcription-capabilities", asyncRoute(async (_req, res) => {
 
 // #880: voice-preserving "Turn into messages" after dictation. Accepts a
 // raw transcript (+ optional person/name context for light ASR name fixes
-// only). Prompt and model call stay on the runner. On invalid/failed AI
-// responses the dashboard keeps the original transcript and can retry.
+// only). Prompt and model call stay on the runner. On AI failure the service
+// uses a deterministic split fallback; only empty/unusable results 502 so
+// the dashboard can keep the original transcript and retry.
 app.post("/control/format-dictation-messages", asyncRoute(async (req, res) => {
   if (await checkPresenterGuard(res, settingsStore, { action: "format dictation messages", kind: "external-action" })) return;
   const payload = z
@@ -4771,7 +4772,7 @@ app.post("/control/format-dictation-messages", asyncRoute(async (req, res) => {
     knownNames: payload.knownNames
   });
 
-  if (!result) {
+  if (!result || result.messages.length === 0) {
     res.status(502).json({
       ok: false,
       error: "Could not format the transcript into messages. Your original transcript is still available."

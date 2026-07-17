@@ -32,6 +32,42 @@ export type FormatDictationOutcome =
 export const FORMAT_DICTATION_GENERIC_ERROR =
   "Could not turn the transcript into messages. Your original transcript is still here.";
 
+/** Client ceiling for the format-dictation-messages request. */
+export const FORMAT_DICTATION_TIMEOUT_MS = 45_000;
+
+export const FORMAT_DICTATION_TIMEOUT_ERROR =
+  "Formatting took too long. Your original transcript is still here.";
+
+export const FORMAT_DICTATION_CANCELLED_ERROR =
+  "Formatting cancelled. Your original transcript is still here.";
+
+/** Non-empty bubble texts in order, ready for sequential send. */
+export function textsReadyToSend(messages: DictationMessageBubble[]): string[] {
+  return messages.map((m) => m.text.trim()).filter(Boolean);
+}
+
+/** Progress copy for sequential multi-send (1-based current). */
+export function sequentialSendProgressLabel(current: number, total: number): string {
+  const c = Math.max(0, Math.min(current, total));
+  return `Sending ${c} of ${total}…`;
+}
+
+/**
+ * After a partial sequential send, keep only the unsent bubbles so the
+ * operator can retry or edit without re-sending already-accepted ones.
+ */
+export function remainingMessagesAfterPartialSend(
+  messages: DictationMessageBubble[],
+  sentCount: number
+): DictationMessageBubble[] {
+  const ready = messages.filter((m) => m.text.trim());
+  const kept = ready.slice(Math.max(0, sentCount)).map((m) => ({
+    ...m,
+    text: m.text.trim()
+  }));
+  return renumber(kept);
+}
+
 /**
  * Validate the runner response before the UI trusts it. On any invalid
  * shape, return error so the page keeps the original transcript.

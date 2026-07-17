@@ -172,6 +172,21 @@ test("fallbackSplitTranscript on empty input returns empty messages", () => {
   assert.equal(out.cleanedTranscript, "");
 });
 
+test("fallbackSplitTranscript is production-shaped (usable when AI returns null)", () => {
+  // AiService.formatDictationMessages uses this when the client is missing or
+  // the model payload is unusable. Endpoint only 502s when messages is empty.
+  const out = fallbackSplitTranscript(
+    "First thought here. Second thought follows. And a third?"
+  );
+  assert.ok(out.messages.length >= 2);
+  assert.ok(out.cleanedTranscript.length > 0);
+  assert.equal(out.warnings.length, 0);
+  for (const m of out.messages) {
+    assert.match(m.id, /^message-\d+$/);
+    assert.ok(m.text.trim().length > 0);
+  }
+});
+
 test("issue examples fixtures are present and non-empty", () => {
   assert.equal(DICTATION_MESSAGES_EXAMPLES.length, 3);
   for (const ex of DICTATION_MESSAGES_EXAMPLES) {

@@ -58,6 +58,7 @@ import { preserveAmbiguousEvidence } from "./ai-ambiguity";
 import {
   buildDictationMessagesUserPrompt,
   DICTATION_MESSAGES_SYSTEM_PROMPT,
+  fallbackSplitTranscript,
   sanitiseDictationMessagesResponse,
   type DictationMessagesResult,
   type FormatDictationMessagesInput
@@ -2883,9 +2884,9 @@ ${recentExchange || "(no recent messages)"}`;
 
   /**
    * #880: turn a raw dictation transcript into voice-preserving message
-   * bubbles. Prompt and sanitiser live in dictation-messages.ts. Returns
-   * null on provider/parse failure so the dashboard keeps the original
-   * transcript and can offer retry. Never auto-sends.
+   * bubbles. Prompt and sanitiser live in dictation-messages.ts. On AI
+   * unavailability or unusable model output, falls back to deterministic
+   * sentence/thought split (no invented wording). Never auto-sends.
    */
   async function formatDictationMessages(
     input: FormatDictationMessagesInput
@@ -2893,10 +2894,15 @@ ${recentExchange || "(no recent messages)"}`;
     const transcript = input.transcript?.trim() ?? "";
     if (!transcript) return null;
 
+    const useFallback = (reason: string): DictationMessagesResult | null => {
+      console.warn(`[ai] formatDictationMessages: ${reason}; using deterministic split`);
+      const fallback = fallbackSplitTranscript(transcript);
+      return fallback.messages.length > 0 ? fallback : null;
+    };
+
     const { client, model, provider } = await resolveActive();
     if (!client) {
-      console.warn("[ai] formatDictationMessages: no AI client configured");
-      return null;
+      return useFallback("no AI client configured");
     }
 
     const userPrompt = buildDictationMessagesUserPrompt({
@@ -2920,18 +2926,16 @@ ${recentExchange || "(no recent messages)"}`;
       });
       const content = response.choices[0]?.message?.content;
       if (!content) {
-        console.warn(
-          `[ai] formatDictationMessages empty content (provider=${provider}, model=${model})`
-        );
-        return null;
+        return useFallback(`empty content (provider=${provider}, model=${model})`);
       }
       const raw = parseAiJson(content, model);
-      return sanitiseDictationMessagesResponse(raw, transcript);
+      const sanitised = sanitiseDictationMessagesResponse(raw, transcript);
+      if (sanitised) return sanitised;
+      return useFallback(`unusable model payload (provider=${provider}, model=${model})`);
     } catch (error) {
-      console.warn(
-        `[ai] formatDictationMessages failed (provider=${provider}, model=${model}); ${classifyLlmError(error, provider)}`
+      return useFallback(
+        `failed (provider=${provider}, model=${model}); ${classifyLlmError(error, provider)}`
       );
-      return null;
     }
   }
 

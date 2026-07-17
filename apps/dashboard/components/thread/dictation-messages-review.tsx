@@ -5,6 +5,7 @@ import {
   ChevronDown,
   ChevronUp,
   Copy,
+  Loader2,
   Merge,
   Scissors,
   Trash2,
@@ -15,7 +16,9 @@ import {
   joinMessagesForCopy,
   mergeWithNext,
   moveMessage,
+  sequentialSendProgressLabel,
   splitMessage,
+  textsReadyToSend,
   updateMessageText,
   type DictationMessageBubble,
   type DictationMessagesWarning
@@ -32,12 +35,24 @@ export interface DictationMessagesReviewProps {
   onKeepOriginal: () => void;
   onRetryFormat: () => void;
   onDismiss: () => void;
+  /** Abort in-flight format request (timeout path still surfaces Retry). */
+  onCancelFormat?: () => void;
+  /**
+   * When set, show "Send as separate messages". Caller walks bubbles through
+   * the existing send path; must never auto-fire without this click.
+   */
+  onSendSequentially?: (
+    messages: DictationMessageBubble[],
+    opts: { onProgress: (current: number, total: number) => void }
+  ) => Promise<void>;
+  /** Disable sequential send while the thread composer is already sending. */
+  sendBusy?: boolean;
 }
 
 /**
  * #880 review surface after "Turn into messages". Editable bubbles with
- * delete / split / merge / reorder / copy. Never sends. Original transcript
- * stays available via Keep original.
+ * delete / split / merge / reorder / copy. Sequential send is user-triggered
+ * only. Original transcript stays available via Keep original.
  */
 export function DictationMessagesReview({
   originalTranscript,
@@ -49,11 +64,19 @@ export function DictationMessagesReview({
   onUseInComposer,
   onKeepOriginal,
   onRetryFormat,
-  onDismiss
+  onDismiss,
+  onCancelFormat,
+  onSendSequentially,
+  sendBusy = false
 }: DictationMessagesReviewProps) {
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [copiedAll, setCopiedAll] = useState(false);
   const [splitHintId, setSplitHintId] = useState<string | null>(null);
+  const [sendProgress, setSendProgress] = useState<{ current: number; total: number } | null>(
+    null
+  );
+  const [sendError, setSendError] = useState<string | null>(null);
+  const [sendDone, setSendDone] = useState(false);
 
   const copyText = useCallback(async (text: string, id: string | "all") => {
     try {
@@ -70,6 +93,29 @@ export function DictationMessagesReview({
     }
   }, []);
 
+  const handleSendSequentially = useCallback(async () => {
+    if (!onSendSequentially || sendProgress || sendBusy) return;
+    const ready = textsReadyToSend(messages);
+    if (ready.length === 0) return;
+    setSendError(null);
+    setSendDone(false);
+    setSendProgress({ current: 0, total: ready.length });
+    try {
+      await onSendSequentially(messages, {
+        onProgress: (current, total) => setSendProgress({ current, total })
+      });
+      setSendDone(true);
+    } catch (err) {
+      const message =
+        err instanceof Error && err.message
+          ? err.message
+          : "Could not send all messages. Unsent ones are still here.";
+      setSendError(message);
+    } finally {
+      setSendProgress(null);
+    }
+  }, [messages, onSendSequentially, sendBusy, sendProgress]);
+
   if (formatting) {
     return (
       <div className="mb-1.5 rounded-[10px] border border-hairline bg-paper-2 px-3 py-2.5 text-[12px] text-ink-2">
@@ -77,6 +123,32 @@ export function DictationMessagesReview({
         <p className="m-0 mt-1 text-[11px] leading-snug text-ink-3">
           Keeping your wording. Light fixes only.
         </p>
+        <details className="mt-2">
+          <summary className="cursor-pointer font-mono text-[9.5px] uppercase tracking-[0.06em] text-ink-3">
+            Original transcript
+          </summary>
+          <p className="m-0 mt-1 max-h-[4.5rem] overflow-y-auto whitespace-pre-wrap text-[11px] leading-snug text-ink-2">
+            {originalTranscript}
+          </p>
+        </details>
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          {onCancelFormat ? (
+            <button
+              type="button"
+              onClick={onCancelFormat}
+              className="rounded-pill border border-hairline bg-paper px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.06em] text-ink-2 transition-colors duration-calm hover:text-ink"
+            >
+              Cancel
+            </button>
+          ) : null}
+          <button
+            type="button"
+            onClick={onKeepOriginal}
+            className="rounded-pill border border-hairline bg-paper px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.06em] text-ink-2 transition-colors duration-calm hover:text-ink"
+          >
+            Keep as transcript
+          </button>
+        </div>
       </div>
     );
   }
@@ -113,6 +185,10 @@ export function DictationMessagesReview({
     );
   }
 
+  const readyCount = textsReadyToSend(messages).length;
+  const sending = sendProgress !== null;
+  const actionsDisabled = sending || sendBusy || readyCount === 0;
+
   return (
     <div className="mb-1.5 rounded-[10px] border border-hairline bg-paper-2 px-2.5 py-2 text-[12px] text-ink-2">
       <div className="mb-1.5 flex items-start gap-2 px-0.5">
@@ -126,7 +202,8 @@ export function DictationMessagesReview({
           type="button"
           onClick={onDismiss}
           aria-label="Dismiss"
-          className="shrink-0 text-ink-3 transition-colors duration-calm hover:text-ink"
+          disabled={sending}
+          className="shrink-0 text-ink-3 transition-colors duration-calm hover:text-ink disabled:opacity-40"
         >
           <X className="h-3.5 w-3.5" strokeWidth={2} />
         </button>
@@ -142,7 +219,8 @@ export function DictationMessagesReview({
               value={msg.text}
               onChange={(e) => onMessagesChange(updateMessageText(messages, msg.id, e.target.value))}
               rows={Math.min(4, Math.max(1, Math.ceil(msg.text.length / 48)))}
-              className="w-full resize-y bg-transparent text-[13px] leading-[1.45] text-ink outline-none placeholder:text-ink-3"
+              disabled={sending}
+              className="w-full resize-y bg-transparent text-[13px] leading-[1.45] text-ink outline-none placeholder:text-ink-3 disabled:opacity-60"
               aria-label={`Message ${index + 1}`}
             />
             <div className="mt-1 flex flex-wrap items-center gap-1">
@@ -150,7 +228,7 @@ export function DictationMessagesReview({
                 type="button"
                 title="Move up"
                 aria-label="Move up"
-                disabled={index === 0}
+                disabled={sending || index === 0}
                 onClick={() => onMessagesChange(moveMessage(messages, msg.id, "up"))}
                 className="inline-flex h-6 w-6 items-center justify-center rounded-full text-ink-3 transition-colors duration-calm hover:bg-paper-2 hover:text-ink disabled:opacity-30"
               >
@@ -160,7 +238,7 @@ export function DictationMessagesReview({
                 type="button"
                 title="Move down"
                 aria-label="Move down"
-                disabled={index === messages.length - 1}
+                disabled={sending || index === messages.length - 1}
                 onClick={() => onMessagesChange(moveMessage(messages, msg.id, "down"))}
                 className="inline-flex h-6 w-6 items-center justify-center rounded-full text-ink-3 transition-colors duration-calm hover:bg-paper-2 hover:text-ink disabled:opacity-30"
               >
@@ -174,6 +252,7 @@ export function DictationMessagesReview({
                     : "Split at caret"
                 }
                 aria-label="Split message"
+                disabled={sending}
                 onClick={(e) => {
                   const ta = (e.currentTarget.closest("li")?.querySelector("textarea") ??
                     null) as HTMLTextAreaElement | null;
@@ -186,7 +265,7 @@ export function DictationMessagesReview({
                   setSplitHintId(null);
                   onMessagesChange(splitMessage(messages, msg.id, caret));
                 }}
-                className="inline-flex h-6 items-center gap-1 rounded-pill px-1.5 font-mono text-[9px] uppercase tracking-[0.06em] text-ink-3 transition-colors duration-calm hover:bg-paper-2 hover:text-ink"
+                className="inline-flex h-6 items-center gap-1 rounded-pill px-1.5 font-mono text-[9px] uppercase tracking-[0.06em] text-ink-3 transition-colors duration-calm hover:bg-paper-2 hover:text-ink disabled:opacity-30"
               >
                 <Scissors className="h-3 w-3" strokeWidth={2} />
                 Split
@@ -195,7 +274,7 @@ export function DictationMessagesReview({
                 type="button"
                 title="Merge with next"
                 aria-label="Merge with next"
-                disabled={index >= messages.length - 1}
+                disabled={sending || index >= messages.length - 1}
                 onClick={() => onMessagesChange(mergeWithNext(messages, msg.id))}
                 className="inline-flex h-6 items-center gap-1 rounded-pill px-1.5 font-mono text-[9px] uppercase tracking-[0.06em] text-ink-3 transition-colors duration-calm hover:bg-paper-2 hover:text-ink disabled:opacity-30"
               >
@@ -206,8 +285,9 @@ export function DictationMessagesReview({
                 type="button"
                 title="Copy"
                 aria-label="Copy message"
+                disabled={sending}
                 onClick={() => void copyText(msg.text, msg.id)}
-                className="inline-flex h-6 items-center gap-1 rounded-pill px-1.5 font-mono text-[9px] uppercase tracking-[0.06em] text-ink-3 transition-colors duration-calm hover:bg-paper-2 hover:text-ink"
+                className="inline-flex h-6 items-center gap-1 rounded-pill px-1.5 font-mono text-[9px] uppercase tracking-[0.06em] text-ink-3 transition-colors duration-calm hover:bg-paper-2 hover:text-ink disabled:opacity-30"
               >
                 <Copy className="h-3 w-3" strokeWidth={2} />
                 {copiedId === msg.id ? "Copied" : "Copy"}
@@ -216,7 +296,7 @@ export function DictationMessagesReview({
                 type="button"
                 title="Delete"
                 aria-label="Delete message"
-                disabled={messages.length <= 1}
+                disabled={sending || messages.length <= 1}
                 onClick={() => onMessagesChange(deleteMessage(messages, msg.id))}
                 className="ml-auto inline-flex h-6 w-6 items-center justify-center rounded-full text-ink-3 transition-colors duration-calm hover:bg-paper-2 hover:text-ink disabled:opacity-30"
               >
@@ -246,6 +326,10 @@ export function DictationMessagesReview({
         </div>
       ) : null}
 
+      {sendError ? (
+        <p className="m-0 mt-2 px-0.5 text-[11px] leading-snug text-risk-overdue">{sendError}</p>
+      ) : null}
+
       <details className="mt-2 px-0.5">
         <summary className="cursor-pointer font-mono text-[9.5px] uppercase tracking-[0.06em] text-ink-3">
           Original transcript
@@ -256,18 +340,37 @@ export function DictationMessagesReview({
       </details>
 
       <div className="mt-2 flex flex-wrap items-center gap-2 px-0.5">
+        {onSendSequentially ? (
+          <button
+            type="button"
+            onClick={() => void handleSendSequentially()}
+            disabled={actionsDisabled}
+            className="inline-flex items-center gap-1.5 rounded-pill border border-hairline-strong bg-paper px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.06em] text-ink transition-colors duration-calm hover:bg-paper-2 disabled:opacity-40"
+          >
+            {sending ? (
+              <>
+                <Loader2 className="h-3 w-3 animate-spin" strokeWidth={2} />
+                {sequentialSendProgressLabel(sendProgress.current, sendProgress.total)}
+              </>
+            ) : sendDone ? (
+              "Sent"
+            ) : (
+              "Send as separate messages"
+            )}
+          </button>
+        ) : null}
         <button
           type="button"
           onClick={() => onUseInComposer(joinMessagesForCopy(messages))}
-          disabled={messages.every((m) => !m.text.trim())}
-          className="rounded-pill border border-hairline-strong bg-paper px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.06em] text-ink transition-colors duration-calm hover:bg-paper-2 disabled:opacity-40"
+          disabled={actionsDisabled}
+          className="rounded-pill border border-hairline bg-paper px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.06em] text-ink-2 transition-colors duration-calm hover:text-ink disabled:opacity-40"
         >
           Use in composer
         </button>
         <button
           type="button"
           onClick={() => void copyText(joinMessagesForCopy(messages), "all")}
-          disabled={messages.every((m) => !m.text.trim())}
+          disabled={actionsDisabled}
           className="rounded-pill border border-hairline bg-paper px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.06em] text-ink-2 transition-colors duration-calm hover:text-ink disabled:opacity-40"
         >
           {copiedAll ? "Copied all" : "Copy all"}
@@ -275,7 +378,8 @@ export function DictationMessagesReview({
         <button
           type="button"
           onClick={onKeepOriginal}
-          className="rounded-pill border border-hairline bg-paper px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.06em] text-ink-2 transition-colors duration-calm hover:text-ink"
+          disabled={sending}
+          className="rounded-pill border border-hairline bg-paper px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.06em] text-ink-2 transition-colors duration-calm hover:text-ink disabled:opacity-40"
         >
           Keep as transcript
         </button>

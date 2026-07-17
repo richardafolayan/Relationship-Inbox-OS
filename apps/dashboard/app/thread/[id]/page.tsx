@@ -95,6 +95,11 @@ import {
 } from "@/lib/dictation-retry";
 import {
   classifyFormatDictationResponse,
+  FORMAT_DICTATION_CANCELLED_ERROR,
+  FORMAT_DICTATION_TIMEOUT_ERROR,
+  FORMAT_DICTATION_TIMEOUT_MS,
+  remainingMessagesAfterPartialSend,
+  textsReadyToSend,
   type DictationMessageBubble,
   type DictationMessagesWarning,
   type FormatDictationMessagesResponse
@@ -723,6 +728,11 @@ export default function ThreadPage() {
     "idle" | "formatting" | "ready" | "error"
   >("idle");
   const [dictationFormatError, setDictationFormatError] = useState<string | null>(null);
+  // Abort in-flight format-dictation-messages fetch (timeout or Cancel).
+  const dictationFormatAbortRef = useRef<AbortController | null>(null);
+  const dictationFormatAbortReasonRef = useRef<"timeout" | "cancel" | null>(null);
+  // Bumped on keep/dismiss/thread switch so a late format response cannot reapply.
+  const dictationFormatGenerationRef = useRef(0);
   // Source of the current composer text: empty / explicit draft typed
   // by the operator / AI predraft (first suggested reply auto-filled
   // when no explicit draft exists). Drives the "AI predraft" badge.
@@ -1150,6 +1160,10 @@ export default function ThreadPage() {
     setComposeError(null);
     setAskAnswer(null);
     // #880: drop any in-flight dictation review from the previous thread.
+    dictationFormatAbortReasonRef.current = "cancel";
+    dictationFormatAbortRef.current?.abort();
+    dictationFormatAbortRef.current = null;
+    dictationFormatGenerationRef.current += 1;
     setPendingDictationTranscript(null);
     setDictationMessages(null);
     setDictationMessageWarnings([]);
@@ -1924,6 +1938,9 @@ export default function ThreadPage() {
   const keepDictationAsTranscript = useCallback(() => {
     const spoken = pendingDictationTranscript;
     if (!spoken) return;
+    dictationFormatAbortReasonRef.current = "cancel";
+    dictationFormatAbortRef.current?.abort();
+    dictationFormatGenerationRef.current += 1;
     setComposer((prev) => (prev && !/\s$/.test(prev) ? `${prev} ${spoken}` : `${prev}${spoken}`));
     setComposerSource("user");
     setPendingDictationTranscript(null);
@@ -1934,6 +1951,9 @@ export default function ThreadPage() {
   }, [pendingDictationTranscript]);
 
   const dismissDictationTranscript = useCallback(() => {
+    dictationFormatAbortReasonRef.current = "cancel";
+    dictationFormatAbortRef.current?.abort();
+    dictationFormatGenerationRef.current += 1;
     setPendingDictationTranscript(null);
     setDictationMessages(null);
     setDictationMessageWarnings([]);
@@ -1941,14 +1961,35 @@ export default function ThreadPage() {
     setDictationFormatError(null);
   }, []);
 
+  const cancelDictationFormat = useCallback(() => {
+    if (dictationFormatStatus !== "formatting") return;
+    dictationFormatAbortReasonRef.current = "cancel";
+    dictationFormatAbortRef.current?.abort();
+  }, [dictationFormatStatus]);
+
   const turnDictationIntoMessages = useCallback(async () => {
     const transcript = pendingDictationTranscript;
     if (!transcript || dictationFormatStatus === "formatting") return;
     const startThreadId = threadId;
+    const generation = dictationFormatGenerationRef.current + 1;
+    dictationFormatGenerationRef.current = generation;
     setDictationFormatStatus("formatting");
     setDictationFormatError(null);
     setDictationMessages(null);
     setDictationMessageWarnings([]);
+
+    dictationFormatAbortReasonRef.current = null;
+    const controller = new AbortController();
+    dictationFormatAbortRef.current = controller;
+    const timeoutId = window.setTimeout(() => {
+      dictationFormatAbortReasonRef.current = "timeout";
+      controller.abort();
+    }, FORMAT_DICTATION_TIMEOUT_MS);
+
+    const stillCurrent = () =>
+      generation === dictationFormatGenerationRef.current &&
+      shouldApplyThreadScopedResult(startThreadId, transformRouteIdRef.current);
+
     try {
       const personName = thread?.personName ?? null;
       let resp: Response;
@@ -1959,10 +2000,23 @@ export default function ThreadPage() {
           body: JSON.stringify({
             transcript,
             personName
-          })
+          }),
+          signal: controller.signal
         });
-      } catch {
-        if (!shouldApplyThreadScopedResult(startThreadId, transformRouteIdRef.current)) return;
+      } catch (err) {
+        if (!stillCurrent()) return;
+        const aborted = controller.signal.aborted || (err instanceof DOMException && err.name === "AbortError");
+        if (aborted) {
+          if (dictationFormatAbortReasonRef.current === "cancel") {
+            // Return to the Keep / Turn-into-messages choice; original stays.
+            setDictationFormatStatus("idle");
+            setDictationFormatError(null);
+            return;
+          }
+          setDictationFormatStatus("error");
+          setDictationFormatError(FORMAT_DICTATION_TIMEOUT_ERROR);
+          return;
+        }
         setDictationFormatStatus("error");
         setDictationFormatError(
           "Lost connection while formatting. Your original transcript is still here."
@@ -1970,7 +2024,7 @@ export default function ThreadPage() {
         return;
       }
       const data = (await resp.json().catch(() => ({}))) as FormatDictationMessagesResponse;
-      if (!shouldApplyThreadScopedResult(startThreadId, transformRouteIdRef.current)) return;
+      if (!stillCurrent()) return;
       const outcome = classifyFormatDictationResponse({
         ok: resp.ok,
         status: resp.status,
@@ -1985,13 +2039,32 @@ export default function ThreadPage() {
       setDictationMessageWarnings(outcome.warnings);
       setDictationFormatStatus("ready");
     } catch (err) {
-      if (!shouldApplyThreadScopedResult(startThreadId, transformRouteIdRef.current)) return;
+      if (!stillCurrent()) return;
+      if (controller.signal.aborted) {
+        if (dictationFormatAbortReasonRef.current === "cancel") {
+          setDictationFormatStatus("idle");
+          setDictationFormatError(null);
+          return;
+        }
+        setDictationFormatStatus("error");
+        setDictationFormatError(
+          dictationFormatAbortReasonRef.current === "timeout"
+            ? FORMAT_DICTATION_TIMEOUT_ERROR
+            : FORMAT_DICTATION_CANCELLED_ERROR
+        );
+        return;
+      }
       setDictationFormatStatus("error");
       setDictationFormatError(
         err instanceof Error && err.message
           ? err.message
           : "Could not turn the transcript into messages. Your original transcript is still here."
       );
+    } finally {
+      window.clearTimeout(timeoutId);
+      if (dictationFormatAbortRef.current === controller) {
+        dictationFormatAbortRef.current = null;
+      }
     }
   }, [pendingDictationTranscript, dictationFormatStatus, threadId, thread?.personName]);
 
@@ -2009,6 +2082,123 @@ export default function ThreadPage() {
     setDictationFormatStatus("idle");
     setDictationFormatError(null);
   }, []);
+
+  /**
+   * #880: user-triggered sequential send of reviewed bubbles via the same
+   * /send path as the composer. Progress is reported to the review UI.
+   * Aborts remaining bubbles on first failure; leaves unsent ones for retry.
+   */
+  const sendDictationMessagesSequentially = useCallback(
+    async (
+      messages: DictationMessageBubble[],
+      opts: { onProgress: (current: number, total: number) => void }
+    ) => {
+      if (!thread) {
+        throw new Error("This conversation is not ready to send.");
+      }
+      if (sendingRef.current || sending) {
+        throw new Error("A send is already in progress. Try again when it finishes.");
+      }
+      const texts = textsReadyToSend(messages);
+      if (texts.length === 0) {
+        throw new Error("No messages to send.");
+      }
+
+      sendingRef.current = true;
+      setSending(true);
+      setError(null);
+      stickToBottomRef.current = true;
+      let sentCount = 0;
+
+      try {
+        for (let i = 0; i < texts.length; i++) {
+          const text = texts[i]!;
+          opts.onProgress(i + 1, texts.length);
+          const clientSendId = uuid();
+          const sentAt = new Date().toISOString();
+          setPendingSends((prev) => [
+            ...prev,
+            { clientSendId, text, sentAt, attachments: [] }
+          ]);
+          afterNextPaint(() => {
+            recordMessageSyncLatency({
+              metric: "send_click_to_visible_acknowledgement",
+              durationMs: Date.now() - Date.parse(sentAt),
+              platform: thread.platform
+            });
+          });
+
+          try {
+            await apiPost(`/runner/control/thread/${thread.id}/send`, {
+              text,
+              clientSendId,
+              clientRequestedAt: sentAt
+            });
+            sentCount += 1;
+          } catch (sendError) {
+            const failure = classifyConsumerFailure(sendError, {
+              path: `/runner/control/thread/${thread.id}/send`,
+              method: "POST"
+            });
+            if (failure.deliveryUncertain) {
+              const message =
+                "Delivery is not confirmed. Check the conversation before sending again.";
+              setPendingSends((prev) =>
+                prev.map((p) =>
+                  p.clientSendId === clientSendId
+                    ? {
+                        ...p,
+                        uncertain: true,
+                        errorMessage: message,
+                        errorKind: "DELIVERY_UNCERTAIN"
+                      }
+                    : p
+                )
+              );
+              setError(message);
+              window.setTimeout(() => void checkPendingDelivery(clientSendId), 750);
+              // Treat as not confirmed: do not advance sentCount; keep this + rest.
+              const remaining = remainingMessagesAfterPartialSend(messages, sentCount);
+              setDictationMessages(remaining.length > 0 ? remaining : null);
+              if (remaining.length === 0) {
+                setPendingDictationTranscript(null);
+                setDictationMessageWarnings([]);
+                setDictationFormatStatus("idle");
+                setDictationFormatError(null);
+              }
+              throw new Error(
+                `${message} Sent ${sentCount} of ${texts.length}. Unsent messages are still here.`
+              );
+            }
+            setPendingSends((prev) => prev.filter((p) => p.clientSendId !== clientSendId));
+            setError(failure.message);
+            const remaining = remainingMessagesAfterPartialSend(messages, sentCount);
+            setDictationMessages(remaining.length > 0 ? remaining : null);
+            if (remaining.length === 0) {
+              setPendingDictationTranscript(null);
+              setDictationMessageWarnings([]);
+              setDictationFormatStatus("idle");
+              setDictationFormatError(null);
+            }
+            throw new Error(
+              `${failure.message} Sent ${sentCount} of ${texts.length}. Unsent messages are still here.`
+            );
+          }
+        }
+
+        // All accepted by the send queue. Clear the review surface.
+        setPendingDictationTranscript(null);
+        setDictationMessages(null);
+        setDictationMessageWarnings([]);
+        setDictationFormatStatus("idle");
+        setDictationFormatError(null);
+      } finally {
+        sendingRef.current = false;
+        setSending(false);
+      }
+    },
+    [checkPendingDelivery, sending, thread]
+  );
 
   // #462: record a short clip, prepare it as 16 kHz mono WAV, and hand it to
   // submitDictationWav. No autosend; nothing is persisted server-side.
@@ -4826,6 +5016,11 @@ export default function ThreadPage() {
                 onKeepOriginal={keepDictationAsTranscript}
                 onRetryFormat={() => void turnDictationIntoMessages()}
                 onDismiss={dismissDictationTranscript}
+                onCancelFormat={cancelDictationFormat}
+                onSendSequentially={
+                  thread ? sendDictationMessagesSequentially : undefined
+                }
+                sendBusy={sending}
               />
             ) : null}
             {/* Focus Reply Buffer: when this thread arrived during the active

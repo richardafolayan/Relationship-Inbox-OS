@@ -194,9 +194,10 @@ export function sanitiseDictationMessagesResponse(
 }
 
 /**
- * Deterministic fallback when the AI is unavailable: split on sentence
- * boundaries and light conjunctions so the operator still gets bubbles
- * rather than a dead end. Never invents wording.
+ * Deterministic production fallback when AI is unavailable or returns an
+ * unusable payload (wired from AiService.formatDictationMessages). Splits
+ * on sentence boundaries and light conjunctions so the operator still gets
+ * editable bubbles. Never invents wording.
  */
 export function fallbackSplitTranscript(transcript: string): DictationMessagesResult {
   const trimmed = transcript.trim();

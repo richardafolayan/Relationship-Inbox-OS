@@ -7,9 +7,14 @@ const {
   joinMessagesForCopy,
   mergeWithNext,
   moveMessage,
+  remainingMessagesAfterPartialSend,
+  sequentialSendProgressLabel,
   splitMessage,
+  textsReadyToSend,
   updateMessageText,
-  FORMAT_DICTATION_GENERIC_ERROR
+  FORMAT_DICTATION_GENERIC_ERROR,
+  FORMAT_DICTATION_TIMEOUT_ERROR,
+  FORMAT_DICTATION_TIMEOUT_MS
 } = await import("../apps/dashboard/lib/dictation-messages.ts");
 
 // #880: client-side response validation + pure bubble operations for the
@@ -143,4 +148,43 @@ test("joinMessagesForCopy joins with blank lines", () => {
     "First thought\n\nSecond thought\n\nThird thought"
   );
   assert.equal(joinMessagesForCopy([{ id: "message-1", text: "  " }]), "");
+});
+
+test("textsReadyToSend drops blanks and preserves order", () => {
+  assert.deepEqual(
+    textsReadyToSend([
+      { id: "message-1", text: "  One  " },
+      { id: "message-2", text: "   " },
+      { id: "message-3", text: "Two" }
+    ]),
+    ["One", "Two"]
+  );
+});
+
+test("sequentialSendProgressLabel is 1-based and clamp-safe", () => {
+  assert.equal(sequentialSendProgressLabel(1, 3), "Sending 1 of 3…");
+  assert.equal(sequentialSendProgressLabel(3, 3), "Sending 3 of 3…");
+  assert.equal(sequentialSendProgressLabel(0, 2), "Sending 0 of 2…");
+  assert.equal(sequentialSendProgressLabel(9, 2), "Sending 2 of 2…");
+});
+
+test("remainingMessagesAfterPartialSend keeps only unsent bubbles", () => {
+  const remaining = remainingMessagesAfterPartialSend(sample(), 1);
+  assert.equal(remaining.length, 2);
+  assert.equal(remaining[0].id, "message-1");
+  assert.equal(remaining[0].text, "Second thought");
+  assert.equal(remaining[1].text, "Third thought");
+  assert.deepEqual(remainingMessagesAfterPartialSend(sample(), 3), []);
+  assert.deepEqual(remainingMessagesAfterPartialSend(sample(), 0).map((m) => m.text), [
+    "First thought",
+    "Second thought",
+    "Third thought"
+  ]);
+});
+
+test("format timeout constants are finite and user-facing", () => {
+  assert.ok(FORMAT_DICTATION_TIMEOUT_MS > 0);
+  assert.ok(FORMAT_DICTATION_TIMEOUT_MS <= 120_000);
+  assert.match(FORMAT_DICTATION_TIMEOUT_ERROR, /took too long/i);
+  assert.match(FORMAT_DICTATION_TIMEOUT_ERROR, /original transcript/i);
 });
