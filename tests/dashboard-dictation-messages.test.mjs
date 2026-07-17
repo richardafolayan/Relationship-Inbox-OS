@@ -188,3 +188,26 @@ test("format timeout constants are finite and user-facing", () => {
   assert.match(FORMAT_DICTATION_TIMEOUT_ERROR, /took too long/i);
   assert.match(FORMAT_DICTATION_TIMEOUT_ERROR, /original transcript/i);
 });
+
+// Source-level: sequential send must snapshot the start thread and gate UI
+// writes (full assertions live in dashboard-thread-page-state-race-guards).
+test("thread page sequential send guards against cross-thread UI pollution", async () => {
+  const { readFileSync } = await import("node:fs");
+  const { fileURLToPath } = await import("node:url");
+  const { dirname, join } = await import("node:path");
+  const dir = dirname(fileURLToPath(import.meta.url));
+  const src = readFileSync(join(dir, "..", "apps", "dashboard", "app", "thread", "[id]", "page.tsx"), "utf8");
+  const sendBlock = src.slice(
+    src.indexOf("const sendDictationMessagesSequentially"),
+    src.indexOf("const startDictation")
+  );
+  assert.match(sendBlock, /const startThreadId = threadId;/);
+  assert.match(
+    sendBlock,
+    /shouldApplyThreadScopedResult\(startThreadId, transformRouteIdRef\.current\)/
+  );
+  assert.ok(
+    (sendBlock.match(/if \(!stillOnStartThread\(\)\) return;/g) || []).length >= 3,
+    "expected multiple stillOnStartThread abort points in the send loop"
+  );
+});

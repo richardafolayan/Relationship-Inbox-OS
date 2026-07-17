@@ -42,3 +42,47 @@ test("a dismissed AI predraft is not re-injected on the next refresh", () => {
   // applyThread skips the predraft branch when dismissed
   assert.match(SRC, /!predraftDismissedRef\.current\.has\(transformRouteIdRef\.current\)/, "applyThread skips a dismissed predraft");
 });
+
+// #880 / PR #934 F1: sequential multi-send must not re-pollute thread B after
+// A→B navigation mid-send. Source guards only (page is not unit-mounted).
+test("sequential dictation send is thread-scoped and stops on route change", () => {
+  const sendBlock = SRC.slice(
+    SRC.indexOf("const sendDictationMessagesSequentially"),
+    SRC.indexOf("const startDictation")
+  );
+  assert.match(
+    sendBlock,
+    /const startThreadId = threadId;/,
+    "sendDictationMessagesSequentially snapshots startThreadId"
+  );
+  assert.match(
+    sendBlock,
+    /shouldApplyThreadScopedResult\(startThreadId, transformRouteIdRef\.current\)/,
+    "sequential send gates on transformRouteIdRef"
+  );
+  assert.match(
+    sendBlock,
+    /if \(!stillOnStartThread\(\)\) return;/,
+    "sequential send aborts the loop after leave"
+  );
+  // finally must not clear B's sending latch after A→B
+  assert.match(
+    sendBlock,
+    /if \(stillOnStartThread\(\)\) \{\s*sendingRef\.current = false;\s*setSending\(false\);/,
+    "finally only clears sending while still on start thread"
+  );
+
+  // Thread-switch reset must force-stop the send latch so B is not stuck.
+  const resetStart = SRC.indexOf("transformRouteIdRef.current = threadId;");
+  const resetBlock = SRC.slice(resetStart, resetStart + 1200);
+  assert.match(
+    resetBlock,
+    /sendingRef\.current = false;/,
+    "thread switch clears sendingRef"
+  );
+  assert.match(
+    resetBlock,
+    /setSending\(false\);/,
+    "thread switch clears sending state"
+  );
+});

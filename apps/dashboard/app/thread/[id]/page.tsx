@@ -1150,6 +1150,10 @@ export default function ThreadPage() {
     // started on the previous thread will see this changed value once it
     // resolves and skip its setComposer.
     transformRouteIdRef.current = threadId;
+    // Force-stop sequential multi-send (and any single send latch) so B is
+    // not stuck with sending=true and so the A→B loop skips further UI writes.
+    sendingRef.current = false;
+    setSending(false);
     // A freshly-opened thread starts with its predraft un-dismissed.
     predraftDismissedRef.current.delete(threadId);
     setComposer("");
@@ -2087,6 +2091,8 @@ export default function ThreadPage() {
    * #880: user-triggered sequential send of reviewed bubbles via the same
    * /send path as the composer. Progress is reported to the review UI.
    * Aborts remaining bubbles on first failure; leaves unsent ones for retry.
+   * Thread-scoped: if the operator navigates A→B mid-send, already-started
+   * POSTs may still complete for A but no UI updates apply after leave.
    */
   const sendDictationMessagesSequentially = useCallback(
     async (
@@ -2104,6 +2110,10 @@ export default function ThreadPage() {
         throw new Error("No messages to send.");
       }
 
+      const startThreadId = threadId;
+      const stillOnStartThread = () =>
+        shouldApplyThreadScopedResult(startThreadId, transformRouteIdRef.current);
+
       sendingRef.current = true;
       setSending(true);
       setError(null);
@@ -2112,10 +2122,13 @@ export default function ThreadPage() {
 
       try {
         for (let i = 0; i < texts.length; i++) {
+          if (!stillOnStartThread()) return;
+
           const text = texts[i]!;
           opts.onProgress(i + 1, texts.length);
           const clientSendId = uuid();
           const sentAt = new Date().toISOString();
+          if (!stillOnStartThread()) return;
           setPendingSends((prev) => [
             ...prev,
             { clientSendId, text, sentAt, attachments: [] }
@@ -2134,8 +2147,10 @@ export default function ThreadPage() {
               clientSendId,
               clientRequestedAt: sentAt
             });
+            if (!stillOnStartThread()) return;
             sentCount += 1;
           } catch (sendError) {
+            if (!stillOnStartThread()) return;
             const failure = classifyConsumerFailure(sendError, {
               path: `/runner/control/thread/${thread.id}/send`,
               method: "POST"
@@ -2186,6 +2201,8 @@ export default function ThreadPage() {
           }
         }
 
+        if (!stillOnStartThread()) return;
+
         // All accepted by the send queue. Clear the review surface.
         setPendingDictationTranscript(null);
         setDictationMessages(null);
@@ -2193,11 +2210,14 @@ export default function ThreadPage() {
         setDictationFormatStatus("idle");
         setDictationFormatError(null);
       } finally {
-        sendingRef.current = false;
-        setSending(false);
+        // Do not clear B's sending latch if the operator already left for B.
+        if (stillOnStartThread()) {
+          sendingRef.current = false;
+          setSending(false);
+        }
       }
     },
-    [checkPendingDelivery, sending, thread]
+    [checkPendingDelivery, sending, thread, threadId]
   );
 
   // #462: record a short clip, prepare it as 16 kHz mono WAV, and hand it to
