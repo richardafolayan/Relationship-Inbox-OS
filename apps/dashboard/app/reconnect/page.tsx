@@ -43,6 +43,12 @@ type RefreshState =
   | { kind: "done"; summary: string; tone: "ok" | "warn" }
   | { kind: "error"; message: string };
 
+// AppShell scrolls <main> (overflow-y-auto); document scroll is locked.
+function getListScroller(): HTMLElement | null {
+  if (typeof document === "undefined") return null;
+  return document.querySelector("main");
+}
+
 function readScrollY(): number {
   try {
     const raw = sessionStorage.getItem(RECONNECT_SCROLL_KEY);
@@ -60,6 +66,15 @@ function writeScrollY(y: number): void {
   } catch {
     // Private mode / blocked storage: scroll restore is best-effort.
   }
+}
+
+function captureListScrollY(): number {
+  return getListScroller()?.scrollTop ?? 0;
+}
+
+function restoreListScrollY(y: number): void {
+  const scroller = getListScroller();
+  if (scroller) scroller.scrollTop = y;
 }
 
 export default function ReconnectPage() {
@@ -90,17 +105,18 @@ export default function ReconnectPage() {
   // Restore list place after a thread visit so the operator can keep scanning.
   useEffect(() => {
     if (!loaded) return;
+    const scroller = getListScroller();
     const y = readScrollY();
     if (y > 0) {
       requestAnimationFrame(() => {
-        window.scrollTo(0, y);
+        restoreListScrollY(y);
       });
     }
-    const onScroll = () => writeScrollY(window.scrollY);
-    window.addEventListener("scroll", onScroll, { passive: true });
+    const onScroll = () => writeScrollY(captureListScrollY());
+    scroller?.addEventListener("scroll", onScroll, { passive: true });
     return () => {
-      writeScrollY(window.scrollY);
-      window.removeEventListener("scroll", onScroll);
+      writeScrollY(captureListScrollY());
+      scroller?.removeEventListener("scroll", onScroll);
     };
   }, [loaded]);
 
@@ -226,7 +242,7 @@ export default function ReconnectPage() {
               key={row.id}
               row={row}
               suggested={index < 3 && combinedReconnectScore(row) >= 55}
-              onNavigate={() => writeScrollY(window.scrollY)}
+              onNavigate={() => writeScrollY(captureListScrollY())}
             />
           ))}
         </div>
