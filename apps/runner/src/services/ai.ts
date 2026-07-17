@@ -55,6 +55,14 @@ import {
   validateMechanicalWritingRules
 } from "./ai-output-rules";
 import { preserveAmbiguousEvidence } from "./ai-ambiguity";
+import {
+  buildDictationMessagesUserPrompt,
+  DICTATION_MESSAGES_SYSTEM_PROMPT,
+  fallbackSplitTranscript,
+  sanitiseDictationMessagesResponse,
+  type DictationMessagesResult,
+  type FormatDictationMessagesInput
+} from "./dictation-messages";
 
 // Re-exported so existing tests + callers continue to import from ai.ts.
 export const classifyLlmError = classifyLlmErrorImpl;
@@ -2875,6 +2883,63 @@ ${recentExchange || "(no recent messages)"}`;
   }
 
   /**
+   * #880: turn a raw dictation transcript into voice-preserving message
+   * bubbles. Prompt and sanitiser live in dictation-messages.ts. On AI
+   * unavailability or unusable model output, falls back to deterministic
+   * sentence/thought split (no invented wording). Never auto-sends.
+   */
+  async function formatDictationMessages(
+    input: FormatDictationMessagesInput
+  ): Promise<DictationMessagesResult | null> {
+    const transcript = input.transcript?.trim() ?? "";
+    if (!transcript) return null;
+
+    const useFallback = (reason: string): DictationMessagesResult | null => {
+      console.warn(`[ai] formatDictationMessages: ${reason}; using deterministic split`);
+      const fallback = fallbackSplitTranscript(transcript);
+      return fallback.messages.length > 0 ? fallback : null;
+    };
+
+    const { client, model, provider } = await resolveActive();
+    if (!client) {
+      return useFallback("no AI client configured");
+    }
+
+    const userPrompt = buildDictationMessagesUserPrompt({
+      transcript,
+      personName: input.personName,
+      knownNames: input.knownNames
+    });
+
+    try {
+      const response = await client.chat.completions.create({
+        model,
+        ...(shouldUseJsonResponseFormat(provider, model)
+          ? { response_format: { type: "json_object" as const } }
+          : {}),
+        messages: [
+          { role: "system", content: DICTATION_MESSAGES_SYSTEM_PROMPT },
+          { role: "user", content: reinforceJsonPrompt(userPrompt, model) }
+        ],
+        ...providerOptions(provider, model),
+        ...geminiExtraBody(provider, model)
+      });
+      const content = response.choices[0]?.message?.content;
+      if (!content) {
+        return useFallback(`empty content (provider=${provider}, model=${model})`);
+      }
+      const raw = parseAiJson(content, model);
+      const sanitised = sanitiseDictationMessagesResponse(raw, transcript);
+      if (sanitised) return sanitised;
+      return useFallback(`unusable model payload (provider=${provider}, model=${model})`);
+    } catch (error) {
+      return useFallback(
+        `failed (provider=${provider}, model=${model}); ${classifyLlmError(error, provider)}`
+      );
+    }
+  }
+
+  /**
    * Classify a thread as outreach (sales / recruitment / marketing / InMail
    * / cold solicitation) vs genuine (peer chats, ongoing relationships).
    * Returns null when the AI service is unavailable — callers should treat
@@ -4148,6 +4213,7 @@ ${safeTruncate(input.draft, 2000)}`;
     updateThreadSummary,
     generateSuggestedReplies,
     transformReply,
+    formatDictationMessages,
     classifyThreadCategory,
     classifyThreadClosed,
     scoreReconnectCandidate,

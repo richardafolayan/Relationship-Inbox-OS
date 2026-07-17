@@ -48,6 +48,7 @@ import {
   STYLE_ANALYSIS_MIN_SAMPLE
 } from "./services/reply-style-analysis";
 import { briefSignatureForCache, sanitizeReplyBrief, synthesiseFallbackBrief } from "./services/reply-brief";
+import { DICTATION_MESSAGES_MAX_TRANSCRIPT } from "./services/dictation-messages";
 import { analyzeStyle, styleFingerprint } from "./services/style";
 import { createSelectorTestStore } from "./services/selector-report-store";
 import { decidePersonNameAction } from "./services/person-name-action";
@@ -4748,6 +4749,43 @@ app.post("/control/message/:messageId/transcribe", asyncRoute(async (req, res) =
 // control (vs. show it disabled with an explanation).
 app.get("/data/transcription-capabilities", asyncRoute(async (_req, res) => {
   res.json({ dictationAvailable: pickDictationProvider() !== null });
+}));
+
+// #880: voice-preserving "Turn into messages" after dictation. Accepts a
+// raw transcript (+ optional person/name context for light ASR name fixes
+// only). Prompt and model call stay on the runner. On AI failure the service
+// uses a deterministic split fallback; only empty/unusable results 502 so
+// the dashboard can keep the original transcript and retry.
+app.post("/control/format-dictation-messages", asyncRoute(async (req, res) => {
+  if (await checkPresenterGuard(res, settingsStore, { action: "format dictation messages", kind: "external-action" })) return;
+  const payload = z
+    .object({
+      transcript: z.string().min(1).max(DICTATION_MESSAGES_MAX_TRANSCRIPT),
+      personName: z.string().max(200).optional().nullable(),
+      knownNames: z.array(z.string().max(200)).max(20).optional()
+    })
+    .parse(req.body);
+
+  const result = await aiService.formatDictationMessages({
+    transcript: payload.transcript,
+    personName: payload.personName ?? null,
+    knownNames: payload.knownNames
+  });
+
+  if (!result || result.messages.length === 0) {
+    res.status(502).json({
+      ok: false,
+      error: "Could not format the transcript into messages. Your original transcript is still available."
+    });
+    return;
+  }
+
+  res.json({
+    ok: true,
+    cleanedTranscript: result.cleanedTranscript,
+    messages: result.messages,
+    warnings: result.warnings
+  });
 }));
 
 // #462 (pilot R-0061): transcribe a one-shot dictation clip into text. Posts

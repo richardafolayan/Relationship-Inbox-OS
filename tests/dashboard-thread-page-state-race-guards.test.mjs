@@ -42,3 +42,107 @@ test("a dismissed AI predraft is not re-injected on the next refresh", () => {
   // applyThread skips the predraft branch when dismissed
   assert.match(SRC, /!predraftDismissedRef\.current\.has\(transformRouteIdRef\.current\)/, "applyThread skips a dismissed predraft");
 });
+
+// #880 / PR #934 F1: sequential multi-send must not re-pollute thread B after
+// A→B navigation mid-send. Source guards only (page is not unit-mounted).
+test("sequential dictation send is thread-scoped and stops on route change", () => {
+  const sendBlock = SRC.slice(
+    SRC.indexOf("const sendDictationMessagesSequentially"),
+    SRC.indexOf("const startDictation")
+  );
+  assert.match(
+    sendBlock,
+    /const startThreadId = threadId;/,
+    "sendDictationMessagesSequentially snapshots startThreadId"
+  );
+  assert.match(
+    sendBlock,
+    /shouldApplyThreadScopedResult\(startThreadId, transformRouteIdRef\.current\)/,
+    "sequential send gates on transformRouteIdRef"
+  );
+  assert.match(
+    sendBlock,
+    /if \(!stillOnStartThread\(\)\) return;/,
+    "sequential send aborts the loop after leave"
+  );
+  // finally must not clear B's sending latch after A→B
+  assert.match(
+    sendBlock,
+    /if \(stillOnStartThread\(\)\) \{\s*sendingRef\.current = false;\s*setSending\(false\);/,
+    "finally only clears sending while still on start thread"
+  );
+
+  // Thread-switch reset must force-stop the send latch so B is not stuck.
+  const resetStart = SRC.indexOf("transformRouteIdRef.current = threadId;");
+  const resetBlock = SRC.slice(resetStart, resetStart + 1200);
+  assert.match(
+    resetBlock,
+    /sendingRef\.current = false;/,
+    "thread switch clears sendingRef"
+  );
+  assert.match(
+    resetBlock,
+    /setSending\(false\);/,
+    "thread switch clears sending state"
+  );
+});
+
+// #880 / PR #934 re-review F1: a new parked dictation while format is in
+// flight must abort + bump generation so late format cannot pair old bubbles
+// with the new original transcript.
+test("new dictation invalidates in-flight format (generation bump + abort)", () => {
+  const submitBlock = SRC.slice(
+    SRC.indexOf("const submitDictationWav"),
+    SRC.indexOf("const keepDictationAsTranscript")
+  );
+  const textCaseStart = submitBlock.indexOf('case "text"');
+  assert.ok(textCaseStart >= 0, "submitDictationWav has a text success branch");
+  const textCase = submitBlock.slice(textCaseStart, submitBlock.indexOf('case "empty"'));
+  assert.match(
+    textCase,
+    /dictationFormatAbortReasonRef\.current = "cancel"/,
+    "new parked transcript sets cancel abort reason"
+  );
+  assert.match(
+    textCase,
+    /dictationFormatAbortRef\.current\?\.abort\(\)/,
+    "new parked transcript aborts in-flight format"
+  );
+  assert.match(
+    textCase,
+    /dictationFormatGenerationRef\.current \+= 1/,
+    "new parked transcript bumps format generation"
+  );
+  assert.match(
+    textCase,
+    /setDictationFormatStatus\("idle"\)/,
+    "new parked transcript resets format status"
+  );
+
+  const startBlock = SRC.slice(
+    SRC.indexOf("const startDictation"),
+    SRC.indexOf("const stopDictation")
+  );
+  assert.match(
+    startBlock,
+    /dictationFormatAbortReasonRef\.current = "cancel"/,
+    "startDictation sets cancel abort reason"
+  );
+  assert.match(
+    startBlock,
+    /dictationFormatAbortRef\.current\?\.abort\(\)/,
+    "startDictation aborts in-flight format"
+  );
+  assert.match(
+    startBlock,
+    /dictationFormatGenerationRef\.current \+= 1/,
+    "startDictation bumps format generation"
+  );
+
+  // Dictate stays off while formatting or sequential send is active.
+  assert.match(
+    SRC,
+    /disabled=\{\s*!dictationAvailable \|\|\s*dictationStatus === "transcribing" \|\|\s*dictationFormatStatus === "formatting" \|\|\s*sending\s*\}/,
+    "Dictate disabled during formatting or send"
+  );
+});

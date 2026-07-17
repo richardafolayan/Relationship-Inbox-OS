@@ -391,6 +391,21 @@ export interface AiService {
     text: string;
   }): Promise<string>;
   /**
+   * #880: lightly format a raw dictation transcript into natural chat
+   * message bubbles. Server-side only; preserves voice, slang, and
+   * filler. Returns null when the model response is unusable so the
+   * caller keeps the original transcript and can offer retry.
+   */
+  formatDictationMessages(input: {
+    transcript: string;
+    personName?: string | null;
+    knownNames?: string[];
+  }): Promise<{
+    cleanedTranscript: string;
+    messages: Array<{ id: string; text: string }>;
+    warnings: Array<{ originalText: string; reason: string }>;
+  } | null>;
+  /**
    * Coarsely classify a thread as either "outreach" (cold pitches, sales,
    * recruitment, marketing, InMails) or "genuine" (peer chats, real
    * relationships). Returns null when the AI service is unavailable or the
