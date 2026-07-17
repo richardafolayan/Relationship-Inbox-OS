@@ -39,6 +39,24 @@ test("View menu offers Back / Forward / Reload as escape hatches", async () => {
   assert.match(source, /canGoForward\(\)/);
 });
 
+test("Back/Forward only walk local dashboard history and drop the startup page", async () => {
+  const source = await mainSource();
+  // #891: after dashboard load, clear history so the data: bootstrap screen
+  // is not a reachable Back target; goInHistory also refuses non-dashboard URLs.
+  assert.match(source, /function dropBootstrapHistory\(/);
+  assert.match(source, /navigationHistory\.clear\(\)/);
+  assert.match(
+    source,
+    /await window\.loadURL\(url\);\s*dropBootstrapHistory\(window\);/s
+  );
+  assert.match(source, /function goInHistory\(direction\)/);
+  assert.match(source, /historyEntryAtOffset\(history, -1\)/);
+  assert.match(source, /historyEntryAtOffset\(history, 1\)/);
+  assert.match(source, /isLocalDashboardUrl\(previous\.url, process\.env\)/);
+  assert.match(source, /isLocalDashboardUrl\(next\.url, process\.env\)/);
+  assert.match(source, /isLocalDashboardUrl,/);
+});
+
 test("Help menu opens the in-app feedback modal via the pilot event", async () => {
   const source = await mainSource();
   assert.match(source, /label: "Help"/);
