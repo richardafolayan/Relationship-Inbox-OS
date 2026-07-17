@@ -88,7 +88,16 @@ test("jump-to-latest is anchored to the composer footer, not the browser viewpor
 test("scroll restoration probes the message viewport, not a sticky header band", () => {
   assert.match(threadSrc, /const topInset = 8/);
   assert.doesNotMatch(threadSrc, /const stickyBand = 80/);
-  assert.match(threadSrc, /const FOCUS_HEADER_OFFSET = 12/);
+  // Focused realign must clear sticky focused-thread pill (top-2 + ~28–36px),
+  // not tuck the parent under it. Require clearance ≥ pill coverage.
+  const offsetMatch = threadSrc.match(/const FOCUS_HEADER_OFFSET\s*=\s*(\d+)/);
+  assert.ok(offsetMatch, "FOCUS_HEADER_OFFSET must be a numeric constant");
+  assert.ok(
+    Number(offsetMatch[1]) >= 40,
+    `FOCUS_HEADER_OFFSET must clear sticky focused pill (≥40px), got ${offsetMatch[1]}`
+  );
+  assert.match(threadSrc, /data-focused-pill="true"/);
+  assert.match(threadSrc, /sticky top-2/);
   assert.match(threadSrc, /pickScrollAnchor/);
   assert.match(threadSrc, /restoreScrollRef/);
   assert.match(threadSrc, /startPostLoadAnchorGuard/);
