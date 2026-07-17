@@ -3815,6 +3815,8 @@ export default function ThreadPage() {
             }`}
           >
             <ThreadBriefBand
+              key={threadId}
+              threadId={threadId}
               onYou={displayBrief.on_you}
               whereItStands={displayBrief.where_it_stands}
               openLoops={activeOpenLoops}

@@ -131,9 +131,10 @@ test("collapsed lead uses mobile-only clamp pattern", () => {
   assert.match(briefSrc, /sm:hidden/, "expand control is mobile-only");
 });
 
-// Disclosure when mobile would hide something: context, any loops (clamped),
-// or a lead long enough to exceed ~2 lines. Not always-on for short one-liners.
-test("mobile brief offers expand when collapsed content can be hidden", () => {
+// Disclosure when expand actually reveals something: hidden context, or
+// lead/loops that overflow their two-line clamp. Must measure rendered
+// overflow (scrollHeight vs clientHeight), not guess via lead.length.
+test("mobile brief offers expand from measured overflow, not char count", () => {
   assert.doesNotMatch(
     briefSrc,
     /hasDisclosure\s*=\s*showContext\s*\|\|\s*loops\.length\s*>\s*2\s*;/,
@@ -144,10 +145,45 @@ test("mobile brief offers expand when collapsed content can be hidden", () => {
     /hasDisclosure\s*=\s*Boolean\(lead\)\s*\|\|\s*loops\.length\s*>\s*0/,
     "disclosure must not be always-on for every non-empty band"
   );
+  assert.doesNotMatch(
+    briefSrc,
+    /lead\.length\s*>\s*\d+/,
+    "must not guess overflow from character count"
+  );
+  assert.doesNotMatch(
+    briefSrc,
+    /hasDisclosure\s*=\s*\n?\s*showContext\s*\|\|\s*loops\.length\s*>\s*0/,
+    "loops.length alone can show a no-op disclosure"
+  );
   assert.match(
     briefSrc,
-    /hasDisclosure\s*=\s*\n?\s*showContext\s*\|\|\s*loops\.length\s*>\s*0\s*\|\|\s*lead\.length\s*>\s*\d+/,
-    "disclosure when context, loops, or a long lead can be hidden on mobile"
+    /scrollHeight\s*>\s*.*clientHeight/,
+    "disclosure must compare scrollHeight vs clientHeight after layout"
+  );
+  assert.match(
+    briefSrc,
+    /hasDisclosure\s*=\s*showContext\s*\|\|\s*leadOverflows\s*\|\|\s*loopsOverflows/,
+    "disclosure when context is hidden or measured clamp overflow"
+  );
+  assert.match(briefSrc, /ResizeObserver/, "re-measure on width changes");
+});
+
+// Expanded state must not carry across thread navigations (30dvh surprise).
+test("mobile brief resets expanded state when thread changes", () => {
+  assert.match(
+    briefSrc,
+    /useEffect\(\s*\(\)\s*=>\s*\{\s*setExpanded\(false\)\s*;\s*\}\s*,\s*\[\s*threadId\s*\]\s*\)/,
+    "expanded resets on threadId change"
+  );
+  assert.match(
+    threadSrc,
+    /<ThreadBriefBand[\s\S]{0,120}key=\{threadId\}/,
+    "ThreadBriefBand remounts per thread via key"
+  );
+  assert.match(
+    threadSrc,
+    /threadId=\{threadId\}/,
+    "ThreadBriefBand receives threadId for expand reset"
   );
 });
 
