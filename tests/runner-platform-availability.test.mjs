@@ -71,3 +71,33 @@ test("live WhatsApp state overrides a stale stored platform row", () => {
     3
   );
 });
+
+test("WhatsApp preserves DEGRADED when runtime is connected", () => {
+  assert.equal(effectivePlatformStatus("WHATSAPP", "DEGRADED", "connected"), "DEGRADED");
+  assert.equal(
+    connectedPlatformCount(
+      ["WHATSAPP", "LINKEDIN"],
+      [
+        { name: "WHATSAPP", status: "DEGRADED" },
+        { name: "LINKEDIN", status: "CONNECTED" }
+      ],
+      "connected"
+    ),
+    1
+  );
+});
+
+test("WhatsApp preserves ERROR when runtime is connected", () => {
+  assert.equal(effectivePlatformStatus("WHATSAPP", "ERROR", "connected"), "ERROR");
+  assert.equal(
+    connectedPlatformCount(
+      ["WHATSAPP", "LINKEDIN"],
+      [
+        { name: "WHATSAPP", status: "ERROR" },
+        { name: "LINKEDIN", status: "CONNECTED" }
+      ],
+      "connected"
+    ),
+    1
+  );
+});

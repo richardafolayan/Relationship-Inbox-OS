@@ -40,7 +40,13 @@ export function effectivePlatformStatus(
   whatsappState: WhatsAppRuntimeState
 ): StoredPlatformStatus {
   if (platform === "WHATSAPP") {
-    return whatsappState === "connected" ? "CONNECTED" : "NOT_CONNECTED";
+    if (whatsappState !== "connected") {
+      return "NOT_CONNECTED";
+    }
+    if (storedStatus === "DEGRADED" || storedStatus === "ERROR") {
+      return storedStatus;
+    }
+    return "CONNECTED";
   }
   return storedStatus ?? "NOT_CONNECTED";
 }
