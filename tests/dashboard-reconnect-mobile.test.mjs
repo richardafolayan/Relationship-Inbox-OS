@@ -77,7 +77,16 @@ test("opening a thread preserves list scroll position on return", () => {
   assert.match(pageSource, /sessionStorage/);
   assert.match(pageSource, /writeScrollY/);
   assert.match(pageSource, /onNavigate/);
-  assert.match(pageSource, /window\.scrollTo/);
+  // AppShell scrolls <main>, not the document. Reading document scroll would
+  // always see 0 and fail the "preserves list position" acceptance criterion.
+  assert.match(pageSource, /querySelector\(["']main["']\)/);
+  assert.match(pageSource, /scrollTop/);
+  assert.match(pageSource, /getListScroller/);
+  assert.match(pageSource, /captureListScrollY/);
+  assert.match(pageSource, /restoreListScrollY/);
+  // Reject the previous window-only approach (must fail if someone reverts to it).
+  assert.doesNotMatch(pageSource, /window\.scrollTo\s*\(/);
+  assert.doesNotMatch(pageSource, /window\.scrollY\b/);
 });
 
 test("first viewport keeps explanation concise so people stay visible", () => {
