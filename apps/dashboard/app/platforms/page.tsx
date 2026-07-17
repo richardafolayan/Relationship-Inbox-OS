@@ -162,6 +162,8 @@ function PlatformCardView({
   const glyph = PLATFORM_GLYPH[row.platform];
   const supported = row.supported !== false;
   const connected = row.status === "CONNECTED";
+  const scanEligible =
+    connected || row.status === "DEGRADED" || row.status === "ERROR";
   const statusToken =
     !supported
       ? { className: "text-ink-3", label: "Not available" }
@@ -177,17 +179,17 @@ function PlatformCardView({
     ? "macOS only"
     : row.lastScanAt
       ? `Last scanned ${formatRelative(row.lastScanAt)}`
-      : connected
+      : scanEligible
         ? "Not scanned yet"
         : null;
 
   const connectHint =
-    !row.lastScanAt && row.lastError && !connected
+    !row.lastScanAt && row.lastError && !scanEligible
       ? classifyConsumerFailure(new Error(row.lastError), {
           path: "/runner/control/platform/connect",
           method: "POST"
         }).message
-      : !connected && supported
+      : !scanEligible && supported
         ? "Sign in to enable"
         : null;
 
@@ -197,13 +199,13 @@ function PlatformCardView({
 
   const primaryLabel = !supported
     ? "Not available"
-    : connected
+    : scanEligible
       ? "Scan now"
       : "Connect";
 
   const runPrimary = () => {
     if (!supported) return;
-    if (connected) {
+    if (scanEligible) {
       runActionWithFeedback(apiPost("/runner/control/scan", { platform: row.platform }), {
         pending: `Scanning ${display}…`,
         success: `${display} scan queued`,
@@ -225,7 +227,7 @@ function PlatformCardView({
   };
 
   const moreItems: MenuItem[] = [
-    ...(connected
+    ...(scanEligible
       ? [
           {
             label: "Open browser",

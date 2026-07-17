@@ -150,6 +150,10 @@ const PLATFORM_DISPLAY: Record<PlatformCard["platform"], string> = {
 
 type PlatformActionEndpoint = "open-browser" | "connect" | "scan" | "full-disk-access";
 
+function platformScanEligible(status: PlatformCard["status"]): boolean {
+  return status === "CONNECTED" || status === "DEGRADED" || status === "ERROR";
+}
+
 interface FullDiskAccessResponse {
   message?: string;
   runnerProcess?: PlatformCard["runnerProcess"];
@@ -709,22 +713,32 @@ function PlatformSettingsSection({
             title="Google Messages"
             body="Pairs with Google Messages on your Android phone. SMS, MMS, and RCS stay user-triggered."
             primaryLabel={
-              googleMessagesRow.status === "CONNECTED" ? "Scan now" : "Pair Android phone"
+              platformScanEligible(googleMessagesRow.status)
+                ? "Scan now"
+                : "Pair Android phone"
             }
             busy={busy === "GOOGLE_MESSAGES"}
             onPrimary={() =>
               onAction(
                 "GOOGLE_MESSAGES",
-                googleMessagesRow.status === "CONNECTED" ? "scan" : "connect"
+                platformScanEligible(googleMessagesRow.status) ? "scan" : "connect"
               )
             }
             moreItems={
-              googleMessagesRow.status === "CONNECTED"
+              platformScanEligible(googleMessagesRow.status)
                 ? [
                     {
                       label: "Open Google Messages",
                       onSelect: () => onAction("GOOGLE_MESSAGES", "open-browser")
-                    }
+                    },
+                    ...(googleMessagesRow.status !== "CONNECTED"
+                      ? [
+                          {
+                            label: "Pair Android phone",
+                            onSelect: () => onAction("GOOGLE_MESSAGES", "connect")
+                          }
+                        ]
+                      : [])
                   ]
                 : undefined
             }
@@ -739,13 +753,18 @@ function PlatformSettingsSection({
                 ? `Uses a dedicated Chrome profile. Sign in when ${APP_NAME} opens it.`
                 : "Uses your normal Chrome session. Sign in there first."
             }
-            primaryLabel={linkedinRow.status === "CONNECTED" ? "Scan now" : "Connect LinkedIn"}
+            primaryLabel={
+              platformScanEligible(linkedinRow.status) ? "Scan now" : "Connect LinkedIn"
+            }
             busy={busy === "LINKEDIN"}
             onPrimary={() =>
-              onAction("LINKEDIN", linkedinRow.status === "CONNECTED" ? "scan" : "connect")
+              onAction(
+                "LINKEDIN",
+                platformScanEligible(linkedinRow.status) ? "scan" : "connect"
+              )
             }
             moreItems={
-              linkedinRow.status === "CONNECTED"
+              platformScanEligible(linkedinRow.status)
                 ? [
                     {
                       label: "Open LinkedIn",
@@ -820,7 +839,7 @@ function PlatformSetupCard({
             : "Not connected";
   const lastScanLabel = row?.lastScanAt
     ? `Last scanned ${formatRelative(row.lastScanAt)}`
-    : connected
+    : platformScanEligible(status)
       ? "Not scanned yet"
       : null;
   const secondaryItems = moreItems ?? [];
