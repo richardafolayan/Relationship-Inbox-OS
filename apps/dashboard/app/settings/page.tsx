@@ -401,7 +401,9 @@ export default function SettingsPage() {
       window.history.back();
       return;
     }
-    window.history.pushState({ settingsList: true }, "", clearSettingsHashUrl());
+    // Deep links open detail without a settingsMobileDetail marker. Replace the
+    // hash entry so system Back leaves Settings instead of reopening the category.
+    window.history.replaceState({ settingsList: true }, "", clearSettingsHashUrl());
     setMobileDetailOpen(false);
   };
 

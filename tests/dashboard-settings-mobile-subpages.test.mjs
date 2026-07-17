@@ -77,6 +77,25 @@ test("Back returns to the Settings list and preserves list scroll position", () 
   assert.match(SOURCE, /window\.addEventListener\("popstate", onLocation\)/);
 });
 
+test("deep-linked Back clears hash via replaceState so system Back does not reopen category", () => {
+  // When history.state lacks settingsMobileDetail (direct /settings#platforms),
+  // UI Back must replace the current entry, not push a list entry. pushState
+  // leaves […, #category, list] so the next system Back reopens the category.
+  assert.match(
+    SOURCE,
+    /window\.history\.replaceState\(\{ settingsList: true \}, "", clearSettingsHashUrl\(\)\)/
+  );
+  assert.doesNotMatch(
+    SOURCE,
+    /window\.history\.pushState\(\{ settingsList: true \}/
+  );
+  // List→detail still uses pushState with the marker for history.back().
+  assert.match(
+    SOURCE,
+    /window\.history\.pushState\(\{ settingsMobileDetail: true, tab \}/
+  );
+});
+
 test("only active category content is shown in the mobile detail viewport", () => {
   assert.match(
     SOURCE,
