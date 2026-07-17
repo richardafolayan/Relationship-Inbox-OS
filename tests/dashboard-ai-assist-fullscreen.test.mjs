@@ -110,3 +110,53 @@ test("mobile AI Assist subordinates repeated brief context (#898)", () => {
   assert.match(replyBrief, /showWhereInMore/);
   assert.match(replyBrief, /showWhereInline/);
 });
+
+test("compose draft and ask answer live in the scroll middle, not the fixed footer (#898 F1)", () => {
+  // Results must be reachable under overlay body lock: they belong in the
+  // flex-1 overflow-y-auto region, not the shrink-0 action strip.
+  const middleStart = threadPage.indexOf('min-h-0 flex-1 overflow-y-auto overscroll-contain');
+  const footerStart = threadPage.indexOf(
+    'shrink-0 border-t border-hairline bg-paper px-5 pt-3 pb-[calc(24px+env(safe-area-inset-bottom))]'
+  );
+  assert.ok(middleStart >= 0, "scroll middle region present");
+  assert.ok(footerStart > middleStart, "footer follows scroll middle");
+  const middle = threadPage.slice(middleStart, footerStart);
+  // Footer runs until the aside closes.
+  const asideClose = threadPage.indexOf("</aside>", footerStart);
+  const footer = threadPage.slice(footerStart, asideClose > footerStart ? asideClose : footerStart + 12000);
+  assert.match(middle, /data-testid="ai-assist-compose-draft"/);
+  assert.match(middle, /data-testid="ai-assist-ask-answer"/);
+  assert.match(middle, /\{composeDraft \?/);
+  assert.match(middle, /\{askAnswer \?/);
+  assert.doesNotMatch(footer, /data-testid="ai-assist-compose-draft"/);
+  assert.doesNotMatch(footer, /data-testid="ai-assist-ask-answer"/);
+  // Footer still holds intent + primary action.
+  assert.match(footer, /value=\{composeIntent\}/);
+  assert.match(footer, /composeFromIntent\(\)/);
+});
+
+test("phone overlay offsets panel for visualViewport keyboard (#898 F2)", () => {
+  assert.match(threadPage, /window\.visualViewport/);
+  assert.match(threadPage, /visualViewport/);
+  assert.match(threadPage, /vv\.addEventListener\("resize"/);
+  assert.match(threadPage, /vv\.addEventListener\("scroll"/);
+  assert.match(threadPage, /panel\.style\.bottom/);
+  assert.match(threadPage, /innerHeight - vv\.height - vv\.offsetTop/);
+  assert.match(threadPage, /scrollIntoView/);
+});
+
+test("phone AI history always pops on unmount and intercepts in-panel nav (#898 F3)", () => {
+  // Cleanup must always history.back when we pushed, not only when
+  // history.state still has aiAssist (Settings nav clears that state).
+  assert.match(threadPage, /aiHistoryPushedRef\.current = true/);
+  assert.match(threadPage, /window\.history\.back\(\)/);
+  // Must not gate the unmount pop solely on state?.aiAssist.
+  assert.doesNotMatch(
+    threadPage,
+    /if \(state\?\.aiAssist\) \{\s*window\.history\.back\(\)/
+  );
+  // In-panel links pop the synthetic entry before navigating.
+  assert.match(threadPage, /onNavClickCapture/);
+  assert.match(threadPage, /closest\?\.\("a\[href\]"\)/);
+  assert.match(threadPage, /router\.push\(path\)/);
+});
