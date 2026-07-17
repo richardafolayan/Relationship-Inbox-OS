@@ -1,10 +1,12 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { resolveAutoScanDisabled } from "@inbox-os/core/autoscan";
 import {
   Bell,
   ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   CircleHelp,
   MessageSquareText,
   MonitorCog,
@@ -164,6 +166,17 @@ function tabFromHash(hash: string): SettingsTabId | null {
   return null;
 }
 
+function settingsHashForTab(tab: SettingsTabId): string {
+  return tab;
+}
+
+function clearSettingsHashUrl(): string {
+  if (typeof window === "undefined") return "/settings";
+  const url = new URL(window.location.href);
+  url.hash = "";
+  return `${url.pathname}${url.search}`;
+}
+
 // v1 user surface: auto-scan, quiet hours, headless browser, and the user
 // voice / reply-style profile the AI prompts read (UserVoiceProfile). Other
 // operator-only knobs (demo data, scan thresholds, AI provider, enabled
@@ -171,6 +184,10 @@ function tabFromHash(hash: string): SettingsTabId | null {
 // restore from archive/pre-v1-stripback if they're needed back.
 export default function SettingsPage() {
   const [activeTab, setActiveTab] = useState<SettingsTabId>(DEFAULT_SETTINGS_TAB);
+  // Phone: no category hash means the landing list; a hash opens a subpage.
+  // Desktop ignores this and always shows the multi-column layout.
+  const [mobileDetailOpen, setMobileDetailOpen] = useState(false);
+  const listScrollYRef = useRef(0);
   const [autoScan, setAutoScan] = useState(false);
   const [quietHours, setQuietHours] = useState(false);
   const [autoScanDisabled, setAutoScanDisabled] = useState(false);
@@ -195,14 +212,23 @@ export default function SettingsPage() {
 
   // /settings#app-updates (the update toast / bell entry lands here): scroll
   // the App updates card into view and flash a short highlight ring so the
-  // eye finds it. Mount covers cross-page navigation; hashchange covers
-  // manual edits and back/forward.
+  // eye finds it. Mount covers cross-page navigation; hashchange/popstate
+  // cover in-page jumps and Back.
   const [highlightUpdates, setHighlightUpdates] = useState(false);
+  const syncFromLocation = useCallback(() => {
+    const tab = tabFromHash(window.location.hash);
+    if (tab) {
+      setActiveTab(tab);
+      setMobileDetailOpen(true);
+    } else {
+      setMobileDetailOpen(false);
+    }
+  }, []);
+
   useEffect(() => {
     let timer: number | undefined;
-    const maybeHighlight = () => {
-      const tab = tabFromHash(window.location.hash);
-      if (tab) setActiveTab(tab);
+    const onLocation = () => {
+      syncFromLocation();
       if (window.location.hash === "#app-updates") {
         window.setTimeout(() => {
           document
@@ -210,17 +236,30 @@ export default function SettingsPage() {
             ?.scrollIntoView({ behavior: "smooth", block: "center" });
         }, 0);
         setHighlightUpdates(true);
+        window.clearTimeout(timer);
+        timer = window.setTimeout(() => setHighlightUpdates(false), 2400);
       }
-      window.clearTimeout(timer);
-      timer = window.setTimeout(() => setHighlightUpdates(false), 2400);
     };
-    maybeHighlight();
-    window.addEventListener("hashchange", maybeHighlight);
+    onLocation();
+    window.addEventListener("hashchange", onLocation);
+    window.addEventListener("popstate", onLocation);
     return () => {
       window.clearTimeout(timer);
-      window.removeEventListener("hashchange", maybeHighlight);
+      window.removeEventListener("hashchange", onLocation);
+      window.removeEventListener("popstate", onLocation);
     };
-  }, []);
+  }, [syncFromLocation]);
+
+  useEffect(() => {
+    if (mobileDetailOpen) {
+      window.scrollTo(0, 0);
+      return;
+    }
+    const y = listScrollYRef.current;
+    if (y <= 0) return;
+    const id = window.requestAnimationFrame(() => window.scrollTo(0, y));
+    return () => window.cancelAnimationFrame(id);
+  }, [mobileDetailOpen]);
 
   useEffect(() => {
     setAutoScanDisabled(
@@ -336,42 +375,91 @@ export default function SettingsPage() {
 
   const chooseTab = (tab: SettingsTabId) => {
     setActiveTab(tab);
+    setMobileDetailOpen(true);
     const url = new URL(window.location.href);
-    url.hash = tab;
+    url.hash = settingsHashForTab(tab);
     window.history.replaceState(null, "", url);
+  };
+
+  const openMobileCategory = (tab: SettingsTabId) => {
+    listScrollYRef.current = window.scrollY;
+    setActiveTab(tab);
+    setMobileDetailOpen(true);
+    const url = new URL(window.location.href);
+    url.hash = settingsHashForTab(tab);
+    window.history.pushState({ settingsMobileDetail: true, tab }, "", url);
+  };
+
+  const backToSettingsList = () => {
+    const state = window.history.state as { settingsMobileDetail?: boolean } | null;
+    if (state?.settingsMobileDetail) {
+      window.history.back();
+      return;
+    }
+    window.history.pushState({ settingsList: true }, "", clearSettingsHashUrl());
+    setMobileDetailOpen(false);
   };
 
   return (
     <Canvas className="max-w-[1480px] 3xl:max-w-[1680px]">
-      <PageHead
-        eyebrow="Preferences"
-        title="Settings"
-        meta={
-          savedAt && Date.now() - savedAt < 4000 ? (
-            <span className="text-ink">saved</span>
-          ) : (
-            <span>synced to local profile</span>
-          )
-        }
-      />
+      <div className={cn(mobileDetailOpen && "hidden md:block")}>
+        <PageHead
+          eyebrow="Preferences"
+          title="Settings"
+          meta={
+            savedAt && Date.now() - savedAt < 4000 ? (
+              <span className="text-ink">saved</span>
+            ) : (
+              <span>synced to local profile</span>
+            )
+          }
+        />
+      </div>
+
+      {mobileDetailOpen ? (
+        <header className="sticky top-0 z-10 -mx-5 mb-5 flex items-center gap-2 bg-[color-mix(in_oklch,var(--paper)_95%,transparent)] px-5 pb-3 pt-3 backdrop-blur-md backdrop-saturate-150 sm:-mx-8 sm:px-8 md:hidden lg:-mx-12 lg:px-12">
+          <button
+            type="button"
+            onClick={backToSettingsList}
+            aria-label="Back to Settings"
+            className="inline-flex min-h-9 shrink-0 items-center gap-0.5 rounded-[8px] pr-2 text-[15px] font-medium text-ink-2 transition-colors duration-calm hover:bg-paper-2 hover:text-ink"
+          >
+            <ChevronLeft className="h-[18px] w-[18px]" strokeWidth={1.8} aria-hidden />
+            Settings
+          </button>
+          <h1 className="m-0 min-w-0 flex-1 truncate text-center font-display text-[17px] font-semibold tracking-[-0.015em] text-ink">
+            {activeTabInfo.label}
+          </h1>
+          <span className="inline-block w-[88px] shrink-0" aria-hidden />
+        </header>
+      ) : null}
 
       <div className="grid gap-7 md:grid-cols-[230px_minmax(0,1fr)] xl:grid-cols-[260px_minmax(0,1fr)] md:items-start">
-        <SettingsTabs activeTab={activeTab} onChoose={chooseTab} />
+        <div className={cn(mobileDetailOpen && "hidden md:block")}>
+          <SettingsTabs
+            activeTab={activeTab}
+            onChoose={chooseTab}
+            onMobileChoose={openMobileCategory}
+          />
+        </div>
         <section
-          aria-labelledby={`settings-tab-${activeTab}`}
-          className="min-w-0"
+          aria-label={activeTabInfo.label}
+          className={cn("min-w-0", !mobileDetailOpen && "hidden md:block")}
         >
-          <div className="mb-7 border-b border-hairline pb-5">
-            <h2
-              id={`settings-tab-${activeTab}`}
-              className="m-0 text-[25px] font-semibold tracking-[-0.015em] text-ink"
-            >
+          <div className={cn("mb-7 border-b border-hairline pb-5", mobileDetailOpen && "hidden md:block")}>
+            <h2 className="m-0 text-[25px] font-semibold tracking-[-0.015em] text-ink">
               {activeTabInfo.label}
             </h2>
             <p className="m-0 mt-1 max-w-[68ch] text-[13px] leading-[1.5] text-ink-3">
               {activeTabInfo.description}
             </p>
           </div>
+
+          {mobileDetailOpen ? (
+            <p className="m-0 mb-6 max-w-[68ch] text-[13px] leading-[1.5] text-ink-3 md:hidden">
+              {activeTabInfo.description}
+            </p>
+          ) : null}
 
           {activeTab === "setup" ? <SetupGuideSection rows={platformRows} /> : null}
 
@@ -595,52 +683,87 @@ export default function SettingsPage() {
 
 function SettingsTabs({
   activeTab,
-  onChoose
+  onChoose,
+  onMobileChoose
 }: {
   activeTab: SettingsTabId;
   onChoose: (tab: SettingsTabId) => void;
+  onMobileChoose: (tab: SettingsTabId) => void;
 }) {
   return (
-    <nav
-      aria-label="Settings sections"
-      className="grid grid-cols-2 gap-2 sm:grid-cols-3 md:sticky md:top-[92px] md:grid-cols-1"
-    >
-      {SETTINGS_TABS.map((tab) => {
-        const Icon = tab.icon;
-        const active = activeTab === tab.id;
-        return (
-          <button
-            key={tab.id}
-            type="button"
-            onClick={() => onChoose(tab.id)}
-            aria-current={active ? "page" : undefined}
-            className={cn(
-              "flex min-w-0 items-start gap-3 rounded-[8px] border px-3 py-[11px] text-left transition-colors duration-calm",
-              active
-                ? "border-hairline-strong bg-ink text-paper"
-                : "border-transparent bg-transparent text-ink-2 hover:border-hairline hover:bg-paper-2 hover:text-ink"
-            )}
-          >
-            <Icon
-              className={cn("mt-[1px] h-[17px] w-[17px] shrink-0", active ? "text-paper" : "text-ink-3")}
-              strokeWidth={1.8}
-              aria-hidden
-            />
-            <span className="min-w-0">
-              <span className="block truncate text-[15px] font-medium">{tab.label}</span>
-              <span
-                className={cn(
-                  "mt-[3px] hidden text-[12.5px] leading-[1.35] md:block",
-                  active ? "text-paper/70" : "text-ink-3"
-                )}
-              >
-                {tab.description}
+    <>
+      <nav aria-label="Settings sections" className="md:hidden">
+        <ul className="m-0 list-none divide-y divide-hairline overflow-hidden rounded-card border border-hairline bg-paper p-0">
+          {SETTINGS_TABS.map((tab) => {
+            const Icon = tab.icon;
+            return (
+              <li key={tab.id}>
+                <button
+                  type="button"
+                  onClick={() => onMobileChoose(tab.id)}
+                  className="flex w-full min-w-0 items-center gap-3 px-4 py-[14px] text-left text-ink transition-colors duration-calm hover:bg-paper-2"
+                >
+                  <Icon
+                    className="h-[18px] w-[18px] shrink-0 text-ink-3"
+                    strokeWidth={1.8}
+                    aria-hidden
+                  />
+                  <span className="min-w-0 flex-1 truncate text-[16px] font-medium tracking-[-0.01em]">
+                    {tab.label}
+                  </span>
+                  <ChevronRight
+                    className="h-[16px] w-[16px] shrink-0 text-ink-3"
+                    strokeWidth={1.8}
+                    aria-hidden
+                  />
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+      </nav>
+
+      <nav
+        aria-label="Settings sections"
+        className="hidden md:sticky md:top-[92px] md:grid md:grid-cols-1 md:gap-2"
+      >
+        {SETTINGS_TABS.map((tab) => {
+          const Icon = tab.icon;
+          const active = activeTab === tab.id;
+          return (
+            <button
+              key={tab.id}
+              type="button"
+              onClick={() => onChoose(tab.id)}
+              aria-current={active ? "page" : undefined}
+              className={cn(
+                "flex min-w-0 items-start gap-3 rounded-[8px] border px-3 py-[11px] text-left transition-colors duration-calm",
+                active
+                  ? "border-hairline-strong bg-ink text-paper"
+                  : "border-transparent bg-transparent text-ink-2 hover:border-hairline hover:bg-paper-2 hover:text-ink"
+              )}
+            >
+              <Icon
+                className={cn("mt-[1px] h-[17px] w-[17px] shrink-0", active ? "text-paper" : "text-ink-3")}
+                strokeWidth={1.8}
+                aria-hidden
+              />
+              <span className="min-w-0">
+                <span className="block truncate text-[15px] font-medium">{tab.label}</span>
+                <span
+                  className={cn(
+                    "mt-[3px] block text-[12.5px] leading-[1.35]",
+                    active ? "text-paper/70" : "text-ink-3"
+                  )}
+                >
+                  {tab.description}
+                </span>
               </span>
-            </span>
-          </button>
-        );
-      })}
-    </nav>
+            </button>
+          );
+        })}
+      </nav>
+    </>
   );
 }
 
