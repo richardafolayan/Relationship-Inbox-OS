@@ -856,7 +856,8 @@ export default function ThreadPage() {
   }, [aiOpen, aiOverlayMode]);
   // Phone: system Back / browser back closes AI Assist before leaving the
   // thread. pushState on open; popstate closes; button/Escape close pops
-  // the extra history entry.
+  // the extra history entry. In-panel navigations (e.g. Settings) pop first
+  // so a phantom aiAssist entry is not left under the destination.
   useEffect(() => {
     if (!aiOpen || !aiOverlayMode) return;
     const isPhone = window.matchMedia("(max-width: 639px)").matches;
@@ -870,15 +871,84 @@ export default function ThreadPage() {
       setAiOpen(false);
     };
     window.addEventListener("popstate", onPopState);
+
+    const panel = document.getElementById("ai-assist-panel");
+    const onNavClickCapture = (event: MouseEvent) => {
+      if (!aiHistoryPushedRef.current) return;
+      const target = event.target as Element | null;
+      const anchor = target?.closest?.("a[href]") as HTMLAnchorElement | null;
+      if (!anchor || !panel?.contains(anchor)) return;
+      if (
+        anchor.target === "_blank" ||
+        event.metaKey ||
+        event.ctrlKey ||
+        event.shiftKey ||
+        event.altKey
+      ) {
+        return;
+      }
+      const hrefAttr = anchor.getAttribute("href");
+      if (!hrefAttr || hrefAttr.startsWith("#")) return;
+      let url: URL;
+      try {
+        url = new URL(anchor.href, window.location.href);
+      } catch {
+        return;
+      }
+      if (url.origin !== window.location.origin) return;
+
+      event.preventDefault();
+      event.stopPropagation();
+      aiHistoryPushedRef.current = false;
+      const path = `${url.pathname}${url.search}${url.hash}`;
+      const onPopThenNav = () => {
+        window.removeEventListener("popstate", onPopThenNav);
+        setAiOpen(false);
+        router.push(path);
+      };
+      window.addEventListener("popstate", onPopThenNav);
+      window.history.back();
+    };
+    panel?.addEventListener("click", onNavClickCapture, true);
+
     return () => {
       window.removeEventListener("popstate", onPopState);
+      panel?.removeEventListener("click", onNavClickCapture, true);
       if (aiHistoryPushedRef.current) {
         aiHistoryPushedRef.current = false;
-        const state = window.history.state as { aiAssist?: boolean } | null;
-        if (state?.aiAssist) {
-          window.history.back();
-        }
+        // Always pop the entry we pushed (button/Escape/unmount). Do not
+        // gate on history.state: after in-panel nav the ref is already clear.
+        window.history.back();
       }
+    };
+  }, [aiOpen, aiOverlayMode, router]);
+  // Phone overlay: shrink the fixed panel above the software keyboard so
+  // Compose/Ask controls stay in the visual viewport (iOS does not resize
+  // layout viewport when the keyboard opens).
+  useEffect(() => {
+    if (!aiOpen || !aiOverlayMode) return;
+    const isPhone = window.matchMedia("(max-width: 639px)").matches;
+    if (!isPhone) return;
+    const vv = window.visualViewport;
+    if (!vv) return;
+    const panel = document.getElementById("ai-assist-panel");
+    if (!panel) return;
+
+    const syncKeyboardInset = () => {
+      const inset = Math.max(0, window.innerHeight - vv.height - vv.offsetTop);
+      panel.style.bottom = inset > 0 ? `${inset}px` : "";
+      const active = document.activeElement as HTMLElement | null;
+      if (active && panel.contains(active) && typeof active.scrollIntoView === "function") {
+        active.scrollIntoView({ block: "nearest", inline: "nearest" });
+      }
+    };
+    vv.addEventListener("resize", syncKeyboardInset);
+    vv.addEventListener("scroll", syncKeyboardInset);
+    syncKeyboardInset();
+    return () => {
+      vv.removeEventListener("resize", syncKeyboardInset);
+      vv.removeEventListener("scroll", syncKeyboardInset);
+      panel.style.bottom = "";
     };
   }, [aiOpen, aiOverlayMode]);
   // How much AI writing help to surface is driven by the operator's
@@ -5620,6 +5690,74 @@ export default function ThreadPage() {
             {/* Things to remember: durable life facts, not reply-state.
                 Self-hiding when empty. */}
             <ThingsToRemember remember={thread.remember ?? []} />
+
+            {/* Drafts/answers live in the scroll middle so long Compose
+                results stay reachable under overlay body scroll-lock.
+                Footer stays intent + primary action only (#898 F1). */}
+            {composeDraft ? (
+              // #436.4: "try again" re-runs composeFromIntent, which keeps the
+              // old draft mounted while the new one streams. Fade the stale
+              // text and swap the actions for a Regenerating… indicator so two
+              // suggestions never sit side by side.
+              <div
+                id="ai-assist-result"
+                data-testid="ai-assist-compose-draft"
+                className={`rounded-row border border-hairline bg-paper p-3 text-[13.5px] leading-[1.55] text-ink transition-opacity duration-calm ${
+                  composing ? "opacity-40" : "opacity-100"
+                }`}
+              >
+                <p className="m-0 whitespace-pre-wrap [overflow-wrap:anywhere]">{composeDraft}</p>
+                <div className="mt-3 flex items-center gap-3">
+                  {composing ? (
+                    <span className="inline-flex items-center gap-2 font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3">
+                      <Loader2 className="h-[12px] w-[12px] animate-spin" />
+                      Regenerating…
+                    </span>
+                  ) : (
+                    <>
+                      <Button variant="quiet" onClick={useDraft}>
+                        Use this
+                      </Button>
+                      <button
+                        type="button"
+                        onClick={() => void composeFromIntent()}
+                        className="font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3 hover:text-ink"
+                      >
+                        try again
+                      </button>
+                    </>
+                  )}
+                </div>
+              </div>
+            ) : null}
+            {askAnswer ? (
+              <div
+                id="ai-assist-result"
+                data-testid="ai-assist-ask-answer"
+                className="rounded-row border border-hairline bg-paper-2/50 p-3 text-[13.5px] leading-[1.55] text-ink"
+              >
+                <p className="mb-2 font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3">
+                  Answer
+                </p>
+                <p className="m-0 whitespace-pre-wrap [overflow-wrap:anywhere] text-ink-2">{askAnswer}</p>
+                <div className="mt-3 flex items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setAskAnswer(null)}
+                    className="font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3 hover:text-ink"
+                  >
+                    dismiss
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void askAi()}
+                    className="font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3 hover:text-ink"
+                  >
+                    ask again
+                  </button>
+                </div>
+              </div>
+            ) : null}
           </div>
         </div>
 
@@ -5781,64 +5919,6 @@ export default function ThreadPage() {
                 <span className="rounded-[8px] border border-hairline bg-paper-2 px-2 py-1 text-[11px] text-ink-2">{composeError}</span>
               ) : null}
             </div>
-            {composeDraft ? (
-              // #436.4: "try again" re-runs composeFromIntent, which keeps the
-              // old draft mounted while the new one streams. Fade the stale
-              // text and swap the actions for a Regenerating… indicator so two
-              // suggestions never sit side by side.
-              <div
-                className={`mt-3 rounded-row border border-hairline bg-paper p-3 text-[13.5px] leading-[1.55] text-ink transition-opacity duration-calm ${
-                  composing ? "opacity-40" : "opacity-100"
-                }`}
-              >
-                <p className="m-0 whitespace-pre-wrap [overflow-wrap:anywhere]">{composeDraft}</p>
-                <div className="mt-3 flex items-center gap-3">
-                  {composing ? (
-                    <span className="inline-flex items-center gap-2 font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3">
-                      <Loader2 className="h-[12px] w-[12px] animate-spin" />
-                      Regenerating…
-                    </span>
-                  ) : (
-                    <>
-                      <Button variant="quiet" onClick={useDraft}>
-                        Use this
-                      </Button>
-                      <button
-                        type="button"
-                        onClick={() => void composeFromIntent()}
-                        className="font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3 hover:text-ink"
-                      >
-                        try again
-                      </button>
-                    </>
-                  )}
-                </div>
-              </div>
-            ) : null}
-            {askAnswer ? (
-              <div className="mt-3 rounded-row border border-hairline bg-paper-2/50 p-3 text-[13.5px] leading-[1.55] text-ink">
-                <p className="mb-2 font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3">
-                  Answer
-                </p>
-                <p className="m-0 whitespace-pre-wrap [overflow-wrap:anywhere] text-ink-2">{askAnswer}</p>
-                <div className="mt-3 flex items-center gap-3">
-                  <button
-                    type="button"
-                    onClick={() => setAskAnswer(null)}
-                    className="font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3 hover:text-ink"
-                  >
-                    dismiss
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => void askAi()}
-                    className="font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3 hover:text-ink"
-                  >
-                    ask again
-                  </button>
-                </div>
-              </div>
-            ) : null}
           </section>
         </div>
       </aside>
