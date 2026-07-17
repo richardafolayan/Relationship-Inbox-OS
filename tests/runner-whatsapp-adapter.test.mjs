@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { WhatsAppAdapter, extractPollPayload, renderMessageText } from "../apps/runner/dist/platforms/whatsapp-adapter.js";
 
 /**
@@ -14,6 +17,7 @@ function createFakeClient(overrides = {}) {
     initialize: overrides.initialize ?? (async () => undefined),
     destroy: overrides.destroy ?? (async () => undefined),
     getChats: overrides.getChats ?? (async () => []),
+    pupPage: overrides.pupPage,
     getChatById: overrides.getChatById ?? (async () => null),
     sendMessage:
       overrides.sendMessage ??
@@ -37,6 +41,7 @@ function createFakePrisma(overrides = {}) {
 
 const baseDeps = () => ({
   authDir: "/tmp/wa-test",
+  mediaDir: "/tmp/wa-test-media",
   sendGuardConfig: { minIntervalMs: 30_000, dailyCap: 30 },
   prisma: createFakePrisma()
 });
@@ -262,6 +267,55 @@ test("scanUnreadThreads does not reconnect for unrelated collection failures", a
   assert.equal(factoryCalls, 1);
 });
 
+test("scanUnreadThreads falls back to a lightweight browser snapshot when chat hydration fails", async () => {
+  let evaluateCalls = 0;
+  const client = createFakeClient({
+    getChats: async () => {
+      const error = new Error("r");
+      error.name = "r";
+      throw error;
+    },
+    pupPage: {
+      evaluate: async () => {
+        evaluateCalls += 1;
+        return [
+          {
+            id: { _serialized: "group@g.us" },
+            name: "Study group",
+            isGroup: true,
+            unreadCount: 2,
+            timestamp: 1_700_000_100,
+            lastMessage: { body: "See you there" }
+          }
+        ];
+      }
+    }
+  });
+  const adapter = new WhatsAppAdapter({
+    ...baseDeps(),
+    createClient: () => client
+  });
+
+  const connecting = adapter.ensureConnected();
+  setImmediate(() => client.emit("ready"));
+  await connecting;
+
+  const threads = await adapter.scanUnreadThreads();
+  assert.equal(evaluateCalls, 1);
+  assert.deepEqual(threads, [
+    {
+      platformThreadId: "group@g.us",
+      displayName: "Study group",
+      unreadCount: 2,
+      lastMessagePreview: "See you there",
+      lastMessageAt: "2023-11-14T22:15:00.000Z",
+      isGroup: true,
+      groupName: "Study group",
+      isUnreadCandidate: true
+    }
+  ]);
+});
+
 test("fetchRecentThreads indexes every existing chat on the first sweep", async () => {
   const chats = Array.from({ length: 10 }, (_, i) => ({
     id: { _serialized: `c${i}@c.us` },
@@ -359,9 +413,11 @@ test("sendMessage allows WhatsApp group sends even when the group is not a saved
 
 test("sendMessage delegates to client.sendMessage when the guard allows", async () => {
   let sentText = null;
+  let sentOptions = null;
   const client = createFakeClient({
-    sendMessage: async (jid, text) => {
+    sendMessage: async (jid, text, options) => {
       sentText = text;
+      sentOptions = options;
       assert.equal(jid, "447111222333@c.us");
       return { timestamp: 1700000100, id: { _serialized: "msg-1" }, ack: 1 };
     }
@@ -378,18 +434,111 @@ test("sendMessage delegates to client.sendMessage when the guard allows", async 
     "hello"
   );
   assert.equal(sentText, "hello");
+  assert.deepEqual(sentOptions, { waitUntilMsgSent: true });
   assert.equal(receipt.verifiedBy, "platform_acknowledged");
   assert.equal(receipt.platformMessageKey, "msg-1");
   assert.equal(receipt.sentAt, "2023-11-14T22:15:00.000Z");
 });
 
+test("sendMessage treats a missing WhatsApp result as delivery uncertain", async () => {
+  const client = createFakeClient({ sendMessage: async () => undefined });
+  const adapter = new WhatsAppAdapter({
+    ...baseDeps(),
+    createClient: () => client
+  });
+  const ready = adapter.ensureConnected();
+  setImmediate(() => client.emit("ready"));
+  await ready;
+
+  await assert.rejects(
+    adapter.sendMessage(
+      { platformThreadId: "447111222333@c.us", displayName: "Alice", lastMessagePreview: "" },
+      "hello"
+    ),
+    /delivery could not be confirmed.*no message result/i
+  );
+});
+
+test("sendMessage recovers a sent message from the chat store when WhatsApp returns no result", async () => {
+  const client = createFakeClient({
+    sendMessage: async () => undefined,
+    pupPage: {
+      evaluate: async () => ({
+        id: { _serialized: "recovered-message", fromMe: true },
+        body: "hello from recovery",
+        type: "chat",
+        timestamp: 1_700_000_100,
+        from: "me@c.us",
+        to: "friend@c.us",
+        ack: 1,
+        hasMedia: false
+      })
+    }
+  });
+  const adapter = new WhatsAppAdapter({
+    ...baseDeps(),
+    createClient: () => client
+  });
+  const ready = adapter.ensureConnected();
+  setImmediate(() => client.emit("ready"));
+  await ready;
+
+  const receipt = await adapter.sendMessage(
+    {
+      platformThreadId: "friend@c.us",
+      displayName: "Friend",
+      lastMessagePreview: ""
+    },
+    "hello from recovery"
+  );
+
+  assert.equal(receipt.platformMessageKey, "recovered-message");
+  assert.equal(receipt.verifiedBy, "platform_acknowledged");
+});
+
+test("media sends wait for WhatsApp and keep a missing result delivery uncertain", async () => {
+  const file = join(tmpdir(), `whatsapp-send-${Date.now()}.txt`);
+  await writeFile(file, "attachment");
+  let sentOptions = null;
+  const client = createFakeClient({
+    sendMessage: async (_jid, _content, options) => {
+      sentOptions = options;
+      return undefined;
+    }
+  });
+  const adapter = new WhatsAppAdapter({
+    ...baseDeps(),
+    createClient: () => client
+  });
+  const ready = adapter.ensureConnected();
+  setImmediate(() => client.emit("ready"));
+  await ready;
+
+  try {
+    await assert.rejects(
+      adapter.sendMessage(
+        { platformThreadId: "447111222333@c.us", displayName: "Alice", lastMessagePreview: "" },
+        "caption",
+        [{ absolutePath: file, displayName: "note.txt", mimeType: "text/plain", kind: "unknown" }]
+      ),
+      /delivery could not be confirmed.*no message result/i
+    );
+    assert.equal(sentOptions.waitUntilMsgSent, true);
+    assert.equal(sentOptions.caption, "caption");
+  } finally {
+    await rm(file, { force: true });
+  }
+});
+
 test("sendPoll sends a native WhatsApp poll and returns structured metadata", async () => {
   let sentJid = null;
   let sentPoll = null;
+  let sentOptions = null;
   const client = createFakeClient({
-    sendMessage: async (jid, content) => {
+    sendMessage: async (jid, content, options) => {
       sentJid = jid;
       sentPoll = content;
+      sentOptions = options;
       return { timestamp: 1700000100, id: { _serialized: "poll-msg-1" }, ack: 1 };
     }
   });
@@ -411,6 +560,7 @@ test("sendPoll sends a native WhatsApp poll and returns structured metadata", as
   );
 
   assert.equal(sentJid, "447111222333@c.us");
+  assert.deepEqual(sentOptions, { waitUntilMsgSent: true });
   assert.equal(sentPoll.pollName, "Dinner?");
   assert.deepEqual(sentPoll.pollOptions, [
     { name: "Yes", localId: 0 },
@@ -435,6 +585,25 @@ test("sendPoll sends a native WhatsApp poll and returns structured metadata", as
       }
     }
   });
+});
+
+test("sendPoll treats a missing WhatsApp result as delivery uncertain", async () => {
+  const client = createFakeClient({ sendMessage: async () => null });
+  const adapter = new WhatsAppAdapter({
+    ...baseDeps(),
+    createClient: () => client
+  });
+  const ready = adapter.ensureConnected();
+  setImmediate(() => client.emit("ready"));
+  await ready;
+
+  await assert.rejects(
+    adapter.sendPoll(
+      { platformThreadId: "447111222333@c.us", displayName: "Alice", lastMessagePreview: "" },
+      { question: "Dinner?", options: ["Yes", "No"], allowMultipleAnswers: false }
+    ),
+    /delivery could not be confirmed.*no message result/i
+  );
 });
 
 test("fetchThreadMessages normalises wweb.js Message shapes (1:1)", async () => {
@@ -479,6 +648,51 @@ test("fetchThreadMessages normalises wweb.js Message shapes (1:1)", async () => 
   assert.equal(msgs[0].timestamp, "2023-11-14T22:13:20.000Z");
   assert.equal(msgs[1].direction, "OUT");
   assert.equal(msgs[1].senderName, undefined);
+});
+
+test("fetchThreadMessages bypasses broken chat hydration", async () => {
+  const client = createFakeClient({
+    getChatById: async () => {
+      const error = new Error("r");
+      error.name = "r";
+      throw error;
+    },
+    pupPage: {
+      evaluate: async () => [
+        {
+          id: { _serialized: "message-1", fromMe: false },
+          body: "Fallback message",
+          type: "chat",
+          timestamp: 1_700_000_100,
+          from: "person@c.us",
+          to: "me@c.us",
+          hasMedia: false
+        }
+      ]
+    }
+  });
+  const adapter = new WhatsAppAdapter({
+    ...baseDeps(),
+    createClient: () => client
+  });
+  const ready = adapter.ensureConnected();
+  setImmediate(() => client.emit("ready"));
+  await ready;
+
+  const messages = await adapter.fetchThreadMessages(
+    {
+      platformThreadId: "person@c.us",
+      displayName: "Person",
+      lastMessagePreview: "",
+      isGroup: false
+    },
+    20
+  );
+
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].platformMessageKey, "message-1");
+  assert.equal(messages[0].text, "Fallback message");
+  assert.equal(messages[0].direction, "IN");
 });
 
 test("fetchThreadMessages populates senderName for inbound group messages via msg.author lookup", async () => {

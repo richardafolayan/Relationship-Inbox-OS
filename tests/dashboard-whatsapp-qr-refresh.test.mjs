@@ -18,6 +18,19 @@ test("runner refreshes WhatsApp QR by resetting the session before reconnecting"
   assert.match(runner, /ensureConnected\(\)/);
 });
 
+test("repeated connect requests preserve connected and QR-ready state", () => {
+  const connectRoute = runner.slice(
+    runner.indexOf('app.post("/control/whatsapp/connect"'),
+    runner.indexOf('app.post("/control/whatsapp/refresh-qr"')
+  );
+  assert.match(connectRoute, /state === "connected"[\s\S]*res\.json/);
+  assert.match(connectRoute, /state === "connecting" \|\| whatsappConnect\.state === "qr_ready"/);
+  assert.ok(
+    connectRoute.indexOf('state === "connected"') <
+      connectRoute.indexOf('whatsappConnect.state = "connecting"')
+  );
+});
+
 test("WhatsApp can be reset to a clean session with inline feedback", () => {
   assert.match(component, /apiPost\("\/runner\/control\/whatsapp\/reset"/);
   assert.match(component, /Reset WhatsApp/);
