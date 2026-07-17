@@ -670,13 +670,20 @@ export function AppShell({ children }: { children: ReactNode }) {
     return () => source.close();
   }, []);
 
-  // ⌘K toggles the palette. Esc closes the palette and, when there is no
-  // palette open, navigates back from a thread to /today (matches the
+  // ⌘K: desktop opens the floating command palette; phone widths go to the
+  // dedicated /search screen (#903). Esc closes the palette and, when there
+  // is no palette open, navigates back from a thread to /today (matches the
   // prototype's "Esc closes thread" behaviour).
   useEffect(() => {
     const onKeydown = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
         event.preventDefault();
+        const phoneSearch = typeof window !== "undefined" && window.matchMedia("(max-width: 767px)").matches;
+        if (phoneSearch) {
+          setPaletteOpen(false);
+          if (pathname !== "/search") router.push("/search");
+          return;
+        }
         setPaletteOpen((value) => !value);
         return;
       }
@@ -780,7 +787,7 @@ export function AppShell({ children }: { children: ReactNode }) {
         ) : null}
         <main className="min-h-0 flex-1 overflow-y-auto">{children}</main>
       </div>
-      <MobileDock attentionCount={sidebarAttention} onOpenSearch={() => setPaletteOpen(true)} />
+      <MobileDock attentionCount={sidebarAttention} />
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
       <ToastHost />
       <PilotFeedbackModal />

@@ -8,54 +8,38 @@ import { cn } from "@/lib/utils";
 
 interface MobileDockProps {
   attentionCount: number;
-  onOpenSearch: () => void;
 }
 
 const tabs = [
   { href: "/today", label: "Today", icon: Sun, attention: true },
   { href: "/inbox", label: "Inbox", icon: Inbox },
+  { href: "/search", label: "Search", icon: Search },
   { href: "/reconnect", label: "Reconnect", icon: Sparkles },
   { href: "/settings", label: "Settings", icon: SettingsIcon }
 ] as const;
 
 // Phone-width replacement for the sidebar: a fixed bottom icon dock
 // (the sidebar itself is hidden below md). Hidden inside a thread so
-// the conversation + composer get the full height — the header's back
-// button (and Esc) return to the lists. Translucent + blurred like the
-// thread header; padded by env(safe-area-inset-bottom) so the icons
-// clear the iOS home indicator.
-export function MobileDock({ attentionCount, onOpenSearch }: MobileDockProps) {
+// the conversation + composer get the full height. Also hidden on
+// /search so the full-screen Search screen owns the viewport (#903).
+// Translucent + blurred like the thread header; padded by
+// env(safe-area-inset-bottom) so the icons clear the iOS home indicator.
+export function MobileDock({ attentionCount }: MobileDockProps) {
   const pathname = usePathname();
   if (pathname.startsWith("/thread/")) return null;
+  if (pathname === "/search" || pathname.startsWith("/search/")) return null;
 
   return (
     <nav
       aria-label="Primary"
       className="fixed inset-x-0 bottom-0 z-30 flex items-stretch justify-around border-t border-hairline bg-[color-mix(in_oklch,var(--paper)_92%,transparent)] px-2 pb-[env(safe-area-inset-bottom)] backdrop-blur-md backdrop-saturate-150 md:hidden"
     >
-      {tabs.slice(0, 2).map((tab) => (
+      {tabs.map((tab) => (
         <DockTab
           key={tab.href}
           {...tab}
           active={pathname === tab.href || pathname.startsWith(`${tab.href}/`)}
           badge={"attention" in tab && tab.attention ? attentionCount : 0}
-        />
-      ))}
-      <button
-        type="button"
-        onClick={onOpenSearch}
-        className="flex flex-1 flex-col items-center gap-[3px] px-1 pb-[6px] pt-[8px] text-ink-3 transition-colors duration-calm hover:text-ink"
-        aria-label="Search (⌘K)"
-      >
-        <Search className="h-[21px] w-[21px]" strokeWidth={1.6} />
-        <span className="font-mono text-[10px] tracking-[0.04em]">Search</span>
-      </button>
-      {tabs.slice(2).map((tab) => (
-        <DockTab
-          key={tab.href}
-          {...tab}
-          active={pathname === tab.href || pathname.startsWith(`${tab.href}/`)}
-          badge={0}
         />
       ))}
     </nav>
