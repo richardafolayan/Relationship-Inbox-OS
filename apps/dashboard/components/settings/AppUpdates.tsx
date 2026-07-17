@@ -1,11 +1,28 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { apiGetRaw, apiPost } from "@/lib/api";
 import { APP_NAME, LEGACY_APP_NAME } from "@/lib/branding";
+import {
+  buildTechnicalDetails,
+  describeUpdateState,
+  extractBranchRef,
+  extractPullRequestRef,
+  hostAppTitle,
+  hostOfflineCheckMessage,
+  installLocationCopy,
+  presentReleaseNotes,
+  readAppUpdatesSnapshot,
+  technicalDetailsOpenByDefault,
+  updateRestartNotice,
+  writeAppUpdatesSnapshot,
+  type AppUpdatesSnapshot,
+  type HostDeviceKind,
+  type UpdateUiState
+} from "@/lib/app-update-presentation";
 
-// Calm "App updates" card for the Settings > Pilot area. The runner starts a
-// detached updater so pilots do not need a terminal or a manual restart.
+// Calm "App updates" card for Settings. Updates always apply to the host
+// computer running the app (often viewed from a phone on the same Wi-Fi).
 
 interface UpdateCheck {
   applyMode?: "automatic" | "replace_app";
@@ -17,11 +34,21 @@ interface UpdateCheck {
   updateAvailable: boolean;
   releaseNotes: string[];
   error?: string;
+  commit?: string;
+  channel?: string;
+  build?: string;
+  hostDeviceLabel?: string;
+  hostDeviceKind?: HostDeviceKind;
 }
 
 interface AppVersion {
   version: string;
   releaseNotes?: string[];
+  commit?: string;
+  channel?: string;
+  build?: string;
+  hostDeviceLabel?: string;
+  hostDeviceKind?: HostDeviceKind;
 }
 
 interface StageResponse {
@@ -37,45 +64,103 @@ interface SettingsResponse {
   automaticUpdates: boolean;
 }
 
+function snapshotFromState(input: {
+  hostLabel: string;
+  hostKind: HostDeviceKind;
+  info: UpdateCheck | null;
+  automaticUpdates: boolean;
+  status: UpdateUiState;
+  statusMessage: string;
+  error: string;
+  started: { from: string; to: string; message?: string } | null;
+  installHelp: string;
+}): AppUpdatesSnapshot {
+  return {
+    hostLabel: input.hostLabel,
+    hostKind: input.hostKind,
+    currentVersion: input.info?.currentVersion ?? "",
+    latestVersion: input.info?.latestVersion ?? "",
+    updateAvailable: Boolean(input.info?.updateAvailable),
+    configured: Boolean(input.info?.configured),
+    automaticUpdates: input.automaticUpdates,
+    applyMode: input.info?.applyMode,
+    currentReleaseNotes: input.info?.currentReleaseNotes ?? [],
+    releaseNotes: input.info?.releaseNotes ?? [],
+    commit: input.info?.commit,
+    channel: input.info?.channel,
+    build: input.info?.build,
+    status: input.status,
+    statusMessage: input.statusMessage,
+    error: input.error,
+    started: input.started,
+    installHelp: input.installHelp,
+    updatedAt: Date.now()
+  };
+}
+
 export function AppUpdates() {
-  const [info, setInfo] = useState<UpdateCheck | null>(null);
+  const cached = readAppUpdatesSnapshot();
+  const [info, setInfo] = useState<UpdateCheck | null>(() =>
+    cached
+      ? {
+          applyMode: cached.applyMode,
+          automaticUpdates: cached.automaticUpdates,
+          configured: cached.configured,
+          currentVersion: cached.currentVersion,
+          currentReleaseNotes: cached.currentReleaseNotes,
+          latestVersion: cached.latestVersion,
+          updateAvailable: cached.updateAvailable,
+          releaseNotes: cached.releaseNotes,
+          commit: cached.commit,
+          channel: cached.channel,
+          build: cached.build,
+          hostDeviceLabel: cached.hostLabel,
+          hostDeviceKind: cached.hostKind
+        }
+      : null
+  );
   const [checking, setChecking] = useState(false);
-  const [checkMsg, setCheckMsg] = useState("");
   const [updating, setUpdating] = useState(false);
   const [runnerStarting, setRunnerStarting] = useState(false);
-  const [runnerOffline, setRunnerOffline] = useState(false);
-  const [started, setStarted] = useState<{ from: string; to: string; message?: string } | null>(null);
-  const [error, setError] = useState("");
-  const [installHelp, setInstallHelp] = useState("");
-  const [automaticUpdates, setAutomaticUpdates] = useState(true);
+  const [runnerOffline, setRunnerOffline] = useState(cached?.status === "host_offline");
+  const [started, setStarted] = useState<{ from: string; to: string; message?: string } | null>(
+    () => cached?.started ?? null
+  );
+  const [error, setError] = useState(cached?.error ?? "");
+  const [installHelp, setInstallHelp] = useState(cached?.installHelp ?? "");
+  const [automaticUpdates, setAutomaticUpdates] = useState(cached?.automaticUpdates ?? true);
   const [savingAutomaticUpdates, setSavingAutomaticUpdates] = useState(false);
   const [automaticUpdatesMsg, setAutomaticUpdatesMsg] = useState("");
+  const [hostLabel, setHostLabel] = useState(cached?.hostLabel ?? "your Mac");
+  const [hostKind, setHostKind] = useState<HostDeviceKind>(cached?.hostKind ?? "mac");
+  const [statusOverride, setStatusOverride] = useState<UpdateUiState | null>(
+    cached && (cached.status === "updating" || cached.status === "restart_required")
+      ? cached.status
+      : null
+  );
+
+  const applyHost = useCallback((res: { hostDeviceLabel?: string; hostDeviceKind?: HostDeviceKind }) => {
+    if (res.hostDeviceLabel?.trim()) setHostLabel(res.hostDeviceLabel.trim());
+    if (res.hostDeviceKind) setHostKind(res.hostDeviceKind);
+  }, []);
 
   const check = useCallback(async (manual: boolean) => {
     setChecking(true);
     setError("");
     setRunnerOffline(false);
-    if (manual) setCheckMsg("Checking…");
+    setStatusOverride(null);
     try {
       const res = await apiGetRaw<UpdateCheck>("/runner/system/update-check");
-      setInfo({
+      const next: UpdateCheck = {
         ...res,
-        currentReleaseNotes: Array.isArray(res.currentReleaseNotes) ? res.currentReleaseNotes : []
-      });
+        currentReleaseNotes: Array.isArray(res.currentReleaseNotes) ? res.currentReleaseNotes : [],
+        releaseNotes: Array.isArray(res.releaseNotes) ? res.releaseNotes : []
+      };
+      setInfo(next);
       setAutomaticUpdates(res.automaticUpdates);
+      applyHost(res);
       if (res.error) {
-        setError("Couldn’t check the update feed. Try again in a moment.");
-      }
-      if (manual) {
-        setCheckMsg(
-          res.error
-            ? ""
-            : res.updateAvailable
-            ? ""
-            : res.configured
-              ? "You’re up to date."
-              : "Updates aren’t set up yet."
-        );
+        setError("Could not check the update feed. Try again in a moment.");
       }
     } catch {
       try {
@@ -87,22 +172,78 @@ export function AppUpdates() {
           currentReleaseNotes: version.releaseNotes ?? [],
           latestVersion: version.version,
           updateAvailable: false,
-          releaseNotes: []
+          releaseNotes: [],
+          commit: version.commit,
+          channel: version.channel,
+          build: version.build,
+          hostDeviceLabel: version.hostDeviceLabel,
+          hostDeviceKind: version.hostDeviceKind
         });
-        setError(`Couldn’t check for updates. Restart ${APP_NAME}, then try again.`);
+        applyHost(version);
+        setError(`Could not check for updates. Restart ${APP_NAME}, then try again.`);
       } catch {
         setRunnerOffline(true);
         setInfo(null);
-        setError("Couldn’t reach the local runner. Use Start runner, then try again.");
+        setError(hostOfflineCheckMessage(hostKind));
       }
     } finally {
       setChecking(false);
     }
-  }, [automaticUpdates]);
+  }, [applyHost, automaticUpdates, hostKind]);
 
   useEffect(() => {
     void check(false);
   }, [check]);
+
+  const status: UpdateUiState = useMemo(() => {
+    if (statusOverride) return statusOverride;
+    if (checking && !info) return "loading";
+    if (checking) return "checking";
+    if (runnerOffline) return "host_offline";
+    if (updating) return "updating";
+    if (started) return "restart_required";
+    if (error && !info?.updateAvailable) return "error";
+    if (info?.updateAvailable) return "available";
+    if (info && !info.configured) return "not_configured";
+    if (info) return "up_to_date";
+    return "loading";
+  }, [checking, error, info, runnerOffline, started, statusOverride, updating]);
+
+  const statusMessage = useMemo(
+    () =>
+      describeUpdateState({
+        state: status,
+        latestVersion: info?.latestVersion,
+        errorMessage: error
+      }),
+    [error, info?.latestVersion, status]
+  );
+
+  useEffect(() => {
+    writeAppUpdatesSnapshot(
+      snapshotFromState({
+        hostLabel,
+        hostKind,
+        info,
+        automaticUpdates,
+        status,
+        statusMessage,
+        error,
+        started,
+        installHelp
+      })
+    );
+  }, [
+    automaticUpdates,
+    error,
+    hostKind,
+    hostLabel,
+    info,
+    installHelp,
+    started,
+    status,
+    statusMessage
+  ]);
 
   const prepareUpdate = useCallback(async () => {
     if (info?.applyMode === "replace_app") {
@@ -112,6 +253,7 @@ export function AppUpdates() {
       return;
     }
     setUpdating(true);
+    setStatusOverride("updating");
     setError("");
     try {
       const res = await apiPost<StageResponse>("/runner/system/update", {});
@@ -121,12 +263,15 @@ export function AppUpdates() {
           to: res.toVersion ?? info?.latestVersion ?? "",
           message: res.message
         });
+        setStatusOverride("restart_required");
       } else {
-        setError(res.message ?? "Couldn’t start the update. Try Check for updates again.");
+        setStatusOverride(null);
+        setError(res.message ?? "Could not start the update. Try Check for updates again.");
       }
     } catch (err) {
+      setStatusOverride(null);
       const message = err instanceof Error && err.message ? err.message : "";
-      setError(message || "Couldn’t start the update. Try again in a moment.");
+      setError(message || "Could not start the update. Try again in a moment.");
     } finally {
       setUpdating(false);
     }
@@ -141,12 +286,11 @@ export function AppUpdates() {
       if (!response.ok || !payload.ok) {
         throw new Error(payload.reason ?? `Request failed: ${response.status}`);
       }
-      setCheckMsg("Runner is starting. Checking again…");
       window.setTimeout(() => void check(true), 2500);
       window.setTimeout(() => void check(true), 6000);
     } catch (err) {
       const message = err instanceof Error && err.message ? err.message : "";
-      setError(message || `Couldn’t start the runner. Try reopening ${APP_NAME}.`);
+      setError(message || `Could not start the runner. Try reopening ${APP_NAME}.`);
     } finally {
       setRunnerStarting(false);
     }
@@ -162,42 +306,60 @@ export function AppUpdates() {
         automaticUpdates: next
       });
       setAutomaticUpdates(saved.automaticUpdates);
-      setInfo((current) => current ? { ...current, automaticUpdates: saved.automaticUpdates } : current);
+      setInfo((current) => (current ? { ...current, automaticUpdates: saved.automaticUpdates } : current));
       setAutomaticUpdatesMsg("Saved");
       window.setTimeout(() => setAutomaticUpdatesMsg(""), 1800);
     } catch {
       setAutomaticUpdatesMsg("");
-      setError("Couldn’t save automatic update settings. Try again.");
+      setError("Could not save automatic update settings. Try again.");
     } finally {
       setSavingAutomaticUpdates(false);
     }
   }, [automaticUpdates]);
 
-  const version = info?.currentVersion ?? "…";
+  const version = info?.currentVersion ?? cached?.currentVersion ?? "…";
+  const currentNotes = presentReleaseNotes(info?.currentReleaseNotes ?? []);
+  const upcomingNotes = presentReleaseNotes(
+    info?.updateAvailable ? info.releaseNotes ?? [] : []
+  );
+  const rawNotes = [
+    ...(info?.currentReleaseNotes ?? []),
+    ...(info?.updateAvailable ? info.releaseNotes ?? [] : [])
+  ];
+  const technicalDetails = buildTechnicalDetails({
+    commit: info?.commit,
+    channel: info?.channel,
+    build: info?.build,
+    branch: extractBranchRef(rawNotes),
+    pullRequest: extractPullRequestRef(rawNotes),
+    technicalLines: [
+      ...currentNotes.technicalLines,
+      ...upcomingNotes.technicalLines
+    ].filter((line, index, all) => all.indexOf(line) === index)
+  });
+  const showTechnical = technicalDetails.length > 0;
+  const techOpenDefault = technicalDetailsOpenByDefault(info?.channel);
+  const checkDisabled = checking || runnerOffline || updating || Boolean(started);
+  const title = hostAppTitle(APP_NAME, hostLabel);
 
   return (
     <div className="rounded-row border border-hairline bg-paper-2 px-5 py-4">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex flex-col gap-1">
-          <p className="text-[13px] text-ink">
-            App version <span className="font-mono text-ink-2">v{version}</span>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="flex min-w-0 flex-col gap-1">
+          <p className="text-[14px] font-medium text-ink">{title}</p>
+          <p className="text-[13px] text-ink-2">
+            Version <span className="font-mono">{version}</span>
           </p>
-          {info?.updateAvailable ? (
-            <p className="text-[13px] text-ink">
-              Update available{" "}
-              <span className="font-mono text-accent-ink">v{info.latestVersion}</span>
-            </p>
-          ) : checkMsg ? (
-            <p className="text-[12px] text-ink-3" aria-live="polite">
-              {checkMsg}
-            </p>
-          ) : null}
+          <p className="text-[12.5px] text-ink-3" aria-live="polite">
+            {statusMessage}
+          </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <button
             type="button"
             onClick={() => void check(true)}
-            disabled={checking}
+            disabled={checkDisabled}
+            title={runnerOffline ? hostOfflineCheckMessage(hostKind) : undefined}
             className="inline-flex items-center rounded-pill border border-hairline px-[14px] py-[8px] text-[12.5px] font-medium text-ink-2 transition-colors duration-calm hover:border-hairline-strong hover:bg-paper hover:text-ink disabled:opacity-60"
           >
             {checking ? "Checking…" : "Check for updates"}
@@ -216,21 +378,32 @@ export function AppUpdates() {
             <button
               type="button"
               onClick={() => void prepareUpdate()}
-              disabled={updating}
+              disabled={updating || runnerOffline}
               className="inline-flex items-center rounded-pill border border-hairline-strong px-[14px] py-[8px] text-[12.5px] font-medium text-accent-ink transition-colors duration-calm hover:bg-paper disabled:opacity-60"
             >
-              {updating ? "Updating app…" : info.applyMode === "replace_app" ? "Show update steps" : "Update app"}
+              {updating
+                ? "Updating app…"
+                : info.applyMode === "replace_app"
+                  ? "Show update steps"
+                  : "Update app"}
             </button>
           ) : null}
         </div>
       </div>
 
+      {runnerOffline ? (
+        <p className="mt-3 text-[12px] leading-relaxed text-ink-2" aria-live="polite">
+          {hostOfflineCheckMessage(hostKind)}
+        </p>
+      ) : null}
+
       <div className="mt-4 flex items-center justify-between gap-5 border-t border-hairline pt-4">
         <div>
-          <p className="text-[13px] font-medium text-ink">Install updates automatically</p>
+          <p className="text-[13px] font-medium text-ink">Automatic updates</p>
           <p className="mt-1 max-w-[58ch] text-[12px] leading-relaxed text-ink-3">
-            {APP_NAME} checks shortly after opening and once an hour. When an update is ready,
-            it installs it and reopens with your messages and settings kept.
+            {installLocationCopy(hostKind)}. {APP_NAME} checks shortly after opening and once an hour.
+            When an update is ready, it installs on the host computer and reopens with your messages
+            and settings kept.
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-2.5">
@@ -241,9 +414,9 @@ export function AppUpdates() {
             type="button"
             role="switch"
             aria-checked={automaticUpdates}
-            aria-label="Install updates automatically"
+            aria-label="Automatic updates"
             onClick={() => void toggleAutomaticUpdates()}
-            disabled={savingAutomaticUpdates || info?.applyMode === "replace_app"}
+            disabled={savingAutomaticUpdates || info?.applyMode === "replace_app" || runnerOffline}
             className={`relative h-[20px] w-[36px] shrink-0 rounded-pill transition-colors duration-calm ${
               automaticUpdates ? "bg-accent" : "bg-hairline-strong"
             } disabled:cursor-not-allowed disabled:opacity-50`}
@@ -258,24 +431,26 @@ export function AppUpdates() {
         </div>
       </div>
 
-      {info?.currentReleaseNotes.length || (info?.updateAvailable && info.releaseNotes.length) ? (
+      {currentNotes.userFacing.length || upcomingNotes.userFacing.length ? (
         <div className="mt-4 grid gap-3 border-t border-hairline pt-4 sm:grid-cols-2">
-          {info.currentReleaseNotes.length ? (
+          {currentNotes.userFacing.length ? (
             <div>
-              <p className="text-[12px] font-medium text-ink">What’s new in v{info.currentVersion}</p>
+              <p className="text-[12px] font-medium text-ink">What&apos;s new</p>
               <ul className="mt-1.5 list-disc space-y-1 pl-4 text-[12px] leading-relaxed text-ink-2">
-                {info.currentReleaseNotes.slice(0, 4).map((note, i) => (
-                  <li key={i}>{note}</li>
+                {currentNotes.userFacing.slice(0, 4).map((note, i) => (
+                  <li key={`current-${i}`}>{note}</li>
                 ))}
               </ul>
             </div>
           ) : null}
-          {info.updateAvailable && info.releaseNotes.length ? (
+          {upcomingNotes.userFacing.length ? (
             <div>
-              <p className="text-[12px] font-medium text-ink">Coming in v{info.latestVersion}</p>
+              <p className="text-[12px] font-medium text-ink">
+                Coming in v{info?.latestVersion}
+              </p>
               <ul className="mt-1.5 list-disc space-y-1 pl-4 text-[12px] leading-relaxed text-ink-2">
-                {info.releaseNotes.slice(0, 4).map((note, i) => (
-                  <li key={i}>{note}</li>
+                {upcomingNotes.userFacing.slice(0, 4).map((note, i) => (
+                  <li key={`next-${i}`}>{note}</li>
                 ))}
               </ul>
             </div>
@@ -283,12 +458,34 @@ export function AppUpdates() {
         </div>
       ) : null}
 
+      {showTechnical ? (
+        <details
+          className="mt-4 rounded-[10px] border border-hairline bg-paper/40 px-4 py-3"
+          defaultOpen={techOpenDefault}
+        >
+          <summary className="cursor-pointer text-[12.5px] font-medium text-ink">
+            Technical details
+          </summary>
+          <dl className="mt-3 space-y-1.5 text-[12px] leading-relaxed text-ink-2">
+            {technicalDetails.map((detail, i) => (
+              <div key={`${detail.label}-${i}`} className="grid grid-cols-[minmax(0,7.5rem)_1fr] gap-2">
+                <dt className="text-ink-3">{detail.label}</dt>
+                <dd className="m-0 break-all font-mono text-[11.5px] text-ink-2">{detail.value}</dd>
+              </div>
+            ))}
+          </dl>
+        </details>
+      ) : null}
+
       {started ? (
-        <p className="mt-3 text-[12px] leading-relaxed text-ink-2" aria-live="polite">
-          {started.message ?? "Update started."} v{started.from} to v{started.to}. This
-          page may disconnect for a moment while {APP_NAME} reopens.
-          Your messages and settings are kept.
-        </p>
+        <div className="mt-3 space-y-1.5" aria-live="polite">
+          <p className="text-[12px] leading-relaxed text-ink-2">
+            {started.message ?? "Update started."} v{started.from} to v{started.to}.
+          </p>
+          <p className="text-[12px] leading-relaxed text-ink-2">
+            {updateRestartNotice(APP_NAME, hostKind)}
+          </p>
+        </div>
       ) : null}
 
       {installHelp ? (
@@ -297,8 +494,11 @@ export function AppUpdates() {
         </p>
       ) : null}
 
-      {error ? (
-        <p className="mt-3 rounded-row border border-hairline bg-paper px-3 py-2 text-[12px] leading-relaxed text-ink-2" aria-live="polite">
+      {error && !runnerOffline ? (
+        <p
+          className="mt-3 rounded-row border border-hairline bg-paper px-3 py-2 text-[12px] leading-relaxed text-ink-2"
+          aria-live="polite"
+        >
           {error}
         </p>
       ) : null}
