@@ -19,6 +19,18 @@ test("post-click verification failures are delivery uncertain", () => {
   assert.match(failure.message, /check the conversation/i);
 });
 
+test("a missing WhatsApp send result blocks blind retry", () => {
+  const kind = classifySendFailureKind({
+    message: "WhatsApp delivery could not be confirmed because the send returned no message result"
+  });
+  const failure = consumerSendFailure(kind);
+
+  assert.equal(kind, "DELIVERY_UNCERTAIN");
+  assert.equal(failure.retrySafe, false);
+  assert.equal(failure.deliveryUncertain, true);
+  assert.match(failure.message, /check the conversation/i);
+});
+
 test("interrupted claimed sends stay uncertain after restart", () => {
   const failure = parsePersistedSendFailure(
     JSON.stringify({

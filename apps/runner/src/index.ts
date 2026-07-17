@@ -95,7 +95,11 @@ import {
 } from "./services/message-sync-latency";
 import { createSendService } from "./services/send";
 import { createSendQueue } from "./services/send-queue";
-import { parsePersistedSendFailure } from "./services/send-failure";
+import {
+  classifySendFailureKind,
+  consumerSendFailure,
+  parsePersistedSendFailure
+} from "./services/send-failure";
 import { createReassessOnSendHandler } from "./services/reassess-on-send";
 import { createScheduledSendPromoter } from "./services/scheduled-send-promoter";
 import {
@@ -3949,14 +3953,20 @@ app.post("/control/thread/:threadId/send-poll", asyncRoute(async (req, res) => {
         sentAt: sentAt.toISOString()
       });
     } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      const errorKind = classifySendFailureKind({ message: errorMessage });
+      const consumerFailure = consumerSendFailure(errorKind);
       await auditService.log({
         platform: target.platform,
         stage: "Send",
         action: "POLL_SEND_FAIL",
         status: "FAIL",
-        details: { threadId, clientSendId, ...summarizeError(error) }
+        details: { threadId, clientSendId, errorKind, ...summarizeError(error) }
       });
-      throw error;
+      res.status(errorKind === "DELIVERY_UNCERTAIN" ? 409 : 502).json({
+        error: consumerFailure.message,
+        failure: consumerFailure
+      });
     }
   });
 }));
@@ -6944,6 +6954,14 @@ app.post("/control/whatsapp/connect", asyncRoute(async (_req, res) => {
   const adapter = adapters.WHATSAPP;
   if (!adapter) {
     res.status(500).json({ ok: false, reason: "no_adapter" });
+    return;
+  }
+  if (whatsappConnect.state === "connected") {
+    res.json({ ok: true, state: whatsappConnect.state });
+    return;
+  }
+  if (whatsappConnect.state === "connecting" || whatsappConnect.state === "qr_ready") {
+    res.status(202).json({ ok: true, state: whatsappConnect.state });
     return;
   }
   // ensureConnected resolves on "ready"; don't await it (first connect waits

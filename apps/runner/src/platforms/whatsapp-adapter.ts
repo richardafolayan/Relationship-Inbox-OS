@@ -29,7 +29,7 @@ import type {
 } from "@inbox-os/core";
 import type { Client, Message as WaMessage } from "whatsapp-web.js";
 import { createWhatsAppClient } from "./whatsapp/client";
-import { chatToThreadStub } from "./whatsapp/groupResolver";
+import { chatToThreadStub, type WhatsAppChatLike } from "./whatsapp/groupResolver";
 import { checkSendGuard, type SendGuardConfig, type SendGuardPrisma } from "./whatsapp/sendGuard";
 import { epochSecondsToIso } from "./whatsapp/whatsappTime";
 import { isGroupJid } from "./whatsapp/whatsappIdentity";
@@ -189,8 +189,22 @@ export class WhatsAppAdapter implements PlatformAdapter {
 
   async fetchThreadMessages(thread: ThreadStub, limit: number): Promise<NormalizedMessage[]> {
     const client = this.requireClient();
-    const chat = await client.getChatById(thread.platformThreadId);
-    const messages = await chat.fetchMessages({ limit });
+    let messages: WaMessage[];
+    try {
+      const chat = await client.getChatById(thread.platformThreadId);
+      messages = await chat.fetchMessages({ limit });
+    } catch (error) {
+      if (isDetachedFrameError(error)) throw error;
+      try {
+        messages = await this.fetchMessagesWithoutChatHydration(
+          client,
+          thread.platformThreadId,
+          limit
+        );
+      } catch {
+        throw error;
+      }
+    }
     const isGroup = thread.isGroup ?? isGroupJid(thread.platformThreadId);
     return Promise.all(messages.map((m) => this.normaliseMessage(m, isGroup)));
   }
@@ -207,7 +221,19 @@ export class WhatsAppAdapter implements PlatformAdapter {
     // returns the sent Message object, whose timestamp we mirror.
     const media = (attachments ?? []).filter((a) => a.absolutePath && a.absolutePath.length > 0);
     if (media.length === 0) {
-      const sent = await client.sendMessage(thread.platformThreadId, text);
+      const sendStartedAt = Date.now();
+      const sent = await this.resolveSendResult(
+        await (client as unknown as {
+          sendMessage: (
+            jid: string,
+            content: string,
+            options: { waitUntilMsgSent: boolean }
+          ) => Promise<WaMessage | null | undefined>;
+        }).sendMessage(thread.platformThreadId, text, { waitUntilMsgSent: true }),
+        thread.platformThreadId,
+        sendStartedAt,
+        text
+      );
       const acknowledgedAt = new Date().toISOString();
       const verifiedBy = await this.waitForAcknowledgement(sent);
       return {
@@ -253,14 +279,24 @@ export class WhatsAppAdapter implements PlatformAdapter {
       // wweb.js's options bag accepts `caption` (for image/video) and
       // `sendMediaAsDocument` / `sendAudioAsVoice` flags. Voice notes
       // become PTT (push-to-talk) so the recipient sees the waveform UI.
-      const opts: Record<string, unknown> = {};
+      const opts: Record<string, unknown> = { waitUntilMsgSent: true };
       if (i === 0 && text && text.length > 0) opts.caption = text;
       if (a.kind === "voice_note") opts.sendAudioAsVoice = true;
       if (a.kind === "gif") opts.sendVideoAsGif = true;
       if (a.kind === "sticker") opts.sendMediaAsSticker = true;
-      const sent = await (client as unknown as {
-        sendMessage: (jid: string, content: unknown, options?: Record<string, unknown>) => Promise<WaMessage>;
-      }).sendMessage(thread.platformThreadId, payload, opts);
+      const sendStartedAt = Date.now();
+      const sent = await this.resolveSendResult(
+        await (client as unknown as {
+          sendMessage: (
+            jid: string,
+            content: unknown,
+            options?: Record<string, unknown>
+          ) => Promise<WaMessage | null | undefined>;
+        }).sendMessage(thread.platformThreadId, payload, opts),
+        thread.platformThreadId,
+        sendStartedAt,
+        i === 0 ? text : undefined
+      );
       acknowledgedAt ??= new Date().toISOString();
       const messageVerification = await this.waitForAcknowledgement(sent);
       if (messageVerification !== "platform_acknowledged") {
@@ -345,9 +381,20 @@ export class WhatsAppAdapter implements PlatformAdapter {
     const payload = new Poll(question, options, {
       allowMultipleAnswers: Boolean(poll.allowMultipleAnswers)
     });
-    const sent = await (client as unknown as {
-      sendMessage: (jid: string, content: unknown) => Promise<WaMessage>;
-    }).sendMessage(thread.platformThreadId, payload);
+    const sendStartedAt = Date.now();
+    const sent = await this.resolveSendResult(
+      await (client as unknown as {
+        sendMessage: (
+          jid: string,
+          content: unknown,
+          options: { waitUntilMsgSent: boolean }
+        ) => Promise<WaMessage | null | undefined>;
+      }).sendMessage(thread.platformThreadId, payload, { waitUntilMsgSent: true }),
+      thread.platformThreadId,
+      sendStartedAt,
+      undefined,
+      "poll_creation"
+    );
     const acknowledgedAt = new Date().toISOString();
     const verifiedBy = await this.waitForAcknowledgement(sent);
     const structuredPoll: WhatsAppPollPayload = {
@@ -419,6 +466,91 @@ export class WhatsAppAdapter implements PlatformAdapter {
       timer.unref?.();
       client.on("message_ack", onAck);
     });
+  }
+
+  private async resolveSendResult(
+    sent: WaMessage | null | undefined,
+    chatId: string,
+    sendStartedAt: number,
+    expectedText?: string,
+    expectedType?: string
+  ): Promise<WaMessage> {
+    if (sent) return sent;
+
+    const client = this.requireClient();
+    if (client.pupPage) {
+      try {
+        const model = await client.pupPage.evaluate(
+          async (targetChatId, earliestTimestamp, targetText, targetType) => {
+            type BrowserMessage = {
+              id?: { fromMe?: boolean; _serialized?: string; toString?: () => string };
+              t?: number;
+              body?: string;
+              type?: string;
+            };
+            type BrowserChat = {
+              msgs: { getModelsArray: () => BrowserMessage[] };
+            };
+            type BrowserWindow = typeof globalThis & {
+              WWebJS: {
+                getChat: (
+                  id: string,
+                  options: { getAsModel: false }
+                ) => Promise<BrowserChat | null>;
+                getMessageModel: (message: BrowserMessage) => unknown;
+              };
+            };
+
+            const browserWindow = globalThis as BrowserWindow;
+            const chat = await browserWindow.WWebJS.getChat(targetChatId, {
+              getAsModel: false
+            });
+            if (!chat) return null;
+            const match = chat.msgs
+              .getModelsArray()
+              .filter(
+                (message) =>
+                  message.id?.fromMe === true &&
+                  Number(message.t ?? 0) >= earliestTimestamp &&
+                  (targetText === undefined || message.body === targetText) &&
+                  (targetType === undefined || message.type === targetType)
+              )
+              .sort((a, b) => Number(b.t ?? 0) - Number(a.t ?? 0))[0];
+            if (!match) return null;
+            const model = browserWindow.WWebJS.getMessageModel(match) as {
+              id?: { _serialized?: string };
+            };
+            const serializedId =
+              match.id?._serialized ??
+              (typeof match.id?.toString === "function" ? match.id.toString() : undefined);
+            if (serializedId && !model.id?._serialized) {
+              model.id = { ...model.id, _serialized: serializedId };
+            }
+            return model;
+          },
+          chatId,
+          Math.floor(sendStartedAt / 1000) - 2,
+          expectedText,
+          expectedType
+        );
+        if (model) {
+          const whatsapp = (await import("whatsapp-web.js")) as unknown as {
+            Message?: new (messageClient: Client, data: unknown) => WaMessage;
+            default?: {
+              Message?: new (messageClient: Client, data: unknown) => WaMessage;
+            };
+          };
+          const Message = whatsapp.Message ?? whatsapp.default?.Message;
+          if (Message) return new Message(client, model);
+        }
+      } catch {
+        // Fall through to the delivery-uncertain error.
+      }
+    }
+
+    throw new Error(
+      "WhatsApp delivery could not be confirmed because the send returned no message result"
+    );
   }
 
   async voteOnPoll(
@@ -577,9 +709,23 @@ export class WhatsAppAdapter implements PlatformAdapter {
     return this.client;
   }
 
-  private async getChatsWithDetachedFrameRecovery(): Promise<Awaited<ReturnType<Client["getChats"]>>> {
+  private async getChatsWithDetachedFrameRecovery(): Promise<WhatsAppChatLike[]> {
+    const getChats = async (): Promise<WhatsAppChatLike[]> => {
+      const client = this.requireClient();
+      try {
+        return await client.getChats();
+      } catch (error) {
+        if (isDetachedFrameError(error)) throw error;
+        try {
+          return await this.getLightweightChatSnapshots(client);
+        } catch {
+          throw error;
+        }
+      }
+    };
+
     try {
-      return await this.requireClient().getChats();
+      return await getChats();
     } catch (error) {
       if (!isDetachedFrameError(error)) {
         throw error;
@@ -588,7 +734,151 @@ export class WhatsAppAdapter implements PlatformAdapter {
 
     await this.closeSession("detached_frame");
     await this.ensureConnected();
-    return this.requireClient().getChats();
+    return getChats();
+  }
+
+  private async getLightweightChatSnapshots(client: Client): Promise<WhatsAppChatLike[]> {
+    if (!client.pupPage) throw new Error("WhatsApp browser page unavailable");
+
+    return client.pupPage.evaluate(() => {
+      type BrowserChat = {
+        id?: { _serialized?: string };
+        __x_id?: { _serialized?: string };
+        name?: string;
+        __x_name?: string;
+        formattedTitle?: string;
+        __x_formattedTitle?: string;
+        unreadCount?: number;
+        __x_unreadCount?: number;
+        timestamp?: number;
+        t?: number;
+        __x_t?: number;
+        isGroup?: boolean;
+        groupMetadata?: unknown;
+        lastMessage?: { body?: string } | null;
+        __x_lastMessage?: { body?: string } | null;
+      };
+      type BrowserWindow = typeof globalThis & {
+        require: (moduleName: string) => {
+          Chat: { getModelsArray: () => BrowserChat[] };
+        };
+      };
+
+      const browserWindow = globalThis as BrowserWindow;
+      const chats = browserWindow.require("WAWebCollections").Chat.getModelsArray();
+      const snapshots: Array<{
+        id: { _serialized: string };
+        name?: string;
+        isGroup: boolean;
+        unreadCount: number;
+        timestamp?: number;
+        lastMessage: { body?: string } | null;
+      }> = [];
+
+      for (const chat of chats) {
+        try {
+          const id = chat.id?._serialized ?? chat.__x_id?._serialized;
+          if (!id) continue;
+          const timestamp = Number(chat.timestamp ?? chat.t ?? chat.__x_t);
+          snapshots.push({
+            id: { _serialized: id },
+            name:
+              chat.name ??
+              chat.__x_name ??
+              chat.formattedTitle ??
+              chat.__x_formattedTitle,
+            isGroup: Boolean(chat.isGroup ?? chat.groupMetadata) || id.endsWith("@g.us"),
+            unreadCount: Number(chat.unreadCount ?? chat.__x_unreadCount ?? 0),
+            timestamp: Number.isFinite(timestamp) && timestamp > 0 ? timestamp : undefined,
+            lastMessage: chat.lastMessage ?? chat.__x_lastMessage ?? null
+          });
+        } catch {
+          continue;
+        }
+      }
+
+      return snapshots;
+    });
+  }
+
+  private async fetchMessagesWithoutChatHydration(
+    client: Client,
+    chatId: string,
+    limit: number
+  ): Promise<WaMessage[]> {
+    if (!client.pupPage) throw new Error("WhatsApp browser page unavailable");
+
+    const models = await client.pupPage.evaluate(
+      async (targetChatId, requestedLimit) => {
+        type BrowserMessage = {
+          id?: { fromMe?: boolean; _serialized?: string; toString?: () => string };
+          isNotification?: boolean;
+          t?: number;
+        };
+        type BrowserChat = {
+          msgs: { getModelsArray: () => BrowserMessage[] };
+        };
+        type BrowserWindow = typeof globalThis & {
+          WWebJS: {
+            getChat: (
+              id: string,
+              options: { getAsModel: false }
+            ) => Promise<BrowserChat | null>;
+            getMessageModel: (message: BrowserMessage) => unknown;
+          };
+          require: (moduleName: string) => {
+            loadEarlierMsgs: (input: { chat: BrowserChat }) => Promise<BrowserMessage[] | null>;
+          };
+        };
+
+        const browserWindow = globalThis as BrowserWindow;
+        const chat = await browserWindow.WWebJS.getChat(targetChatId, {
+          getAsModel: false
+        });
+        if (!chat) return [];
+        const include = (message: BrowserMessage): boolean => !message.isNotification;
+        let messages = chat.msgs.getModelsArray().filter(include);
+
+        if (requestedLimit > 0) {
+          while (messages.length < requestedLimit) {
+            const loaded = await browserWindow
+              .require("WAWebChatLoadMessages")
+              .loadEarlierMsgs({ chat });
+            if (!loaded?.length) break;
+            messages = [...loaded.filter(include), ...messages];
+          }
+          if (messages.length > requestedLimit) {
+            messages.sort((a, b) => Number(a.t ?? 0) - Number(b.t ?? 0));
+            messages = messages.slice(messages.length - requestedLimit);
+          }
+        }
+
+        return messages.map((message) => {
+          const model = browserWindow.WWebJS.getMessageModel(message) as {
+            id?: { _serialized?: string };
+          };
+          const serializedId =
+            message.id?._serialized ??
+            (typeof message.id?.toString === "function" ? message.id.toString() : undefined);
+          if (serializedId && !model.id?._serialized) {
+            model.id = { ...model.id, _serialized: serializedId };
+          }
+          return model;
+        });
+      },
+      chatId,
+      limit
+    );
+
+    const whatsapp = (await import("whatsapp-web.js")) as unknown as {
+      Message?: new (messageClient: Client, data: unknown) => WaMessage;
+      default?: {
+        Message?: new (messageClient: Client, data: unknown) => WaMessage;
+      };
+    };
+    const Message = whatsapp.Message ?? whatsapp.default?.Message;
+    if (!Message) throw new Error("WhatsApp Message export unavailable");
+    return models.map((model) => new Message(client, model));
   }
 
   private async rethrowPollSessionFailure(error: unknown): Promise<never> {
