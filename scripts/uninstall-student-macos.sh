@@ -3,7 +3,6 @@
 set -u
 
 DEFAULT_APP_NAME="Tovi"
-APP_NAME="${RIOS_APP_NAME:-$DEFAULT_APP_NAME}"
 # Pre-rebrand name: bundles and folders created before the Tovi rename.
 LEGACY_APP_NAME="Relationship Inbox OS"
 INSTALL_DIR="${RIOS_INSTALL_DIR:-$HOME/RelationshipInboxOS}"
@@ -14,6 +13,55 @@ NODE_DIR="${RIOS_NODE_DIR:-$HOME/.rios-node}"
 ASSUME_YES=false
 KEEP_DATA=false
 DRY_RUN=false
+
+# Read RIOS_APP_NAME from an installed .env without requiring it to be exported
+# in the calling shell. Strips optional single/double quotes around the value.
+read_env_app_name() {
+  local env_file="$1" line value
+  [ -f "$env_file" ] || return 1
+  line="$(grep -E '^[[:space:]]*RIOS_APP_NAME=' "$env_file" 2>/dev/null | tail -n 1)" || return 1
+  [ -n "$line" ] || return 1
+  value="${line#*=}"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  case "$value" in
+    \"*\") value="${value#\"}"; value="${value%\"}" ;;
+    \'*\') value="${value#\'}"; value="${value%\'}" ;;
+  esac
+  value="$(printf '%s' "$value" | tr -d '\r')"
+  [ -n "$value" ] || return 1
+  printf '%s' "$value"
+}
+
+# release.json.appName is the packaged fallback when .env never stored the name.
+read_release_app_name() {
+  local release_file="$1" value
+  [ -f "$release_file" ] || return 1
+  value="$(sed -n 's/.*"appName"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$release_file" 2>/dev/null | head -n 1)"
+  value="$(printf '%s' "$value" | tr -d '\r')"
+  [ -n "$value" ] || return 1
+  printf '%s' "$value"
+}
+
+# Prefer an explicit shell export, then the installed config, then defaults.
+# Must run before the bundle list is built so custom-named .app folders are found.
+resolve_uninstall_app_name() {
+  local value=""
+  if [ -n "${RIOS_APP_NAME:-}" ]; then
+    value="$RIOS_APP_NAME"
+  else
+    value="$(read_env_app_name "$INSTALL_DIR/.env" 2>/dev/null || true)"
+    if [ -z "$value" ]; then
+      value="$(read_release_app_name "$INSTALL_DIR/release.json" 2>/dev/null || true)"
+    fi
+  fi
+  if [ -z "$value" ]; then
+    value="$DEFAULT_APP_NAME"
+  fi
+  printf '%s' "$value"
+}
+
+APP_NAME="$(resolve_uninstall_app_name)"
 
 for arg in "$@"; do
   case "$arg" in

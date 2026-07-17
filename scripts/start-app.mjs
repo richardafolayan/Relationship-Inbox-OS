@@ -126,6 +126,10 @@ function gitHead() {
   return result.status === 0 ? result.stdout.trim() : "";
 }
 
+export function composeDashboardStamp({ appVersion = "", gitHead: head = "", nextVersion = "", appName = "" } = {}) {
+  return [appVersion, head, nextVersion, appName].join("|");
+}
+
 function canResolve(specifier) {
   try {
     createRequire(join(APP_DIR, "package.json")).resolve(specifier);
@@ -247,7 +251,14 @@ function prepare() {
 
   if (FORCE_DEV) return { ok: true, prod: false };
   const nextPackage = readJson(join(APP_DIR, "node_modules/next/package.json"));
-  const dashboardStamp = [readJson(join(APP_DIR, "package.json")).version ?? "", gitHead(), nextPackage.version ?? ""].join("|");
+  // APP_NAME is inlined into the dashboard at build time. Include it so a
+  // rename via RIOS_APP_NAME forces a rebuild instead of reusing a stale .next.
+  const dashboardStamp = composeDashboardStamp({
+    appVersion: readJson(join(APP_DIR, "package.json")).version ?? "",
+    gitHead: gitHead(),
+    nextVersion: nextPackage.version ?? "",
+    appName: APP_NAME
+  });
   const buildIdPath = join(APP_DIR, "apps/dashboard/.next/BUILD_ID");
   if (stamps.dashboardStamp === dashboardStamp && existsSync(buildIdPath)) return { ok: true, prod: true };
 
@@ -429,4 +440,6 @@ async function main() {
   await startApp(result.prod);
 }
 
-void main();
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  void main();
+}

@@ -7,7 +7,13 @@ import {
   nodeArchiveName,
   windowsRuntimeDir
 } from "../scripts/prepare-windows-runtime.mjs";
-import { electronBuilderArgs, npmInvocation } from "../scripts/build-windows-installer.mjs";
+import {
+  electronBuilderArgs,
+  npmInvocation,
+  packagingEnv,
+  writeWindowsBrandingArtifacts,
+  WINDOWS_BRANDING_DIR
+} from "../scripts/build-windows-installer.mjs";
 
 test("Windows runtime helpers select the verified Node archive", () => {
   assert.equal(nodeArchiveName("22.21.1", "x64"), "node-v22.21.1-win-x64.zip");
@@ -79,4 +85,18 @@ test("Windows builder applies the configured display name", () => {
   assert.ok(args.includes("--config.productName=Lumen"));
   assert.ok(args.includes("--config.win.artifactName=Lumen-Setup-${version}-${arch}.${ext}"));
   assert.ok(args.includes("--config.nsis.shortcutName=Lumen"));
+});
+
+test("Windows package files ship generated branding env and release.json", () => {
+  const pkg = JSON.parse(readFileSync(resolve("package.json"), "utf8"));
+  assert.deepEqual(pkg.build.files[0], {
+    from: `${WINDOWS_BRANDING_DIR}/branding.env`,
+    to: ".env"
+  });
+  assert.deepEqual(pkg.build.files[1], {
+    from: `${WINDOWS_BRANDING_DIR}/release.json`,
+    to: "release.json"
+  });
+  assert.equal(packagingEnv("Aria", {}).RIOS_APP_NAME, "Aria");
+  assert.equal(typeof writeWindowsBrandingArtifacts, "function");
 });

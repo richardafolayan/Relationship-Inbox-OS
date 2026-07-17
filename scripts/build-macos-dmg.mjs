@@ -240,21 +240,25 @@ function stageSource(ref, appResourceDir) {
   }
 }
 
+// Staged trees come from `git archive` and have no .env. Always pass the
+// already-resolved display name so the dashboard build inlines the same brand
+// as the DMG / Info.plist, even when RIOS_APP_NAME only lived in the host .env.
+export function stagedChildEnv(nodeDir, appName = APP_NAME, env = process.env) {
+  return {
+    ...env,
+    PATH: `${join(nodeDir, "bin")}:${env.PATH || ""}`,
+    RIOS_APP_NAME: appName
+  };
+}
+
 function installDependencies(appResourceDir, nodeDir) {
   const npm = join(nodeDir, "bin", "npm");
-  const env = {
-    ...process.env,
-    PATH: `${join(nodeDir, "bin")}:${process.env.PATH || ""}`
-  };
-  run(npm, ["ci"], { cwd: appResourceDir, env });
+  run(npm, ["ci"], { cwd: appResourceDir, env: stagedChildEnv(nodeDir) });
 }
 
 function buildRuntimeArtifacts(appResourceDir, nodeDir) {
   const npm = join(nodeDir, "bin", "npm");
-  const env = {
-    ...process.env,
-    PATH: `${join(nodeDir, "bin")}:${process.env.PATH || ""}`
-  };
+  const env = stagedChildEnv(nodeDir);
   run(npm, ["run", "db:generate"], { cwd: appResourceDir, env });
   run(npm, ["run", "build", "--workspace", "@inbox-os/core"], { cwd: appResourceDir, env });
   run(npm, ["run", "build", "--workspace", "@inbox-os/runner"], { cwd: appResourceDir, env });

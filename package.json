@@ -65,6 +65,14 @@
       "output": "dist/windows"
     },
     "files": [
+      {
+        "from": "build/windows-branding/branding.env",
+        "to": ".env"
+      },
+      {
+        "from": "build/windows-branding/release.json",
+        "to": "release.json"
+      },
       ".env.example",
       "package.json",
       "apps/desktop/**/*",
