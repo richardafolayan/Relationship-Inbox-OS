@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { resolveAutoScanDisabled } from "@inbox-os/core/autoscan";
 import {
   Bell,
@@ -160,6 +160,7 @@ function tabFromHash(hash: string): SettingsTabId | null {
   const clean = hash.replace(/^#/, "");
   if (isSettingsTabId(clean)) return clean;
   if (clean === "app-updates") return "app";
+  if (clean === "whatsapp") return "platforms";
   if (clean === "reply-style") return "writing";
   return null;
 }
@@ -197,10 +198,62 @@ export default function SettingsPage() {
   // the App updates card into view and flash a short highlight ring so the
   // eye finds it. Mount covers cross-page navigation; hashchange covers
   // manual edits and back/forward.
+  // /settings#whatsapp: Platforms tab + scroll to the stable #whatsapp-connect
+  // anchor. Other platform cards mount above WhatsApp only after platformRows
+  // loads, so a first successful scroll is not final. Keep re-scrolling for a
+  // short window whenever rows change (debounced) so layout growth cannot
+  // leave the QR card below the fold.
   const [highlightUpdates, setHighlightUpdates] = useState(false);
+  const whatsappScrollUntilRef = useRef(0);
+  const WHATSAPP_SCROLL_WINDOW_MS = 2000;
   useEffect(() => {
-    let timer: number | undefined;
+    let highlightTimer: number | undefined;
+    let retryTimer: number | undefined;
+    let windowEndTimer: number | undefined;
+    let raf1 = 0;
+    let raf2 = 0;
+    let cancelled = false;
+
+    const clearScrollSchedule = () => {
+      window.clearTimeout(retryTimer);
+      if (raf1) window.cancelAnimationFrame(raf1);
+      if (raf2) window.cancelAnimationFrame(raf2);
+      raf1 = 0;
+      raf2 = 0;
+    };
+
+    const inWhatsappScrollWindow = () =>
+      !cancelled &&
+      window.location.hash === "#whatsapp" &&
+      Date.now() < whatsappScrollUntilRef.current;
+
+    const tryScrollWhatsapp = (attempt = 0) => {
+      if (!inWhatsappScrollWindow()) return;
+      const el = document.getElementById("whatsapp-connect");
+      if (el) {
+        // Do not close the window on first paint: cards above may still load.
+        el.scrollIntoView({ behavior: "smooth", block: "center" });
+        return;
+      }
+      if (attempt < 40) {
+        retryTimer = window.setTimeout(() => tryScrollWhatsapp(attempt + 1), 50);
+      }
+    };
+
+    const scheduleWhatsappScroll = () => {
+      whatsappScrollUntilRef.current = Date.now() + WHATSAPP_SCROLL_WINDOW_MS;
+      clearScrollSchedule();
+      window.clearTimeout(windowEndTimer);
+      windowEndTimer = window.setTimeout(() => {
+        whatsappScrollUntilRef.current = 0;
+      }, WHATSAPP_SCROLL_WINDOW_MS);
+      raf1 = window.requestAnimationFrame(() => {
+        raf2 = window.requestAnimationFrame(() => tryScrollWhatsapp(0));
+      });
+    };
+
     const maybeHighlight = () => {
+      clearScrollSchedule();
       const tab = tabFromHash(window.location.hash);
       if (tab) setActiveTab(tab);
       if (window.location.hash === "#app-updates") {
@@ -211,16 +264,63 @@ export default function SettingsPage() {
         }, 0);
         setHighlightUpdates(true);
       }
-      window.clearTimeout(timer);
-      timer = window.setTimeout(() => setHighlightUpdates(false), 2400);
+      if (window.location.hash === "#whatsapp") {
+        scheduleWhatsappScroll();
+      } else {
+        whatsappScrollUntilRef.current = 0;
+        window.clearTimeout(windowEndTimer);
+      }
+      window.clearTimeout(highlightTimer);
+      highlightTimer = window.setTimeout(() => setHighlightUpdates(false), 2400);
     };
     maybeHighlight();
     window.addEventListener("hashchange", maybeHighlight);
     return () => {
-      window.clearTimeout(timer);
+      cancelled = true;
+      clearScrollSchedule();
+      window.clearTimeout(highlightTimer);
+      window.clearTimeout(windowEndTimer);
       window.removeEventListener("hashchange", maybeHighlight);
     };
   }, []);
+
+  // Re-scroll while the #whatsapp window is open whenever Platforms is active
+  // or platformRows changes (other cards inject above #whatsapp-connect).
+  useEffect(() => {
+    if (activeTab !== "platforms") return;
+    if (typeof window === "undefined") return;
+    if (window.location.hash !== "#whatsapp") return;
+    if (Date.now() >= whatsappScrollUntilRef.current) return;
+
+    let cancelled = false;
+    let raf1 = 0;
+    let raf2 = 0;
+    let debounceTimer: number | undefined;
+
+    const scrollToAnchor = () => {
+      if (cancelled) return;
+      if (window.location.hash !== "#whatsapp") return;
+      if (Date.now() >= whatsappScrollUntilRef.current) return;
+      const el = document.getElementById("whatsapp-connect");
+      if (el) {
+        el.scrollIntoView({ behavior: "smooth", block: "center" });
+      }
+    };
+
+    // Debounce so a burst of platformRows updates coalesces into one scroll.
+    debounceTimer = window.setTimeout(() => {
+      raf1 = window.requestAnimationFrame(() => {
+        raf2 = window.requestAnimationFrame(scrollToAnchor);
+      });
+    }, 50);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(debounceTimer);
+      window.cancelAnimationFrame(raf1);
+      window.cancelAnimationFrame(raf2);
+    };
+  }, [activeTab, platformRows]);
 
   useEffect(() => {
     setAutoScanDisabled(
@@ -662,7 +762,6 @@ function PlatformSettingsSection({
   const imessageRow = findRow("IMESSAGE");
   const googleMessagesRow = findRow("GOOGLE_MESSAGES");
   const linkedinRow = findRow("LINKEDIN");
-  const whatsappRow = findRow("WHATSAPP");
   const imessageNeedsFullDiskAccess = isIMessageFullDiskAccessProblem(imessageRow);
 
   return (
@@ -722,14 +821,12 @@ function PlatformSettingsSection({
             }
           />
         ) : null}
-        {whatsappRow ? (
-          <div className="rounded-[8px] bg-paper-2/45 px-4 py-4">
-            <WhatsAppConnect
-              scanBusy={busy === "WHATSAPP"}
-              onScan={() => onAction("WHATSAPP", "scan")}
-            />
-          </div>
-        ) : null}
+        <div id="whatsapp-connect" className="scroll-mt-24 rounded-[8px] bg-paper-2/45 px-4 py-4">
+          <WhatsAppConnect
+            scanBusy={busy === "WHATSAPP"}
+            onScan={() => onAction("WHATSAPP", "scan")}
+          />
+        </div>
       </div>
     </section>
   );

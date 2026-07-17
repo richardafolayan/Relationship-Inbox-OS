@@ -2168,12 +2168,12 @@ export default function ThreadPage() {
     switch (pending.errorKind) {
       case "AUTH_REQUIRED":
         if (platformName === "WHATSAPP") {
-          // WhatsApp reconnects via the QR flow on the Settings page, not the
-          // open-browser control (its zod payload rejects WHATSAPP). Send the
-          // operator straight to the connect surface.
+          // WhatsApp reconnects via the QR flow on Settings > Platforms, not
+          // the open-browser control (its zod payload rejects WHATSAPP). Land
+          // on the Platforms section so the QR / connect card is in view.
           return {
             label: "Reconnect WhatsApp",
-            run: () => router.push("/settings")
+            run: () => router.push("/settings#whatsapp")
           };
         }
         if (platformName === "IMESSAGE") {
