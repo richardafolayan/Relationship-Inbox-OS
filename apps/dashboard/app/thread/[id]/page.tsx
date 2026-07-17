@@ -748,6 +748,26 @@ export default function ThreadPage() {
   // AI assist rail starts collapsed so a 1-message thread doesn't burn 25%
   // of the viewport on duplicate paraphrases. Operator opens it explicitly.
   const [aiOpen, setAiOpen] = useState(false);
+  // Below xl the AI panel is an overlay (phone full-screen / tablet slide-over).
+  // Tracked as state so rotation re-renders subordinate brief content + a11y.
+  const [aiOverlayMode, setAiOverlayMode] = useState(false);
+  const aiCloseButtonRef = useRef<HTMLButtonElement>(null);
+  const aiReturnFocusRef = useRef<HTMLElement | null>(null);
+  const aiTimelineScrollRef = useRef<number | null>(null);
+  const aiHistoryPushedRef = useRef(false);
+  const closeAiAssist = useCallback(() => {
+    setAiOpen(false);
+  }, []);
+  const openAiAssist = useCallback(() => {
+    const active = document.activeElement;
+    aiReturnFocusRef.current =
+      active instanceof HTMLElement ? active : null;
+    setAiOpen(true);
+  }, []);
+  const toggleAiAssist = useCallback(() => {
+    if (aiOpen) closeAiAssist();
+    else openAiAssist();
+  }, [aiOpen, closeAiAssist, openAiAssist]);
   // Phone-width header: the secondary actions (save draft, snooze, archive)
   // leave no room for the person's name, so below sm they fold into the
   // kebab menu instead. Tracked as state (not a render-time matchMedia
@@ -760,6 +780,74 @@ export default function ThreadPage() {
     mq.addEventListener("change", update);
     return () => mq.removeEventListener("change", update);
   }, []);
+  useEffect(() => {
+    const mq = window.matchMedia("(max-width: 1279px)");
+    const update = () => setAiOverlayMode(mq.matches);
+    update();
+    mq.addEventListener("change", update);
+    return () => mq.removeEventListener("change", update);
+  }, []);
+  // Escape closes the AI panel (compose mode menu wins first when open).
+  useEffect(() => {
+    if (!aiOpen) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      if (composeModeMenuOpen) {
+        setComposeModeMenuOpen(false);
+        return;
+      }
+      event.preventDefault();
+      closeAiAssist();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [aiOpen, closeAiAssist, composeModeMenuOpen]);
+  // Focus moves into the panel on open (overlay modes) and returns to the
+  // trigger on close so keyboard flow stays predictable.
+  useEffect(() => {
+    if (aiOpen) {
+      if (aiOverlayMode) {
+        // Defer so the close button is mounted before focus lands.
+        const id = window.requestAnimationFrame(() => {
+          aiCloseButtonRef.current?.focus();
+        });
+        return () => window.cancelAnimationFrame(id);
+      }
+      return;
+    }
+    const returnTo = aiReturnFocusRef.current;
+    aiReturnFocusRef.current = null;
+    if (returnTo && document.contains(returnTo)) {
+      returnTo.focus();
+    }
+  }, [aiOpen, aiOverlayMode]);
+  // Phone: system Back / browser back closes AI Assist before leaving the
+  // thread. pushState on open; popstate closes; button/Escape close pops
+  // the extra history entry.
+  useEffect(() => {
+    if (!aiOpen || !aiOverlayMode) return;
+    const isPhone = window.matchMedia("(max-width: 639px)").matches;
+    if (!isPhone) return;
+
+    window.history.pushState({ aiAssist: true }, "");
+    aiHistoryPushedRef.current = true;
+
+    const onPopState = () => {
+      aiHistoryPushedRef.current = false;
+      setAiOpen(false);
+    };
+    window.addEventListener("popstate", onPopState);
+    return () => {
+      window.removeEventListener("popstate", onPopState);
+      if (aiHistoryPushedRef.current) {
+        aiHistoryPushedRef.current = false;
+        const state = window.history.state as { aiAssist?: boolean } | null;
+        if (state?.aiAssist) {
+          window.history.back();
+        }
+      }
+    };
+  }, [aiOpen, aiOverlayMode]);
   // How much AI writing help to surface is driven by the operator's
   // configured aiHelpLevel (see the `profile` state below). Full sendable
   // drafts, predraft, and compose-in-voice only appear at "full_drafts".
@@ -886,6 +974,28 @@ export default function ThreadPage() {
   }, [thread?.siblingIds, threadId]);
 
   const timelineRef = useRef<HTMLDivElement>(null);
+  // Lock the thread timeline while the AI overlay is open; restore scrollTop
+  // on close so the operator lands back on the same messages.
+  useEffect(() => {
+    if (!aiOpen || !aiOverlayMode) return;
+    const timeline = timelineRef.current;
+    if (timeline) {
+      aiTimelineScrollRef.current = timeline.scrollTop;
+      timeline.style.overflow = "hidden";
+    }
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      if (timeline) {
+        timeline.style.overflow = "";
+        if (aiTimelineScrollRef.current != null) {
+          timeline.scrollTop = aiTimelineScrollRef.current;
+        }
+        aiTimelineScrollRef.current = null;
+      }
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [aiOpen, aiOverlayMode]);
   const stickToBottomRef = useRef(true);
   // #461 (pilot R-0060): controls the floating "jump to latest" button.
   // True when the operator has scrolled up away from the newest message.
@@ -3641,8 +3751,11 @@ export default function ThreadPage() {
               </div>
               <Button
                 variant={aiOpen ? "primary" : "quiet"}
-                onClick={() => setAiOpen((v) => !v)}
-                title="Toggle the AI assist sidebar"
+                onClick={toggleAiAssist}
+                title="Toggle AI Assist"
+                aria-expanded={aiOpen}
+                aria-controls="ai-assist-panel"
+                data-testid="ai-assist-toggle"
                 className="px-3 py-1.5 text-[12px]"
               >
                 <Sparkles className="h-[13px] w-[13px]" strokeWidth={1.6} />
@@ -5391,71 +5504,93 @@ export default function ThreadPage() {
         </div>
       </div>
 
-      {/* ───── Context rail ───── */}
-      {/* Below xl there is no grid column wide enough to live in, so the
-          open rail becomes a right-hand slide-over above the conversation
-          (the design's tablet/phone pattern) — same content, same AI
-          toggle. The backdrop closes it with a tap. */}
-      {aiOpen ? (
+      {/* ───── AI Assist ───── */}
+      {/* Three presentation modes (#898):
+          - phone (<sm): full-screen overlay over app content
+          - tablet (sm–xl): right-hand slide-over with dimmed backdrop
+          - desktop (xl+): docked right rail in the grid
+          Internal layout is fixed header | scrollable context | keyboard-safe
+          action area so Compose/Ask stays reachable without scrolling past
+          the brief first. */}
+      {aiOpen && aiOverlayMode ? (
         <button
           type="button"
           aria-label="Close AI assist"
-          onClick={() => setAiOpen(false)}
-          className="fixed inset-0 z-30 cursor-default bg-ink/20 xl:hidden"
+          onClick={closeAiAssist}
+          className="fixed inset-0 z-[60] cursor-default bg-ink/20 hidden sm:block xl:hidden"
         />
       ) : null}
       <aside
+        id="ai-assist-panel"
+        data-testid="ai-assist-panel"
+        role={aiOpen && aiOverlayMode ? "dialog" : undefined}
+        aria-modal={aiOpen && aiOverlayMode ? true : undefined}
+        aria-label="AI Assist"
         className={
           aiOpen
-            ? "fixed inset-y-0 right-0 z-40 w-[min(92vw,380px)] overflow-y-auto border-l border-hairline bg-paper shadow-pop xl:static xl:z-auto xl:h-full xl:min-h-0 xl:w-auto xl:border-l-0 xl:bg-paper-2/40 xl:shadow-none"
+            ? [
+                "z-[70] flex min-h-0 flex-col bg-paper",
+                // Phone: full-screen over app content (no 8% thread strip).
+                "fixed inset-0 w-full",
+                // Tablet: right slide-over.
+                "sm:inset-y-0 sm:left-auto sm:right-0 sm:w-[min(92vw,380px)] sm:border-l sm:border-hairline sm:shadow-pop",
+                // Desktop: docked rail.
+                "xl:static xl:z-auto xl:h-full xl:w-auto xl:border-l-0 xl:bg-paper-2/40 xl:shadow-none"
+              ].join(" ")
             : "hidden"
         }
       >
-        <div className="flex items-center justify-between border-b border-hairline px-5 py-3 xl:hidden">
-          <span className="font-mono text-[11px] uppercase tracking-[0.08em] text-ink-3">
-            AI assist
-          </span>
+        <div className="flex shrink-0 items-center justify-between border-b border-hairline px-5 py-3 xl:hidden">
+          <div className="flex min-w-0 items-center gap-2">
+            <span className="font-mono text-[11px] uppercase tracking-[0.08em] text-ink-3">
+              AI Assist
+            </span>
+            <span className="truncate font-mono text-[10px] uppercase tracking-[0.06em] text-ink-4">
+              {effectiveComposeMode === "write" ? "Compose" : "Ask"}
+            </span>
+          </div>
           <button
+            ref={aiCloseButtonRef}
             type="button"
-            onClick={() => setAiOpen(false)}
+            onClick={closeAiAssist}
             aria-label="Close AI assist"
+            data-testid="ai-assist-close"
             className="grid h-8 w-8 place-items-center rounded-[8px] text-ink-3 transition-colors duration-calm hover:bg-paper-2 hover:text-ink"
           >
             <X className="h-[16px] w-[16px]" strokeWidth={1.6} />
           </button>
         </div>
-        <div className="flex flex-col gap-7 px-5 py-6 sm:px-7 xl:py-10">
-          {/* Reply Brief - the single adaptive panel that drives the rail.
-              Default visible card carries only Where it stands + On you so
-              the operator can read the thread in under 10 seconds; everything
-              else (optional follow-ups, fuller context, tone steer, the
-              gated reply checklist with its existing auto-tick / dismiss
-              behaviour) sits behind one collapsed disclosure. Falls back to
-              a safe brief derived from the legacy fields when the runner
-              hasn't yet generated one for this row. */}
-          <ReplyBriefPanel
-            threadId={thread.id}
-            brief={displayBrief}
-            openLoops={thread.openLoops}
-            dismissedOpenLoops={thread.dismissedOpenLoops}
-            onDismissLoop={(loop, dismissed) => void toggleOpenLoop(loop, dismissed)}
-            aiCoverageItems={aiCoverageItems}
-            aiCoverageMode={
-              aiHelpLevel === "memory_only"
-                ? "off"
-                : aiHelpLevel === "full_drafts"
-                  ? "auto-tick"
-                  : "highlight"
-            }
-          />
 
-          {/* Things to remember - durable facts (exams, trips, life events)
-              the AI re-derives from the transcript each scan. Stays separate
-              from the Reply Brief on purpose: this is life context the
-              operator wants to carry forward, not reply-state. Read-only and
-              self-hiding when empty. */}
-          <ThingsToRemember remember={thread.remember ?? []} />
+        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-5 py-5 sm:px-7 xl:py-10">
+          <div className="flex flex-col gap-6 xl:gap-7">
+            {/* Reply Brief drives the rail. On overlay widths the thread
+                already shows the brief band, so secondary narrative is
+                subordinated (#898). Falls back to a safe brief derived from
+                legacy fields when the runner has not generated one yet. */}
+            <ReplyBriefPanel
+              threadId={thread.id}
+              brief={displayBrief}
+              openLoops={thread.openLoops}
+              dismissedOpenLoops={thread.dismissedOpenLoops}
+              onDismissLoop={(loop, dismissed) => void toggleOpenLoop(loop, dismissed)}
+              aiCoverageItems={aiCoverageItems}
+              aiCoverageMode={
+                aiHelpLevel === "memory_only"
+                  ? "off"
+                  : aiHelpLevel === "full_drafts"
+                    ? "auto-tick"
+                    : "highlight"
+              }
+              subordinateContext={aiOverlayMode}
+            />
 
+            {/* Things to remember: durable life facts, not reply-state.
+                Self-hiding when empty. */}
+            <ThingsToRemember remember={thread.remember ?? []} />
+          </div>
+        </div>
+
+        <div className="shrink-0 border-t border-hairline bg-paper px-5 pt-3 pb-[calc(24px+env(safe-area-inset-bottom))] sm:px-7 xl:border-t-0 xl:bg-transparent xl:pb-10 xl:pt-0">
           <section>
             <p className="mb-2 font-mono text-[11px] uppercase tracking-[0.08em] text-ink-3">
               {effectiveComposeMode === "write" ? "Compose" : "Ask"}
