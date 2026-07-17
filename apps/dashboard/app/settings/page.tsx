@@ -160,6 +160,7 @@ function tabFromHash(hash: string): SettingsTabId | null {
   const clean = hash.replace(/^#/, "");
   if (isSettingsTabId(clean)) return clean;
   if (clean === "app-updates") return "app";
+  if (clean === "whatsapp") return "platforms";
   if (clean === "reply-style") return "writing";
   return null;
 }
@@ -210,6 +211,15 @@ export default function SettingsPage() {
             ?.scrollIntoView({ behavior: "smooth", block: "center" });
         }, 0);
         setHighlightUpdates(true);
+      }
+      if (window.location.hash === "#whatsapp") {
+        // Platforms tab content mounts after setActiveTab; wait a tick so the
+        // WhatsApp QR / connect card exists before scrolling it into view.
+        window.setTimeout(() => {
+          document
+            .getElementById("whatsapp-connect")
+            ?.scrollIntoView({ behavior: "smooth", block: "center" });
+        }, 0);
       }
       window.clearTimeout(timer);
       timer = window.setTimeout(() => setHighlightUpdates(false), 2400);
@@ -723,7 +733,7 @@ function PlatformSettingsSection({
           />
         ) : null}
         {whatsappRow ? (
-          <div className="rounded-[8px] bg-paper-2/45 px-4 py-4">
+          <div id="whatsapp-connect" className="scroll-mt-24 rounded-[8px] bg-paper-2/45 px-4 py-4">
             <WhatsAppConnect
               scanBusy={busy === "WHATSAPP"}
               onScan={() => onAction("WHATSAPP", "scan")}
