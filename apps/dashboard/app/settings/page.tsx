@@ -30,6 +30,26 @@ import {
   requestNotificationPermission,
   subscribeNotificationPermission
 } from "@/lib/notifications";
+import {
+  classifyNotificationClient,
+  digestBackgroundPingHint,
+  digestDescription,
+  DIGEST_CADENCE_OPTIONS,
+  digestFrequencyLabel,
+  digestPreviewHint,
+  digestPreviewLabel,
+  macNotificationsGroupHead,
+  macNotificationsGroupSubhead,
+  messageNotificationsDescription,
+  messageNotificationsDeviceLine,
+  messageNotificationsPermissionCaption,
+  messageNotificationsTitle,
+  phoneNotificationsGroupHead,
+  quietHoursDescription,
+  quietHoursSwitchLabel,
+  readClientHintsFromWindow,
+  type NotificationClientKind
+} from "@/lib/notifications-settings";
 import { localDateString } from "@/lib/overdue-digest";
 import { APP_NAME } from "@/lib/branding";
 import { interpretReassessAllResult } from "@/lib/reassess-all-result";
@@ -50,6 +70,15 @@ import {
   writeScanInterval,
   type ScanIntervalId
 } from "@/lib/scan-interval";
+import {
+  DEFAULT_QUIET_HOURS_WINDOW,
+  formatQuietHoursRange,
+  isQuietHoursEnabled,
+  readQuietHoursWindow,
+  writeQuietHoursEnabled,
+  writeQuietHoursWindow,
+  type QuietHoursWindow
+} from "@/lib/quiet-hours";
 import { cn } from "@/lib/utils";
 import { classifyConsumerFailure } from "@/lib/consumer-failure";
 import { isIMessageFullDiskAccessProblem } from "@/lib/platform-setup";
@@ -64,7 +93,6 @@ import {
 } from "@/lib/ui-scale";
 
 const AUTO_SCAN_KEY = "linkedin_dashboard_autoscan_enabled";
-const QUIET_HOURS_KEY = "inbox_quiet_hours";
 const DEFAULT_SETTINGS_TAB: SettingsTabId = "setup";
 
 type SettingsTabId =
@@ -106,7 +134,7 @@ const SETTINGS_TABS: SettingsTab[] = [
   {
     id: "notifications",
     label: "Notifications",
-    description: "Quiet hours, desktop alerts, and overdue reply reminders.",
+    description: "Phone alerts, Mac quiet hours, and overdue reply reminders.",
     icon: Bell
   },
   {
@@ -173,6 +201,8 @@ export default function SettingsPage() {
   const [activeTab, setActiveTab] = useState<SettingsTabId>(DEFAULT_SETTINGS_TAB);
   const [autoScan, setAutoScan] = useState(false);
   const [quietHours, setQuietHours] = useState(false);
+  const [quietWindow, setQuietWindow] = useState<QuietHoursWindow>(DEFAULT_QUIET_HOURS_WINDOW);
+  const [notificationClient, setNotificationClient] = useState<NotificationClientKind>("mac");
   const [autoScanDisabled, setAutoScanDisabled] = useState(false);
   // Pilot R-0087 (#754): the scan cadence is a choice, not a constant.
   const [scanInterval, setScanInterval] = useState<ScanIntervalId>(DEFAULT_SCAN_INTERVAL);
@@ -232,7 +262,9 @@ export default function SettingsPage() {
     );
     setAutoScan(window.localStorage.getItem(AUTO_SCAN_KEY) === "true");
     setScanInterval(readScanInterval());
-    setQuietHours(window.localStorage.getItem(QUIET_HOURS_KEY) === "1");
+    setQuietHours(isQuietHoursEnabled());
+    setQuietWindow(readQuietHoursWindow());
+    setNotificationClient(classifyNotificationClient(readClientHintsFromWindow()));
     setUiScale(readUiScale());
     void apiGet<{ headless?: boolean }>("/runner/data/settings")
       .then((data) => {
@@ -259,7 +291,13 @@ export default function SettingsPage() {
   const toggleQuietHours = () => {
     const next = !quietHours;
     setQuietHours(next);
-    window.localStorage.setItem(QUIET_HOURS_KEY, next ? "1" : "0");
+    writeQuietHoursEnabled(next);
+    setSavedAt(Date.now());
+  };
+
+  const updateQuietWindow = (next: QuietHoursWindow) => {
+    const saved = writeQuietHoursWindow(next);
+    setQuietWindow(saved);
     setSavedAt(Date.now());
   };
 
@@ -464,32 +502,13 @@ export default function SettingsPage() {
           ) : null}
 
           {activeTab === "notifications" ? (
-            <>
-              <SettingsGroup head="Quiet hours">
-                <SettingRow
-                  name="Quiet hours"
-                  desc="After 22:00, mute the attention dot and pause auto-scan."
-                  onActivate={toggleQuietHours}
-                  trailing={
-                    <div className="flex items-center gap-[10px]">
-                      <span className="font-mono text-[11px] text-ink-3">
-                        {quietHours ? "On · 22:00-06:00" : "Off · 22:00-06:00 saved"}
-                      </span>
-                      <Toggle on={quietHours} onChange={toggleQuietHours} label="Quiet hours" />
-                    </div>
-                  }
-                />
-              </SettingsGroup>
-
-              <SettingsGroup head="Notifications">
-                <SettingRow
-                  name="Desktop notifications"
-                  desc="Show a system notification when a new message arrives. Clicking it jumps you to the thread. Quiet hours still apply, and nothing fires while this tab is in focus."
-                  trailing={<NotificationsPermissionControl />}
-                />
-                <OverdueDigestRow />
-              </SettingsGroup>
-            </>
+            <NotificationsSettingsPanel
+              client={notificationClient}
+              quietHours={quietHours}
+              quietWindow={quietWindow}
+              onToggleQuietHours={toggleQuietHours}
+              onQuietWindowChange={updateQuietWindow}
+            />
           ) : null}
 
           {activeTab === "writing" ? (
@@ -1108,16 +1127,170 @@ function SettingRow({
   );
 }
 
-// #359: desktop notification permission control.
-//
-// The previous version asked for permission on every AppShell mount,
-// before the operator had expressed any intent. Browsers (Chrome
-// especially) treat these "cold" requests as low-quality signals and
-// deny them more readily; after enough denies the origin can be
-// permanently blocked from ever asking again. This control moves the
-// ask behind an explicit operator gesture and reflects the live
-// permission state so it never re-prompts a granted/denied browser.
-function NotificationsPermissionControl() {
+// #907: Notifications settings split phone vs Mac behaviour, mobile switch
+// rows with title-aligned toggles, editable quiet hours, and a non-
+// interactive digest preview (no repeated snooze links).
+function NotificationsSettingsPanel({
+  client,
+  quietHours,
+  quietWindow,
+  onToggleQuietHours,
+  onQuietWindowChange
+}: {
+  client: NotificationClientKind;
+  quietHours: boolean;
+  quietWindow: QuietHoursWindow;
+  onToggleQuietHours: () => void;
+  onQuietWindowChange: (next: QuietHoursWindow) => void;
+}) {
+  return (
+    <div data-testid="notifications-settings">
+      <SettingsGroup head={phoneNotificationsGroupHead(client)}>
+        <MessageNotificationsRow client={client} />
+      </SettingsGroup>
+
+      <SettingsGroup head={macNotificationsGroupHead()}>
+        <p className="m-0 mb-2 px-1 text-[12.5px] leading-[1.45] text-ink-3">
+          {macNotificationsGroupSubhead()}
+        </p>
+        <MobileSwitchRow
+          name={quietHoursSwitchLabel()}
+          detail={formatQuietHoursRange(quietWindow)}
+          desc={quietHoursDescription()}
+          on={quietHours}
+          onToggle={onToggleQuietHours}
+          testId="quiet-hours-row"
+        />
+        <QuietHoursTimeEditors
+          quietWindow={quietWindow}
+          onChange={onQuietWindowChange}
+        />
+      </SettingsGroup>
+
+      <SettingsGroup head="Overdue reply digest">
+        <OverdueDigestRow client={client} />
+      </SettingsGroup>
+    </div>
+  );
+}
+
+// Switch sits beside the title with a full-row touch target (min 44px).
+function MobileSwitchRow({
+  name,
+  detail,
+  desc,
+  on,
+  onToggle,
+  disabled,
+  testId,
+  switchLabel
+}: {
+  name: string;
+  detail?: string;
+  desc?: string;
+  on: boolean;
+  onToggle: () => void;
+  disabled?: boolean;
+  testId?: string;
+  switchLabel?: string;
+}) {
+  const interactive = !disabled;
+  return (
+    <div
+      role={interactive ? "button" : undefined}
+      tabIndex={interactive ? 0 : undefined}
+      data-testid={testId}
+      onClick={interactive ? onToggle : undefined}
+      onKeyDown={
+        interactive
+          ? (event) => {
+              if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                onToggle();
+              }
+            }
+          : undefined
+      }
+      className={cn(
+        "min-h-[44px] rounded-[8px] px-1 py-[12px]",
+        interactive
+          ? "cursor-pointer transition-colors duration-calm hover:bg-paper-2/60 focus:bg-paper-2/60 focus:outline-none"
+          : "cursor-default"
+      )}
+    >
+      <div className="flex items-start justify-between gap-4">
+        <div className="min-w-0 flex-1">
+          <p className="m-0 text-[16px] font-medium text-ink">{name}</p>
+          {detail ? (
+            <p className="m-0 mt-[2px] font-mono text-[12px] text-ink-2">{detail}</p>
+          ) : null}
+          {desc ? (
+            <p
+              className="m-0 mt-[4px] max-w-[58ch] text-[13.5px] leading-[1.5] text-ink-3"
+              style={{ textWrap: "pretty" }}
+            >
+              {desc}
+            </p>
+          ) : null}
+        </div>
+        <div
+          className="flex min-h-[44px] shrink-0 items-center"
+          onClick={(event) => event.stopPropagation()}
+        >
+          <Toggle
+            on={on}
+            disabled={disabled}
+            onChange={onToggle}
+            label={switchLabel ?? name}
+          />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function QuietHoursTimeEditors({
+  quietWindow,
+  onChange
+}: {
+  quietWindow: QuietHoursWindow;
+  onChange: (next: QuietHoursWindow) => void;
+}) {
+  return (
+    <div
+      data-testid="quiet-hours-time-editors"
+      className="mt-1 grid grid-cols-2 gap-3 rounded-[10px] border border-hairline bg-paper-2/40 px-3 py-3"
+    >
+      <label className="flex min-h-[44px] flex-col gap-1">
+        <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">From</span>
+        <input
+          type="time"
+          value={quietWindow.start}
+          onChange={(event) => onChange({ ...quietWindow, start: event.target.value })}
+          className="min-h-[40px] rounded-[8px] border border-hairline bg-paper px-2 font-mono text-[14px] text-ink focus:border-hairline-strong focus:outline-none"
+          aria-label="Quiet hours start time"
+        />
+      </label>
+      <label className="flex min-h-[44px] flex-col gap-1">
+        <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">To</span>
+        <input
+          type="time"
+          value={quietWindow.end}
+          onChange={(event) => onChange({ ...quietWindow, end: event.target.value })}
+          className="min-h-[40px] rounded-[8px] border border-hairline bg-paper px-2 font-mono text-[14px] text-ink focus:border-hairline-strong focus:outline-none"
+          aria-label="Quiet hours end time"
+        />
+      </label>
+      <p className="col-span-2 m-0 text-[12px] leading-[1.45] text-ink-3">
+        Local time. Auto-scan on the Mac pauses inside this window when quiet hours is on.
+      </p>
+    </div>
+  );
+}
+
+// #359: permission ask stays behind an explicit gesture. Caption is
+// device-appropriate (#907) instead of always saying "browser".
+function MessageNotificationsRow({ client }: { client: NotificationClientKind }) {
   const [permission, setPermission] = useState<NotificationPermission | "unsupported">(
     "unsupported"
   );
@@ -1129,10 +1302,12 @@ function NotificationsPermissionControl() {
       return;
     }
     setPermission(Notification.permission);
+    return subscribeNotificationPermission(setPermission);
   }, []);
 
   const enable = async () => {
     if (busy) return;
+    if (permission !== "default") return;
     setBusy(true);
     try {
       const result = await requestNotificationPermission();
@@ -1142,53 +1317,36 @@ function NotificationsPermissionControl() {
     }
   };
 
-  if (permission === "unsupported") {
-    return (
-      <span className="font-mono text-[11px] text-ink-3">Not supported in this browser</span>
-    );
-  }
-
-  // #436 R-0058: present the same caption + pill shape as every other
-  // Notifications row instead of a bespoke "● Enabled" label. The browser
-  // permission can't be flipped off from JS once granted/denied, so those
-  // states render a read-only pill and the caption names where the real
-  // control lives. "default" is the only in-app actionable state: the OFF
-  // pill requests permission on click — an explicit gesture, so it keeps
-  // the #359 fix that avoids low-quality cold prompts.
   const on = permission === "granted";
-  const caption =
-    permission === "granted"
-      ? "On · turn off in your browser"
-      : permission === "denied"
-        ? "Blocked · re-enable in your browser"
-        : busy
-          ? "asking…"
-          : "Off";
+  const canRequest = permission === "default" && !busy;
+  const caption = messageNotificationsPermissionCaption(permission, client, busy);
 
   return (
-    <div className="flex items-center gap-[10px]">
-      <span className="font-mono text-[11px] text-ink-3">{caption}</span>
-      <Toggle
+    <div data-testid="message-notifications-row">
+      <MobileSwitchRow
+        name={messageNotificationsTitle(client)}
+        detail={messageNotificationsDeviceLine(client)}
+        desc={messageNotificationsDescription(client)}
         on={on}
-        disabled={busy || permission !== "default"}
-        onChange={() => {
-          if (permission === "default") void enable();
+        disabled={!canRequest}
+        onToggle={() => {
+          if (canRequest) void enable();
         }}
-        label="Desktop notifications"
+        switchLabel={messageNotificationsTitle(client)}
+        testId="message-notifications-switch-row"
       />
+      <p className="m-0 px-1 pb-2 font-mono text-[11px] text-ink-3" data-testid="message-notifications-caption">
+        {caption}
+      </p>
     </div>
   );
 }
 
-// #360: calm overdue-reply digest. Quiet, opt-in, low-frequency. The digest
-// lands in the notification bell whenever it is due; the desktop ping is an
-// optional extra behind the sibling permission control, so the cadence
-// selector works without it. The operator can dismiss today or snooze
-// individual people from here without disabling the feature.
-function OverdueDigestRow() {
+// #360: calm overdue-reply digest. Cadence is always available; the optional
+// OS ping is device-labelled. Settings preview is non-interactive (#907).
+function OverdueDigestRow({ client }: { client: NotificationClientKind }) {
   const [settings, setSettings] = useState<OverdueDigestSettings | null>(null);
   const [candidates, setCandidates] = useState<OverdueDigestCandidate[]>([]);
-  const [snoozed, setSnoozed] = useState<OverdueDigestPreview["snoozed"]>([]);
   const [permission, setPermission] = useState<NotificationPermission | "unsupported">(
     "unsupported"
   );
@@ -1202,14 +1360,9 @@ function OverdueDigestRow() {
     if (!preview) return;
     setSettings(preview.settings);
     setCandidates(preview.candidates);
-    setSnoozed(preview.snoozed);
   }, []);
 
   useEffect(() => {
-    // Seed from the live permission, then stay in sync: granting from the
-    // sibling NotificationsPermissionControl in the same session must enable
-    // the cadence control here without a reload (it used to read once on
-    // mount and go stale).
     setPermission(readNotificationPermission());
     const unsubscribe = subscribeNotificationPermission(setPermission);
     void refresh();
@@ -1251,177 +1404,107 @@ function OverdueDigestRow() {
     }
   };
 
-  const snoozePerson = async (personId: string, displayName: string) => {
-    if (busy) return;
-    setBusy(true);
-    try {
-      await apiPost("/runner/control/overdue-digest/snooze-person", {
-        personId,
-        displayName,
-        days: 7
-      });
-      await refresh();
-      setStatus("saved");
-    } catch {
-      setStatus("error");
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const unsnoozePerson = async (personId: string) => {
-    if (busy) return;
-    setBusy(true);
-    try {
-      await apiPost("/runner/control/overdue-digest/unsnooze-person", { personId });
-      await refresh();
-      setStatus("saved");
-    } catch {
-      setStatus("error");
-    } finally {
-      setBusy(false);
-    }
-  };
-
   const cadence = settings?.cadence ?? "off";
   const localDateToday = localDateString();
   const alreadyDismissedToday = settings?.dismissForLocalDate === localDateToday;
-  const desktopNotEnabled = permission !== "granted";
+  const notificationsNotEnabled = permission !== "granted";
 
   return (
-    <div className="grid grid-cols-1 gap-3 rounded-[8px] px-1 py-[15px] sm:grid-cols-[1fr_auto] sm:items-start sm:gap-6">
-      <div>
-        <p className="m-0 mb-[4px] text-[16px] font-medium text-ink">Overdue reply digest</p>
-        <p
-          className="m-0 max-w-[58ch] text-[13.5px] leading-[1.5] text-ink-3"
-          style={{ textWrap: "pretty" }}
-        >
-          One calm reminder for overdue replies. Choose daily or weekly.
+    <div className="rounded-[8px] px-1 py-[12px]" data-testid="overdue-digest-row">
+      <p className="m-0 mb-[4px] text-[16px] font-medium text-ink">Overdue reply digest</p>
+      <p
+        className="m-0 max-w-[58ch] text-[13.5px] leading-[1.5] text-ink-3"
+        style={{ textWrap: "pretty" }}
+      >
+        {digestDescription()}
+      </p>
+      {notificationsNotEnabled ? (
+        <p className="m-0 mt-[8px] font-mono text-[11px] text-ink-3">
+          {digestBackgroundPingHint(client)}
         </p>
-        {desktopNotEnabled ? (
-          <p className="m-0 mt-[8px] font-mono text-[11px] text-ink-3">
-            Enable desktop notifications if you also want a ping while the app is in the
-            background.
-          </p>
-        ) : null}
+      ) : null}
 
-        <div className="mt-[14px] flex flex-wrap items-center gap-[8px]">
-          <CadenceOption
-            label="Off"
-            selected={cadence === "off"}
-            disabled={busy}
-            onClick={() => void writeCadence("off")}
-          />
-          <CadenceOption
-            label="Daily"
-            selected={cadence === "daily"}
-            disabled={busy}
-            onClick={() => void writeCadence("daily")}
-          />
-          <CadenceOption
-            label="Weekly"
-            selected={cadence === "weekly"}
-            disabled={busy}
-            onClick={() => void writeCadence("weekly")}
-          />
+      <div className="mt-[14px]">
+        <p className="m-0 mb-[8px] font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">
+          {digestFrequencyLabel()}
+        </p>
+        <div
+          className="flex flex-wrap items-center gap-[8px]"
+          role="group"
+          aria-label={digestFrequencyLabel()}
+          data-testid="digest-cadence-group"
+        >
+          {DIGEST_CADENCE_OPTIONS.map((option) => (
+            <CadenceOption
+              key={option.id}
+              label={option.label}
+              selected={cadence === option.id}
+              disabled={busy}
+              onClick={() => void writeCadence(option.id)}
+            />
+          ))}
           {status === "saved" ? (
             <span className="font-mono text-[11px] text-ink-3" aria-live="polite">
               saved
             </span>
           ) : status === "error" ? (
             <span className="text-[11px] text-ink-2" aria-live="polite">
-              Couldn’t save. Try again.
+              Couldn&apos;t save. Try again.
             </span>
           ) : null}
         </div>
+      </div>
 
-        {cadence !== "off" ? (
-          <div className="mt-[16px] rounded-[10px] border border-hairline bg-paper-2/40 p-[12px]">
-            <p className="m-0 mb-[8px] font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">
-              Preview
-            </p>
-            {candidates.length === 0 ? (
-              <p className="m-0 text-[12.5px] text-ink-3">
-                Nothing waiting on you right now.
-              </p>
-            ) : (
-              <ul className="m-0 flex list-none flex-col gap-[6px] p-0">
-                {candidates.map((c) => (
-                  <li
-                    key={`${c.threadId}:${c.personId}`}
-                    className="flex items-center justify-between gap-[12px] text-[12.5px] text-ink-2"
-                  >
-                    <span className="truncate">
-                      <span
-                        className={cn(
-                          "mr-[8px] inline-block h-[6px] w-[6px] rounded-full align-middle",
-                          c.riskLevel === "RED" ? "bg-risk-overdue" : "bg-risk-waiting"
-                        )}
-                        aria-hidden
-                      />
-                      {c.personName}
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => void snoozePerson(c.personId, c.personName)}
-                      disabled={busy}
-                      className="font-mono text-[11px] text-ink-3 underline decoration-hairline-strong underline-offset-2 transition-colors duration-calm hover:text-ink"
-                    >
-                      Snooze 7 days
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            )}
-            {candidates.length > 0 ? (
-              <div className="mt-[12px] flex flex-wrap items-center gap-[10px]">
-                <button
-                  type="button"
-                  onClick={() => void dismissToday()}
-                  disabled={busy || alreadyDismissedToday}
-                  className={cn(
-                    "inline-flex items-center rounded-pill border border-hairline px-[12px] py-[6px] font-mono text-[11px] text-ink-2 transition-colors duration-calm",
-                    "hover:border-hairline-strong hover:bg-paper-2 hover:text-ink",
-                    (busy || alreadyDismissedToday) && "cursor-not-allowed opacity-60"
-                  )}
-                >
-                  {alreadyDismissedToday ? "Dismissed for today" : "Dismiss for today"}
-                </button>
-              </div>
-            ) : null}
-          </div>
-        ) : null}
-
-        {snoozed.length > 0 ? (
-          <div className="mt-[14px]">
-            <p className="m-0 mb-[6px] font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">
-              Snoozed people
-            </p>
-            <p className="m-0 mb-[8px] text-[12px] text-ink-3">
-              Snoozed people stay out of the digest until the snooze ends.
-            </p>
-            <ul className="m-0 flex list-none flex-col gap-[6px] p-0">
-              {snoozed.map((s) => (
+      {cadence !== "off" ? (
+        <div
+          className="mt-[16px] rounded-[10px] border border-hairline bg-paper-2/40 p-[12px]"
+          data-testid="digest-preview"
+        >
+          <p className="m-0 mb-[4px] font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">
+            {digestPreviewLabel()}
+          </p>
+          <p className="m-0 mb-[10px] text-[12px] leading-[1.45] text-ink-3">
+            {digestPreviewHint()}
+          </p>
+          {candidates.length === 0 ? (
+            <p className="m-0 text-[12.5px] text-ink-3">Nothing waiting on you right now.</p>
+          ) : (
+            <ul className="m-0 flex list-none flex-col gap-[8px] p-0" aria-label="Digest preview">
+              {candidates.map((c) => (
                 <li
-                  key={s.personId}
-                  className="flex items-center justify-between gap-[12px] text-[12.5px] text-ink-2"
+                  key={`${c.threadId}:${c.personId}`}
+                  className="flex min-h-[36px] items-center gap-[10px] text-[13px] text-ink-2"
                 >
-                  <span className="truncate">{s.displayName}</span>
-                  <button
-                    type="button"
-                    onClick={() => void unsnoozePerson(s.personId)}
-                    disabled={busy}
-                    className="font-mono text-[11px] text-ink-3 underline decoration-hairline-strong underline-offset-2 transition-colors duration-calm hover:text-ink"
-                  >
-                    Unsnooze
-                  </button>
+                  <span
+                    className={cn(
+                      "inline-block h-[6px] w-[6px] shrink-0 rounded-full",
+                      c.riskLevel === "RED" ? "bg-risk-overdue" : "bg-risk-waiting"
+                    )}
+                    aria-hidden
+                  />
+                  <span className="truncate">{c.personName}</span>
                 </li>
               ))}
             </ul>
-          </div>
-        ) : null}
-      </div>
-      <div />
+          )}
+          {candidates.length > 0 ? (
+            <div className="mt-[12px]">
+              <button
+                type="button"
+                onClick={() => void dismissToday()}
+                disabled={busy || alreadyDismissedToday}
+                className={cn(
+                  "inline-flex min-h-[44px] items-center rounded-pill border border-hairline px-[14px] py-[8px] font-mono text-[12px] text-ink-2 transition-colors duration-calm",
+                  "hover:border-hairline-strong hover:bg-paper-2 hover:text-ink",
+                  (busy || alreadyDismissedToday) && "cursor-not-allowed opacity-60"
+                )}
+              >
+                {alreadyDismissedToday ? "Dismissed for today" : "Dismiss for today"}
+              </button>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -1436,12 +1519,6 @@ function CadenceOption({
   label: string;
   selected: boolean;
   disabled?: boolean;
-  /**
-   * Surfaced beside the label when disabled, so the operator can see
-   * WHY the button does nothing (pilot R-0034 — "the toggle is just
-   * broken" was likely the cadence buttons being silently disabled
-   * pending notifications permission). Tooltip alone wasn't enough.
-   */
   disabledReason?: string;
   onClick: () => void;
 }) {
@@ -1453,7 +1530,7 @@ function CadenceOption({
       aria-pressed={selected}
       title={disabled && disabledReason ? disabledReason : undefined}
       className={cn(
-        "inline-flex items-center rounded-pill border px-[14px] py-[6px] font-mono text-[11px] transition-colors duration-calm",
+        "inline-flex min-h-[44px] items-center rounded-pill border px-[16px] py-[8px] font-mono text-[12px] transition-colors duration-calm",
         selected
           ? "border-ink bg-ink text-paper"
           : "border-hairline text-ink-2 hover:border-hairline-strong hover:bg-paper-2 hover:text-ink",
