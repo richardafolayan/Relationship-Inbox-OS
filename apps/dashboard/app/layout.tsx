@@ -12,8 +12,8 @@ export const metadata: Metadata = {
 };
 
 // viewportFit: "cover" lets the phone layout extend under the iOS home
-// indicator; the mobile dock + composer pad themselves back out with
-// env(safe-area-inset-bottom), which is zero everywhere else.
+// indicator. The in-flow MobileDock (and the thread composer) own
+// env(safe-area-inset-bottom); list pages no longer pad for a fixed dock.
 export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,

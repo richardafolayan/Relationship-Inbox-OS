@@ -762,7 +762,7 @@ export function AppShell({ children }: { children: ReactNode }) {
         onToggleCollapsed={() => setSidebarCollapsed((prev) => !prev)}
         operatorDisplayName={operatorDisplayName}
       />
-      <div className="flex h-app-screen min-h-0 flex-col">
+      <div className="flex h-app-screen min-h-0 flex-col overflow-hidden">
         <FullDemoBanner />
         <TopStatus />
         <FullDiskAccessBanner />
@@ -779,8 +779,11 @@ export function AppShell({ children }: { children: ReactNode }) {
           </div>
         ) : null}
         <main className="min-h-0 flex-1 overflow-y-auto">{children}</main>
+        {/* Dock is a real shell row on phone so pages do not need large
+            bottom padding to clear a fixed overlay. Hidden on md+ where
+            the sidebar owns navigation; returns null inside /thread. */}
+        <MobileDock attentionCount={sidebarAttention} onOpenSearch={() => setPaletteOpen(true)} />
       </div>
-      <MobileDock attentionCount={sidebarAttention} onOpenSearch={() => setPaletteOpen(true)} />
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
       <ToastHost />
       <PilotFeedbackModal />

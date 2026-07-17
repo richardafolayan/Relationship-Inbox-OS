@@ -18,12 +18,12 @@ const tabs = [
   { href: "/settings", label: "Settings", icon: SettingsIcon }
 ] as const;
 
-// Phone-width replacement for the sidebar: a fixed bottom icon dock
-// (the sidebar itself is hidden below md). Hidden inside a thread so
-// the conversation + composer get the full height — the header's back
-// button (and Esc) return to the lists. Translucent + blurred like the
-// thread header; padded by env(safe-area-inset-bottom) so the icons
-// clear the iOS home indicator.
+// Phone-width replacement for the sidebar: an in-flow bottom icon dock
+// rendered as a shell layout row (the sidebar itself is hidden below
+// md). Not position:fixed so list pages can fill the remaining height
+// without guessing bottom padding. Hidden inside a thread so the
+// conversation + composer get the full height. The dock is the sole
+// owner of env(safe-area-inset-bottom) for primary navigation.
 export function MobileDock({ attentionCount, onOpenSearch }: MobileDockProps) {
   const pathname = usePathname();
   if (pathname.startsWith("/thread/")) return null;
@@ -31,7 +31,8 @@ export function MobileDock({ attentionCount, onOpenSearch }: MobileDockProps) {
   return (
     <nav
       aria-label="Primary"
-      className="fixed inset-x-0 bottom-0 z-30 flex items-stretch justify-around border-t border-hairline bg-[color-mix(in_oklch,var(--paper)_92%,transparent)] px-2 pb-[env(safe-area-inset-bottom)] backdrop-blur-md backdrop-saturate-150 md:hidden"
+      data-testid="mobile-dock"
+      className="relative z-30 flex shrink-0 items-stretch justify-around border-t border-hairline bg-[color-mix(in_oklch,var(--paper)_92%,transparent)] px-2 pb-[env(safe-area-inset-bottom)] backdrop-blur-md backdrop-saturate-150 md:hidden"
     >
       {tabs.slice(0, 2).map((tab) => (
         <DockTab
