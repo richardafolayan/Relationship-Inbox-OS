@@ -36,6 +36,12 @@ import { NotificationCta } from "@/components/common/notification-cta";
 import { PilotTourInviteCard } from "@/components/common/PilotTourInviteCard";
 import { PILOT_WELCOME_DISMISSED_KEY } from "@/lib/pilot";
 import { isTourSeen, markTourSeen, startPilotTour } from "@/lib/pilot-tour";
+import {
+  GUIDED_TOUR_SURFACE_EVENT,
+  isGuidedTourSurfaceActive,
+  resolveFrozenListRows,
+  type GuidedTourSurfaceDetail
+} from "@/lib/guided-tour";
 
 // "Today" - the home. Hero card (most-overdue first) with keyboard hints
 // on each action, a "queue peek" of the next few people below it, and a
@@ -335,10 +341,34 @@ export default function TodayPage() {
   // Today shows only the demo-seeded threads so the walkthrough resolves its
   // targets instead of pointing at the operator's real hero. Outside a sandbox
   // flow this is a no-op and the real inbox shows as normal.
-  const allRows = useMemo(
+  const scopedRows = useMemo(
     () => scopeRowsToSandbox(data?.rows ?? [], sandboxActive),
     [data, sandboxActive]
   );
+  // Freeze list order/identity for the active walkthrough step so live
+  // refetches cannot move or replace the spotlighted target mid-step.
+  const [tourSurfaceActive, setTourSurfaceActive] = useState(false);
+  const [frozenRows, setFrozenRows] = useState<typeof scopedRows | null>(null);
+  useEffect(() => {
+    setTourSurfaceActive(isGuidedTourSurfaceActive());
+    const onSurface = (event: Event) => {
+      const detail = (event as CustomEvent<GuidedTourSurfaceDetail>).detail;
+      setTourSurfaceActive(detail?.active ?? isGuidedTourSurfaceActive());
+    };
+    window.addEventListener(GUIDED_TOUR_SURFACE_EVENT, onSurface);
+    return () => window.removeEventListener(GUIDED_TOUR_SURFACE_EVENT, onSurface);
+  }, []);
+  useEffect(() => {
+    const resolved = resolveFrozenListRows({
+      tourActive: tourSurfaceActive,
+      nextRows: scopedRows,
+      frozenRows
+    });
+    if (resolved.nextFrozen !== frozenRows) {
+      setFrozenRows(resolved.nextFrozen);
+    }
+  }, [scopedRows, tourSurfaceActive, frozenRows]);
+  const allRows = tourSurfaceActive && frozenRows && frozenRows.length > 0 ? frozenRows : scopedRows;
   // Today is the "tonight's work" view. Two filters narrow the runner's
   // raw needs-reply set into things that genuinely need the operator
   // tonight (issue #287):

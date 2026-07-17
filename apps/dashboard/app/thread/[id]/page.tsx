@@ -74,6 +74,12 @@ import { initials, isDegradedAndInUse, PLATFORM_LABEL, toDisplayRisk } from "@/l
 import { PersonAvatar } from "@/components/common/person-avatar";
 import { Button } from "@/components/ui/button";
 import { ActionButton } from "@/components/ui/action-button";
+import {
+  GUIDED_TOUR_SURFACE_EVENT,
+  isGuidedTourSurfaceActive,
+  planTourOverlayConflicts,
+  type GuidedTourSurfaceDetail
+} from "@/lib/guided-tour";
 // Drawers are lazy-loaded: they're heavy (ProfileDrawer ~390 LOC + its own
 // data fetch) and only ever shown on demand, so they stay out of the most-
 // opened page's initial JS chunk. An "opened-once" latch below keeps them
@@ -766,9 +772,32 @@ export default function ThreadPage() {
     setAiOpen(true);
   }, []);
   const toggleAiAssist = useCallback(() => {
+    if (isGuidedTourSurfaceActive()) {
+      closeAiAssist();
+      return;
+    }
     if (aiOpen) closeAiAssist();
     else openAiAssist();
   }, [aiOpen, closeAiAssist, openAiAssist]);
+  // Walkthrough owns the primary overlay surface: close AI Assist when the
+  // tour starts so the two never stack, and refuse re-open while active.
+  const aiOpenRef = useRef(false);
+  aiOpenRef.current = aiOpen;
+  useEffect(() => {
+    if (isGuidedTourSurfaceActive() && aiOpenRef.current) setAiOpen(false);
+    const onSurface = (event: Event) => {
+      const detail = (event as CustomEvent<GuidedTourSurfaceDetail>).detail;
+      const tourActive = detail?.active ?? isGuidedTourSurfaceActive();
+      const plan = planTourOverlayConflicts({
+        tourActive,
+        aiAssistOpen: aiOpenRef.current,
+        paletteOpen: false
+      });
+      if (plan.closeAiAssist) setAiOpen(false);
+    };
+    window.addEventListener(GUIDED_TOUR_SURFACE_EVENT, onSurface);
+    return () => window.removeEventListener(GUIDED_TOUR_SURFACE_EVENT, onSurface);
+  }, []);
   // Phone-width header: the secondary actions (save draft, snooze, archive)
   // leave no room for the person's name, so below sm they fold into the
   // overflow menu / action sheet instead. Tracked as state (not a
@@ -1017,6 +1046,7 @@ export default function ThreadPage() {
     const hasBriefContent = Boolean(
       brief && (brief.where_it_stands?.trim() || brief.on_you?.trim())
     );
+    if (isGuidedTourSurfaceActive()) return;
     if (
       hasBriefContent ||
       thread.openLoops.length > 0 ||

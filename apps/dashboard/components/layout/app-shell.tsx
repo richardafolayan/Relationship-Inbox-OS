@@ -94,6 +94,13 @@ import {
   logConsumerFailure,
   type ConsumerFailure
 } from "@/lib/consumer-failure";
+import {
+  GUIDED_TOUR_SURFACE_EVENT,
+  isGuidedTourSurfaceActive,
+  planTourOverlayConflicts,
+  shouldQueueLiveBanner,
+  type GuidedTourSurfaceDetail
+} from "@/lib/guided-tour";
 
 const linkedInAutoScanStorageKey = "linkedin_dashboard_autoscan_enabled";
 // Auto-scan cadence is randomised per firing rather than a hard loop: a
@@ -179,6 +186,7 @@ export function AppShell({ children }: { children: ReactNode }) {
     open: paletteOpen,
     onRequestClose: closePalette
   });
+  const [tourSurfaceActive, setTourSurfaceActive] = useState(false);
   const [autoScanEnabled, setAutoScanEnabled] = useState(false);
   const [attentionCount, setAttentionCount] = useState(0);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -204,6 +212,34 @@ export function AppShell({ children }: { children: ReactNode }) {
       }),
     []
   );
+  // Track the guided walkthrough surface so Search cannot stack on top of
+  // it and live new-message banners stay queued until the tour ends.
+  const paletteOpenRef = useRef(paletteOpen);
+  paletteOpenRef.current = paletteOpen;
+  useEffect(() => {
+    setTourSurfaceActive(isGuidedTourSurfaceActive());
+    const onSurface = (event: Event) => {
+      const detail = (event as CustomEvent<GuidedTourSurfaceDetail>).detail;
+      const active = detail?.active ?? isGuidedTourSurfaceActive();
+      setTourSurfaceActive(active);
+      if (active) {
+        const plan = planTourOverlayConflicts({
+          tourActive: true,
+          aiAssistOpen: false,
+          paletteOpen: paletteOpenRef.current
+        });
+        if (plan.closePalette) setPaletteOpen(false);
+      }
+    };
+    window.addEventListener(GUIDED_TOUR_SURFACE_EVENT, onSurface);
+    return () => window.removeEventListener(GUIDED_TOUR_SURFACE_EVENT, onSurface);
+  }, []);
+
+  const openSearch = useCallback(() => {
+    if (tourSurfaceActive || isGuidedTourSurfaceActive()) return;
+    setPaletteOpen(true);
+  }, [tourSurfaceActive]);
+
   // Diff the latest inbox poll against the previous one and surface any
   // thread that gained a new inbound message. Gated so it stays a signal,
   // not noise: silent on the first poll (baseline only) and rolled up when
@@ -212,6 +248,8 @@ export function AppShell({ children }: { children: ReactNode }) {
   //   - tab hidden: a desktop notification (suppressed during quiet hours),
   //   - tab focused: a quiet, clickable in-app toast, so a new message is
   //     visible without having to open the thread to discover it.
+  // While a walkthrough is active, still record into the notification
+  // center but skip visible banners so the coach sheet stays deterministic.
   const maybeNotify = useCallback(
     (rows: InboxRow[]) => {
       // #758 (R-0091): threads the operator has since replied to (from the
@@ -231,6 +269,9 @@ export function AppShell({ children }: { children: ReactNode }) {
       // silence): the bell must answer "what came in while I was away" even
       // when the alert itself was missed or suppressed.
       recordNewMessageNotifications(fresh);
+      if (shouldQueueLiveBanner(isGuidedTourSurfaceActive())) {
+        return;
+      }
       const tabHidden =
         typeof document !== "undefined" && document.visibilityState === "hidden";
       const plan = planNewMessageNotice({
@@ -732,6 +773,7 @@ export function AppShell({ children }: { children: ReactNode }) {
     const onKeydown = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
         event.preventDefault();
+        if (isGuidedTourSurfaceActive()) return;
         const phoneSearch = typeof window !== "undefined" && window.matchMedia("(max-width: 767px)").matches;
         if (phoneSearch) {
           setPaletteOpen(false);
@@ -841,7 +883,7 @@ export function AppShell({ children }: { children: ReactNode }) {
       <Sidebar
         health={health}
         attentionCount={sidebarAttention}
-        onOpenSearch={() => setPaletteOpen(true)}
+        onOpenSearch={openSearch}
         collapsed={sidebarCollapsed}
         onToggleCollapsed={() => setSidebarCollapsed((prev) => !prev)}
         operatorDisplayName={operatorDisplayName}
@@ -890,7 +932,7 @@ export function AppShell({ children }: { children: ReactNode }) {
             the sidebar owns navigation; returns null inside /thread. */}
         <MobileDock attentionCount={sidebarAttention} />
       </div>
-      <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
+      <CommandPalette open={paletteOpen && !tourSurfaceActive} onClose={() => setPaletteOpen(false)} />
       <ToastHost />
       <PilotFeedbackModal />
       <PilotTour />
