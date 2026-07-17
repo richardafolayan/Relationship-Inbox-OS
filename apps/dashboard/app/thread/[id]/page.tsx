@@ -38,6 +38,7 @@ import {
   X
 } from "lucide-react";
 import { Menu } from "@/components/ui/menu";
+import { ActionSheet, type ActionSheetGroup } from "@/components/ui/action-sheet";
 import { apiGet, apiPost, apiPostForm, peekCache, runAction } from "@/lib/api";
 import { BrandLoader } from "@/components/common/brand-loader";
 import { APP_NAME } from "@/lib/branding";
@@ -769,12 +770,21 @@ export default function ThreadPage() {
   }, [aiOpen, closeAiAssist, openAiAssist]);
   // Phone-width header: the secondary actions (save draft, snooze, archive)
   // leave no room for the person's name, so below sm they fold into the
-  // kebab menu instead. Tracked as state (not a render-time matchMedia
-  // read) so rotation / window resizes re-render the menu items.
+  // overflow menu / action sheet instead. Tracked as state (not a
+  // render-time matchMedia read) so rotation / window resizes re-render.
   const [compactActions, setCompactActions] = useState(false);
+  // Issue #901. Phone uses a bottom action sheet; desktop keeps the
+  // existing popover Menu. Controlled open state + trigger ref so we can
+  // restore focus and lock thread scroll while the sheet is up.
+  const [overflowOpen, setOverflowOpen] = useState(false);
+  const overflowTriggerRef = useRef<HTMLButtonElement>(null);
   useEffect(() => {
     const mq = window.matchMedia("(max-width: 639px)");
-    const update = () => setCompactActions(mq.matches);
+    const update = () => {
+      const phone = mq.matches;
+      setCompactActions(phone);
+      if (!phone) setOverflowOpen(false);
+    };
     update();
     mq.addEventListener("change", update);
     return () => mq.removeEventListener("change", update);
@@ -3430,6 +3440,214 @@ export default function ThreadPage() {
 
   const platformLabel = PLATFORM_LABEL[thread.platform];
 
+  // Overflow actions shared by the phone action sheet (#901) and the desktop
+  // popover Menu. Grouping only applies on phone; desktop stays a flat list.
+  const saveDraftAction = {
+    label: "Save draft",
+    onSelect: () =>
+      runActionWithFeedback(
+        apiPost(`/runner/control/thread/${thread.id}/draft`, { text: composer }),
+        {
+          pending: "Saving draft…",
+          success: "Draft saved",
+          setError,
+          onDone: () => setHasSavedDraft(composer.trim().length > 0)
+        }
+      )
+  };
+  const deleteDraftAction = {
+    label: "Delete draft",
+    danger: true as const,
+    onSelect: () =>
+      runActionWithFeedback(
+        apiPost(`/runner/control/thread/${thread.id}/delete-draft`, {}),
+        {
+          pending: "Deleting draft…",
+          success: "Draft deleted",
+          setError,
+          onDone: () => {
+            predraftDismissedRef.current.add(thread.id);
+            setComposer("");
+            setComposerSource("empty");
+            setHasSavedDraft(false);
+          }
+        }
+      )
+  };
+  const snoozeOverflowAction =
+    thread.snoozedUntil && Date.parse(thread.snoozedUntil) > Date.now()
+      ? {
+          label: "Wake up",
+          onSelect: () =>
+            runAction(
+              apiPost(`/runner/control/thread/${thread.id}/unsnooze`, {}),
+              setError,
+              refresh
+            )
+        }
+      : {
+          label: "Snooze…",
+          onSelect: () => {
+            if (!snoozeSuggestions) {
+              setSnoozeSuggestions({ loading: true, items: [] });
+              void apiGet<{
+                suggestions: Array<{ label: string; hours: number; reason: string }>;
+              }>(`/runner/control/thread/${thread.id}/suggest-snooze`)
+                .then((r) =>
+                  setSnoozeSuggestions({ loading: false, items: r.suggestions ?? [] })
+                )
+                .catch(() => setSnoozeSuggestions({ loading: false, items: [] }));
+            }
+            setSnoozeMenuOpen(true);
+          }
+        };
+  const archiveOverflowAction = {
+    label: thread.archivedAt
+      ? unarchiving
+        ? "Unarchiving…"
+        : "Unarchive"
+      : archiving
+        ? "Archiving…"
+        : "Archive",
+    danger: !thread.archivedAt,
+    onSelect: () => {
+      // Soft confirm on Archive only: unarchive is a recovery path.
+      if (!thread.archivedAt) {
+        const ok = window.confirm(
+          "Archive this conversation? You can find it later under Archived."
+        );
+        if (!ok) return;
+      }
+      if (thread.archivedAt) unarchiveThread();
+      else archiveThread();
+    }
+  };
+  const reassessOverflowAction = {
+    label: reassessing ? "Reassessing…" : "Reassess",
+    disabled: reassessing,
+    onSelect: () => {
+      if (reassessing) return;
+      void reassessThread();
+    }
+  };
+  const remindOverflowAction = {
+    // Issue #392 / R-0032. "Remind me to follow up in 3 days"
+    // → AI parses → thread snoozes until then with the
+    // reminder text saved on Thread.reminderText. When the
+    // snooze expires the thread returns to inbox with a
+    // "Reminder: <text>" banner. window.prompt for the
+    // input is intentionally rough — see #392 for the
+    // upcoming dedicated compose-mode polish.
+    label: "Remind me…",
+    onSelect: () => {
+      if (!thread) return;
+      const intent = window.prompt(
+        "Remind me to…\n\nExample: \"follow up with him next Tuesday\" or \"ask about the offer in 3 days\"."
+      );
+      if (!intent || !intent.trim()) return;
+      apiPost<{
+        ok: boolean;
+        remindAt?: string;
+        reminderText?: string;
+        needsClarification?: boolean;
+        reason?: string;
+      }>(`/runner/control/thread/${thread.id}/remind`, { intent: intent.trim() })
+        .then(async (res) => {
+          if (res.ok && res.remindAt && res.reminderText) {
+            const whenLabel = new Date(res.remindAt).toLocaleString(undefined, {
+              weekday: "short",
+              month: "short",
+              day: "numeric",
+              hour: "numeric",
+              minute: "2-digit"
+            });
+            showToast({
+              kind: "success",
+              title: `Reminder set for ${whenLabel}`,
+              description: res.reminderText
+            });
+            await refresh();
+          } else {
+            showToast({
+              kind: "error",
+              title: "Couldn't set the reminder",
+              description:
+                res.reason ??
+                "Try rewriting with a clearer time, like 'in 3 days' or 'next Tuesday'.",
+              durationMs: 9000
+            });
+          }
+        })
+        .catch((err) => {
+          showToast({
+            kind: "error",
+            title: "Reminder failed",
+            description: err instanceof Error ? err.message : String(err),
+            durationMs: 9000
+          });
+        });
+    }
+  };
+  const openInPlatformAction = {
+    label: `Open in ${platformLabel}`,
+    onSelect: () =>
+      runAction(apiPost(`/runner/control/thread/${thread.id}/open`, {}), setError)
+  };
+  const rescanOverflowAction = {
+    // Progress lives in the TopStatus ticker ("Checking
+    // <name>'s messages"), not the thread header — the
+    // menu label only flips while running so a re-click
+    // reads as already in flight.
+    label: rescanStage ? "Checking for new messages…" : "Check for new messages",
+    disabled: Boolean(rescanStage),
+    onSelect: () => {
+      if (rescanStage) return;
+      runAction(
+        apiPost(`/runner/control/thread/${thread.id}/rescan`, {}),
+        setError,
+        refresh
+      );
+    }
+  };
+  const receiptsOverflowAction = {
+    label: "Receipts",
+    onSelect: () => setReceiptsOpen(true)
+  };
+
+  // Phone sheet groups (#901): Primary / Conversation tools / External.
+  const overflowSheetGroups: ActionSheetGroup[] = [
+    {
+      id: "primary",
+      label: "Primary",
+      items: [
+        saveDraftAction,
+        ...(hasSavedDraft ? [deleteDraftAction] : []),
+        snoozeOverflowAction,
+        archiveOverflowAction
+      ]
+    },
+    {
+      id: "conversation",
+      label: "Conversation tools",
+      items: [remindOverflowAction, reassessOverflowAction, rescanOverflowAction]
+    },
+    {
+      id: "external",
+      label: "External",
+      items: [openInPlatformAction, receiptsOverflowAction]
+    }
+  ];
+
+  // Desktop / tablet popover stays a flat list of secondary actions.
+  // Primary phone-only actions live exclusively in the action sheet groups.
+  const overflowMenuItems = [
+    reassessOverflowAction,
+    remindOverflowAction,
+    openInPlatformAction,
+    rescanOverflowAction,
+    receiptsOverflowAction
+  ];
+
   // Reply Brief, computed once and shared between the always-visible brief
   // band (pinned under the header, the default-visible reply-readiness
   // summary) and the full Reply Brief in the AI rail.
@@ -3859,186 +4077,47 @@ export default function ThreadPage() {
                 <Sparkles className="h-[13px] w-[13px]" strokeWidth={1.6} />
                 AI
               </Button>
-              <Menu
-                align="end"
-                trigger={
+              {compactActions ? (
+                <>
                   <Button
+                    ref={overflowTriggerRef}
                     variant="ghost"
                     aria-label="More actions"
                     title="More actions"
+                    aria-expanded={overflowOpen}
+                    aria-haspopup="dialog"
+                    data-testid="thread-overflow-trigger"
+                    onClick={() => setOverflowOpen(true)}
                     className="px-2 py-1.5 text-[12px]"
                   >
                     <MoreHorizontal className="h-[14px] w-[14px]" strokeWidth={1.6} />
                   </Button>
-                }
-                items={[
-                  // Phone-width header: the secondary actions live here so
-                  // the person's name keeps its space. Menu-launched actions
-                  // surface progress via pending/success toasts because the
-                  // menu closes on select (no inline button state to show).
-                  ...(compactActions
-                    ? [
-                        {
-                          label: "Save draft",
-                          onSelect: () =>
-                            runActionWithFeedback(
-                              apiPost(`/runner/control/thread/${thread.id}/draft`, { text: composer }),
-                              {
-                                pending: "Saving draft…",
-                                success: "Draft saved",
-                                setError,
-                                onDone: () => setHasSavedDraft(composer.trim().length > 0)
-                              }
-                            )
-                        },
-                        ...(hasSavedDraft
-                          ? [
-                              {
-                                label: "Delete draft",
-                                onSelect: () =>
-                                  runActionWithFeedback(
-                                    apiPost(`/runner/control/thread/${thread.id}/delete-draft`, {}),
-                                    {
-                                      pending: "Deleting draft…",
-                                      success: "Draft deleted",
-                                      setError,
-                                      onDone: () => {
-                                        predraftDismissedRef.current.add(thread.id);
-                                        setComposer("");
-                                        setComposerSource("empty");
-                                        setHasSavedDraft(false);
-                                      }
-                                    }
-                                  )
-                              }
-                            ]
-                          : []),
-                        thread.snoozedUntil && Date.parse(thread.snoozedUntil) > Date.now()
-                          ? {
-                              label: "Wake up",
-                              onSelect: () =>
-                                runAction(
-                                  apiPost(`/runner/control/thread/${thread.id}/unsnooze`, {}),
-                                  setError,
-                                  refresh
-                                )
-                            }
-                          : {
-                              label: "Snooze…",
-                              onSelect: () => {
-                                if (!snoozeSuggestions) {
-                                  setSnoozeSuggestions({ loading: true, items: [] });
-                                  void apiGet<{ suggestions: Array<{ label: string; hours: number; reason: string }> }>(
-                                    `/runner/control/thread/${thread.id}/suggest-snooze`
-                                  )
-                                    .then((r) =>
-                                      setSnoozeSuggestions({ loading: false, items: r.suggestions ?? [] })
-                                    )
-                                    .catch(() => setSnoozeSuggestions({ loading: false, items: [] }));
-                                }
-                                setSnoozeMenuOpen(true);
-                              }
-                            },
-                        {
-                          label: thread.archivedAt
-                            ? unarchiving
-                              ? "Unarchiving…"
-                              : "Unarchive"
-                            : archiving
-                              ? "Archiving…"
-                              : "Archive",
-                          onSelect: () => (thread.archivedAt ? unarchiveThread() : archiveThread())
-                        }
-                      ]
-                    : []),
-                  {
-                    label: reassessing ? "Reassessing…" : "Reassess",
-                    onSelect: () => {
-                      if (reassessing) return;
-                      void reassessThread();
-                    }
-                  },
-                  {
-                    // Issue #392 / R-0032. "Remind me to follow up in 3 days"
-                    // → AI parses → thread snoozes until then with the
-                    // reminder text saved on Thread.reminderText. When the
-                    // snooze expires the thread returns to inbox with a
-                    // "Reminder: <text>" banner. window.prompt for the
-                    // input is intentionally rough — see #392 for the
-                    // upcoming dedicated compose-mode polish.
-                    label: "Remind me…",
-                    onSelect: () => {
-                      if (!thread) return;
-                      const intent = window.prompt(
-                        "Remind me to…\n\nExample: \"follow up with him next Tuesday\" or \"ask about the offer in 3 days\"."
-                      );
-                      if (!intent || !intent.trim()) return;
-                      apiPost<{
-                        ok: boolean;
-                        remindAt?: string;
-                        reminderText?: string;
-                        needsClarification?: boolean;
-                        reason?: string;
-                      }>(`/runner/control/thread/${thread.id}/remind`, { intent: intent.trim() })
-                        .then(async (res) => {
-                          if (res.ok && res.remindAt && res.reminderText) {
-                            const whenLabel = new Date(res.remindAt).toLocaleString(undefined, {
-                              weekday: "short",
-                              month: "short",
-                              day: "numeric",
-                              hour: "numeric",
-                              minute: "2-digit"
-                            });
-                            showToast({
-                              kind: "success",
-                              title: `Reminder set for ${whenLabel}`,
-                              description: res.reminderText
-                            });
-                            await refresh();
-                          } else {
-                            showToast({
-                              kind: "error",
-                              title: "Couldn't set the reminder",
-                              description:
-                                res.reason ??
-                                "Try rewriting with a clearer time, like 'in 3 days' or 'next Tuesday'.",
-                              durationMs: 9000
-                            });
-                          }
-                        })
-                        .catch((err) => {
-                          showToast({
-                            kind: "error",
-                            title: "Reminder failed",
-                            description: err instanceof Error ? err.message : String(err),
-                            durationMs: 9000
-                          });
-                        });
-                    }
-                  },
-                  {
-                    label: `Open in ${platformLabel}`,
-                    onSelect: () =>
-                      runAction(apiPost(`/runner/control/thread/${thread.id}/open`, {}), setError)
-                  },
-                  {
-                    // Progress lives in the TopStatus ticker ("Checking
-                    // <name>'s messages"), not the thread header — the
-                    // menu label only flips while running so a re-click
-                    // reads as already in flight.
-                    label: rescanStage ? "Checking for new messages…" : "Check for new messages",
-                    onSelect: () => {
-                      if (rescanStage) return;
-                      runAction(
-                        apiPost(`/runner/control/thread/${thread.id}/rescan`, {}),
-                        setError,
-                        refresh
-                      );
-                    }
-                  },
-                  { label: "Receipts", onSelect: () => setReceiptsOpen(true) }
-                ]}
-              />
+                  <ActionSheet
+                    open={overflowOpen}
+                    onClose={() => setOverflowOpen(false)}
+                    title="Thread actions"
+                    groups={overflowSheetGroups}
+                    returnFocusRef={overflowTriggerRef}
+                    scrollLockTargetRef={timelineRef}
+                    historyKey="threadOverflow"
+                  />
+                </>
+              ) : (
+                <Menu
+                  align="end"
+                  trigger={
+                    <Button
+                      variant="ghost"
+                      aria-label="More actions"
+                      title="More actions"
+                      className="px-2 py-1.5 text-[12px]"
+                    >
+                      <MoreHorizontal className="h-[14px] w-[14px]" strokeWidth={1.6} />
+                    </Button>
+                  }
+                  items={overflowMenuItems}
+                />
+              )}
             </header>
         </div>
 
