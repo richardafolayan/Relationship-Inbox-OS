@@ -172,17 +172,16 @@ type PendingSend = {
   errorKind?: "AUTH_REQUIRED" | "SELECTOR_FAIL" | "PROFILE_LOCKED" | "TRANSIENT" | "DELIVERY_UNCERTAIN" | "UNKNOWN";
 };
 
-// Picks the topmost visible message bubble below the sticky header to
-// anchor scroll preservation on. Selecting by data-message-id (set on
-// every bubble in the JSX) avoids accidentally anchoring on a wrapper
-// div whose position doesn't map cleanly to a message — the wrapper's
-// rect can stay constant while the messages inside it shift, leaving
-// scroll preservation off by tens of pixels. Each bubble is rendered
-// with key={message.id}, so React preserves the DOM node across the
-// re-render that prepends older messages.
+// Picks the topmost visible message bubble to anchor scroll preservation
+// on. Selecting by data-message-id (set on every bubble in the JSX)
+// avoids accidentally anchoring on a wrapper div whose position doesn't
+// map cleanly to a message. The contact header and reply brief live
+// outside this scroller (#896), so only a small top inset is needed.
+// Each bubble is rendered with key={message.id}, so React preserves the
+// DOM node across the re-render that prepends older messages.
 function pickScrollAnchor(scroller: HTMLElement, scrollerTop: number): HTMLElement | null {
-  const stickyBand = 80;
-  const probeTop = scrollerTop + stickyBand;
+  const topInset = 8;
+  const probeTop = scrollerTop + topInset;
   const probeBottom = scrollerTop + scroller.clientHeight;
   let best: { el: HTMLElement; top: number } | null = null;
   const candidates = scroller.querySelectorAll<HTMLElement>("[data-message-id]");
@@ -249,8 +248,8 @@ function startScrollSettlingGuard(scroller: HTMLElement, repin: () => void): () 
     if (!active) return;
     repin();
   });
-  // Observe each non-sticky child of the scroller — that's where the
-  // message-list growth happens. (The sticky header doesn't count.)
+  // Observe non-sticky children (message list growth). Sticky in-scroller
+  // chrome such as the focused-thread pill is skipped.
   for (const child of Array.from(scroller.children) as HTMLElement[]) {
     if (getComputedStyle(child).position !== "sticky") ro.observe(child);
   }
@@ -2864,20 +2863,17 @@ export default function ThreadPage() {
       `[data-message-id="${focusedThreadParentId}"]`
     ) as HTMLElement | null;
     if (!container || !target) return;
-    // #465 (pilot R-0064): position the focused message as HIGH as
-    // possible — its top sits just below the sticky header — rather than
-    // centring it, so the message and the replies beneath it read
-    // top-down. scrollTop clamps at the bottom, so a focused message near
-    // the end of the thread still lands as high as the remaining content
-    // allows. Bubbles + dividers collapse over 150ms (see bubble/DayDivider
-    // className), so re-align on every layout change during that window
-    // rather than relying on a one-shot calculation.
+    // #465 (pilot R-0064): position the focused message as high as
+    // possible so the message and replies beneath it read top-down.
+    // Header/brief live outside the scroller (#896); only the small
+    // focused-thread pill needs clearance. scrollTop clamps at the
+    // bottom, so a focused message near the end still lands as high as
+    // remaining content allows. Bubbles + dividers collapse over 150ms,
+    // so re-align on every layout change during that window.
     const realignToTop = () => {
       const containerRect = container.getBoundingClientRect();
       const targetRect = target.getBoundingClientRect();
-      // FOCUS_HEADER_OFFSET matches the scroller's scrollPaddingTop so the
-      // message clears the glassy sticky header.
-      const FOCUS_HEADER_OFFSET = 64;
+      const FOCUS_HEADER_OFFSET = 12;
       const delta = (targetRect.top - containerRect.top) - FOCUS_HEADER_OFFSET;
       container.scrollTop = container.scrollTop + delta;
     };
@@ -3221,7 +3217,7 @@ export default function ThreadPage() {
       // apply from lg/xl up. Setting gridTemplateColumns as a plain inline
       // style kept the 240px/360px rail tracks reserved at every width,
       // which crushed the conversation into a thin centre strip on phones.
-      className="grid h-full min-h-0 grid-cols-1 overflow-hidden lg:[grid-template-columns:var(--thread-cols-lg)] xl:[grid-template-columns:var(--thread-cols-xl)]"
+      className="relative grid h-full min-h-0 grid-cols-1 overflow-hidden lg:[grid-template-columns:var(--thread-cols-lg)] xl:[grid-template-columns:var(--thread-cols-xl)]"
       style={
         {
           "--thread-cols-lg": gridColsLg,
@@ -3362,8 +3358,13 @@ export default function ThreadPage() {
         </ul>
       </aside>
 
-      {/* ───── Chat column ───── */}
+      {/* ───── Chat column ─────
+          Four fixed rows on every width: header | brief | messages | composer.
+          Only the message timeline scrolls (#896). Header and brief are
+          layout rows, not sticky-inside-scroller, so they stay put even if
+          an outer shell still scrolls. Desktop rails stay separate columns. */}
       <div
+        data-testid="thread-chat-column"
         className="relative flex h-full min-h-0 flex-col overflow-hidden border-r border-hairline"
         onDragEnter={onComposerDragEnter}
         onDragOver={onComposerDragOver}
@@ -3403,45 +3404,14 @@ export default function ThreadPage() {
           </div>
         ) : null}
 
+        {/* Fixed contact header row. Outside the message scroller so it
+            never competes with timeline scroll or sticky-in-scroller
+            fragility on mobile (#896). */}
         <div
-          ref={timelineRef}
-          onScroll={onTimelineScroll}
-          data-scroll-owner="thread-messages"
-          // overflow-x-hidden is load-bearing: overflow-y-auto alone makes
-          // the browser compute overflow-x as auto, so any too-wide child
-          // (an unbroken URL, a future embed) turns into a horizontal
-          // scrollbar that drags the sticky header along with it.
-          className="relative min-h-0 flex-1 overflow-y-auto overflow-x-hidden"
-          // overflowAnchor: disable the browser's native scroll anchoring
-          // so it doesn't race with the load-older restoration in
-          // useLayoutEffect. When both fire on the same prepend, the
-          // browser anchors on its own heuristic-picked element (often a
-          // wrapper) and our code anchors on a specific message bubble —
-          // the difference shows up as a small visible jolt as the scroll
-          // position settles.
-          //
-          // scrollPaddingTop: the glassy sticky header below sits INSIDE
-          // this scroller, so any programmatic scroll (scrollIntoView,
-          // future snap-to-message features) would otherwise land target
-          // elements at scroll-container-top — i.e. behind the header.
-          // Reserving a top scroll-padding zone the size of the header
-          // makes those alignments respect the header. Value tuned to the
-          // header's resting height (single row, h-9 avatar + py-2.5 ≈
-          // 60-64px); if the header grows another row of chips this may
-          // need a ref-based measurement.
-          style={{ overflowAnchor: "none", scrollPaddingTop: "64px" }}
+          data-testid="thread-header-band"
+          className="shrink-0 border-b border-hairline bg-[color-mix(in_oklch,var(--paper)_96%,transparent)] backdrop-blur-md backdrop-saturate-150 px-2 py-2 sm:px-6 sm:py-2.5 lg:px-8"
         >
-          {/* Glassy sticky header. Sits inside the scroll container so the
-              timeline scrolls visibly behind it - matches the iOS / Apple
-              translucent-bar aesthetic the rest of the redesign nods at.
-              Single-row layout keeps vertical real estate for the chat.
-              Opacity is high (92%) on purpose: at lower values (~70%)
-              message bubbles passing behind the bar stayed legible enough
-              to read as a layout bug — the operator saw a clipped bubble
-              rather than a tinted bar. 92% + backdrop-blur reads as
-              frosted glass while making clipped content visually fade. */}
-          <div className="sticky top-0 z-10 border-b border-hairline bg-[color-mix(in_oklch,var(--paper)_92%,transparent)] backdrop-blur-md backdrop-saturate-150 px-2 py-2 sm:px-6 sm:py-2.5 lg:px-8">
-            <header className="flex items-center gap-1 sm:gap-2">
+          <header className="flex items-center gap-1 sm:gap-2">
               <button
                 type="button"
                 onClick={() => router.push("/today")}
@@ -3830,23 +3800,42 @@ export default function ThreadPage() {
                 ]}
               />
             </header>
-            {/* Always-visible reply-readiness band: what the reply needs to
-                do, why it matters, what's still open — so the operator
-                understands the thread without opening the AI rail or
-                rereading. Pinned with the header. Hidden at lg only when the
-                full rail is open (it supersedes the summary there); stays
-                visible on mobile, where the rail can't open. */}
-            {thread.needsReply !== false ? (
-              <div className={aiOpen ? "xl:hidden" : undefined}>
-                <ThreadBriefBand
-                  onYou={displayBrief.on_you}
-                  whereItStands={displayBrief.where_it_stands}
-                  openLoops={activeOpenLoops}
-                />
-              </div>
-            ) : null}
-          </div>
+        </div>
 
+        {/* Fixed reply brief. Layout row under the header, not sticky
+            inside the timeline. Compact/collapsible on mobile via
+            ThreadBriefBand. Hidden at xl when the full AI rail is open. */}
+        {thread.needsReply !== false ? (
+          <div
+            data-testid="thread-brief-row"
+            className={`shrink-0 border-b border-hairline bg-paper px-2 pb-2 pt-0 sm:px-6 lg:px-8 ${
+              aiOpen ? "xl:hidden" : ""
+            }`}
+          >
+            <ThreadBriefBand
+              onYou={displayBrief.on_you}
+              whereItStands={displayBrief.where_it_stands}
+              openLoops={activeOpenLoops}
+            />
+          </div>
+        ) : null}
+
+        {/* Message timeline: the only scroller in the chat column. */}
+        <div
+          ref={timelineRef}
+          data-testid="thread-message-timeline"
+          onScroll={onTimelineScroll}
+          // overflow-x-hidden is load-bearing: overflow-y-auto alone makes
+          // the browser compute overflow-x as auto, so any too-wide child
+          // (an unbroken URL, a future embed) turns into a horizontal
+          // scrollbar under the chat. overscroll-contain keeps pull
+          // gestures from bubbling to an outer shell scroller.
+          className="relative min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain"
+          // overflowAnchor: disable the browser's native scroll anchoring
+          // so it doesn't race with the load-older restoration in
+          // useLayoutEffect.
+          style={{ overflowAnchor: "none" }}
+        >
           <div className="mx-auto flex w-full max-w-[820px] flex-col gap-[18px] px-4 py-3 sm:px-8 lg:px-12">
             {/* Issue #412. "🎂 birthday in N days" pill. Surfaces when
                 the contact's birthday is within the next 30 days
@@ -4609,15 +4598,17 @@ export default function ThreadPage() {
           </div>
         </div>
 
-        <div className="relative flex-shrink-0 border-t border-hairline bg-paper">
-          {/* #461 (pilot R-0060): floating jump-to-latest button. Centred
-              above the composer's top edge so it sits in the middle just
-              above the input, with a glassy frosted-surface treatment that
-              matches the sticky header. Hidden in focused mode (the stack is
-              bounded there). */}
+        <div
+          data-testid="thread-composer-footer"
+          className="relative shrink-0 border-t border-hairline bg-paper"
+        >
+          {/* #461 (pilot R-0060) / #896: jump-to-latest is positioned
+              relative to the message viewport + composer foot, not the
+              browser viewport. Hidden in focused mode (bounded stack). */}
           {showJumpToLatest && !focusedThreadParentId ? (
             <button
               type="button"
+              data-testid="jump-to-latest"
               onClick={scrollToLatest}
               aria-label="Jump to latest message"
               title="Jump to latest"
@@ -4626,6 +4617,8 @@ export default function ThreadPage() {
               <ChevronDown className="h-[18px] w-[18px]" strokeWidth={2} />
             </button>
           ) : null}
+          {/* Safe-area pad: the mobile dock is hidden on /thread/*, so the
+              composer owns the home-indicator inset (not the shell). */}
           <div className="mx-auto w-full max-w-[820px] px-3 pb-[max(8px,env(safe-area-inset-bottom))] pt-2 sm:px-8 sm:pb-2">
             {error ? (
               <p className="mb-1.5 rounded-[10px] border border-hairline bg-paper-2 px-2.5 py-1.5 text-[12px] leading-[1.45] text-ink-2">{error}</p>
@@ -4961,17 +4954,18 @@ export default function ThreadPage() {
                   }
                 }}
                 rows={2}
+                data-testid="thread-composer-input"
                 ref={(el) => {
                   composerInputRef.current = el;
                   if (!el) return;
-                  // Autosize: grow with content from 2 rows up to ~7 rows
-                  // before capping so the composer doesn't eat the chat
-                  // when pasting walls of text.
+                  // Autosize up to min(160px, 28dvh). CSS max-height clamps
+                  // the viewport share on short phones; overflow scrolls
+                  // inside the field once the cap is reached (#896).
                   el.style.height = "auto";
-                  el.style.height = `${Math.min(Math.max(el.scrollHeight, 44), 160)}px`;
+                  el.style.height = `${Math.max(el.scrollHeight, 44)}px`;
                 }}
-                className="block w-full resize-none border-0 bg-transparent text-[14px] leading-[1.45] text-ink outline-none placeholder:text-ink-4"
-                style={{ minHeight: 44, maxHeight: 160 }}
+                className="block w-full resize-none overflow-y-auto border-0 bg-transparent text-[14px] leading-[1.45] text-ink outline-none placeholder:text-ink-4"
+                style={{ minHeight: 44, maxHeight: "min(160px, 28dvh)" }}
               />
               <div className="mt-1.5 flex flex-wrap items-center gap-2">
                 {/* Memory icon - opens the prior-conversations popover.
