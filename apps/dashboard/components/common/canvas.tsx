@@ -5,19 +5,14 @@ import { cn } from "@/lib/utils";
 // padding is owned by the (sticky) PageHead so the glass bar sits flush
 // against the primary scroller once scrolled. Gutters breathe with the
 // viewport (20 → 32 → 48px) and the canvas widens on big screens so a
-// large monitor isn't a thin strip of content; the bottom padding also
-// clears the phone dock + home indicator.
-//
-// On mobile the shell main is overflow-hidden, so Canvas is the primary
-// vertical scroller for list pages. Thread routes do not use Canvas and
-// keep their dedicated message scroller. Desktop (md+) leaves scrolling
-// to the shell main.
+// large monitor isn't a thin strip of content. Phone bottom padding is
+// modest: the MobileDock owns its shell row and safe-area, so pages no
+// longer reserve ~132px for a fixed overlay.
 export function Canvas({ children, className, ...rest }: HTMLAttributes<HTMLDivElement>) {
   return (
     <div
-      data-scroll-owner="canvas"
       className={cn(
-        "mx-auto h-full min-h-0 w-full max-w-[920px] overflow-y-auto overscroll-y-contain px-5 pb-[calc(132px+env(safe-area-inset-bottom))] sm:px-8 md:h-auto md:overflow-visible md:overscroll-auto md:pb-[120px] lg:px-12 3xl:max-w-[1080px]",
+        "mx-auto w-full max-w-[920px] px-5 pb-8 sm:px-8 md:pb-[120px] lg:px-12 3xl:max-w-[1080px]",
         className
       )}
       {...rest}

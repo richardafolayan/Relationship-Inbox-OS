@@ -543,7 +543,7 @@ export default function TodayPage() {
 
   return (
     <Canvas
-      className="max-w-[1240px] pb-[calc(96px+env(safe-area-inset-bottom))] md:pb-10 3xl:max-w-[1400px]"
+      className="max-w-[1240px] pb-8 md:pb-10 3xl:max-w-[1400px]"
     >
       <header className="sticky top-0 z-10 -mx-5 mb-6 flex flex-col gap-1 bg-[color-mix(in_oklch,var(--paper)_95%,transparent)] px-5 pb-3 pt-4 backdrop-blur-md backdrop-saturate-150 sm:-mx-8 sm:flex-row sm:items-baseline sm:justify-between sm:gap-6 sm:px-8 sm:pt-6 lg:-mx-12 lg:px-12">
         <div className="min-w-0">
