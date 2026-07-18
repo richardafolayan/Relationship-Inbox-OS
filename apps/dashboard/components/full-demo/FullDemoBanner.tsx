@@ -7,8 +7,8 @@ import { useFullDemo } from "./FullDemoProvider";
  * mode is on. Rendered from AppShell so it sits above every route. It's
  * visible in three situations:
  *
- *  1. Sandbox demo active — shows "Sandbox demo running" + exit.
- *  2. Live demo active — shows "Live demo, read only" + exit.
+ *  1. Sample demo active — practice conversations + exit.
+ *  2. Real read-only demo active — no auto-send guarantee + exit.
  *  3. Recovery: server flags on but local state lost (closed tab / crash).
  *     Banner explains and offers a one-click reset.
  */
@@ -23,18 +23,18 @@ export function FullDemoBanner() {
   let tone: "info" | "warn" = "info";
 
   if (showActive && mode === "sandbox") {
-    title = "Sandbox demo running";
-    body = "All interactions stay in the demo data.";
+    title = "Sample demo running";
+    body = "Practice conversations only. Nothing is sent automatically.";
   } else if (showActive && mode === "live") {
-    title = "Live demo, read only";
-    body = "Sending, archiving, snoozing and mark-handled are blocked.";
+    title = "Real conversations, read-only";
+    body = "Nothing is sent automatically. Sending, archiving and snoozing are blocked.";
     tone = "warn";
   } else if (recoveryNeeded) {
     title = serverSettings?.presenterReadOnly
-      ? "Live demo, read only (recover)"
-      : "Sandbox demo running (recover)";
+      ? "Real conversations, read-only (recover)"
+      : "Sample demo running (recover)";
     body =
-      "The app is still in presenter mode but the local walkthrough state is gone. Exit cleanly to restore normal behaviour.";
+      "The app is still in demo mode but the local walkthrough state is gone. Exit cleanly to restore normal behaviour.";
     tone = "warn";
   }
 

@@ -638,13 +638,6 @@ export default function SettingsPage() {
                 />
               </SettingsGroup>
 
-              <section className="mb-9">
-                <p className="mb-3 font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">
-                  Demo
-                </p>
-                <FullDemoSettingsCard />
-              </section>
-
               <section id="app-updates" className="scroll-mt-24">
                 <p className="mb-3 font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">
                   App updates
@@ -662,9 +655,12 @@ export default function SettingsPage() {
           ) : null}
 
           {activeTab === "pilot" ? (
-            <section>
-              <PilotWelcomeCard />
-              <div className="mt-5 flex flex-wrap items-center gap-[10px]">
+            <section data-testid="settings-pilot" className="space-y-4">
+              <PilotWelcomeCard settings />
+              <div
+                className="flex flex-col gap-2"
+                data-testid="settings-pilot-actions"
+              >
                 <PilotActionButton onClick={() => openPilotFeedback("feedback")}>
                   Share feedback
                 </PilotActionButton>
@@ -676,23 +672,21 @@ export default function SettingsPage() {
                     window.localStorage.removeItem(PILOT_WELCOME_DISMISSED_KEY);
                     setWelcomeReset(true);
                   }}
+                  detail={welcomeReset ? "Will show next time you open Today" : undefined}
                 >
-                  Show welcome on Today
+                  Show welcome card again
                 </PilotActionButton>
                 <PilotActionButton
                   onClick={() => {
                     clearTourSeen(window.localStorage);
                     startPilotTour({ replay: true });
                   }}
+                  detail="Guided tour of Today, a thread, and feedback"
                 >
                   Replay walkthrough
                 </PilotActionButton>
-                {welcomeReset ? (
-                  <span className="font-mono text-[11px] text-ink-3" aria-live="polite">
-                    it’ll show next time you open Today
-                  </span>
-                ) : null}
               </div>
+              <FullDemoSettingsCard />
             </section>
           ) : null}
         </section>
@@ -1163,18 +1157,26 @@ function ReassessAllControl() {
 
 function PilotActionButton({
   onClick,
-  children
+  children,
+  detail
 }: {
   onClick: () => void;
   children: React.ReactNode;
+  detail?: string;
 }) {
   return (
     <button
       type="button"
       onClick={onClick}
-      className="inline-flex items-center rounded-pill border border-hairline px-[14px] py-[8px] text-[12.5px] font-medium text-ink-2 transition-colors duration-calm hover:border-hairline-strong hover:bg-paper-2 hover:text-ink"
+      className="flex w-full min-h-[48px] items-center gap-3 rounded-[10px] border border-hairline bg-paper px-4 py-3 text-left transition-colors duration-calm hover:border-hairline-strong hover:bg-paper-2"
     >
-      {children}
+      <span className="min-w-0 flex-1">
+        <span className="block text-[15px] font-medium text-ink">{children}</span>
+        {detail ? (
+          <span className="mt-0.5 block text-[12.5px] leading-[1.4] text-ink-3">{detail}</span>
+        ) : null}
+      </span>
+      <ChevronRight className="h-[18px] w-[18px] shrink-0 text-ink-3" strokeWidth={1.8} aria-hidden />
     </button>
   );
 }
