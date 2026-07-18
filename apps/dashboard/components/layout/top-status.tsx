@@ -584,7 +584,7 @@ export function TopStatus() {
     <div
       role="status"
       aria-live="polite"
-      className="sticky top-0 z-30 flex h-[44px] items-center gap-2 border-b border-hairline bg-paper/95 px-4 font-mono text-[11px] tracking-[0.02em] text-ink-3 backdrop-blur md:gap-3 md:px-6"
+      className="sticky top-0 z-30 flex h-[44px] items-center gap-1 border-b border-hairline bg-paper/95 px-2 font-mono text-[11px] tracking-[0.02em] text-ink-3 backdrop-blur sm:gap-2 sm:px-4 md:gap-3 md:px-6"
     >
       {!ready ? (
         // #435: cold-mount placeholder. A grey pip + "Connecting…" instead
@@ -602,21 +602,21 @@ export function TopStatus() {
         <Link
           href="/settings#platforms"
           title={`${connected}/${total} platforms connected, open platform settings`}
-          className="inline-flex items-center gap-[6px] rounded-[6px] px-1 -mx-1 transition-colors duration-calm hover:bg-paper-2 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/35"
+          className="inline-flex h-9 w-9 shrink-0 items-center justify-center gap-[6px] rounded-[8px] transition-colors duration-calm hover:bg-paper-2 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/35 sm:h-auto sm:w-auto sm:justify-start sm:rounded-[6px] sm:px-1 sm:-mx-1"
         >
           <span className={`h-[6px] w-[6px] rounded-full ${pip}`} aria-hidden />
-          <span className="text-ink-2 underline-offset-2 hover:underline">
+          <span className="hidden text-ink-2 underline-offset-2 hover:underline sm:inline">
             {connected}/{total} connected
           </span>
         </Link>
       ) : (
         <Link
           href="/settings#platforms"
-          className="inline-flex items-center gap-[6px] rounded-[6px] px-1 -mx-1 transition-colors duration-calm hover:bg-paper-2 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/35"
+          className="inline-flex h-9 w-9 shrink-0 items-center justify-center gap-[6px] rounded-[8px] transition-colors duration-calm hover:bg-paper-2 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/35 sm:h-auto sm:w-auto sm:justify-start sm:rounded-[6px] sm:px-1 sm:-mx-1"
           title={`${connected}/${total} platforms connected, open platform settings`}
         >
           <span className={`h-[6px] w-[6px] rounded-full ${pip}`} aria-hidden />
-          <span className="text-ink-2 underline-offset-2 hover:underline">
+          <span className="hidden text-ink-2 underline-offset-2 hover:underline sm:inline">
             {connected}/{total} connected
           </span>
         </Link>
@@ -667,22 +667,24 @@ export function TopStatus() {
         </>
       ) : null}
 
-      <div className="ml-auto flex items-center gap-3">
+      <div className="ml-auto flex shrink-0 items-center gap-1 sm:gap-3">
         <NotificationBell />
         <button
           type="button"
           onClick={() => (focusActive ? openFocusReview() : openFocusSetup())}
           title={focusActive ? "Focus block active, review acknowledgements" : "Start a focus window"}
-          className={`inline-flex items-center gap-[6px] rounded-pill border px-[10px] py-[3px] font-sans text-[11.5px] tracking-[-0.005em] transition-colors duration-calm ${
+          className={`inline-flex h-9 w-9 items-center justify-center gap-[6px] rounded-full border p-0 font-sans text-[11.5px] tracking-[-0.005em] transition-colors duration-calm sm:h-auto sm:w-auto sm:px-[10px] sm:py-[3px] ${
             focusActive
               ? "border-[color-mix(in_srgb,var(--accent)_30%,transparent)] bg-accent-soft text-accent-ink"
               : "border-hairline-strong text-ink-2 hover:border-[color-mix(in_srgb,var(--accent)_30%,transparent)] hover:text-ink"
           }`}
         >
           <Moon className="h-[12px] w-[12px]" strokeWidth={1.7} />
-          {focusActive
-            ? `Focus${focusWindow.endsAt ? ` · until ${formatUntil(focusWindow.endsAt)}` : ""}`
-            : "Focus off"}
+          <span className="hidden sm:inline">
+            {focusActive
+              ? `Focus${focusWindow.endsAt ? ` · until ${formatUntil(focusWindow.endsAt)}` : ""}`
+              : "Focus off"}
+          </span>
         </button>
         {/* #435: suppress "scan never" / "Scan now" until the first poll
             settles so a cold mount doesn't imply the runner has never run.
@@ -713,7 +715,8 @@ export function TopStatus() {
               title="Scan every connected platform now to check for new replies."
               className="font-mono text-[11px] text-ink-2 underline-offset-2 hover:text-ink hover:underline disabled:opacity-50"
             >
-              {scanTriggering ? "scanning…" : "Scan now"}
+              <span className="sm:hidden">{scanTriggering ? "…" : "Scan"}</span>
+              <span className="hidden sm:inline">{scanTriggering ? "scanning…" : "Scan now"}</span>
             </button>
           </>
         ) : null}

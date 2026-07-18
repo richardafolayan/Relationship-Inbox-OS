@@ -726,12 +726,13 @@ export default function InboxPage() {
           (issue #676). Renders nothing unless the runner confirms it. */}
       <MacContactsHint />
 
+      <div className="sticky top-[51px] z-10 -mx-4 bg-[color-mix(in_oklch,var(--paper)_96%,transparent)] px-4 pb-1 backdrop-blur-xl sm:static sm:mx-0 sm:bg-transparent sm:px-0 sm:pb-0 sm:backdrop-blur-none">
       {/* Ghost search — a subtle field, not a heavy box (the redesign's
           calmer default). The border darkens on hover/focus; a clear
           button appears once there's a query. */}
       <label
         className={cn(
-          "mb-[16px] flex items-center gap-[10px] rounded-[12px] border bg-transparent px-[14px] py-[10px] transition-colors duration-calm",
+          "mb-2 flex min-h-[44px] items-center gap-[10px] rounded-[12px] border bg-paper/70 px-[14px] py-2 transition-colors duration-calm sm:mb-[16px] sm:bg-transparent sm:py-[10px]",
           query
             ? "border-hairline-strong"
             : "border-hairline hover:border-hairline-strong focus-within:border-ink-3 focus-within:bg-paper"
@@ -846,6 +847,7 @@ export default function InboxPage() {
           setPriorityGroup("all");
         }}
       />
+      </div>
 
       {degraded ? (
         <DegradedBanner
@@ -1043,7 +1045,7 @@ export default function InboxPage() {
       {selectMode ? (
         <div
           data-testid="bulk-action-bar"
-          className="fixed bottom-6 left-1/2 z-40 flex -translate-x-1/2 items-center gap-2 rounded-full border border-hairline bg-paper px-4 py-2 shadow-card"
+          className="fixed bottom-[calc(70px+env(safe-area-inset-bottom))] left-3 right-3 z-50 flex items-center justify-center gap-1 rounded-[14px] border border-hairline bg-paper px-2 py-2 shadow-pop sm:left-1/2 sm:right-auto sm:-translate-x-1/2 sm:gap-2 sm:rounded-full sm:px-4 md:bottom-6"
         >
           <span className="font-mono text-[11px] tracking-[0.04em] text-ink-3">
             {selectedIds.length} selected
@@ -1333,7 +1335,7 @@ const InboxRowItem = memo(function InboxRowItem({ row, selectMode, selected, onT
       onFocus={() => prefetchThreadData(row.id)}
       onBlur={() => cancelThreadPrefetch(row.id)}
       className={cn(
-        "group grid grid-cols-[28px_30px_1fr_auto] items-center gap-[14px] border-b border-hairline px-1 py-[13px] transition-colors duration-calm hover:bg-paper-2",
+        "group grid min-h-[76px] grid-cols-[28px_24px_minmax(0,1fr)] items-center gap-x-2 gap-y-1 border-b border-hairline px-1 py-3 transition-colors duration-calm hover:bg-paper-2 sm:grid-cols-[28px_30px_1fr_auto] sm:gap-[14px] sm:py-[13px]",
         selected ? "bg-paper-2" : ""
       )}
     >
@@ -1410,7 +1412,7 @@ const InboxRowItem = memo(function InboxRowItem({ row, selectMode, selected, onT
           </span>
         ) : null}
       </span>
-      <span className="flex items-center gap-[10px] font-mono text-[11px] text-ink-3">
+      <span className="col-start-3 flex items-center justify-end gap-[8px] font-mono text-[11px] text-ink-3 sm:col-auto sm:justify-start sm:gap-[10px]">
         {/* Favourite star (R-0066 / #483). Filled + always visible once
             favourited (doubles as the at-a-glance marker); a quiet outline
             that fades in on row hover otherwise. Stops propagation so a tap
@@ -1430,7 +1432,7 @@ const InboxRowItem = memo(function InboxRowItem({ row, selectMode, selected, onT
             "-my-1 shrink-0 rounded p-[3px] transition-[color,opacity] duration-calm",
             fav
               ? "text-accent opacity-100"
-              : "text-ink-4 opacity-0 hover:text-accent group-hover:opacity-100 focus-visible:opacity-100"
+              : "text-ink-4 opacity-100 hover:text-accent sm:opacity-0 sm:group-hover:opacity-100 sm:focus-visible:opacity-100"
           )}
         >
           <Star className="h-[15px] w-[15px]" strokeWidth={1.6} fill={fav ? "currentColor" : "none"} />

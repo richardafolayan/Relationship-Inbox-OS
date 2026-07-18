@@ -35,6 +35,9 @@ to send it.
 - Trying AI help only when you actually want it.
 - Marking a thread done / snoozing it.
 - Whether the action items captured what really mattered.
+- Opening **Settings > App > Phone access**, scanning the QR code, and using
+  the same reply flow in Safari on your phone. Keep Tovi open on the computer
+  and use the same private Wi-Fi network.
 
 ## What not to test
 
@@ -82,6 +85,8 @@ to send it.
   what you choose to type. Share only what you're comfortable sharing.
 - A screenshot you attach may show private messages. Check or blur anything
   sensitive first. The app asks you to confirm you have.
+- The phone link contains a private access key. Do not share it, and only use
+  phone access on a private Wi-Fi network you trust.
 - **Don't connect any account you're uncomfortable using** with an early
   build. Use it with conversations that are fine to test against.
 - There is no tracking and no analytics. The app runs on the machine it's

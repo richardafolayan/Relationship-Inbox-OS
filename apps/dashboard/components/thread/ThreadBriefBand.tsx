@@ -31,22 +31,22 @@ export function ThreadBriefBand({ onYou, whereItStands, openLoops }: ThreadBrief
   const extraLoops = loops.length - shownLoops.length;
 
   return (
-    <div data-testid="thread-brief-band" className="mt-2 border-t border-hairline pt-2.5">
+    <div data-testid="thread-brief-band" className="mt-1.5 border-t border-hairline pt-1.5 sm:mt-2 sm:pt-2.5">
       {lead ? (
-        <p className="m-0 flex items-baseline gap-2 text-[13.5px] leading-[1.5] text-ink">
-          <span className="shrink-0 font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">
+        <p className="m-0 flex items-baseline gap-2 text-[12px] leading-[1.35] text-ink sm:text-[13.5px] sm:leading-[1.5]">
+          <span className="shrink-0 font-mono text-[9px] uppercase tracking-[0.08em] text-ink-3 sm:text-[10px]">
             {job ? "Reply job" : "Where it stands"}
           </span>
-          <span className="min-w-0 text-balance">{lead}</span>
+          <span className="min-w-0 line-clamp-2 sm:text-balance">{lead}</span>
         </p>
       ) : null}
 
       {showContext ? (
-        <p className="m-0 mt-1 line-clamp-1 text-[12.5px] leading-[1.45] text-ink-3">{context}</p>
+        <p className="m-0 mt-1 hidden line-clamp-1 text-[12.5px] leading-[1.45] text-ink-3 sm:block">{context}</p>
       ) : null}
 
       {shownLoops.length > 0 ? (
-        <p className="m-0 mt-1.5 flex flex-wrap items-baseline gap-x-2 gap-y-[3px] text-[12.5px] leading-[1.4]">
+        <p className="m-0 mt-1.5 hidden flex-wrap items-baseline gap-x-2 gap-y-[3px] text-[12.5px] leading-[1.4] sm:flex">
           <span className="shrink-0 font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">
             To address
           </span>

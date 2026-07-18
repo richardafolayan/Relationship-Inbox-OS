@@ -309,7 +309,7 @@ export default function AtRiskPage() {
       />
 
       {total > 0 ? (
-        <div className="mb-6 flex flex-wrap items-center gap-3">
+        <div className="mb-4 flex items-center gap-2 overflow-x-auto pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden sm:mb-6 sm:flex-wrap sm:gap-3">
           <select
             value={triageSort}
             onChange={(event) => setTriageSort(event.target.value as TriageSort)}
@@ -358,11 +358,11 @@ export default function AtRiskPage() {
         <CaughtUp title="You're caught up." body="Nothing is at risk right now." />
       ) : (
         <>
-          <div className="mb-[28px] grid grid-cols-1 gap-[12px] sm:grid-cols-3">
+          <div className="-mx-4 mb-5 flex snap-x gap-[10px] overflow-x-auto px-4 pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden sm:mx-0 sm:mb-[28px] sm:grid sm:grid-cols-3 sm:gap-[12px] sm:overflow-visible sm:px-0 sm:pb-0">
             {bucketCounts.map((bucket) => (
               <div
                 key={bucket.key}
-                className="rounded-[14px] border border-hairline bg-paper px-[20px] py-[18px]"
+                className="min-w-[72vw] snap-start rounded-[14px] border border-hairline bg-paper px-4 py-4 sm:min-w-0 sm:px-[20px] sm:py-[18px]"
               >
                 <p className="mb-[10px] flex items-center gap-2 font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">
                   <span className={cn("inline-block h-[7px] w-[7px] rounded-full", decayDotClass(bucket.key))} />
@@ -389,7 +389,7 @@ export default function AtRiskPage() {
                 <Link
                   key={row.id}
                   href={`/thread/${row.id}`}
-                  className="group grid grid-cols-[36px_1fr_minmax(140px,180px)_auto] items-center gap-[18px] border-b border-hairline px-1 py-[14px] transition-colors duration-calm hover:bg-paper-2"
+                  className="group grid min-h-[82px] grid-cols-[36px_minmax(0,1fr)_auto] items-center gap-x-3 gap-y-2 border-b border-hairline px-1 py-3 transition-colors duration-calm hover:bg-paper-2 sm:grid-cols-[36px_1fr_minmax(140px,180px)_auto] sm:gap-[18px] sm:py-[14px]"
                 >
                   <PersonAvatar
                     name={row.personName}
@@ -406,8 +406,8 @@ export default function AtRiskPage() {
                       {row.preview ? ` · ${normalizePreview(row.preview)}` : ""}
                     </p>
                   </div>
-                  <div className="flex items-center gap-[10px] font-mono text-[11px] text-ink-3">
-                    <span className="shrink-0">last touch</span>
+                  <div className="col-start-2 col-end-4 flex items-center gap-[8px] font-mono text-[10.5px] text-ink-3 sm:col-auto sm:gap-[10px] sm:text-[11px]">
+                    <span className="hidden shrink-0 sm:inline">last touch</span>
                     <span className="relative h-[3px] flex-1 overflow-hidden rounded-pill bg-hairline">
                       <span
                         className={cn("absolute inset-y-0 left-0 rounded-pill", decayFillClass(bucket.key))}
@@ -416,8 +416,8 @@ export default function AtRiskPage() {
                     </span>
                     <span className="shrink-0 tabular-nums text-ink-2">{formatDecay(hours)}</span>
                   </div>
-                  <span className="inline-flex items-center gap-[6px] rounded-pill border border-hairline px-3 py-[7px] text-[12px] text-ink-2 transition-colors duration-calm group-hover:border-ink group-hover:text-ink">
-                    Warm up ↗
+                  <span className="row-start-1 inline-flex min-h-[36px] items-center gap-[6px] rounded-pill border border-hairline px-2.5 py-[7px] text-[0px] text-ink-2 transition-colors duration-calm group-hover:border-ink group-hover:text-ink sm:row-auto sm:px-3 sm:text-[12px]">
+                    <span className="text-[15px] sm:text-[12px]">↗</span><span className="hidden sm:inline">Warm up</span>
                   </span>
                 </Link>
               );
@@ -428,13 +428,13 @@ export default function AtRiskPage() {
 
       {focusOpen ? (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-[color-mix(in_oklch,var(--ink)_28%,transparent)] p-6"
+          className="fixed inset-0 z-50 flex items-stretch justify-center bg-paper p-0 sm:items-center sm:bg-[color-mix(in_oklch,var(--ink)_28%,transparent)] sm:p-6"
           role="dialog"
           aria-modal="true"
           onClick={closeFocus}
         >
           <div
-            className="w-full max-w-[520px] rounded-card border border-hairline-strong bg-paper p-8 shadow-xl"
+            className="h-full w-full max-w-[520px] overflow-y-auto bg-paper px-4 pb-[calc(24px+env(safe-area-inset-bottom))] pt-[calc(16px+env(safe-area-inset-top))] sm:h-auto sm:max-h-[90vh] sm:rounded-card sm:border sm:border-hairline-strong sm:p-8 sm:shadow-xl"
             onClick={(event) => event.stopPropagation()}
           >
             <div className="mb-4 flex items-center justify-between">

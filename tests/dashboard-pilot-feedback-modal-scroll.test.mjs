@@ -18,7 +18,7 @@ test("pilot feedback modal content scrolls inside the capped dialog", () => {
   );
 
   const scrollPanes = MODAL.match(
-    /className="min-h-0 flex-1 overflow-y-auto px-5 py-4"/g
+    /className="app-main-scroll min-h-0 flex-1 overflow-y-auto px-4 py-4 sm:px-5"/g
   );
 
   assert.equal(

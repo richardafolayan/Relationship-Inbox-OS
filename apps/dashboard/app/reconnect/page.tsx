@@ -132,7 +132,7 @@ export default function ReconnectPage() {
         subtitle="LinkedIn catch-ups only. iMessage replies stay in Today and Inbox, where they are treated as active conversations. Open one to write the message yourself, nothing here is auto-sent."
         meta={
           loaded ? (
-            <span className="flex items-baseline gap-4">
+            <span className="flex items-baseline justify-end gap-4">
               <span>
                 <strong className="font-medium text-ink">{candidates.length}</strong>{" "}
                 {candidates.length === 1 ? "person" : "people"}
@@ -142,7 +142,7 @@ export default function ReconnectPage() {
                   type="button"
                   onClick={() => void handleRefreshScores()}
                   disabled={refresh_state.kind === "running"}
-                  className={`font-mono text-[11px] uppercase tracking-[0.06em] transition-colors duration-calm hover:text-ink disabled:opacity-60 ${refreshButtonTone}`}
+                  className={`hidden font-mono text-[11px] uppercase tracking-[0.06em] transition-colors duration-calm hover:text-ink disabled:opacity-60 sm:inline ${refreshButtonTone}`}
                   data-testid="reconnect-refresh-scores"
                   aria-live="polite"
                 >
@@ -153,6 +153,19 @@ export default function ReconnectPage() {
           ) : null
         }
       />
+
+      {loaded && candidates.length > 0 ? (
+        <button
+          type="button"
+          onClick={() => void handleRefreshScores()}
+          disabled={refresh_state.kind === "running"}
+          className={`mb-3 min-h-[40px] rounded-pill border border-hairline px-3 font-mono text-[11px] uppercase tracking-[0.06em] transition-colors duration-calm hover:border-hairline-strong hover:text-ink disabled:opacity-60 sm:hidden ${refreshButtonTone}`}
+          data-testid="reconnect-refresh-scores-mobile"
+          aria-live="polite"
+        >
+          {refreshButtonLabel}
+        </button>
+      ) : null}
 
       {error ? (
         <p className="mb-6 rounded-row border border-hairline bg-paper-2 px-4 py-3 text-[12px] leading-[1.5] text-ink-2">{error}</p>
@@ -204,7 +217,7 @@ function ReconnectRow({ row, suggested }: ReconnectRowProps) {
   return (
     <Link
       href={`/thread/${row.id}`}
-      className="grid grid-cols-[28px_1fr_auto] items-start gap-[14px] border-b border-hairline px-1 py-[13px] transition-colors duration-calm hover:bg-paper-2"
+      className="grid min-h-[76px] grid-cols-[28px_minmax(0,1fr)] items-start gap-x-3 gap-y-1 border-b border-hairline px-1 py-3 transition-colors duration-calm hover:bg-paper-2 sm:grid-cols-[28px_1fr_auto] sm:gap-[14px] sm:py-[13px]"
     >
       <PersonAvatar
         name={row.personName}
@@ -213,8 +226,8 @@ function ReconnectRow({ row, suggested }: ReconnectRowProps) {
         className="text-[11px]"
       />
       <span className="flex min-w-0 flex-col gap-[3px]">
-        <span className="flex min-w-0 items-baseline gap-[10px]">
-          <span className="shrink-0 text-[14px] font-medium tracking-[-0.005em] text-ink">
+        <span className="flex min-w-0 flex-wrap items-baseline gap-x-[8px] gap-y-1">
+          <span className="min-w-0 max-w-full truncate text-[14px] font-medium tracking-[-0.005em] text-ink">
             {row.personName}
           </span>
           {suggested ? (
@@ -222,13 +235,13 @@ function ReconnectRow({ row, suggested }: ReconnectRowProps) {
               Suggested
             </span>
           ) : null}
-          <span className="min-w-0 truncate text-[13px] text-ink-3">{previewBody}</span>
+          <span className="hidden min-w-0 truncate text-[13px] text-ink-3 sm:inline">{previewBody}</span>
         </span>
         {reason ? (
           <span className="block text-[12px] text-ink-3">{reason}</span>
         ) : null}
       </span>
-      <span className="font-mono text-[11px] text-ink-3">quiet for {quietFor}</span>
+      <span className="col-start-2 font-mono text-[11px] text-ink-3 sm:col-auto">quiet for {quietFor}</span>
     </Link>
   );
 }

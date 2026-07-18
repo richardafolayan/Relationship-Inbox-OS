@@ -64,7 +64,14 @@
 }
 
 * { box-sizing: border-box; }
-html, body { margin: 0; padding: 0; }
+html, body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  overscroll-behavior: none;
+}
 
 /* ───────────── Responsive scale ─────────────
  * The layout is designed at laptop width with px-based type. Very large
@@ -89,6 +96,9 @@ body { zoom: var(--effective-zoom); }
 }
 /* Full-viewport height that stays correct under the zoom layer. */
 .h-app-screen { height: calc(100vh / var(--effective-zoom)); }
+@supports (height: 100dvh) {
+  .h-app-screen { height: calc(100dvh / var(--effective-zoom)); }
+}
 body {
   font-family: var(--font-text);
   background: var(--paper);
@@ -100,6 +110,33 @@ body {
   letter-spacing: -0.005em;
 }
 a { color: inherit; text-decoration: none; }
+a,
+button,
+input,
+select,
+textarea {
+  -webkit-tap-highlight-color: transparent;
+}
+
+.app-main-scroll {
+  overscroll-behavior-y: contain;
+  -webkit-overflow-scrolling: touch;
+}
+
+@media (max-width: 767px) {
+  .app-main-scroll {
+    scrollbar-width: none;
+  }
+  .app-main-scroll::-webkit-scrollbar {
+    display: none;
+  }
+
+  input,
+  select,
+  textarea {
+    font-size: 16px !important;
+  }
+}
 
 /* Themed scrollbars - translucent thumb that picks up the active palette
    so the chrome doesn't break immersion in dark mode. */

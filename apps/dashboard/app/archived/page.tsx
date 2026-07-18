@@ -333,7 +333,7 @@ export default function ArchivedPage() {
     <Canvas>
       <Link
         href="/inbox"
-        className="mb-[16px] inline-flex items-center gap-[5px] font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3 transition-colors duration-calm hover:text-ink"
+        className="mb-2 mt-3 inline-flex min-h-[36px] items-center gap-[5px] font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3 transition-colors duration-calm hover:text-ink sm:mb-[16px] sm:mt-0 sm:min-h-0"
       >
         <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth={1.8}>
           <path d="M15 18l-6-6 6-6" strokeLinecap="round" strokeLinejoin="round" />
@@ -341,17 +341,17 @@ export default function ArchivedPage() {
         Back to inbox
       </Link>
 
-      <header className="mb-[20px] flex items-start justify-between gap-6">
+      <header className="mb-3 flex items-start justify-between gap-3 sm:mb-[20px] sm:gap-6">
         <div>
-          <p className="mb-1 font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">
+          <p className="mb-0.5 hidden font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3 sm:block">
             Done &amp; dusted
           </p>
-          <h1 className="m-0 font-display text-[40px] font-semibold leading-[1.04] tracking-[-0.035em]">
+          <h1 className="m-0 font-display text-[28px] font-semibold leading-[1.04] tracking-[-0.035em] sm:text-[40px]">
             Archived
           </h1>
         </div>
         {rows && rows.length > 0 ? (
-          <div className="shrink-0 pt-1 text-right font-mono text-[12.5px] text-ink-3">
+          <div className="max-w-[44%] shrink-0 pt-1 text-right font-mono text-[10.5px] leading-[1.35] text-ink-3 sm:max-w-none sm:text-[12.5px]">
             <strong className="font-medium text-ink">{visible.length}</strong> of {rows.length} threads
             {oldestMonthLabel ? (
               <>
@@ -369,10 +369,11 @@ export default function ArchivedPage() {
         <CaughtUp title="No archived threads yet." body="Threads you mark as handled land here." />
       ) : (
         <>
+          <div className="sticky top-0 z-10 -mx-4 bg-[color-mix(in_oklch,var(--paper)_96%,transparent)] px-4 pb-1 pt-1 backdrop-blur-xl sm:static sm:mx-0 sm:bg-transparent sm:px-0 sm:pb-0 sm:pt-0 sm:backdrop-blur-none">
           {/* Ghost search */}
           <label
             className={cn(
-              "mb-[16px] flex items-center gap-[10px] rounded-[12px] border bg-transparent px-[14px] py-[10px] transition-colors duration-calm",
+              "mb-2 flex min-h-[44px] items-center gap-[10px] rounded-[12px] border bg-paper/70 px-[14px] py-2 transition-colors duration-calm sm:mb-[16px] sm:bg-transparent sm:py-[10px]",
               query
                 ? "border-hairline-strong"
                 : "border-hairline hover:border-hairline-strong focus-within:border-ink-3 focus-within:bg-paper"
@@ -458,6 +459,7 @@ export default function ArchivedPage() {
               ) : null}
             </div>
           </div>
+          </div>
 
           {platformFilter !== "all" ? (
             <div className="flex flex-wrap items-center gap-2 pt-[14px]">
@@ -512,7 +514,7 @@ export default function ArchivedPage() {
           {selectMode ? (
             <div
               data-testid="archived-bulk-bar"
-              className="sticky bottom-6 z-40 mt-3 flex items-center gap-4 rounded-[12px] bg-ink px-[18px] py-[14px] text-paper shadow-pop"
+              className="sticky bottom-[calc(70px+env(safe-area-inset-bottom))] z-40 mt-3 flex items-center justify-between gap-2 rounded-[12px] bg-ink px-3 py-3 text-paper shadow-pop sm:bottom-6 sm:gap-4 sm:px-[18px] sm:py-[14px]"
             >
               <span className="font-mono text-[13px]">{selectedIds.length} selected</span>
               <span className="flex-1" />
@@ -622,7 +624,7 @@ function ArchivedRowItem({ row, selectMode, selected, onToggle }: ArchivedRowIte
       href={`/thread/${row.id}`}
       onClick={onClick}
       className={cn(
-        "group grid grid-cols-[28px_1fr_auto] items-center gap-[14px] border-b border-hairline px-1 py-[13px] transition-colors duration-calm hover:bg-paper-2",
+        "group grid min-h-[72px] grid-cols-[28px_minmax(0,1fr)] items-center gap-x-3 gap-y-1 border-b border-hairline px-1 py-3 transition-colors duration-calm hover:bg-paper-2 sm:grid-cols-[28px_1fr_auto] sm:gap-[14px] sm:py-[13px]",
         selected ? "bg-paper-2" : ""
       )}
     >
@@ -655,7 +657,7 @@ function ArchivedRowItem({ row, selectMode, selected, onToggle }: ArchivedRowIte
         </button>
       </span>
 
-      <span className="flex min-w-0 items-center gap-[12px]">
+      <span className="flex min-w-0 flex-wrap items-center gap-x-[10px] gap-y-1 sm:flex-nowrap sm:gap-[12px]">
         <span className="truncate text-[14px] font-medium tracking-[-0.005em] text-ink">
           {row.personName}
         </span>
@@ -668,7 +670,7 @@ function ArchivedRowItem({ row, selectMode, selected, onToggle }: ArchivedRowIte
         ) : null}
       </span>
 
-      <span className="flex items-center gap-[12px] font-mono text-[11px] text-ink-3">
+      <span className="col-start-2 flex items-center gap-[10px] font-mono text-[11px] text-ink-3 sm:col-auto sm:gap-[12px]">
         <span>{when}</span>
         <span className="text-ink-3">{PLATFORM_LABEL[row.platform]}</span>
       </span>

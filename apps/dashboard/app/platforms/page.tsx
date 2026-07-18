@@ -110,7 +110,7 @@ export default function PlatformsPage() {
           />
         ))}
 
-      <div className="grid grid-cols-1 gap-[14px] md:grid-cols-2">
+      <div className="grid grid-cols-1 gap-3 sm:gap-[14px] md:grid-cols-2">
         {visibleRows.map((row) => (
           <PlatformCardView
             key={row.platform}
@@ -190,7 +190,7 @@ function PlatformCardView({
 
   return (
     <article className="rounded-[16px] border border-hairline bg-paper">
-      <div className="grid grid-cols-[36px_1fr_auto] items-center gap-[14px] px-[20px] py-[18px]">
+      <div className="grid grid-cols-[36px_minmax(0,1fr)] items-center gap-x-3 gap-y-3 px-4 py-4 sm:grid-cols-[36px_1fr_auto] sm:gap-[14px] sm:px-[20px] sm:py-[18px]">
         <span
           aria-hidden
           className="grid h-[36px] w-[36px] place-items-center rounded-[10px] bg-paper-2 font-mono text-[14px] font-semibold text-ink-2"
@@ -213,7 +213,7 @@ function PlatformCardView({
             ) : null}
           </p>
         </div>
-        <div className="flex items-center gap-1">
+        <div className="col-span-2 flex items-center justify-end gap-1 sm:col-auto sm:justify-start">
           <button
             type="button"
             onClick={onToggleDetail}
@@ -319,7 +319,7 @@ function PlatformCardView({
       </div>
 
       {detailOpen ? (
-        <div className="border-t border-hairline px-[20px] py-[16px]">
+        <div className="border-t border-hairline px-4 py-4 sm:px-[20px] sm:py-[16px]">
           <div className="grid grid-cols-1 gap-x-8 gap-y-1 font-mono text-[12px] text-ink-2 sm:grid-cols-2">
             <p className="m-0">
               profile dir <span className="text-ink-3">·</span>{" "}

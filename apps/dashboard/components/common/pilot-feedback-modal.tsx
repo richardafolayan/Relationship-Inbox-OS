@@ -239,7 +239,7 @@ export function PilotFeedbackModal() {
 
   return (
     <div
-      className="fixed inset-0 z-[100] grid place-items-start justify-items-center bg-[color-mix(in_oklch,var(--ink)_38%,transparent)] pt-[10vh] backdrop-blur-md"
+      className="fixed inset-0 z-[100] grid place-items-stretch bg-paper pt-[env(safe-area-inset-top)] sm:place-items-start sm:justify-items-center sm:bg-[color-mix(in_oklch,var(--ink)_38%,transparent)] sm:pt-[10vh] sm:backdrop-blur-md"
       onClick={requestClose}
       onKeyDown={(event) => {
         event.stopPropagation();
@@ -250,7 +250,7 @@ export function PilotFeedbackModal() {
         role="dialog"
         aria-modal="true"
         aria-label="Pilot feedback"
-        className="flex max-h-[80vh] w-[min(560px,92vw)] flex-col overflow-hidden rounded-[18px] border border-hairline bg-paper shadow-pop"
+        className="flex h-full w-full flex-col overflow-hidden bg-paper pb-[env(safe-area-inset-bottom)] sm:h-auto sm:max-h-[80vh] sm:w-[min(560px,92vw)] sm:rounded-[18px] sm:border sm:border-hairline sm:pb-0 sm:shadow-pop"
         onClick={(event) => event.stopPropagation()}
       >
         <header className="flex shrink-0 items-center gap-3 border-b border-hairline px-5 py-[14px]">
@@ -287,7 +287,7 @@ export function PilotFeedbackModal() {
         </header>
 
         {view === "reports" ? (
-          <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
+          <div className="app-main-scroll min-h-0 flex-1 overflow-y-auto px-4 py-4 sm:px-5">
             <p className="m-0 mb-3 text-[12.5px] leading-[1.55] text-ink-3">
               Your recent reports and where they stand. Screenshots and message content are never
               shown here.
@@ -325,7 +325,7 @@ export function PilotFeedbackModal() {
             )}
           </div>
         ) : (
-          <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
+          <div className="app-main-scroll min-h-0 flex-1 overflow-y-auto px-4 py-4 sm:px-5">
             {/* Issue #383 / R-0030: the inline error block was removed —
                 submit now closes the modal immediately and surfaces the
                 outcome via toast. The fallback form URL is still

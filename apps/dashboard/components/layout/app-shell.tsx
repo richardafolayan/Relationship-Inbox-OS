@@ -762,7 +762,7 @@ export function AppShell({ children }: { children: ReactNode }) {
         onToggleCollapsed={() => setSidebarCollapsed((prev) => !prev)}
         operatorDisplayName={operatorDisplayName}
       />
-      <div className="flex h-app-screen min-h-0 flex-col">
+      <div className="flex h-full min-h-0 flex-col overflow-hidden">
         <FullDemoBanner />
         <TopStatus />
         <FullDiskAccessBanner />
@@ -778,7 +778,7 @@ export function AppShell({ children }: { children: ReactNode }) {
             />
           </div>
         ) : null}
-        <main className="min-h-0 flex-1 overflow-y-auto">{children}</main>
+        <main className="app-main-scroll min-h-0 flex-1 overflow-x-hidden overflow-y-auto">{children}</main>
       </div>
       <MobileDock attentionCount={sidebarAttention} onOpenSearch={() => setPaletteOpen(true)} />
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />

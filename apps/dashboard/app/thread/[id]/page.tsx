@@ -3221,7 +3221,7 @@ export default function ThreadPage() {
       // apply from lg/xl up. Setting gridTemplateColumns as a plain inline
       // style kept the 240px/360px rail tracks reserved at every width,
       // which crushed the conversation into a thin centre strip on phones.
-      className="grid h-full min-h-0 grid-cols-1 lg:[grid-template-columns:var(--thread-cols-lg)] xl:[grid-template-columns:var(--thread-cols-xl)]"
+      className="relative grid h-full min-h-0 grid-cols-1 overflow-hidden lg:[grid-template-columns:var(--thread-cols-lg)] xl:[grid-template-columns:var(--thread-cols-xl)]"
       style={
         {
           "--thread-cols-lg": gridColsLg,
@@ -3506,7 +3506,7 @@ export default function ThreadPage() {
                 data-testid="thread-favourite-toggle"
                 title={favourite ? "Remove favourite" : "Favourite this contact"}
                 className={cn(
-                  "grid h-8 w-8 shrink-0 place-items-center rounded-[8px] transition-colors duration-calm hover:bg-paper-2",
+                  "hidden h-8 w-8 shrink-0 place-items-center rounded-[8px] transition-colors duration-calm hover:bg-paper-2 sm:grid",
                   favourite ? "text-accent" : "text-ink-3 hover:text-ink"
                 )}
               >
@@ -3605,7 +3605,7 @@ export default function ThreadPage() {
                 onSuccess={refresh}
                 action={() => apiPost(`/runner/control/thread/${thread.id}/mark-done`, {})}
                 title="Mark as handled"
-                className="px-2 py-1.5 text-[12px] 2xl:px-3"
+                className="h-9 px-2 py-1.5 text-[12px] 2xl:px-3"
               >
                 <Check className="h-[14px] w-[14px] 2xl:hidden" strokeWidth={1.6} aria-hidden />
                 <span className="hidden 2xl:inline">Mark as handled</span>
@@ -3643,7 +3643,7 @@ export default function ThreadPage() {
                 variant={aiOpen ? "primary" : "quiet"}
                 onClick={() => setAiOpen((v) => !v)}
                 title="Toggle the AI assist sidebar"
-                className="px-3 py-1.5 text-[12px]"
+                className="h-9 px-2.5 py-1.5 text-[12px] sm:px-3"
               >
                 <Sparkles className="h-[13px] w-[13px]" strokeWidth={1.6} />
                 AI
@@ -3846,7 +3846,7 @@ export default function ThreadPage() {
             ) : null}
           </div>
 
-          <div className="mx-auto flex w-full max-w-[820px] flex-col gap-[18px] px-4 py-3 sm:px-8 lg:px-12">
+          <div className="mx-auto flex w-full max-w-[820px] flex-col gap-4 px-3 py-3 sm:gap-[18px] sm:px-8 lg:px-12">
             {/* Issue #412. "🎂 birthday in N days" pill. Surfaces when
                 the contact's birthday is within the next 30 days
                 (pilot wanted "in the next month"). Wider than the
@@ -4011,7 +4011,7 @@ export default function ThreadPage() {
                   <div
                     data-message-id={message.id}
                     data-focused-bubble={focusedIdSet && focusedIdSet.has(message.id) ? "true" : undefined}
-                    className={`flex max-w-[86%] flex-col ease-out transition-all sm:max-w-[72%] ${
+                    className={`flex max-w-[92%] flex-col ease-out transition-all sm:max-w-[72%] ${
                       // Focus enter is animated too — same easing as
                       // exit, just faster (150ms vs 300ms) so the
                       // focused stack snaps into view without
@@ -4298,10 +4298,10 @@ export default function ThreadPage() {
                           ) : null}
                           {canReact || canEdit ? (
                             <div
-                              className={`absolute top-1/2 flex -translate-y-1/2 flex-col gap-1 ${
+                              className={`absolute -top-[18px] flex flex-row gap-1 sm:top-1/2 sm:-translate-y-1/2 sm:flex-col ${
                                 message.direction === "OUT"
-                                  ? "right-[calc(100%+8px)]"
-                                  : "left-[calc(100%+8px)]"
+                                  ? "right-0 sm:right-[calc(100%+8px)]"
+                                  : "left-0 sm:left-[calc(100%+8px)]"
                               }`}
                             >
                               {/* React trigger: revealed on bubble hover, or
@@ -4318,10 +4318,10 @@ export default function ThreadPage() {
                                 }
                                 aria-label="React to message"
                                 title="React"
-                                className={`inline-flex h-[26px] w-[26px] items-center justify-center rounded-full border border-hairline bg-paper text-ink-2 shadow-sm transition-opacity duration-calm hover:border-hairline-strong hover:bg-paper-2 hover:text-ink disabled:cursor-not-allowed disabled:opacity-50 ${
+                                className={`inline-flex h-[30px] w-[30px] items-center justify-center rounded-full border border-hairline bg-paper text-ink-2 shadow-sm transition-opacity duration-calm hover:border-hairline-strong hover:bg-paper-2 hover:text-ink disabled:cursor-not-allowed disabled:opacity-50 sm:h-[26px] sm:w-[26px] ${
                                   pickerOpen || isReacting
                                     ? "opacity-100"
-                                    : "opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
+                                    : "opacity-100 sm:opacity-0 sm:group-hover:opacity-100 sm:focus-visible:opacity-100"
                                 }`}
                               >
                                 {isReacting ? (
@@ -4337,10 +4337,10 @@ export default function ThreadPage() {
                                   onClick={() => startMessageEdit(message)}
                                   aria-label="Edit message"
                                   title="Edit"
-                                  className={`inline-flex h-[26px] w-[26px] items-center justify-center rounded-full border border-hairline bg-paper text-ink-2 shadow-sm transition-opacity duration-calm hover:border-hairline-strong hover:bg-paper-2 hover:text-ink disabled:cursor-not-allowed disabled:opacity-50 ${
+                                  className={`inline-flex h-[30px] w-[30px] items-center justify-center rounded-full border border-hairline bg-paper text-ink-2 shadow-sm transition-opacity duration-calm hover:border-hairline-strong hover:bg-paper-2 hover:text-ink disabled:cursor-not-allowed disabled:opacity-50 sm:h-[26px] sm:w-[26px] ${
                                     isEditingMessage || isSavingEdit || isSavedEdit
                                       ? "opacity-100"
-                                      : "opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
+                                      : "opacity-100 sm:opacity-0 sm:group-hover:opacity-100 sm:focus-visible:opacity-100"
                                   }`}
                                 >
                                   {isSavingEdit ? (
@@ -4723,7 +4723,7 @@ export default function ThreadPage() {
                 </div>
               ) : null}
               {thread.platform === "WHATSAPP" ? (
-                <div className="mb-2 flex flex-wrap items-center gap-1.5">
+                <div className="mb-2 flex items-center gap-1.5 overflow-x-auto pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
                   <span className="mr-1 font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3">
                     WhatsApp
                   </span>
@@ -4972,7 +4972,7 @@ export default function ThreadPage() {
                 className="block w-full resize-none border-0 bg-transparent text-[14px] leading-[1.45] text-ink outline-none placeholder:text-ink-4"
                 style={{ minHeight: 44, maxHeight: 160 }}
               />
-              <div className="mt-1.5 flex flex-wrap items-center gap-2">
+              <div className="mt-1.5 flex flex-nowrap items-center gap-2 overflow-x-auto pb-0.5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
                 {/* Memory icon - opens the prior-conversations popover.
                     Compact replacement for the old chip that used to sit
                     above the composer and burn a row of vertical space. */}
@@ -5093,7 +5093,7 @@ export default function ThreadPage() {
                 {/* Tools take a full row of their own on phone (the cluster
                     doesn't fit beside the suggestions pill), right-aligned
                     like the design's composer foot. */}
-                <div className="flex w-full flex-wrap items-center justify-end gap-2 sm:w-auto sm:flex-1">
+                <div className="flex w-auto min-w-max flex-1 flex-nowrap items-center justify-end gap-2">
                   {/* "shorten" / "warmer" rewrite the operator's OWN draft —
                       writing support, shown unless AI help is memory-only. */}
                   {showWritingSupport ? (
@@ -5102,7 +5102,7 @@ export default function ThreadPage() {
                         type="button"
                         disabled={!composer.trim() || transforming !== null}
                         onClick={() => void transform("SHORTEN")}
-                        className="font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3 hover:text-ink disabled:opacity-40"
+                        className="hidden font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3 hover:text-ink disabled:opacity-40 sm:inline"
                       >
                         {transforming === "SHORTEN" ? "shortening…" : "shorten"}
                       </button>
@@ -5110,7 +5110,7 @@ export default function ThreadPage() {
                         type="button"
                         disabled={!composer.trim() || transforming !== null}
                         onClick={() => void transform("MAKE_WARMER")}
-                        className="font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3 hover:text-ink disabled:opacity-40"
+                        className="hidden font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3 hover:text-ink disabled:opacity-40 sm:inline"
                       >
                         {transforming === "MAKE_WARMER" ? "warming…" : "warmer"}
                       </button>
@@ -5392,28 +5392,26 @@ export default function ThreadPage() {
       </div>
 
       {/* ───── Context rail ───── */}
-      {/* Below xl there is no grid column wide enough to live in, so the
-          open rail becomes a right-hand slide-over above the conversation
-          (the design's tablet/phone pattern) — same content, same AI
-          toggle. The backdrop closes it with a tap. */}
+      {/* AI help is a dedicated full-screen workspace on phones, a
+          slide-over on tablets, and a docked rail on wide screens. */}
       {aiOpen ? (
         <button
           type="button"
           aria-label="Close AI assist"
           onClick={() => setAiOpen(false)}
-          className="fixed inset-0 z-30 cursor-default bg-ink/20 xl:hidden"
+          className="fixed inset-0 z-30 hidden cursor-default bg-ink/20 sm:block xl:hidden"
         />
       ) : null}
       <aside
         className={
           aiOpen
-            ? "fixed inset-y-0 right-0 z-40 w-[min(92vw,380px)] overflow-y-auto border-l border-hairline bg-paper shadow-pop xl:static xl:z-auto xl:h-full xl:min-h-0 xl:w-auto xl:border-l-0 xl:bg-paper-2/40 xl:shadow-none"
+            ? "fixed inset-0 z-[70] flex w-full flex-col overflow-hidden bg-paper sm:inset-y-0 sm:left-auto sm:right-0 sm:w-[min(92vw,380px)] sm:border-l sm:border-hairline sm:shadow-pop xl:static xl:z-auto xl:h-full xl:min-h-0 xl:w-auto xl:border-l-0 xl:bg-paper-2/40 xl:shadow-none"
             : "hidden"
         }
       >
-        <div className="flex items-center justify-between border-b border-hairline px-5 py-3 xl:hidden">
+        <div className="flex flex-shrink-0 items-center justify-between border-b border-hairline px-4 pb-3 pt-[calc(12px+env(safe-area-inset-top))] sm:px-5 sm:py-3 xl:hidden">
           <span className="font-mono text-[11px] uppercase tracking-[0.08em] text-ink-3">
-            AI assist
+            AI help
           </span>
           <button
             type="button"
@@ -5424,7 +5422,7 @@ export default function ThreadPage() {
             <X className="h-[16px] w-[16px]" strokeWidth={1.6} />
           </button>
         </div>
-        <div className="flex flex-col gap-7 px-5 py-6 sm:px-7 xl:py-10">
+        <div className="app-main-scroll flex min-h-0 flex-1 flex-col gap-6 overflow-y-auto px-4 pb-[calc(24px+env(safe-area-inset-bottom))] pt-5 sm:gap-7 sm:px-7 sm:py-6 xl:py-10">
           {/* Reply Brief - the single adaptive panel that drives the rail.
               Default visible card carries only Where it stands + On you so
               the operator can read the thread in under 10 seconds; everything

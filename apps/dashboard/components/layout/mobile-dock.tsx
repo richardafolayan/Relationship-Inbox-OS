@@ -31,7 +31,7 @@ export function MobileDock({ attentionCount, onOpenSearch }: MobileDockProps) {
   return (
     <nav
       aria-label="Primary"
-      className="fixed inset-x-0 bottom-0 z-30 flex items-stretch justify-around border-t border-hairline bg-[color-mix(in_oklch,var(--paper)_92%,transparent)] px-2 pb-[env(safe-area-inset-bottom)] backdrop-blur-md backdrop-saturate-150 md:hidden"
+      className="fixed inset-x-0 bottom-0 z-40 flex min-h-[58px] items-stretch justify-around border-t border-hairline bg-[color-mix(in_oklch,var(--paper)_94%,transparent)] px-1 pb-[env(safe-area-inset-bottom)] backdrop-blur-xl backdrop-saturate-150 md:hidden"
     >
       {tabs.slice(0, 2).map((tab) => (
         <DockTab
@@ -44,10 +44,12 @@ export function MobileDock({ attentionCount, onOpenSearch }: MobileDockProps) {
       <button
         type="button"
         onClick={onOpenSearch}
-        className="flex flex-1 flex-col items-center gap-[3px] px-1 pb-[6px] pt-[8px] text-ink-3 transition-colors duration-calm hover:text-ink"
+        className="flex min-h-[58px] flex-1 flex-col items-center justify-center gap-[2px] px-1 py-[5px] text-ink-3 transition-colors duration-calm hover:text-ink"
         aria-label="Search (⌘K)"
       >
-        <Search className="h-[21px] w-[21px]" strokeWidth={1.6} />
+        <span className="grid h-[28px] w-[38px] place-items-center rounded-full">
+          <Search className="h-[21px] w-[21px]" strokeWidth={1.6} />
+        </span>
         <span className="font-mono text-[10px] tracking-[0.04em]">Search</span>
       </button>
       {tabs.slice(2).map((tab) => (
@@ -80,12 +82,17 @@ function DockTab({
       href={href}
       aria-current={active ? "page" : undefined}
       className={cn(
-        "relative flex flex-1 flex-col items-center gap-[3px] px-1 pb-[6px] pt-[8px] transition-colors duration-calm",
+        "relative flex min-h-[58px] flex-1 flex-col items-center justify-center gap-[2px] px-1 py-[5px] transition-colors duration-calm",
         active ? "text-ink" : "text-ink-3 hover:text-ink"
       )}
     >
-      <span className="relative">
-        <Icon className="h-[21px] w-[21px]" strokeWidth={active ? 2 : 1.6} />
+      <span
+        className={cn(
+          "relative grid h-[28px] w-[38px] place-items-center rounded-full transition-colors duration-calm",
+          active ? "bg-accent-soft text-accent-ink" : ""
+        )}
+      >
+        <Icon className="h-[20px] w-[20px]" strokeWidth={active ? 2 : 1.6} />
         {badge > 0 ? (
           // Pilot R-0089 (#756): a small warm count (99+ cap), matching
           // the sidebar. Same attentionCount as Today's "N need you

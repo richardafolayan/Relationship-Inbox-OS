@@ -11,7 +11,7 @@ export function Canvas({ children, className, ...rest }: HTMLAttributes<HTMLDivE
   return (
     <div
       className={cn(
-        "mx-auto w-full max-w-[920px] px-5 pb-[calc(132px+env(safe-area-inset-bottom))] sm:px-8 md:pb-[120px] lg:px-12 3xl:max-w-[1080px]",
+        "mx-auto w-full max-w-[920px] px-4 pb-[calc(76px+env(safe-area-inset-bottom))] sm:px-8 sm:pb-[96px] md:pb-[120px] lg:px-12 3xl:max-w-[1080px]",
         className
       )}
       {...rest}
@@ -35,22 +35,22 @@ interface PageHeadProps {
 // Canvas gutters at every breakpoint so the glass runs edge to edge.
 export function PageHead({ eyebrow, title, subtitle, meta }: PageHeadProps) {
   return (
-    <header className="sticky top-0 z-10 -mx-5 mb-6 flex flex-col gap-1 bg-[color-mix(in_oklch,var(--paper)_95%,transparent)] px-5 pb-3 pt-4 backdrop-blur-md backdrop-saturate-150 sm:-mx-8 sm:flex-row sm:items-baseline sm:justify-between sm:gap-6 sm:px-8 sm:pt-6 lg:-mx-12 lg:px-12">
+    <header className="sticky top-0 z-20 -mx-4 mb-4 flex items-start justify-between gap-3 border-b border-hairline/70 bg-[color-mix(in_oklch,var(--paper)_96%,transparent)] px-4 pb-2.5 pt-3 backdrop-blur-xl backdrop-saturate-150 sm:-mx-8 sm:mb-6 sm:items-baseline sm:gap-6 sm:border-b-0 sm:px-8 sm:pb-3 sm:pt-6 lg:-mx-12 lg:px-12">
       <div className="min-w-0">
         {eyebrow ? (
-          <p className="mb-1 font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">{eyebrow}</p>
+          <p className="mb-0.5 hidden font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3 sm:block">{eyebrow}</p>
         ) : null}
         <div className="flex flex-col gap-y-1">
-          <h1 className="m-0 font-display text-[24px] font-semibold leading-[1.15] tracking-[-0.02em] sm:text-[28px]">
+          <h1 className="m-0 font-display text-[23px] font-semibold leading-[1.15] tracking-[-0.02em] sm:text-[28px]">
             {title}
           </h1>
           {subtitle ? (
-            <p className="m-0 max-w-[60ch] text-[13px] text-ink-2">{subtitle}</p>
+            <p className="m-0 line-clamp-2 max-w-[60ch] text-[12px] leading-[1.35] text-ink-2 sm:line-clamp-none sm:text-[13px]">{subtitle}</p>
           ) : null}
         </div>
       </div>
       {meta ? (
-        <div className="shrink-0 font-mono text-[12px] text-ink-3 sm:text-right">{meta}</div>
+        <div className="max-w-[42%] shrink-0 text-right font-mono text-[10.5px] leading-[1.35] text-ink-3 sm:max-w-none sm:text-[12px]">{meta}</div>
       ) : null}
     </header>
   );
@@ -87,8 +87,8 @@ interface CaughtUpProps {
 // filtered set is empty.
 export function CaughtUp({ title, body }: CaughtUpProps) {
   return (
-    <div className="mt-10 rounded-card border border-dashed border-hairline-strong px-6 py-16 text-center text-ink-3">
-      <h4 className="m-0 mb-2 font-display text-[28px] font-semibold tracking-[-0.022em] text-ink">
+    <div className="mt-6 rounded-card border border-dashed border-hairline-strong px-5 py-10 text-center text-ink-3 sm:mt-10 sm:px-6 sm:py-16">
+      <h4 className="m-0 mb-2 font-display text-[24px] font-semibold tracking-[-0.022em] text-ink sm:text-[28px]">
         {title}
       </h4>
       {body ? <p className="m-0 text-[14px]">{body}</p> : null}
@@ -106,13 +106,13 @@ interface QuietRowProps {
 // Three-column quiet row used on Platforms / Settings / People stub.
 export function QuietRow({ name, stat, status, action }: QuietRowProps) {
   return (
-    <div className="grid grid-cols-[1fr_auto_auto] items-center gap-6 border-t border-hairline px-1 py-[22px] last:border-b last:border-hairline">
+    <div className="grid grid-cols-[1fr_auto] items-center gap-3 border-t border-hairline px-1 py-4 last:border-b last:border-hairline sm:grid-cols-[1fr_auto_auto] sm:gap-6 sm:py-[22px]">
       <div>
         <p className="m-0 font-display text-[18px] font-medium tracking-[-0.012em] text-ink">{name}</p>
         {stat ? <p className="mt-1 font-mono text-[12px] text-ink-3">{stat}</p> : null}
       </div>
-      {status ? <div>{status}</div> : <span />}
-      {action ? <div>{action}</div> : <span />}
+      {status ? <div className="text-right">{status}</div> : <span />}
+      {action ? <div className="col-span-2 sm:col-span-1">{action}</div> : <span />}
     </div>
   );
 }

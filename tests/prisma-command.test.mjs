@@ -58,6 +58,8 @@ test("packaged Windows dashboard starts from its production build directory", ()
     "start",
     win32.join(appDir, "apps", "dashboard"),
     "-p",
-    "3100"
+    "3100",
+    "-H",
+    "127.0.0.1"
   ]);
 });

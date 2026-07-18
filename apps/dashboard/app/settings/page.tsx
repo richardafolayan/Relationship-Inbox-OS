@@ -20,6 +20,7 @@ import { UserVoiceProfile } from "@/components/settings/UserVoiceProfile";
 import { FocusSettingsSection } from "@/components/settings/FocusSettingsSection";
 import { CalendarFocusSection } from "@/components/settings/CalendarFocusSection";
 import { AppUpdates } from "@/components/settings/AppUpdates";
+import { PhoneAccess } from "@/components/settings/PhoneAccess";
 import { WhatsAppConnect } from "@/components/settings/WhatsAppConnect";
 import { PilotWelcomeCard } from "@/components/common/pilot-welcome";
 import { FullDemoSettingsCard } from "@/components/full-demo/FullDemoSettingsCard";
@@ -160,6 +161,7 @@ function tabFromHash(hash: string): SettingsTabId | null {
   const clean = hash.replace(/^#/, "");
   if (isSettingsTabId(clean)) return clean;
   if (clean === "app-updates") return "app";
+  if (clean === "phone") return "app";
   if (clean === "reply-style") return "writing";
   return null;
 }
@@ -210,6 +212,11 @@ export default function SettingsPage() {
             ?.scrollIntoView({ behavior: "smooth", block: "center" });
         }, 0);
         setHighlightUpdates(true);
+      }
+      if (window.location.hash === "#phone") {
+        window.setTimeout(() => {
+          document.getElementById("phone")?.scrollIntoView({ behavior: "smooth", block: "center" });
+        }, 0);
       }
       window.clearTimeout(timer);
       timer = window.setTimeout(() => setHighlightUpdates(false), 2400);
@@ -355,16 +362,16 @@ export default function SettingsPage() {
         }
       />
 
-      <div className="grid gap-7 md:grid-cols-[230px_minmax(0,1fr)] xl:grid-cols-[260px_minmax(0,1fr)] md:items-start">
+      <div className="grid gap-4 sm:gap-7 md:grid-cols-[230px_minmax(0,1fr)] xl:grid-cols-[260px_minmax(0,1fr)] md:items-start">
         <SettingsTabs activeTab={activeTab} onChoose={chooseTab} />
         <section
           aria-labelledby={`settings-tab-${activeTab}`}
           className="min-w-0"
         >
-          <div className="mb-7 border-b border-hairline pb-5">
+          <div className="mb-5 border-b border-hairline pb-4 sm:mb-7 sm:pb-5">
             <h2
               id={`settings-tab-${activeTab}`}
-              className="m-0 text-[25px] font-semibold tracking-[-0.015em] text-ink"
+              className="m-0 text-[22px] font-semibold tracking-[-0.015em] text-ink sm:text-[25px]"
             >
               {activeTabInfo.label}
             </h2>
@@ -532,6 +539,13 @@ export default function SettingsPage() {
 
               <section className="mb-9">
                 <p className="mb-3 font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">
+                  Phone access
+                </p>
+                <PhoneAccess />
+              </section>
+
+              <section className="mb-9">
+                <p className="mb-3 font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">
                   Demo
                 </p>
                 <FullDemoSettingsCard />
@@ -603,7 +617,7 @@ function SettingsTabs({
   return (
     <nav
       aria-label="Settings sections"
-      className="grid grid-cols-2 gap-2 sm:grid-cols-3 md:sticky md:top-[92px] md:grid-cols-1"
+      className="sticky top-[51px] z-10 -mx-4 flex gap-2 overflow-x-auto border-b border-hairline bg-[color-mix(in_oklch,var(--paper)_96%,transparent)] px-4 pb-2 pt-1 backdrop-blur-xl [scrollbar-width:none] [&::-webkit-scrollbar]:hidden sm:static sm:mx-0 sm:grid sm:grid-cols-3 sm:border-b-0 sm:bg-transparent sm:px-0 sm:pb-0 sm:pt-0 sm:backdrop-blur-none md:sticky md:top-[92px] md:grid-cols-1 md:overflow-visible"
     >
       {SETTINGS_TABS.map((tab) => {
         const Icon = tab.icon;
@@ -615,19 +629,19 @@ function SettingsTabs({
             onClick={() => onChoose(tab.id)}
             aria-current={active ? "page" : undefined}
             className={cn(
-              "flex min-w-0 items-start gap-3 rounded-[8px] border px-3 py-[11px] text-left transition-colors duration-calm",
+              "flex min-h-[42px] shrink-0 items-center gap-2 rounded-full border px-3 py-2 text-left transition-colors duration-calm sm:min-w-0 sm:items-start sm:gap-3 sm:rounded-[8px] sm:py-[11px]",
               active
                 ? "border-hairline-strong bg-ink text-paper"
                 : "border-transparent bg-transparent text-ink-2 hover:border-hairline hover:bg-paper-2 hover:text-ink"
             )}
           >
             <Icon
-              className={cn("mt-[1px] h-[17px] w-[17px] shrink-0", active ? "text-paper" : "text-ink-3")}
+              className={cn("h-[16px] w-[16px] shrink-0 sm:mt-[1px] sm:h-[17px] sm:w-[17px]", active ? "text-paper" : "text-ink-3")}
               strokeWidth={1.8}
               aria-hidden
             />
             <span className="min-w-0">
-              <span className="block truncate text-[15px] font-medium">{tab.label}</span>
+              <span className="block whitespace-nowrap text-[13px] font-medium sm:truncate sm:text-[15px]">{tab.label}</span>
               <span
                 className={cn(
                   "mt-[3px] hidden text-[12.5px] leading-[1.35] md:block",

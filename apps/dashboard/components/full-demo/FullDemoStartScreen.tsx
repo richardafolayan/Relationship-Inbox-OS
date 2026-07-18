@@ -64,10 +64,10 @@ export function FullDemoStartScreen({ inboxRows }: { inboxRows: InboxRow[] }) {
   // to a single column; at the Canvas's full 920px the cards sit side
   // by side so the page does not feel empty.
   return (
-    <section className="grid gap-4 md:grid-cols-2">
+    <section className="grid gap-3 sm:gap-4 md:grid-cols-2">
       <button
         type="button"
-        className="flex h-full flex-col rounded-card border border-hairline bg-paper-2 p-6 text-left transition-colors duration-calm hover:border-hairline-strong"
+        className="flex min-h-[160px] flex-col rounded-card border border-hairline bg-paper-2 p-4 text-left transition-colors duration-calm hover:border-hairline-strong sm:h-full sm:p-6"
         onClick={() => void start("sandbox")}
         data-demo-target="full-demo-start-sandbox"
       >
@@ -84,7 +84,7 @@ export function FullDemoStartScreen({ inboxRows }: { inboxRows: InboxRow[] }) {
 
       <button
         type="button"
-        className="flex h-full flex-col rounded-card border border-hairline bg-paper p-6 text-left transition-colors duration-calm hover:border-hairline-strong"
+        className="flex min-h-[160px] flex-col rounded-card border border-hairline bg-paper p-4 text-left transition-colors duration-calm hover:border-hairline-strong sm:h-full sm:p-6"
         onClick={() => setPickingLive(true)}
         data-demo-target="full-demo-start-live"
       >

@@ -102,7 +102,7 @@ export function SelectableThreadRow({
         />
       )}
       <span className="min-w-0">
-        <span className="mb-1 flex items-baseline gap-[10px]">
+        <span className="mb-1 flex min-w-0 flex-wrap items-baseline gap-x-[10px] gap-y-1 pr-14 sm:pr-0">
           <span className="text-[15px] font-medium tracking-[-0.01em] text-ink">{row.personName}</span>
           <span className="rounded bg-paper-2 px-[6px] py-[1px] text-[10px] font-medium uppercase tracking-[0.04em] text-ink-2">
             {PLATFORM_LABEL[row.platform]}
@@ -129,13 +129,13 @@ export function SelectableThreadRow({
         </span>
         <span className="block max-w-[52ch] truncate text-[14px] text-ink-2">{bodyText}</span>
       </span>
-      <span className={`text-[12px] tracking-[-0.005em] ${riskTextClass[risk]}`}>
+      <span className={`absolute right-1 top-4 text-[12px] tracking-[-0.005em] sm:static ${riskTextClass[risk]}`}>
         {rightLabel}
       </span>
     </>
   );
 
-  const className = `group grid grid-cols-[32px_1fr_auto] items-center gap-4 border-t border-hairline px-1 py-[18px] transition-colors duration-calm last:border-b last:border-hairline ${selected ? "bg-paper-2" : "hover:bg-paper-2"}`;
+  const className = `group relative grid grid-cols-[32px_minmax(0,1fr)] items-center gap-3 border-t border-hairline px-1 py-4 transition-colors duration-calm last:border-b last:border-hairline sm:grid-cols-[32px_1fr_auto] sm:gap-4 sm:py-[18px] ${selected ? "bg-paper-2" : "hover:bg-paper-2"}`;
 
   if (selectMode) {
     // role=button div instead of <button> so the NameSuggestionPill's

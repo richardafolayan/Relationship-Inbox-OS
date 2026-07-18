@@ -152,6 +152,7 @@ export default function TodayPage() {
   // First-run pilot welcome card. `undefined` until localStorage is read,
   // so the card never flashes for testers who already dismissed it.
   const [welcomeDismissed, setWelcomeDismissed] = useState<boolean | undefined>(undefined);
+  const [mobileOverviewOpen, setMobileOverviewOpen] = useState(false);
   // First-run pilot tour invite. `undefined` until localStorage is read so
   // the card never flashes for testers who already saw or skipped it.
   const [tourSeen, setTourSeen] = useState<boolean | undefined>(undefined);
@@ -543,22 +544,22 @@ export default function TodayPage() {
 
   return (
     <Canvas
-      className="max-w-[1240px] pb-[calc(96px+env(safe-area-inset-bottom))] md:pb-10 3xl:max-w-[1400px]"
+      className="max-w-[1240px] pb-[calc(76px+env(safe-area-inset-bottom))] sm:pb-[96px] md:pb-10 3xl:max-w-[1400px]"
     >
-      <header className="sticky top-0 z-10 -mx-5 mb-6 flex flex-col gap-1 bg-[color-mix(in_oklch,var(--paper)_95%,transparent)] px-5 pb-3 pt-4 backdrop-blur-md backdrop-saturate-150 sm:-mx-8 sm:flex-row sm:items-baseline sm:justify-between sm:gap-6 sm:px-8 sm:pt-6 lg:-mx-12 lg:px-12">
+      <header className="sticky top-0 z-20 -mx-4 mb-3 flex items-start justify-between gap-3 border-b border-hairline/70 bg-[color-mix(in_oklch,var(--paper)_96%,transparent)] px-4 pb-2.5 pt-3 backdrop-blur-xl backdrop-saturate-150 sm:-mx-8 sm:mb-6 sm:items-baseline sm:gap-6 sm:border-b-0 sm:px-8 sm:pb-3 sm:pt-6 lg:-mx-12 lg:px-12">
         <div className="min-w-0">
-          <p className="mb-1 font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">
+          <p className="mb-0.5 hidden font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3 sm:block">
             {dayLabel}
           </p>
-          <h1 className="m-0 font-display text-[26px] font-semibold leading-[1.1] tracking-[-0.025em] sm:text-[32px]">
+          <h1 className="m-0 truncate font-display text-[23px] font-semibold leading-[1.1] tracking-[-0.025em] sm:text-[32px]">
             {greetingLine}
           </h1>
         </div>
-        <div className="shrink-0 font-mono text-[12px] text-ink-3 sm:text-right">
+        <div className="max-w-[42%] shrink-0 text-right font-mono text-[10.5px] leading-[1.35] text-ink-3 sm:max-w-none sm:text-[12px]">
           <span>
             <strong className="font-medium text-ink">{rows.length}</strong> need you tonight
           </span>
-          <br />
+          <br className="hidden sm:block" />
           last scan {health ? formatRelative(health.lastScanAt) : "never"}
         </div>
       </header>
@@ -611,7 +612,7 @@ export default function TodayPage() {
         <p className="mb-6 rounded-row border border-hairline bg-paper-2 px-4 py-3 text-[12px] leading-[1.5] text-ink-2">{error}</p>
       ) : null}
 
-      <div className="grid min-h-[calc(100vh-140px)] grid-cols-1 gap-8 lg:grid-cols-[1fr_260px]">
+      <div className="grid grid-cols-1 gap-8 lg:min-h-[calc(100vh-140px)] lg:grid-cols-[1fr_260px]">
         {/* Hero column */}
         <div className="flex flex-col">
           {hero ? (
@@ -619,7 +620,7 @@ export default function TodayPage() {
               ref={heroRef}
               data-testid="today-hero"
               data-demo-target="today-hero"
-              className={`relative mb-2 flex cursor-pointer flex-col overflow-hidden rounded-[16px] px-5 pb-[22px] pt-6 transition-opacity duration-300 sm:px-[30px] sm:pt-7 ${heroIsTransitioning ? "opacity-50" : "opacity-100"}`}
+              className={`relative mb-2 flex cursor-pointer flex-col overflow-hidden rounded-[16px] px-3 pb-4 pt-4 transition-opacity duration-300 sm:px-[30px] sm:pb-[22px] sm:pt-7 ${heroIsTransitioning ? "opacity-50" : "opacity-100"}`}
               onClick={() => router.push(`/thread/${hero.id}`)}
             >
               {/* The hero is no longer a white card — per the redesign it
@@ -635,7 +636,7 @@ export default function TodayPage() {
                 }}
               />
               <div className="relative flex flex-col">
-                <p className="mb-[20px] flex items-center gap-[10px] font-mono text-[11px] uppercase tracking-[0.08em] text-accent-ink">
+                <p className="mb-3 flex items-center gap-[10px] font-mono text-[10px] uppercase tracking-[0.08em] text-accent-ink sm:mb-[20px] sm:text-[11px]">
                   <span className="inline-block h-[6px] w-[6px] rounded-full bg-accent" />
                   {heroIsTransitioning ? transitioning?.label ?? "First up" : `First up${META_SEP}1 of ${rows.length}`}
                 </p>
@@ -648,7 +649,7 @@ export default function TodayPage() {
                     guarantee — a long ask can't grow unbounded and push the
                     actions below the fold, because the block height is capped
                     (the font shrinks instead of the card growing). */}
-                <div className="mb-[14px] max-w-[600px]">
+                <div className="mb-3 max-w-[600px] sm:mb-[14px]">
                   <FitText
                     as="h2"
                     maxPx={36}
@@ -660,7 +661,7 @@ export default function TodayPage() {
                     {heroHeadline || "Catching up with someone"}
                   </FitText>
                 </div>
-                <div className="mb-[18px] flex items-center gap-3">
+                <div className="mb-3 flex items-center gap-2.5 sm:mb-[18px] sm:gap-3">
                   <PersonAvatar name={hero.personName} avatarUrl={hero.personAvatarUrl} size={28} />
                   <span className="font-medium text-ink">{hero.personName}</span>
                   {hero.personFavourite ? (
@@ -673,24 +674,24 @@ export default function TodayPage() {
                   ) : null}
                   <span className="font-mono text-[12px] text-ink-3">{heroLabel}</span>
                 </div>
-                <p className="m-0 mb-7 max-w-[68ch] text-balance border-l-2 border-hairline-strong pl-5 text-[17px] leading-[1.55] text-ink-2">
+                <p className="m-0 mb-4 line-clamp-3 max-w-[68ch] border-l-2 border-hairline-strong pl-3 text-[14px] leading-[1.5] text-ink-2 sm:mb-7 sm:line-clamp-none sm:pl-5 sm:text-balance sm:text-[17px] sm:leading-[1.55]">
                   {normalizePreview(hero.preview)}
                 </p>
                 <div
-                  className="relative flex flex-wrap items-center gap-[10px]"
+                  className="relative grid grid-cols-2 items-center gap-2 sm:flex sm:flex-wrap sm:gap-[10px]"
                   onClick={(event) => event.stopPropagation()}
                 >
                   <Button
                     variant="primary"
                     onClick={() => router.push(`/thread/${hero.id}`)}
-                    className="gap-3"
+                    className="col-span-2 w-full justify-center gap-3 sm:w-auto"
                   >
                     Open &amp; reply
                     <KbHint label="↵" tone="primary" />
                   </Button>
                   <Button
                     variant="quiet"
-                    className="gap-3 hover:border-[color-mix(in_oklch,var(--accent)_45%,transparent)] hover:bg-accent-soft hover:text-accent-ink"
+                    className="w-full justify-center gap-3 hover:border-[color-mix(in_oklch,var(--accent)_45%,transparent)] hover:bg-accent-soft hover:text-accent-ink sm:w-auto"
                     onClick={() => {
                       const id = hero.id;
                       const level = hero.riskLevel;
@@ -707,7 +708,7 @@ export default function TodayPage() {
                   </Button>
                   <Button
                     variant="quiet"
-                    className="gap-3 hover:border-[color-mix(in_oklch,var(--accent)_45%,transparent)] hover:bg-accent-soft hover:text-accent-ink"
+                    className="w-full justify-center gap-3 hover:border-[color-mix(in_oklch,var(--accent)_45%,transparent)] hover:bg-accent-soft hover:text-accent-ink sm:w-auto"
                     onClick={() => {
                       const id = hero.id;
                       const level = hero.riskLevel;
@@ -725,7 +726,7 @@ export default function TodayPage() {
                 </div>
 
                 {queuePeek.length > 0 ? (
-                  <div className="mt-[22px] flex items-center gap-[14px] border-t border-hairline pt-[18px] font-mono text-[11px] text-ink-3">
+                  <div className="mt-[22px] hidden items-center gap-[14px] border-t border-hairline pt-[18px] font-mono text-[11px] text-ink-3 sm:flex">
                     <span>after this</span>
                     <span className="flex">
                       {queuePeek.map((row, i) => (
@@ -762,7 +763,7 @@ export default function TodayPage() {
 
           {remaining.length > 0 ? (
             <>
-              <div className="mb-[14px] mt-10 flex items-baseline justify-between px-1">
+              <div className="mb-2 mt-6 flex items-baseline justify-between px-1 sm:mb-[14px] sm:mt-10">
                 <h3 className="m-0 font-display text-[19px] font-semibold tracking-[-0.018em]">
                   Then these, in order
                 </h3>
@@ -798,14 +799,21 @@ export default function TodayPage() {
           ) : null}
         </div>
 
-        {/* Right rail: the focus block + pilot welcome sit above tonight's
-            progress and upcoming birthdays. Per the redesign the rail's lower
-            sections are open titled groups, not boxed cards, so the focus
-            column and the rail read as one calm surface. The rail stacks below
-            the queue on narrow screens (it used to be desktop-only) so the
-            focus entry stays reachable; birthdays render exactly as before. */}
+        {/* Secondary Today context stays one tap away on phones instead of
+            extending the primary reply queue. Wide layouts keep the rail. */}
         <aside>
-          <div className="flex flex-col gap-10 lg:sticky lg:top-[110px]">
+          <button
+            type="button"
+            aria-expanded={mobileOverviewOpen}
+            onClick={() => setMobileOverviewOpen((open) => !open)}
+            className="flex min-h-[44px] w-full items-center justify-between rounded-[12px] border border-hairline px-4 text-left text-[13px] font-medium text-ink lg:hidden"
+          >
+            Focus, progress and birthdays
+            <span className="font-mono text-[16px] text-ink-3" aria-hidden>
+              {mobileOverviewOpen ? "−" : "+"}
+            </span>
+          </button>
+          <div className={`${mobileOverviewOpen ? "mt-6 flex" : "hidden"} flex-col gap-8 lg:sticky lg:top-[110px] lg:mt-0 lg:flex lg:gap-10`}>
             <FocusRailCard rows={rows} />
 
             {welcomeDismissed === false ? (
