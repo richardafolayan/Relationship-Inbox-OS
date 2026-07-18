@@ -84,7 +84,11 @@ import {
 } from "@/lib/quiet-hours";
 import { cn } from "@/lib/utils";
 import { classifyConsumerFailure } from "@/lib/consumer-failure";
-import { isIMessageFullDiskAccessProblem } from "@/lib/platform-setup";
+import {
+  isIMessageFullDiskAccessProblem,
+  platformScanEligible,
+  resolvePlatformPrimaryAction
+} from "@/lib/platform-setup";
 import { startSetupWizard } from "@/lib/setup-wizard";
 import { OptionalComponents } from "@/components/settings/OptionalComponents";
 import { formatRelative } from "@/lib/time";
@@ -179,10 +183,6 @@ const PLATFORM_DISPLAY: Record<PlatformCard["platform"], string> = {
 };
 
 type PlatformActionEndpoint = "open-browser" | "connect" | "scan" | "full-disk-access";
-
-function platformScanEligible(status: PlatformCard["status"]): boolean {
-  return status === "CONNECTED" || status === "DEGRADED" || status === "ERROR";
-}
 
 interface FullDiskAccessResponse {
   message?: string;
@@ -867,6 +867,10 @@ function PlatformSettingsSection({
   const linkedinRow = findRow("LINKEDIN");
   const whatsappRow = findRow("WHATSAPP");
   const imessageNeedsFullDiskAccess = isIMessageFullDiskAccessProblem(imessageRow);
+  const googleMessagesPrimary = googleMessagesRow
+    ? resolvePlatformPrimaryAction(googleMessagesRow)
+    : "connect";
+  const linkedinPrimary = linkedinRow ? resolvePlatformPrimaryAction(linkedinRow) : "connect";
 
   return (
     <section className="mb-9">
@@ -909,19 +913,21 @@ function PlatformSettingsSection({
             title="Google Messages"
             body="Pairs with Google Messages on your Android phone. SMS, MMS, and RCS stay user-triggered."
             primaryLabel={
-              platformScanEligible(googleMessagesRow.status)
+              googleMessagesPrimary === "scan"
                 ? "Scan now"
-                : "Pair Android phone"
+                : googleMessagesPrimary === "reconnect"
+                  ? "Reconnect"
+                  : "Pair Android phone"
             }
             busy={busy === "GOOGLE_MESSAGES"}
             onPrimary={() =>
               onAction(
                 "GOOGLE_MESSAGES",
-                platformScanEligible(googleMessagesRow.status) ? "scan" : "connect"
+                googleMessagesPrimary === "scan" ? "scan" : "connect"
               )
             }
             moreItems={
-              platformScanEligible(googleMessagesRow.status)
+              googleMessagesPrimary === "scan"
                 ? [
                     {
                       label: "Open Google Messages",
@@ -936,7 +942,16 @@ function PlatformSettingsSection({
                         ]
                       : [])
                   ]
-                : undefined
+                : [
+                    {
+                      label: "Open Google Messages",
+                      onSelect: () => onAction("GOOGLE_MESSAGES", "open-browser")
+                    },
+                    {
+                      label: "Scan now",
+                      onSelect: () => onAction("GOOGLE_MESSAGES", "scan")
+                    }
+                  ]
             }
           />
         ) : null}
@@ -950,17 +965,18 @@ function PlatformSettingsSection({
                 : "Uses your normal Chrome session. Sign in there first."
             }
             primaryLabel={
-              platformScanEligible(linkedinRow.status) ? "Scan now" : "Connect LinkedIn"
+              linkedinPrimary === "scan"
+                ? "Scan now"
+                : linkedinPrimary === "reconnect"
+                  ? "Reconnect"
+                  : "Connect LinkedIn"
             }
             busy={busy === "LINKEDIN"}
             onPrimary={() =>
-              onAction(
-                "LINKEDIN",
-                platformScanEligible(linkedinRow.status) ? "scan" : "connect"
-              )
+              onAction("LINKEDIN", linkedinPrimary === "scan" ? "scan" : "connect")
             }
             moreItems={
-              platformScanEligible(linkedinRow.status)
+              linkedinPrimary === "scan"
                 ? [
                     {
                       label: "Open LinkedIn",
@@ -975,6 +991,10 @@ function PlatformSettingsSection({
                     {
                       label: "Open LinkedIn",
                       onSelect: () => onAction("LINKEDIN", "open-browser")
+                    },
+                    {
+                      label: "Scan now",
+                      onSelect: () => onAction("LINKEDIN", "scan")
                     }
                   ]
             }
@@ -1035,9 +1055,11 @@ function PlatformSetupCard({
             : "Not connected";
   const lastScanLabel = row?.lastScanAt
     ? `Last scanned ${formatRelative(row.lastScanAt)}`
-    : platformScanEligible(status)
+    : row && platformScanEligible(row)
       ? "Not scanned yet"
-      : null;
+      : status === "ERROR"
+        ? "Not scanned yet"
+        : null;
   const secondaryItems = moreItems ?? [];
 
   return (
