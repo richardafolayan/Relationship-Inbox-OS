@@ -31,6 +31,12 @@ interface ReplyBriefPanelProps {
    * to ActionItemsChecklist when the checklist is gated open.
    */
   aiCoverageMode?: "auto-tick" | "highlight" | "off";
+  /**
+   * Issue #898. When the thread screen already shows the reply brief band,
+   * tuck the narrative situation summary behind More so AI Assist does not
+   * repeat the same paragraph at equal weight.
+   */
+  subordinateContext?: boolean;
 }
 
 // The thread right-rail Reply Brief. Default visible card holds only
@@ -51,7 +57,8 @@ export function ReplyBriefPanel({
   dismissedOpenLoops,
   onDismissLoop,
   aiCoverageItems,
-  aiCoverageMode = "off"
+  aiCoverageMode = "off",
+  subordinateContext = false
 }: ReplyBriefPanelProps) {
   const [moreOpen, setMoreOpen] = useState(false);
   const moreId = useId();
@@ -74,12 +81,18 @@ export function ReplyBriefPanel({
     [brief.they_said]
   );
 
+  // When the thread brief band already surfaces "Where it stands", keep it
+  // in the More disclosure so AI Assist leads with action + evidence only.
+  const showWhereInline = Boolean(where) && !subordinateContext;
+  const showWhereInMore = Boolean(where) && subordinateContext;
+  const showMoreDisclosure = hasMore || showWhereInMore;
+
   return (
     <section
       data-testid="reply-brief"
       data-demo-target="reply-brief"
       data-tour="reply-brief"
-      className="flex flex-col gap-7"
+      className={cn("flex flex-col", subordinateContext ? "gap-5" : "gap-7")}
     >
       {/* Reply job — leads the rail with the action this reply must do
           (#388), sourced from brief.on_you. The data anchors are kept so
@@ -137,8 +150,9 @@ export function ReplyBriefPanel({
       ) : null}
 
       {/* Where it stands — narrative summary, demoted below the action
-          sections (#388). Kept for operators who still want the prose. */}
-      {where ? (
+          sections (#388). Kept for operators who still want the prose.
+          When subordinateContext is on, it lives inside More instead. */}
+      {showWhereInline ? (
         <div data-demo-target="reply-brief-where-it-stands" data-tour="reply-brief-where-it-stands">
           <p className="mb-2 font-mono text-[11px] uppercase tracking-[0.08em] text-ink-3">
             Where it stands
@@ -147,7 +161,7 @@ export function ReplyBriefPanel({
         </div>
       ) : null}
 
-      {hasMore ? (
+      {showMoreDisclosure ? (
         <div>
           <button
             type="button"
@@ -169,6 +183,15 @@ export function ReplyBriefPanel({
 
           {moreOpen ? (
             <div id={moreId} className="mt-4 flex flex-col gap-6">
+              {showWhereInMore ? (
+                <div data-demo-target="reply-brief-where-it-stands" data-tour="reply-brief-where-it-stands">
+                  <p className="mb-2 font-mono text-[11px] uppercase tracking-[0.08em] text-ink-3">
+                    Where it stands
+                  </p>
+                  <p className="m-0 text-[14px] leading-[1.55] text-ink">{where}</p>
+                </div>
+              ) : null}
+
               {brief.optional_followups.length > 0 ? (
                 <div>
                   <p className="mb-2 font-mono text-[11px] uppercase tracking-[0.08em] text-ink-3">

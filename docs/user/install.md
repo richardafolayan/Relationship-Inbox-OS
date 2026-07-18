@@ -138,6 +138,20 @@ Do not start several copies. The Electron shell enforces one instance, but
 the browser launcher can still meet an already-running source process on the
 same ports.
 
+## Use Tovi on your phone
+
+1. Open Tovi from Applications or Launchpad on the computer.
+2. In Tovi, open **Settings > App > Phone access**.
+3. Scan the QR code with the phone camera, or copy the private address into
+   Safari. The phone and computer must be on the same private Wi-Fi network.
+4. Keep Tovi open and keep the computer awake while using it on the phone.
+
+Phone access does not require Terminal. Tovi creates a private access key on
+the computer and requires it before forwarding any dashboard request. The
+normal dashboard and local message service remain bound to the computer only.
+Do not share the private address, and do not use phone access on a public or
+untrusted Wi-Fi network. Quitting Tovi closes phone access.
+
 ## Update
 
 Use Settings, App updates, Check for updates. A source installation offers

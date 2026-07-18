@@ -95,6 +95,16 @@ AI-derived thread state, drafts, send requests, audit receipts, and
 transcription state all persist there. WAL mode is enabled best-effort at
 runner startup so readers can continue while one writer appends.
 
+### Phone access
+
+The shared launcher starts an authenticated HTTP proxy for phones on the same
+private network. The dashboard and runner stay bound to `127.0.0.1`; only the
+phone proxy listens on the LAN. A random access key is stored in the launcher's
+state directory and paired through a private URL, after which the proxy uses an
+HTTP-only, same-site cookie. Quitting Tovi closes the proxy. The dashboard's
+Settings page discovers the current private IPv4 address at request time and
+renders both the pairing link and a QR code.
+
 The complete model and storage map is in
 [database and storage](../developer/data-and-storage.md).
 

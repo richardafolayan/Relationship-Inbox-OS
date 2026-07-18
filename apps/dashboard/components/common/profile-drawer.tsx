@@ -198,12 +198,12 @@ export function ProfileDrawer({ open, personId, onClose }: ProfileDrawerProps) {
       onClick={onClose}
     >
       <div
-        className="absolute right-0 top-0 flex h-full w-full max-w-2xl flex-col border-l border-hairline bg-paper p-7 shadow-pop"
+        className="absolute inset-0 flex h-full w-full flex-col overflow-hidden bg-paper px-4 pb-[env(safe-area-inset-bottom)] pt-[env(safe-area-inset-top)] sm:inset-y-0 sm:left-auto sm:right-0 sm:max-w-2xl sm:border-l sm:border-hairline sm:p-7 sm:shadow-pop"
         onClick={(event) => event.stopPropagation()}
       >
-        <div className="mb-4 flex items-center justify-between">
-          <p className="font-mono text-[11px] uppercase tracking-[0.08em] text-ink-3">Profile</p>
-          <div className="flex items-center gap-2">
+        <div className="mb-3 flex min-h-[56px] flex-shrink-0 items-center justify-between gap-2 border-b border-hairline sm:mb-4 sm:min-h-0 sm:border-b-0">
+          <p className="font-display text-[20px] font-semibold tracking-[-0.02em] text-ink sm:font-mono sm:text-[11px] sm:font-normal sm:uppercase sm:tracking-[0.08em] sm:text-ink-3">Profile</p>
+          <div className="flex min-w-0 items-center justify-end gap-1 sm:gap-2">
             {/* Favourite toggle (R-0066 / #483). Pins the contact so their
                 threads float to the top of the Inbox / Today. */}
             <Button
@@ -211,22 +211,23 @@ export function ProfileDrawer({ open, personId, onClose }: ProfileDrawerProps) {
               disabled={!detail || favSaving}
               onClick={() => void toggleFavourite()}
               aria-pressed={favourite}
-              className={cn(favourite ? "text-accent" : "")}
+              aria-label={favourite ? "Remove favourite" : "Favourite this contact"}
+              className={cn("px-2 sm:px-3", favourite ? "text-accent" : "")}
             >
               <Star
                 className="h-[14px] w-[14px]"
                 strokeWidth={1.6}
                 fill={favourite ? "currentColor" : "none"}
               />
-              {favourite ? "Favourited" : "Favourite"}
+              <span className="hidden sm:inline">{favourite ? "Favourited" : "Favourite"}</span>
             </Button>
-            <Button variant="quiet" disabled={refreshing || !detail?.person.profileUrl} onClick={rescan}>
+            <Button variant="quiet" className="px-2 sm:px-3" disabled={refreshing || !detail?.person.profileUrl} onClick={rescan} aria-label="Rescan profile">
               {refreshing ? (
                 <Loader2 className="h-[14px] w-[14px] animate-spin" />
               ) : (
                 <RefreshCw className="h-[14px] w-[14px]" strokeWidth={1.6} />
               )}
-              {refreshing ? "Rescanning…" : "Rescan"}
+              <span className="hidden sm:inline">{refreshing ? "Rescanning…" : "Rescan"}</span>
             </Button>
             <Button variant="ghost" onClick={onClose} aria-label="Close">
               <X className="h-4 w-4" />
@@ -238,7 +239,7 @@ export function ProfileDrawer({ open, personId, onClose }: ProfileDrawerProps) {
           <p className="mb-4 rounded-row border border-hairline bg-paper-2 px-3 py-2 text-[12px] leading-[1.45] text-ink-2">{error}</p>
         ) : null}
 
-        <div className="flex-1 overflow-y-auto pb-8">
+        <div className="app-main-scroll min-h-0 flex-1 overflow-y-auto pb-8">
           {loading && !detail ? (
             <p className="text-[13px] text-ink-3">Loading…</p>
           ) : detail ? (

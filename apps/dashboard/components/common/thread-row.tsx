@@ -79,7 +79,7 @@ export function ThreadRow({ row, onPersonChanged, id }: ThreadRowProps) {
       // and touch input still open an already-warm thread.
       onPointerDown={() => prefetchThreadDataNow(row.id)}
       data-demo-target={row.platformThreadId ? `thread-row-${row.platformThreadId}` : undefined}
-      className="group grid grid-cols-[32px_1fr_auto] items-center gap-4 border-t border-hairline px-1 py-[18px] transition-colors duration-calm last:border-b last:border-hairline hover:bg-paper-2"
+      className="group relative grid min-h-[76px] grid-cols-[32px_minmax(0,1fr)] items-center gap-3 border-t border-hairline px-1 py-4 transition-colors duration-calm last:border-b last:border-hairline hover:bg-paper-2 sm:grid-cols-[32px_1fr_auto] sm:gap-4 sm:py-[18px]"
     >
       <PersonAvatar
         name={row.personName}
@@ -87,9 +87,9 @@ export function ThreadRow({ row, onPersonChanged, id }: ThreadRowProps) {
         size={32}
         className="text-[12px]"
       />
-      <span className="min-w-0">
-        <span className="mb-1 flex items-baseline gap-[10px]">
-          <span className="text-[15px] font-medium tracking-[-0.01em] text-ink">{row.personName}</span>
+      <span className="min-w-0 pr-[68px] sm:pr-0">
+        <span className="mb-1 flex min-w-0 flex-wrap items-center gap-x-[8px] gap-y-1">
+          <span className="min-w-0 max-w-full truncate text-[15px] font-medium tracking-[-0.01em] text-ink">{row.personName}</span>
           {row.personFavourite ? (
             // Favourite marker (R-0066 / #483). Subtle filled star so a pinned
             // contact reads at a glance in the queue.
@@ -121,7 +121,7 @@ export function ThreadRow({ row, onPersonChanged, id }: ThreadRowProps) {
           {/* Metadata tags are space-separated (no glyph) — the row-top
               flex gap provides the spacing. */}
           {categoryLabel ? (
-            <span className="font-mono text-[11px] tracking-[0.02em] text-ink-3">
+            <span className="hidden font-mono text-[11px] tracking-[0.02em] text-ink-3 sm:inline">
               {categoryLabel}
             </span>
           ) : null}
@@ -132,7 +132,7 @@ export function ThreadRow({ row, onPersonChanged, id }: ThreadRowProps) {
           ) : null}
           {birthdayMarker ? (
             <span
-              className={`font-mono text-[11px] tracking-[0.02em] ${
+              className={`hidden font-mono text-[11px] tracking-[0.02em] sm:inline ${
                 birthdayDays === 0 ? "text-accent-ink" : "text-ink-3"
               }`}
             >
@@ -141,7 +141,7 @@ export function ThreadRow({ row, onPersonChanged, id }: ThreadRowProps) {
           ) : null}
           {row.personThreadCount && row.personThreadCount > 1 ? (
             <span
-              className="font-mono text-[11px] tracking-[0.02em] text-ink-3"
+              className="hidden font-mono text-[11px] tracking-[0.02em] text-ink-3 sm:inline"
               title="Same contact has multiple separate conversations visible"
             >
               {row.personThreadCount} threads
@@ -162,7 +162,7 @@ export function ThreadRow({ row, onPersonChanged, id }: ThreadRowProps) {
           {bodyText}
         </span>
       </span>
-      <span className={`text-[12px] tracking-[-0.005em] ${riskTextClass[risk]}`}>
+      <span className={`absolute right-1 top-[18px] text-[11px] tracking-[-0.005em] sm:static sm:text-[12px] ${riskTextClass[risk]}`}>
         {rightLabel}
       </span>
     </Link>

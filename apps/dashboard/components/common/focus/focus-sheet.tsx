@@ -37,16 +37,16 @@ export function FocusSheet({
 
   return (
     <div
-      className="fixed inset-0 z-[120] flex items-start justify-center overflow-y-auto bg-ink/30 px-5 py-[7vh] backdrop-blur-sm"
+      className="fixed inset-0 z-[120] flex items-stretch justify-center overflow-hidden bg-paper p-0 sm:items-start sm:overflow-y-auto sm:bg-ink/30 sm:px-5 sm:py-[7vh] sm:backdrop-blur-sm"
       role="dialog"
       aria-modal="true"
       onClick={onClose}
     >
       <div
-        className="w-full max-w-[520px] overflow-hidden rounded-card border border-hairline-strong bg-paper shadow-pop"
+        className="app-main-scroll h-full w-full max-w-[520px] overflow-y-auto bg-paper pb-[env(safe-area-inset-bottom)] pt-[env(safe-area-inset-top)] sm:h-auto sm:overflow-hidden sm:rounded-card sm:border sm:border-hairline-strong sm:p-0 sm:shadow-pop"
         onClick={(event) => event.stopPropagation()}
       >
-        <div className="relative px-6 pt-[22px]">
+        <div className="relative px-4 pt-[18px] sm:px-6 sm:pt-[22px]">
           <p className="flex items-center gap-[7px] font-mono text-[10.5px] uppercase tracking-[0.1em] text-accent-ink">
             <Moon className="h-[13px] w-[13px]" strokeWidth={1.7} />
             {eyebrow}
@@ -71,9 +71,9 @@ export function FocusSheet({
             <X className="h-[14px] w-[14px]" strokeWidth={1.8} />
           </button>
         </div>
-        <div className="px-6 pb-2 pt-4">{children}</div>
+        <div className="px-4 pb-2 pt-4 sm:px-6">{children}</div>
         {footer ? (
-          <div className="flex items-center gap-[10px] px-6 pb-5 pt-3">{footer}</div>
+          <div className="flex flex-wrap items-center gap-[10px] px-4 pb-5 pt-3 sm:px-6">{footer}</div>
         ) : null}
       </div>
     </div>

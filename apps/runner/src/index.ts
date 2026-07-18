@@ -121,6 +121,7 @@ import {
   runUpdateCheck,
   stagePendingUpdate
 } from "./services/system-update";
+import { resolveHostDeviceInfo } from "./services/host-device";
 import {
   LINKEDIN_VOICE_MIME,
   hasLinkedInVoice,
@@ -2030,6 +2031,18 @@ app.get("/health", asyncRoute(async (_req, res) => {
     queueDepth: scanQueue.getQueueDepth(),
     connectedPlatforms,
     availablePlatforms: runnerConfig.availablePlatforms,
+    // Host machine identity for phone Settings and App updates.
+    // Resolved once in services/host-device so hostname/ComputerName logic is
+    // not duplicated across /health and /system/version / update-check.
+    hostDevice: (() => {
+      const host = resolveHostDeviceInfo();
+      return {
+        hostname: host.hostname,
+        platform: host.platform,
+        label: host.label,
+        kind: host.kind
+      };
+    })(),
     // Current platform being scanned, if any. Drives the status bar's
     // "Scanning <platform>" label so it stops claiming "linkedin" when
     // an iMessage scan is running.
@@ -2611,13 +2624,24 @@ app.post("/control/setup/transcription", asyncRoute(async (req, res) => {
 // again after this runner and the dashboard shut down.
 
 app.get("/system/version", asyncRoute(async (_req, res) => {
-  res.json(readAppVersion(projectRoot));
+  const version = readAppVersion(projectRoot);
+  const host = resolveHostDeviceInfo();
+  res.json({
+    ...version,
+    hostDeviceLabel: host.label,
+    hostDeviceKind: host.kind
+  });
 }));
 
 app.get("/system/update-check", asyncRoute(async (_req, res) => {
   const packaged = process.env.RIOS_PACKAGED_APP === "1";
   const settings = await settingsStore.getSettings();
   const feedUrl = resolveUpdateFeedUrl(projectRoot, runnerConfig.updateFeedUrl);
+  const host = resolveHostDeviceInfo();
+  const hostFields = {
+    hostDeviceLabel: host.label,
+    hostDeviceKind: host.kind
+  };
   if (!feedUrl) {
     const current = readAppVersion(projectRoot);
     res.json({
@@ -2627,18 +2651,27 @@ app.get("/system/update-check", asyncRoute(async (_req, res) => {
       currentReleaseNotes: current.releaseNotes ?? [],
       latestVersion: current.version,
       updateAvailable: false,
-      releaseNotes: []
+      releaseNotes: [],
+      commit: current.commit,
+      channel: current.channel,
+      build: current.build,
+      ...hostFields
     });
     return;
   }
   const result = await runUpdateCheck({ projectRoot, feedUrl });
+  const current = readAppVersion(projectRoot);
   res.json({
     configured: true,
     automaticUpdates: settings.automaticUpdates,
     // Dev-channel packaged installs self-update in place (quit, swap, relaunch);
     // student packaged installs still ask for a DMG reinstall.
     applyMode: packaged && !canSelfUpdateInPlace(projectRoot, packaged) ? "replace_app" : "automatic",
-    ...result
+    ...result,
+    commit: current.commit,
+    channel: current.channel,
+    build: current.build,
+    ...hostFields
   });
 }));
 
@@ -2783,6 +2816,12 @@ const automaticUpdateScheduler = createAutomaticUpdateScheduler({
 });
 
 app.post("/control/settings", asyncRoute(async (req, res) => {
+  const quietHoursWindowSchema = z
+    .object({
+      start: z.string().regex(/^\d{1,2}:\d{2}$/),
+      end: z.string().regex(/^\d{1,2}:\d{2}$/)
+    })
+    .optional();
   const payload = z
     .object({
       scanIntervalSeconds: z.number().int().min(10).max(3600).optional(),
@@ -2802,7 +2841,10 @@ app.post("/control/settings", asyncRoute(async (req, res) => {
       // but accept either here defensively. Length cap matches typical model
       // ids while preventing accidental megabyte payloads.
       glmModel: z.string().max(100).optional(),
-      geminiModel: z.string().max(100).optional()
+      geminiModel: z.string().max(100).optional(),
+      // Shared host quiet hours: phone Settings and Mac AppShell scan path.
+      quietHoursEnabled: z.boolean().optional(),
+      quietHoursWindow: quietHoursWindowSchema
     })
     .parse(req.body);
 

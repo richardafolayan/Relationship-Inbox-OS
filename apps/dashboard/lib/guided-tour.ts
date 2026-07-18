@@ -62,6 +62,28 @@ export const CARD_GAP = 14;
 /** Inner viewport margin. The card never sits closer than this to any edge. */
 export const VIEWPORT_MARGIN = 24;
 
+/**
+ * Matches Tailwind `sm` (640px). Below this the tour uses a stable bottom
+ * coach sheet instead of a floating desktop tooltip.
+ */
+export const MOBILE_TOUR_BREAKPOINT = 640;
+/** Default reserved height for the mobile coach sheet when unmeasured. */
+export const MOBILE_COACH_SHEET_HEIGHT = 220;
+/** Gap between the spotlighted target and the coach sheet. */
+export const MOBILE_TARGET_SHEET_GAP = 16;
+/** Approximate mobile dock height excluding safe-area inset. */
+export const MOBILE_DOCK_HEIGHT = 56;
+/** Spotlight padding around the target rect. */
+export const SPOTLIGHT_PAD = 6;
+
+/** Window event: primary tour surface opened or closed. */
+export const GUIDED_TOUR_SURFACE_EVENT = "guided-tour-surface";
+/**
+ * Session flag so non-React helpers (notification planning, list freeze)
+ * can read tour activity without a React tree.
+ */
+export const GUIDED_TOUR_SURFACE_ACTIVE_KEY = "relationship-inbox-os:guided-tour-surface-active:v1";
+
 // ── Anchor resolution ──────────────────────────────────────────────────
 
 /**
@@ -308,6 +330,243 @@ export function prevStepIndex(_steps: GuidedTourStep[], current: number): number
 
 export function isLastStep(steps: GuidedTourStep[], current: number): boolean {
   return current >= steps.length - 1;
+}
+
+// ── Mobile coach layout ────────────────────────────────────────────────
+
+export function isMobileTourViewport(width: number): boolean {
+  return width > 0 && width < MOBILE_TOUR_BREAKPOINT;
+}
+
+export interface SafeInsets {
+  top: number;
+  right: number;
+  bottom: number;
+  left: number;
+}
+
+export interface MobileCoachLayoutInput {
+  /** Anchor rect in viewport coords. Null = no target. */
+  rect: { top: number; left: number; width: number; height: number; bottom?: number; right?: number } | null;
+  viewport: { width: number; height: number };
+  /** Measured coach sheet height (content). */
+  sheetHeight: number;
+  /** env(safe-area-inset-*) values in CSS pixels. */
+  safeInsets?: Partial<SafeInsets>;
+  /** True when the bottom mobile dock is visible (hidden inside threads). */
+  dockVisible?: boolean;
+  /** Keyboard / visual-viewport bottom inset (CSS pixels). */
+  keyboardInset?: number;
+}
+
+export type MobileCoachMode = "sheet" | "fullscreen";
+
+export interface MobileCoachLayout {
+  mode: MobileCoachMode;
+  /** Top edge of the fixed coach sheet. */
+  sheetTop: number;
+  /** Bottom padding reserved under the sheet (safe area + dock + keyboard). */
+  sheetBottomInset: number;
+  /**
+   * Visible band available for the spotlighted target (above the sheet).
+   * Scroll should keep the target fully inside this band.
+   */
+  targetBand: { top: number; bottom: number; height: number };
+  /** True when the target would be covered by the sheet or is unusable. */
+  needsFullscreen: boolean;
+  /** Whether a spotlight ring should render. */
+  showSpotlight: boolean;
+}
+
+/**
+ * Deterministic mobile coach placement. The sheet sits at the bottom of
+ * the visual viewport (above safe area, dock, and keyboard). The target
+ * must fit entirely in the band above the sheet with a small gap; otherwise
+ * the step falls back to a full-screen explainer so the sheet never covers
+ * its own highlight.
+ */
+export function computeMobileCoachLayout(input: MobileCoachLayoutInput): MobileCoachLayout {
+  const safeTop = Math.max(0, input.safeInsets?.top ?? 0);
+  const safeBottom = Math.max(0, input.safeInsets?.bottom ?? 0);
+  const dock = input.dockVisible ? MOBILE_DOCK_HEIGHT : 0;
+  const keyboard = Math.max(0, input.keyboardInset ?? 0);
+  const sheetBottomInset = safeBottom + dock + keyboard;
+  const sheetHeight = Math.max(120, input.sheetHeight || MOBILE_COACH_SHEET_HEIGHT);
+  const vh = input.viewport.height;
+  const sheetTop = Math.max(safeTop + 48, vh - sheetBottomInset - sheetHeight);
+  const targetBandTop = safeTop + VIEWPORT_MARGIN;
+  const targetBandBottom = sheetTop - MOBILE_TARGET_SHEET_GAP;
+  const targetBandHeight = targetBandBottom - targetBandTop;
+
+  if (!input.rect) {
+    return {
+      mode: "fullscreen",
+      sheetTop: Math.max(safeTop, Math.round(vh * 0.18)),
+      sheetBottomInset,
+      targetBand: { top: targetBandTop, bottom: targetBandBottom, height: Math.max(0, targetBandHeight) },
+      needsFullscreen: true,
+      showSpotlight: false
+    };
+  }
+
+  const rectBottom = input.rect.bottom ?? input.rect.top + input.rect.height;
+  const rectTop = input.rect.top;
+  const targetHeight = rectBottom - rectTop;
+  const fitsInBand =
+    targetBandHeight >= targetHeight + SPOTLIGHT_PAD * 2 &&
+    targetBandHeight >= 80;
+
+  // Target fully outside the viewport (or only a sliver left) → fullscreen.
+  const fullyOffscreen =
+    rectBottom <= targetBandTop ||
+    rectTop >= targetBandBottom ||
+    input.rect.left + input.rect.width <= 0 ||
+    input.rect.left >= input.viewport.width;
+
+  if (!fitsInBand || fullyOffscreen) {
+    return {
+      mode: "fullscreen",
+      sheetTop: Math.max(safeTop, Math.round(vh * 0.12)),
+      sheetBottomInset,
+      targetBand: { top: targetBandTop, bottom: targetBandBottom, height: Math.max(0, targetBandHeight) },
+      needsFullscreen: true,
+      showSpotlight: false
+    };
+  }
+
+  return {
+    mode: "sheet",
+    sheetTop,
+    sheetBottomInset,
+    targetBand: { top: targetBandTop, bottom: targetBandBottom, height: targetBandHeight },
+    needsFullscreen: false,
+    showSpotlight: true
+  };
+}
+
+/**
+ * Whether the target currently sits fully inside the safe band above the
+ * coach sheet (with spotlight pad). Used to decide if a scroll is needed.
+ */
+export function isTargetInTourBand(
+  rect: { top: number; height: number; bottom?: number },
+  band: { top: number; bottom: number }
+): boolean {
+  const bottom = rect.bottom ?? rect.top + rect.height;
+  return rect.top >= band.top + SPOTLIGHT_PAD && bottom <= band.bottom - SPOTLIGHT_PAD;
+}
+
+/**
+ * Desired vertical scroll delta (in CSS pixels) so `rect` lands inside
+ * `band`, preferring a centered placement within the band. Positive means
+ * scroll the document down (content moves up). Returns 0 when already ok.
+ */
+export function computeTourScrollDelta(
+  rect: { top: number; height: number; bottom?: number },
+  band: { top: number; bottom: number }
+): number {
+  const bottom = rect.bottom ?? rect.top + rect.height;
+  if (isTargetInTourBand(rect, band)) return 0;
+  const bandMid = (band.top + band.bottom) / 2;
+  const rectMid = (rect.top + bottom) / 2;
+  return Math.round(rectMid - bandMid);
+}
+
+// ── Tour surface lifecycle (overlay freeze / conflict rules) ───────────
+
+export interface GuidedTourSurfaceDetail {
+  active: boolean;
+  variant?: "pilot" | "presenter";
+}
+
+export function setGuidedTourSurfaceActive(
+  active: boolean,
+  options: { variant?: "pilot" | "presenter"; storage?: { setItem(k: string, v: string): void; removeItem(k: string): void } } = {}
+): void {
+  const storage = options.storage ?? (typeof window !== "undefined" ? window.sessionStorage : null);
+  if (storage) {
+    if (active) storage.setItem(GUIDED_TOUR_SURFACE_ACTIVE_KEY, "1");
+    else storage.removeItem(GUIDED_TOUR_SURFACE_ACTIVE_KEY);
+  }
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(
+      new CustomEvent<GuidedTourSurfaceDetail>(GUIDED_TOUR_SURFACE_EVENT, {
+        detail: { active, variant: options.variant }
+      })
+    );
+  }
+}
+
+export function isGuidedTourSurfaceActive(
+  storage?: { getItem(k: string): string | null } | null
+): boolean {
+  const store =
+    storage ?? (typeof window !== "undefined" ? window.sessionStorage : null);
+  if (!store) return false;
+  return store.getItem(GUIDED_TOUR_SURFACE_ACTIVE_KEY) === "1";
+}
+
+/** Live banners / new-message toasts stay quiet while the tour is open. */
+export function shouldQueueLiveBanner(tourActive: boolean): boolean {
+  return tourActive;
+}
+
+/** List order and counts freeze for the active step. */
+export function shouldFreezeLiveListUpdates(tourActive: boolean): boolean {
+  return tourActive;
+}
+
+/**
+ * Hold the previous stable list while the tour is active so live refetches
+ * cannot replace or reorder the spotlighted row mid-step. When the tour
+ * ends, pass through the latest list again.
+ */
+export function resolveFrozenListRows<T>(input: {
+  tourActive: boolean;
+  nextRows: T[];
+  frozenRows: T[] | null;
+}): { rows: T[]; nextFrozen: T[] | null } {
+  if (!input.tourActive) {
+    return { rows: input.nextRows, nextFrozen: null };
+  }
+  if (input.frozenRows && input.frozenRows.length > 0) {
+    return { rows: input.frozenRows, nextFrozen: input.frozenRows };
+  }
+  // Capture the first non-empty snapshot after the tour starts.
+  if (input.nextRows.length > 0) {
+    return { rows: input.nextRows, nextFrozen: input.nextRows };
+  }
+  return { rows: input.nextRows, nextFrozen: input.frozenRows };
+}
+
+export interface TourOverlayConflictInput {
+  tourActive: boolean;
+  aiAssistOpen: boolean;
+  paletteOpen: boolean;
+}
+
+export interface TourOverlayConflictPlan {
+  /** Close AI Assist so it cannot stack under the coach sheet. */
+  closeAiAssist: boolean;
+  /** Close the command palette / search overlay. */
+  closePalette: boolean;
+  /** Reject opening the palette while the tour owns the surface. */
+  blockPaletteOpen: boolean;
+}
+
+/**
+ * Primary overlay rules for the walkthrough. Opening the tour suspends
+ * AI Assist and Search; while active they cannot re-stack on top of it.
+ */
+export function planTourOverlayConflicts(input: TourOverlayConflictInput): TourOverlayConflictPlan {
+  if (!input.tourActive) {
+    return { closeAiAssist: false, closePalette: false, blockPaletteOpen: false };
+  }
+  return {
+    closeAiAssist: input.aiAssistOpen,
+    closePalette: input.paletteOpen,
+    blockPaletteOpen: true
+  };
 }
 
 // ── Util ──────────────────────────────────────────────────────────────

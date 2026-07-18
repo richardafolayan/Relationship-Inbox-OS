@@ -153,8 +153,8 @@ export function SetupWizard() {
   if (!open) return null;
 
   return (
-    <div role="dialog" aria-modal="true" aria-label={`Set up ${APP_NAME}`} data-testid="setup-wizard" className="fixed inset-0 z-[100] overflow-y-auto bg-paper">
-      <div className="mx-auto flex min-h-full w-full max-w-[720px] flex-col px-5 py-8 sm:py-12">
+    <div role="dialog" aria-modal="true" aria-label={`Set up ${APP_NAME}`} data-testid="setup-wizard" className="app-main-scroll fixed inset-0 z-[100] overflow-y-auto bg-paper">
+      <div className="mx-auto flex min-h-full w-full max-w-[720px] flex-col px-4 pb-[calc(24px+env(safe-area-inset-bottom))] pt-[calc(20px+env(safe-area-inset-top))] sm:px-5 sm:py-12">
         <div className="mb-8 flex items-center justify-between gap-4">
           <div className="flex items-center gap-[8px]" aria-label={`Step ${index + 1} of ${steps.length}`}>
             {steps.map((item, itemIndex) => (

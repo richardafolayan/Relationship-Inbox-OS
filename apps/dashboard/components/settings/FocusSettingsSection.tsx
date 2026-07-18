@@ -226,7 +226,7 @@ function ToggleRow({
           onChange();
         }
       }}
-      className="grid cursor-pointer grid-cols-[1fr_auto] items-center gap-6 rounded-[6px] border-t border-hairline px-1 py-[16px] transition-colors duration-calm hover:bg-paper-2/60 focus:bg-paper-2/60 focus:outline-none"
+      className="grid cursor-pointer grid-cols-[1fr_auto] items-center gap-3 rounded-[6px] border-t border-hairline px-1 py-[16px] transition-colors duration-calm hover:bg-paper-2/60 focus:bg-paper-2/60 focus:outline-none sm:gap-6"
     >
       <div>
         <p className="m-0 mb-[4px] text-[14.5px] font-medium text-ink">{name}</p>

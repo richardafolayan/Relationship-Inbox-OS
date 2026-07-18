@@ -117,9 +117,9 @@ export function NotificationBell() {
           <div className="absolute inset-0 bg-ink/40" onClick={closePanel} />
           <div
             data-testid="notification-center-panel"
-            className="absolute inset-y-0 right-0 flex w-[340px] max-w-[92vw] flex-col border-l border-hairline bg-paper shadow-xl"
+            className="absolute inset-0 flex w-full flex-col bg-paper pb-[env(safe-area-inset-bottom)] pt-[env(safe-area-inset-top)] sm:inset-y-0 sm:left-auto sm:right-0 sm:w-[340px] sm:max-w-[92vw] sm:border-l sm:border-hairline sm:p-0 sm:shadow-xl"
           >
-            <div className="flex items-center gap-2 border-b border-hairline px-4 py-3">
+            <div className="flex min-h-[56px] items-center gap-2 border-b border-hairline px-4 py-3">
               <p className="font-display text-[15px] font-medium tracking-[-0.012em] text-ink">
                 Notifications
               </p>
@@ -161,7 +161,7 @@ export function NotificationBell() {
                 </p>
               </div>
             ) : (
-              <div className="flex-1 overflow-y-auto px-3 py-3">
+              <div className="app-main-scroll min-h-0 flex-1 overflow-y-auto px-3 py-3">
                 <div className="flex flex-col gap-2">
                   {items.map((item) => (
                     <CenterRow

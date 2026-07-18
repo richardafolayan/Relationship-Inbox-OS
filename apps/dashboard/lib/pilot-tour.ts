@@ -47,11 +47,11 @@ export function getPilotTourSteps(): GuidedTourStep[] {
     },
     {
       key: "demo-loaded",
-      title: "Demo conversations loaded",
-      body: "Two demo threads have been added: Serena on iMessage and Timi on LinkedIn. All actions stay inside sandbox data.",
+      title: "Sample conversations loaded",
+      body: "Two practice threads are ready: Serena on iMessage and Timi on LinkedIn. Actions stay inside this demo.",
       targets: [],
       placement: "center",
-      beat: "Sandbox ready",
+      beat: "Samples ready",
       navigateTo: () => "/today"
     },
     {

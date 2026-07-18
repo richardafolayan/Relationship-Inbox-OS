@@ -61,8 +61,12 @@ test("Reconnect page copy explains where iMessage follow-ups live", () => {
     new URL("../apps/dashboard/app/reconnect/page.tsx", import.meta.url),
     "utf8"
   );
+  // Concise default subtitle keeps the first viewport scannable; the longer
+  // iMessage exclusion note lives behind the "About this list" control.
+  assert.match(source, /LinkedIn people who went quiet/);
   assert.match(source, /LinkedIn catch-ups only\./);
   assert.match(source, /iMessage replies stay in Today and Inbox/);
+  assert.match(source, /reconnect-about-toggle/);
 });
 
 test("threads still inside the recency horizon are not candidates", () => {

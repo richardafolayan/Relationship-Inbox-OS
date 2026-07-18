@@ -175,11 +175,11 @@ export function InAppBrowser({
       aria-modal="true"
       aria-label={`Preview of ${host}`}
       onClick={onClose}
-      className="fixed inset-0 z-[100] flex items-center justify-center bg-[color-mix(in_oklch,var(--ink)_38%,transparent)] p-[3vmin] backdrop-blur-md"
+      className="fixed inset-0 z-[100] flex items-center justify-center bg-paper p-0 sm:bg-[color-mix(in_oklch,var(--ink)_38%,transparent)] sm:p-[3vmin] sm:backdrop-blur-md"
     >
       <div
         onClick={(event) => event.stopPropagation()}
-        className="flex h-full max-h-[860px] w-full max-w-[1040px] flex-col overflow-hidden rounded-2xl border border-hairline bg-paper shadow-pop"
+        className="flex h-full max-h-[860px] w-full max-w-[1040px] flex-col overflow-hidden bg-paper pb-[env(safe-area-inset-bottom)] pt-[env(safe-area-inset-top)] sm:rounded-2xl sm:border sm:border-hairline sm:p-0 sm:shadow-pop"
       >
         <div className="flex h-[52px] shrink-0 items-center gap-3 border-b border-hairline px-4">
           <span className="flex min-w-0 flex-1 items-baseline gap-2">
@@ -193,16 +193,17 @@ export function InAppBrowser({
           <button
             type="button"
             onClick={openExternal}
-            className="flex shrink-0 items-center gap-[6px] rounded-full border border-hairline px-3 py-[6px] text-[12px] text-ink-2 transition-colors duration-calm hover:border-hairline-strong hover:text-ink"
+            aria-label="Open in browser"
+            className="flex h-10 w-10 shrink-0 items-center justify-center gap-[6px] rounded-full border border-hairline text-[12px] text-ink-2 transition-colors duration-calm hover:border-hairline-strong hover:text-ink sm:h-auto sm:w-auto sm:px-3 sm:py-[6px]"
           >
             <ExternalLink className="h-[13px] w-[13px]" strokeWidth={1.8} />
-            Open in browser
+            <span className="hidden sm:inline">Open in browser</span>
           </button>
           <button
             type="button"
             onClick={onClose}
             aria-label="Close preview"
-            className="flex h-[28px] w-[28px] shrink-0 items-center justify-center rounded-full text-ink-3 transition-colors duration-calm hover:bg-paper-2 hover:text-ink"
+            className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-ink-3 transition-colors duration-calm hover:bg-paper-2 hover:text-ink sm:h-[28px] sm:w-[28px]"
           >
             <X className="h-4 w-4" strokeWidth={1.8} />
           </button>

@@ -40,32 +40,32 @@ export function ReceiptsDrawer({ open, title = "Receipts", rows, onClose }: Rece
       onClick={onClose}
     >
       <div
-        className="absolute right-0 top-0 flex h-full w-full max-w-xl flex-col border-l border-hairline bg-paper p-6 shadow-pop"
+        className="absolute inset-0 flex h-full w-full flex-col overflow-hidden bg-paper px-4 pb-[env(safe-area-inset-bottom)] pt-[env(safe-area-inset-top)] sm:inset-y-0 sm:left-auto sm:right-0 sm:max-w-xl sm:border-l sm:border-hairline sm:p-6 sm:shadow-pop"
         onClick={(event) => event.stopPropagation()}
       >
-        <div className="mb-6 flex items-center justify-between">
+        <div className="mb-3 flex min-h-[56px] flex-shrink-0 items-center justify-between border-b border-hairline sm:mb-6 sm:min-h-0 sm:border-b-0">
           <div>
-            <p className="font-mono text-[11px] uppercase tracking-[0.08em] text-ink-3">Receipts</p>
-            <h3 className="mt-1 font-display text-[26px] font-semibold tracking-[-0.02em]">{title}</h3>
+            <p className="hidden font-mono text-[11px] uppercase tracking-[0.08em] text-ink-3 sm:block">Receipts</p>
+            <h3 className="mt-1 font-display text-[22px] font-semibold tracking-[-0.02em] sm:text-[26px]">{title}</h3>
           </div>
           <Button variant="ghost" onClick={onClose} aria-label="Close">
             <X className="h-4 w-4" />
           </Button>
         </div>
 
-        <div className="flex flex-1 flex-col overflow-y-auto pb-8">
+        <div className="app-main-scroll flex min-h-0 flex-1 flex-col overflow-y-auto pb-8">
           {ordered.map((row) => (
-            <div key={row.id} className="border-t border-hairline py-4">
-              <div className="mb-2 flex items-baseline gap-3">
+            <div key={row.id} className="border-t border-hairline py-3 sm:py-4">
+              <div className="mb-2 grid grid-cols-[auto_1fr_auto] items-baseline gap-x-2 gap-y-1 sm:flex sm:gap-3">
                 <span
                   className={`h-[6px] w-[6px] rounded-full ${row.status === "OK" ? "bg-risk-fresh" : "bg-risk-overdue"}`}
                   aria-hidden
                 />
                 <span className="text-[15px] font-medium text-ink">{row.action}</span>
-                <span className="font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3">
+                <span className="col-start-2 font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3 sm:col-auto">
                   {row.stage ?? "general"}
                 </span>
-                <span className="ml-auto font-mono text-[11px] text-ink-3">{formatClock(row.timestamp)}</span>
+                <span className="col-start-3 row-start-1 ml-auto font-mono text-[11px] text-ink-3 sm:col-auto sm:row-auto">{formatClock(row.timestamp)}</span>
               </div>
               {row.details ? (
                 <pre className="mb-2 overflow-x-auto rounded-row bg-paper-2 p-3 font-mono text-[11px] text-ink-2">

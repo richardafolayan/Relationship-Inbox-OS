@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
+import { X } from "lucide-react";
 import { apiGet, apiPost } from "@/lib/api";
 import type { InboxResponse } from "@/lib/types";
 import { PLATFORM_LABEL } from "@/lib/risk";
@@ -150,22 +151,35 @@ function CommandPalettePanel({ onClose }: { onClose: () => void }) {
 
   return (
     <div
-      className="fixed inset-0 z-[100] grid place-items-start justify-items-center bg-[color-mix(in_oklch,var(--ink)_38%,transparent)] pt-[18vh] backdrop-blur-md"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Search"
+      className="fixed inset-0 z-[100] grid place-items-stretch bg-paper pt-[env(safe-area-inset-top)] sm:place-items-start sm:justify-items-center sm:bg-[color-mix(in_oklch,var(--ink)_38%,transparent)] sm:pt-[18vh] sm:backdrop-blur-md"
       onClick={onClose}
     >
       <div
-        className="w-[min(560px,92vw)] overflow-hidden rounded-[18px] border border-hairline bg-paper shadow-pop"
+        className="flex h-full w-full flex-col overflow-hidden bg-paper sm:block sm:h-auto sm:w-[min(560px,92vw)] sm:rounded-[18px] sm:border sm:border-hairline sm:shadow-pop"
         onClick={(event) => event.stopPropagation()}
       >
-        <input
-          autoFocus
-          value={query}
-          onChange={(event) => setQuery(event.target.value)}
-          onKeyDown={onKeyDown}
-          placeholder="Search conversations, pages, or actions…"
-          className="w-full border-0 border-b border-hairline bg-transparent px-5 py-[18px] text-[16px] text-ink outline-none placeholder:text-ink-4"
-        />
-        <ul className="m-0 list-none p-[6px]">
+        <div className="flex flex-shrink-0 items-center border-b border-hairline">
+          <input
+            autoFocus
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            onKeyDown={onKeyDown}
+            placeholder="Search conversations, pages, or actions…"
+            className="min-h-[60px] min-w-0 flex-1 border-0 bg-transparent px-4 py-[18px] text-[16px] text-ink outline-none placeholder:text-ink-4 sm:px-5"
+          />
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close search"
+            className="mr-2 grid h-11 w-11 shrink-0 place-items-center rounded-full text-ink-3 hover:bg-paper-2 hover:text-ink sm:hidden"
+          >
+            <X className="h-5 w-5" strokeWidth={1.7} />
+          </button>
+        </div>
+        <ul className="app-main-scroll m-0 min-h-0 flex-1 list-none overflow-y-auto p-[6px]">
           {items.map((item, index) => (
             <li
               key={item.id}
@@ -174,7 +188,7 @@ function CommandPalettePanel({ onClose }: { onClose: () => void }) {
                 item.run();
                 onClose();
               }}
-              className={`flex cursor-pointer items-center gap-[10px] rounded-[10px] px-[14px] py-[10px] text-[14px] ${
+              className={`flex min-h-[48px] cursor-pointer items-center gap-[10px] rounded-[10px] px-[14px] py-[10px] text-[14px] ${
                 index === activeIndex ? "bg-paper-2 text-ink" : "text-ink-2"
               }`}
             >

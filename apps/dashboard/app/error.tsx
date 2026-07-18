@@ -25,8 +25,10 @@ export default function ErrorPage({
   }, [error, failure]);
 
   return (
-    <div className="mx-auto w-full max-w-[620px] px-5 py-16 sm:px-10">
-      <ConsumerRecovery failure={failure} onRetry={reset} actionLabel="Try this page again" />
+    <div className="h-full min-h-0 overflow-y-auto overscroll-y-contain">
+      <div className="mx-auto flex min-h-full w-full max-w-[620px] items-start px-4 pb-[calc(76px+env(safe-area-inset-bottom))] pt-8 sm:px-10 sm:py-16">
+        <ConsumerRecovery failure={failure} onRetry={reset} actionLabel="Try this page again" />
+      </div>
     </div>
   );
 }

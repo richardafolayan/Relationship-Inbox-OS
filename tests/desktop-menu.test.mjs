@@ -114,3 +114,11 @@ test("Go menu adds People and a Settings-sections submenu", async () => {
     );
   }
 });
+
+test("app menu deep-links the integrated phone access card", async () => {
+  const source = await mainSource();
+  assert.match(
+    source,
+    /Use \$\{APP_NAME\} on Your Phone\.\.\..*openDashboardPath\("\/settings#phone"\)/
+  );
+});
