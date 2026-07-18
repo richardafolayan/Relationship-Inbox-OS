@@ -64,6 +64,7 @@ import type {
 import { IMessageMedia, VoiceMessageTranscript } from "@/components/thread/imessage-media";
 import { WhatsAppMedia } from "@/components/thread/whatsapp-media";
 import { GoogleMessagesMedia } from "@/components/thread/google-messages-media";
+import { DictationMessageReview } from "@/components/thread/dictation-message-review";
 import { WhatsAppPoll } from "@/components/thread/whatsapp-poll";
 import { WhatsAppText } from "@/components/thread/whatsapp-text";
 import { getWhatsAppPoll, type PollVoteRecord } from "@/lib/whatsapp-poll";
@@ -698,6 +699,7 @@ export default function ThreadPage() {
   // attachment; this one transcribes speech into editable text).
   const [dictationStatus, setDictationStatus] = useState<"idle" | "recording" | "transcribing">("idle");
   const [dictationAvailable, setDictationAvailable] = useState(false);
+  const [dictationTranscript, setDictationTranscript] = useState<string | null>(null);
   const dictationRecorderRef = useRef<MediaRecorder | null>(null);
   const dictationChunksRef = useRef<BlobPart[]>([]);
   // Held so the mic stream can be released on unmount even if onstop never
@@ -1434,6 +1436,7 @@ export default function ThreadPage() {
     setWhatsAppPollAllowMultiple(true);
     setWhatsAppPollSending(false);
     setWhatsAppPollSent(false);
+    setDictationTranscript(null);
     setComposerMoreOpen(false);
     setScheduleMenuOpen(false);
     setChipsMenuOpen(false);
@@ -2144,9 +2147,7 @@ export default function ThreadPage() {
       switch (outcome.kind) {
         case "text": {
           failedDictationWavRef.current = null;
-          const spoken = outcome.text;
-          setComposer((prev) => (prev && !/\s$/.test(prev) ? `${prev} ${spoken}` : `${prev}${spoken}`));
-          setComposerSource("user");
+          setDictationTranscript(outcome.text);
           break;
         }
         case "empty":
@@ -2249,6 +2250,38 @@ export default function ThreadPage() {
     failedDictationWavRef.current = null;
     setDictationRetry(null);
   }, []);
+
+  const keepDictationTranscript = useCallback(() => {
+    if (!dictationTranscript) return;
+    setComposer((current) =>
+      current && !/\s$/.test(current) ? `${current} ${dictationTranscript}` : `${current}${dictationTranscript}`
+    );
+    setComposerSource("user");
+    setDictationTranscript(null);
+    window.requestAnimationFrame(() => composerInputRef.current?.focus());
+  }, [dictationTranscript]);
+
+  const sendDictationMessage = useCallback(async (text: string) => {
+    if (!thread) throw new Error("This conversation is no longer available.");
+    const trimmed = text.trim();
+    if (!trimmed) throw new Error("An empty message cannot be sent.");
+    const clientSendId = uuid();
+    const sentAt = new Date().toISOString();
+    setError(null);
+    setPendingSends((current) => [...current, { clientSendId, text: trimmed, sentAt, attachments: [] }]);
+    stickToBottomRef.current = true;
+    try {
+      await apiPost(`/runner/control/thread/${thread.id}/send`, {
+        text: trimmed,
+        clientSendId,
+        clientRequestedAt: sentAt,
+        ...(focusedThreadParentId ? { replyToMessageId: focusedThreadParentId } : {})
+      });
+    } catch (sendError) {
+      setPendingSends((current) => current.filter((pending) => pending.clientSendId !== clientSendId));
+      throw sendError;
+    }
+  }, [focusedThreadParentId, thread]);
 
   // Cmd/Ctrl-Enter sends.
   useEffect(() => {
@@ -6421,6 +6454,20 @@ export default function ThreadPage() {
           open={profileDrawerOpen}
           personId={thread.personId ?? null}
           onClose={() => setProfileDrawerOpen(false)}
+        />
+      ) : null}
+
+      {dictationTranscript ? (
+        <DictationMessageReview
+          threadId={thread.id}
+          transcript={dictationTranscript}
+          onKeepTranscript={keepDictationTranscript}
+          onDone={() => {
+            setDictationTranscript(null);
+            void refresh();
+          }}
+          onMessageSent={() => void refresh()}
+          onSendMessage={sendDictationMessage}
         />
       ) : null}
 

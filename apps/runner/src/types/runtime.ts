@@ -294,6 +294,12 @@ export interface StyleProfile {
   lowercaseRate: number;
 }
 
+export interface DictationMessageFormatting {
+  cleanedTranscript: string;
+  messages: Array<{ id: string; text: string }>;
+  warnings: Array<{ originalText: string; reason: string }>;
+}
+
 export interface AiService {
   updateThreadSummary(input: {
     /** Group chat flags (#753). */
@@ -390,6 +396,10 @@ export interface AiService {
     mode: "SHORTEN" | "MAKE_WARMER";
     text: string;
   }): Promise<string>;
+  formatDictationMessages(input: {
+    transcript: string;
+    contactName?: string | null;
+  }): Promise<DictationMessageFormatting | null>;
   /**
    * Coarsely classify a thread as either "outreach" (cold pitches, sales,
    * recruitment, marketing, InMails) or "genuine" (peer chats, real

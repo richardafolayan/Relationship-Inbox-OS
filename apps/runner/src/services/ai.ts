@@ -23,6 +23,7 @@ import type {
   ContactProfileSnapshot,
   ConversationStartersOutput,
   ConversationStarterCitedField,
+  DictationMessageFormatting,
   FriendshipSummaryOutput,
   InferredReplyStyle,
   MessageForPrompt,
@@ -55,6 +56,11 @@ import {
   validateMechanicalWritingRules
 } from "./ai-output-rules";
 import { preserveAmbiguousEvidence } from "./ai-ambiguity";
+import {
+  buildDictationMessageFormatterPrompt,
+  DICTATION_MESSAGE_FORMATTER_SYSTEM_PROMPT,
+  parseDictationMessageFormatting
+} from "./dictation-message-formatter";
 
 // Re-exported so existing tests + callers continue to import from ai.ts.
 export const classifyLlmError = classifyLlmErrorImpl;
@@ -2874,6 +2880,19 @@ ${recentExchange || "(no recent messages)"}`;
     }
   }
 
+  async function formatDictationMessages(input: {
+    transcript: string;
+    contactName?: string | null;
+  }): Promise<DictationMessageFormatting | null> {
+    const { result } = await modelJson(
+      buildDictationMessageFormatterPrompt(input),
+      null,
+      parseDictationMessageFormatting,
+      DICTATION_MESSAGE_FORMATTER_SYSTEM_PROMPT
+    );
+    return result;
+  }
+
   /**
    * Classify a thread as outreach (sales / recruitment / marketing / InMail
    * / cold solicitation) vs genuine (peer chats, ongoing relationships).
@@ -4148,6 +4167,7 @@ ${safeTruncate(input.draft, 2000)}`;
     updateThreadSummary,
     generateSuggestedReplies,
     transformReply,
+    formatDictationMessages,
     classifyThreadCategory,
     classifyThreadClosed,
     scoreReconnectCandidate,

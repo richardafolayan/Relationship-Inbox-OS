@@ -4857,6 +4857,38 @@ app.post(
   })
 );
 
+app.post("/control/thread/:threadId/format-dictation-messages", asyncRoute(async (req, res) => {
+  const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
+  if (
+    await checkPresenterGuard(res, settingsStore, {
+      threadId,
+      action: "turn a transcript into messages",
+      kind: "thread-mutation"
+    })
+  ) return;
+  const { transcript } = z
+    .object({ transcript: z.string().trim().min(1).max(12_000) })
+    .strict()
+    .parse(req.body);
+  const thread = await prisma.thread.findUnique({
+    where: { id: threadId },
+    select: { person: { select: { displayName: true } } }
+  });
+  if (!thread) {
+    res.status(404).json({ error: "Thread not found" });
+    return;
+  }
+  const result = await aiService.formatDictationMessages({
+    transcript,
+    contactName: thread.person.displayName
+  });
+  if (!result) {
+    res.status(502).json({ error: "Could not turn this transcript into messages. Your transcript is still safe." });
+    return;
+  }
+  res.json(result);
+}));
+
 // Issue #331. Reads the operator's in-flight draft against the thread's
 // active open loops and returns the subset the draft already addresses.
 // The dashboard debounces calls here while the operator types so the
