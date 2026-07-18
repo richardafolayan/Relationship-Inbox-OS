@@ -16,6 +16,10 @@ test("app update card identifies the host device being updated", () => {
   assert.match(SOURCE, /hostDeviceKind/);
   assert.match(SOURCE, /installLocationCopy/);
   assert.match(SOURCE, /Automatic updates/);
+  // Phone remote-control props from host-device Settings wiring.
+  assert.match(SOURCE, /from "@\/lib\/host-device"/);
+  assert.match(SOURCE, /hostOfflineExplanation/);
+  assert.match(SOURCE, /remoteAvailable/);
 });
 
 test("app update card keeps pilot copy away from terminal commands", () => {
@@ -40,9 +44,9 @@ test("raw commit and branch metadata is behind Technical details, not the main v
 });
 
 test("host offline disables check and explains why", () => {
-  assert.match(SOURCE, /hostOfflineCheckMessage/);
+  assert.match(SOURCE, /hostOfflineCheckMessage|offlineMessage|hostOfflineExplanation/);
   assert.match(SOURCE, /checkDisabled/);
-  assert.match(SOURCE, /runnerOffline/);
+  assert.match(SOURCE, /hostOffline|runnerOffline/);
   assert.match(SOURCE, /disabled=\{checkDisabled\}/);
 });
 

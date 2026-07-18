@@ -18,10 +18,16 @@ interface WhatsAppStatus {
 
 export function WhatsAppConnect({
   onScan,
-  scanBusy = false
+  scanBusy = false,
+  deviceLabel,
+  remoteDisabled = false,
+  offlineExplanation
 }: {
   onScan?: () => void;
   scanBusy?: boolean;
+  deviceLabel?: string;
+  remoteDisabled?: boolean;
+  offlineExplanation?: string;
 } = {}) {
   const [status, setStatus] = useState<WhatsAppStatus | null>(null);
   const [connecting, setConnecting] = useState(false);
@@ -57,7 +63,7 @@ export function WhatsAppConnect({
   }, [status?.state, refresh]);
 
   const connect = async () => {
-    if (connecting) return;
+    if (connecting || remoteDisabled) return;
     setConnecting(true);
     setError("");
     setNotice("");
@@ -72,7 +78,7 @@ export function WhatsAppConnect({
   };
 
   const refreshQr = async () => {
-    if (refreshingQr) return;
+    if (refreshingQr || remoteDisabled) return;
     setRefreshingQr(true);
     setError("");
     setNotice("");
@@ -87,7 +93,7 @@ export function WhatsAppConnect({
   };
 
   const reset = async () => {
-    if (resetting) return;
+    if (resetting || remoteDisabled) return;
     setResetting(true);
     setError("");
     setNotice("");
@@ -125,6 +131,9 @@ export function WhatsAppConnect({
           <p className="m-0 mt-1 text-[13.5px] leading-[1.45] text-ink-3" style={{ textWrap: "pretty" }}>
             Link WhatsApp from your phone. The app reads chats into your inbox. You still press send.
           </p>
+          {deviceLabel ? (
+            <p className="m-0 mt-1.5 text-[12px] leading-[1.4] text-ink-3">{deviceLabel}</p>
+          ) : null}
         </div>
         <span
           className={cn(
@@ -159,20 +168,24 @@ export function WhatsAppConnect({
           <button
             type="button"
             onClick={onScan}
-            disabled={scanBusy || resetting}
+            disabled={scanBusy || resetting || remoteDisabled}
+            title={remoteDisabled ? offlineExplanation : undefined}
             className="inline-flex items-center rounded-pill bg-ink px-3 py-[7px] text-[12.5px] font-medium text-paper hover:bg-ink-2 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {scanBusy ? "Working..." : "Scan WhatsApp"}
           </button>
         ) : null}
-        {connected && onScan ? (
+        {remoteDisabled && offlineExplanation ? (
+          <span className="max-w-[36ch] text-[11.5px] leading-[1.4] text-ink-3">{offlineExplanation}</span>
+        ) : connected && onScan ? (
           <span className="font-mono text-[11px] text-ink-3">Scan ready</span>
         ) : null}
         {state === "qr_ready" ? (
           <button
             type="button"
             onClick={refreshQr}
-            disabled={refreshingQr || resetting}
+            disabled={refreshingQr || resetting || remoteDisabled}
+            title={remoteDisabled ? offlineExplanation : undefined}
             className="inline-flex items-center rounded-pill border border-hairline bg-paper px-3 py-[7px] text-[12px] font-medium text-ink hover:bg-paper-2 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {refreshingQr ? "Refreshing..." : "New QR code"}
@@ -182,7 +195,8 @@ export function WhatsAppConnect({
           <button
             type="button"
             onClick={connect}
-            disabled={connecting || resetting || state === "connecting"}
+            disabled={connecting || resetting || state === "connecting" || remoteDisabled}
+            title={remoteDisabled ? offlineExplanation : undefined}
             className="inline-flex items-center rounded-pill bg-ink px-3 py-[7px] text-[12px] font-medium text-paper hover:bg-ink-2 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {state === "connecting" ? "Connecting..." : "Connect WhatsApp"}
@@ -192,7 +206,8 @@ export function WhatsAppConnect({
           <button
             type="button"
             onClick={reset}
-            disabled={resetting || refreshingQr}
+            disabled={resetting || refreshingQr || remoteDisabled}
+            title={remoteDisabled ? offlineExplanation : undefined}
             className="inline-flex items-center rounded-pill border border-hairline bg-transparent px-3 py-[7px] text-[12px] font-medium text-ink-2 hover:bg-paper-2 hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
           >
             {resetting ? "Resetting..." : "Reset WhatsApp"}

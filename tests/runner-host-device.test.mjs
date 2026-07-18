@@ -28,6 +28,7 @@ test("resolveHostDeviceInfo prefers the macOS ComputerName", () => {
   assert.equal(info.label, "Richard's MacBook");
   assert.equal(info.kind, "mac");
   assert.equal(info.platform, "darwin");
+  assert.equal(info.hostname, "Mac.home");
 });
 
 test("resolveHostDeviceInfo falls back to a non-generic hostname", () => {
@@ -38,6 +39,7 @@ test("resolveHostDeviceInfo falls back to a non-generic hostname", () => {
   });
   assert.equal(info.label, "office-macbook");
   assert.equal(info.kind, "mac");
+  assert.equal(info.hostname, "office-macbook.local");
 });
 
 test("resolveHostDeviceInfo ignores generic hostnames", () => {

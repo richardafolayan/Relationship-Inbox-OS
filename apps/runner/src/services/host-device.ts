@@ -9,6 +9,8 @@ export interface HostDeviceInfo {
   /** Coarse device kind for copy ("your Mac", "this PC"). */
   kind: HostDeviceKind;
   platform: NodeJS.Platform;
+  /** Raw OS hostname (may include .local). */
+  hostname: string;
 }
 
 export type ExecFileSyncFn = (
@@ -51,7 +53,6 @@ function isGenericHostName(name: string): boolean {
   const lower = name.trim().toLowerCase();
   if (!lower) return true;
   if (lower === "localhost" || lower === "mac" || lower === "macbook") return true;
-  // Bare IPv4.
   if (/^\d{1,3}(\.\d{1,3}){3}$/.test(lower)) return true;
   return false;
 }
@@ -59,6 +60,8 @@ function isGenericHostName(name: string): boolean {
 /**
  * Prefer the friendly ComputerName on macOS, then a non-generic hostname,
  * then a calm platform fallback ("your Mac").
+ *
+ * Shared by /runner/health and App updates (version / update-check) host metadata.
  */
 export function resolveHostDeviceInfo(opts?: {
   platform?: NodeJS.Platform;
@@ -67,6 +70,7 @@ export function resolveHostDeviceInfo(opts?: {
 }): HostDeviceInfo {
   const platform = opts?.platform ?? osPlatform();
   const kind = hostDeviceKind(platform);
+  const rawHost = (opts?.hostName ?? hostname()).trim();
   const computerName =
     opts && "computerName" in opts
       ? opts.computerName
@@ -74,15 +78,13 @@ export function resolveHostDeviceInfo(opts?: {
         ? readMacComputerName()
         : null;
   if (computerName && computerName.trim()) {
-    return { label: computerName.trim(), kind, platform };
+    return { label: computerName.trim(), kind, platform, hostname: rawHost };
   }
-  const host = (opts?.hostName ?? hostname()).trim();
-  if (host) {
-    // Strip trailing .local / domain for a shorter label.
-    const short = host.replace(/\.local$/i, "").split(".")[0] || host;
+  if (rawHost) {
+    const short = rawHost.replace(/\.local$/i, "").split(".")[0] || rawHost;
     if (!isGenericHostName(short)) {
-      return { label: short, kind, platform };
+      return { label: short, kind, platform, hostname: rawHost };
     }
   }
-  return { label: fallbackHostLabel(kind), kind, platform };
+  return { label: fallbackHostLabel(kind), kind, platform, hostname: rawHost };
 }
