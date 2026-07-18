@@ -39,7 +39,9 @@ test("secondary screens hide the full status row by default", () => {
     "/reconnect",
     "/reconnect/",
     "/settings",
-    "/settings#platforms"
+    "/settings#platforms",
+    "/search",
+    "/search/"
   ]) {
     assert.equal(
       resolveMobileStatusChrome(path.split("#")[0]),
@@ -47,6 +49,12 @@ test("secondary screens hide the full status row by default", () => {
       `${path} should hide full mobile chrome`
     );
   }
+});
+
+test("/search is a hidden secondary route, not compact chrome", () => {
+  assert.equal(resolveMobileStatusChrome("/search"), "hidden");
+  assert.equal(resolveMobileStatusChrome("/search/"), "hidden");
+  assert.notEqual(resolveMobileStatusChrome("/search"), "compact");
 });
 
 test("other list routes stay compact rather than full", () => {
@@ -149,6 +157,50 @@ test("hidden chrome surfaces in-flight and failed work", () => {
       `${tickerKind} should re-surface the status row`
     );
   }
+});
+
+test("Search hidden chrome still re-surfaces offline, degraded, and in-flight", () => {
+  assert.equal(resolveMobileStatusChrome("/search"), "hidden");
+  assert.equal(
+    shouldSurfaceHiddenStatus({
+      ready: true,
+      runnerOffline: true,
+      hasDegraded: false,
+      tickerKind: "idle"
+    }),
+    true,
+    "offline on Search should re-surface the attention strip"
+  );
+  assert.equal(
+    shouldSurfaceHiddenStatus({
+      ready: true,
+      runnerOffline: false,
+      hasDegraded: true,
+      tickerKind: "idle"
+    }),
+    true,
+    "degraded platforms on Search should re-surface the attention strip"
+  );
+  assert.equal(
+    shouldSurfaceHiddenStatus({
+      ready: true,
+      runnerOffline: false,
+      hasDegraded: false,
+      tickerKind: "scanning"
+    }),
+    true,
+    "in-flight scan on Search should re-surface the attention strip"
+  );
+  assert.equal(
+    shouldSurfaceHiddenStatus({
+      ready: true,
+      runnerOffline: false,
+      hasDegraded: false,
+      tickerKind: "idle"
+    }),
+    false,
+    "healthy idle Search stays chrome-free"
+  );
 });
 
 test("app shell wires resolveMobileStatusChrome into TopStatus", () => {
