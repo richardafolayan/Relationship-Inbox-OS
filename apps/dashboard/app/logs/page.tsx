@@ -186,13 +186,13 @@ export default function LogsPage() {
         title="Activity"
         meta={
           <span>
-            <strong className="font-medium text-ink">{logs.length}</strong> events ·{" "}
+            <strong className="font-medium text-ink">{logs.length}</strong> events
             <button
               type="button"
               onClick={() => setDrawerOpen(true)}
-              className="hover:text-ink"
+              className="hidden hover:text-ink sm:inline"
             >
-              open drawer
+              {" · open drawer"}
             </button>
           </span>
         }
@@ -201,7 +201,7 @@ export default function LogsPage() {
       {logs.length === 0 ? (
         <CaughtUp title="Nothing logged yet." body="Every scan, send, and selector check will appear here." />
       ) : (
-        <div className="overflow-hidden rounded-[14px] border border-hairline">
+        <div className="-mx-1 overflow-hidden rounded-[14px] border border-hairline sm:mx-0">
           {dayGroups.map((day) => (
             <div key={day.key}>
               <div className="border-b border-hairline bg-paper-2 px-[18px] py-[8px] font-mono text-[10.5px] uppercase tracking-[0.08em] text-ink-3">
@@ -245,7 +245,7 @@ function ActivityRow({ log, isLast }: { log: AuditLogRow; isLast: boolean }) {
   const meta = [platformLabel(log.platform), log.stage ?? null].filter(Boolean).join(" · ");
   return (
     <div
-      className={`grid grid-cols-[80px_1fr_auto] items-center gap-4 px-[18px] py-[10px] text-[13px] ${
+      className={`grid grid-cols-[62px_minmax(0,1fr)] items-center gap-x-2 gap-y-1 px-3 py-3 text-[13px] sm:grid-cols-[80px_1fr_auto] sm:gap-4 sm:px-[18px] sm:py-[10px] ${
         isLast ? "" : "border-b border-hairline"
       } cursor-default hover:bg-paper-2`}
     >
@@ -269,7 +269,7 @@ function ActivityRow({ log, isLast }: { log: AuditLogRow; isLast: boolean }) {
         </span>
       </div>
       <span
-        className={`font-mono text-[10.5px] tracking-[0.02em] ${
+        className={`col-start-2 truncate font-mono text-[10.5px] tracking-[0.02em] sm:col-auto ${
           isFail ? "text-risk-overdue" : "text-ink-3"
         }`}
       >
@@ -295,7 +295,7 @@ function GroupSummary({
   return (
     <>
       <div
-        className={`grid cursor-default grid-cols-[80px_1fr_auto] items-center gap-4 px-[18px] py-[10px] text-[13px] ${
+        className={`grid cursor-default grid-cols-[62px_minmax(0,1fr)] items-center gap-x-2 gap-y-1 px-3 py-3 text-[13px] sm:grid-cols-[80px_1fr_auto] sm:gap-4 sm:px-[18px] sm:py-[10px] ${
           isLast && !expanded ? "" : "border-b border-hairline"
         } hover:bg-paper-2`}
       >
@@ -309,7 +309,7 @@ function GroupSummary({
         <button
           type="button"
           onClick={onToggle}
-          className="font-mono text-[10.5px] tracking-[0.02em] text-ink-3 hover:text-ink"
+          className="col-start-2 min-h-[36px] justify-self-start font-mono text-[10.5px] tracking-[0.02em] text-ink-3 hover:text-ink sm:col-auto sm:min-h-0 sm:justify-self-auto"
         >
           {group.rows.length} events · expand {expanded ? "▴" : "▾"}
         </button>

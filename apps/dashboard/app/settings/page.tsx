@@ -24,6 +24,7 @@ import { FocusSettingsSection } from "@/components/settings/FocusSettingsSection
 import { CalendarFocusSection } from "@/components/settings/CalendarFocusSection";
 import { AppUpdates } from "@/components/settings/AppUpdates";
 import { HostDeviceBanner } from "@/components/settings/HostDeviceBanner";
+import { PhoneAccess } from "@/components/settings/PhoneAccess";
 import { WhatsAppConnect } from "@/components/settings/WhatsAppConnect";
 import { useHostDevice, usePhoneSettingsLayout } from "@/lib/use-host-device";
 import type { HostDeviceState } from "@/lib/use-host-device";
@@ -200,6 +201,7 @@ function tabFromHash(hash: string): SettingsTabId | null {
   const clean = hash.replace(/^#/, "");
   if (isSettingsTabId(clean)) return clean;
   if (clean === "app-updates") return "app";
+  if (clean === "phone") return "app";
   if (clean === "reply-style") return "writing";
   return null;
 }
@@ -295,6 +297,11 @@ export default function SettingsPage() {
         setHighlightUpdates(true);
         window.clearTimeout(timer);
         timer = window.setTimeout(() => setHighlightUpdates(false), 2400);
+      }
+      if (window.location.hash === "#phone") {
+        window.setTimeout(() => {
+          document.getElementById("phone")?.scrollIntoView({ behavior: "smooth", block: "center" });
+        }, 0);
       }
     };
     onLocation();
@@ -729,6 +736,13 @@ export default function SettingsPage() {
                   }
                 />
               </SettingsGroup>
+
+              <section className="mb-9">
+                <p className="mb-3 font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">
+                  Phone access
+                </p>
+                <PhoneAccess />
+              </section>
 
               <section id="app-updates" className="scroll-mt-24">
                 <p className="mb-3 font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">

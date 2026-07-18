@@ -124,6 +124,34 @@ body {
   letter-spacing: -0.005em;
 }
 a { color: inherit; text-decoration: none; }
+a,
+button,
+input,
+select,
+textarea {
+  -webkit-tap-highlight-color: transparent;
+}
+
+.app-main-scroll {
+  overscroll-behavior-y: contain;
+  -webkit-overflow-scrolling: touch;
+}
+
+@media (max-width: 767px) {
+  .app-main-scroll {
+    scrollbar-width: none;
+  }
+
+  .app-main-scroll::-webkit-scrollbar {
+    display: none;
+  }
+
+  input,
+  select,
+  textarea {
+    font-size: 16px !important;
+  }
+}
 
 /* Themed scrollbars - translucent thumb that picks up the active palette
    so the chrome doesn't break immersion in dark mode. */

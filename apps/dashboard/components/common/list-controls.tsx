@@ -10,7 +10,7 @@ import { cn } from "@/lib/utils";
 
 // "tool" button styling for the bar cluster (Sort / Filters / Select).
 export const TOOL_CLASS =
-  "inline-flex items-center gap-[6px] rounded-[8px] px-[10px] py-[6px] text-[12px] text-ink-3 transition-colors duration-calm hover:bg-paper-2 hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent";
+  "inline-flex min-h-[40px] items-center gap-[6px] rounded-[8px] px-[10px] py-[6px] text-[12px] text-ink-3 transition-colors duration-calm hover:bg-paper-2 hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent sm:min-h-0";
 
 // ---- Inline glyphs (drawn directly to match the prototype's tool icons
 // without adding icon-name dependencies) ----
@@ -106,7 +106,7 @@ export function SortMenu<K extends string>({
         <ChevronGlyph />
       </button>
       {open ? (
-        <div className="absolute right-0 top-[calc(100%+6px)] z-30 min-w-[180px] rounded-[12px] border border-hairline bg-paper p-[6px] shadow-pop">
+        <div className="absolute right-0 top-[calc(100%+6px)] z-30 min-w-[180px] max-w-[calc(100vw-32px)] rounded-[12px] border border-hairline bg-paper p-[6px] shadow-pop">
           {options.map((o) => {
             const sel = value === o.key;
             return (
@@ -118,7 +118,7 @@ export function SortMenu<K extends string>({
                   setOpen(false);
                 }}
                 className={cn(
-                  "flex w-full items-center gap-2 rounded-[7px] px-[10px] py-[7px] text-left text-[13px] transition-colors duration-calm hover:bg-paper-2",
+                  "flex min-h-[42px] w-full items-center gap-2 rounded-[7px] px-[10px] py-[7px] text-left text-[13px] transition-colors duration-calm hover:bg-paper-2 sm:min-h-0",
                   sel ? "text-ink" : "text-ink-2 hover:text-ink"
                 )}
               >

@@ -1,6 +1,6 @@
 # Current Build Status
 
-_Volatile. Update this whenever branches, commits, or build state change. Last updated: 2026-07-15._
+_Volatile. Update this whenever branches, commits, or build state change. Last updated: 2026-07-18._
 
 This file holds fast-moving build state on purpose. Branch tips and commit
 hashes go stale quickly, so they live here and not in `AGENTS.md`.
@@ -11,6 +11,8 @@ hashes go stale quickly, so they live here and not in `AGENTS.md`.
 - Main release target: `main`.
 - Pilot-ready release version: `0.1.15`.
 - Release base before the version bump: `2ff0623` (`Merge pull request #795 from richardafolayan/fix/launcher-native-runtime-guard`).
+- Active mobile experience track: `feat/mobile-app-experience`, based on
+  `bb5f45ff` from `origin/v1/strip-back-pr1`.
 - Active Windows parity track: `feat/google-messages-windows-parity`, based on
   `cb87a39` from `origin/v1/strip-back-pr1`.
 
@@ -34,6 +36,8 @@ hashes go stale quickly, so they live here and not in `AGENTS.md`.
 
 - Prepare and run the 3-5 student pilot.
 - Only small operational improvements that reduce pilot friction (direct feedback submission, install/readme clarity, setup hardening).
+- Land and pilot-test protected same-Wi-Fi phone access and the responsive phone
+  layouts.
 - Complete Windows x64 verification: NSIS install, first boot, Google Messages
   pair/scan/send, LinkedIn connect/scan, WhatsApp QR/scan, quit/relaunch, and
   clean iMessage-unavailable UI.

@@ -243,7 +243,7 @@ export default function PeoplePage() {
       />
 
       {people.length > 0 ? (
-        <div className="mb-4 flex flex-wrap items-center gap-3">
+        <div className="mb-3 flex items-center gap-2 overflow-x-auto pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden sm:mb-4 sm:flex-wrap sm:gap-3">
           <Button
             variant="quiet"
             disabled={scanningAll !== null}
@@ -287,7 +287,7 @@ export default function PeoplePage() {
                   onClick={() => setSelectedId(active ? null : person.id)}
                   aria-expanded={active}
                   aria-controls={detailId}
-                  className={`grid w-full grid-cols-[32px_1fr_auto] items-center gap-4 px-1 py-[18px] text-left transition-colors duration-calm hover:bg-paper-2 ${
+                  className={`relative grid min-h-[76px] w-full grid-cols-[32px_minmax(0,1fr)] items-center gap-3 px-1 py-4 text-left transition-colors duration-calm hover:bg-paper-2 sm:grid-cols-[32px_1fr_auto] sm:gap-4 sm:py-[18px] ${
                     active ? "bg-paper-2" : ""
                   }`}
                 >
@@ -297,9 +297,9 @@ export default function PeoplePage() {
                     size={32}
                     className="text-[12px]"
                   />
-                  <span className="min-w-0">
-                    <span className="mb-1 flex items-baseline gap-[10px]">
-                      <span className="text-[15px] font-medium tracking-[-0.01em] text-ink">
+                  <span className="min-w-0 pr-[76px] sm:pr-0">
+                    <span className="mb-1 flex min-w-0 items-center gap-[8px]">
+                      <span className="min-w-0 truncate text-[15px] font-medium tracking-[-0.01em] text-ink">
                         {person.name}
                       </span>
                       <span className="rounded bg-paper-2 px-[6px] py-[1px] text-[10px] font-medium uppercase tracking-[0.04em] text-ink-2">
@@ -311,7 +311,7 @@ export default function PeoplePage() {
                     </span>
                   </span>
                   <span
-                    className={`text-[12px] ${
+                    className={`absolute right-1 top-[18px] text-[11px] sm:static sm:text-[12px] ${
                       risk === "overdue"
                         ? "font-medium text-risk-overdue"
                         : risk === "waiting"
@@ -426,11 +426,11 @@ function ProfilePanel({
     <section
       id={detailId}
       data-testid="person-detail-panel"
-      className="animate-accordion-down border-t border-hairline bg-paper-2/40 px-1 py-8 sm:px-6"
+      className="animate-accordion-down border-t border-hairline bg-paper-2/40 px-0 py-4 sm:px-6 sm:py-8"
     >
-      <div className="grid grid-cols-1 gap-10 md:grid-cols-[280px_1fr]">
+      <div className="grid grid-cols-1 gap-6 sm:gap-10 md:grid-cols-[280px_1fr]">
         {/* LEFT: id-card */}
-        <aside className="md:sticky md:top-[60px] md:self-start rounded-card border border-hairline bg-paper p-[22px] shadow-card">
+        <aside className="rounded-card border border-hairline bg-paper p-4 shadow-card sm:p-[22px] md:sticky md:top-[60px] md:self-start">
           <PersonAvatar
             name={person.name}
             avatarUrl={person.avatarUrl}

@@ -28,14 +28,14 @@ export function ListPageSkeleton({ rows = 7 }: { rows?: number }) {
         {Array.from({ length: rows }).map((_, i) => (
           <div
             key={i}
-            className="grid grid-cols-[32px_1fr_auto] items-center gap-4 border-t border-hairline px-1 py-[18px] last:border-b last:border-hairline"
+            className="relative grid grid-cols-[32px_minmax(0,1fr)] items-center gap-3 border-t border-hairline px-1 py-4 last:border-b last:border-hairline sm:grid-cols-[32px_1fr_auto] sm:gap-4 sm:py-[18px]"
           >
             <span className="h-8 w-8 animate-pulse rounded-full bg-paper-3" />
             <span className="min-w-0">
               <Bar className="mb-2 h-[15px] w-40" />
               <Bar className="h-[14px] w-full max-w-[52ch]" />
             </span>
-            <Bar className="h-[12px] w-14" />
+            <Bar className="absolute right-1 top-4 h-[12px] w-14 sm:static" />
           </div>
         ))}
       </div>

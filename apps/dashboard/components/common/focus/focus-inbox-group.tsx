@@ -76,11 +76,11 @@ export function FocusInboxGroup({
           <Link
             key={key}
             href={`/thread/${row.id}`}
-            className="grid grid-cols-[30px_1fr_auto] items-center gap-[14px] border-t border-hairline px-1 py-[12px] transition-colors duration-calm last:border-b last:border-hairline hover:bg-paper-2/40"
+            className="grid grid-cols-[30px_minmax(0,1fr)] items-center gap-x-3 gap-y-2 border-t border-hairline px-1 py-3 transition-colors duration-calm last:border-b last:border-hairline hover:bg-paper-2/40 sm:grid-cols-[30px_1fr_auto] sm:gap-[14px]"
           >
             <PersonAvatar name={row.personName} avatarUrl={row.personAvatarUrl} size={30} />
             <div className="min-w-0">
-              <div className="flex items-baseline gap-[10px]">
+              <div className="flex flex-wrap items-baseline gap-x-[10px] gap-y-1">
                 <span className="shrink-0 text-[13.5px] font-medium text-ink">{row.personName}</span>
                 <span className="shrink-0 rounded-[5px] bg-accent-soft px-[7px] py-[3px] font-mono text-[9px] uppercase tracking-[0.04em] text-accent-ink">
                   Arrived during focus
@@ -90,7 +90,7 @@ export function FocusInboxGroup({
                 {normalizePreview(row.preview)}
               </span>
             </div>
-            <div className="flex items-center gap-3">
+            <div className="col-start-2 flex flex-wrap items-center justify-between gap-2 sm:col-auto sm:flex-nowrap sm:justify-start sm:gap-3">
               <span className="font-mono text-[10.5px] text-ink-3">
                 {formatRelative(row.lastInboundAt)}
               </span>
@@ -108,7 +108,7 @@ export function FocusInboxGroup({
                     void send(row);
                   }}
                   disabled={busyKey === key}
-                  className="inline-flex items-center gap-[6px] whitespace-nowrap rounded-pill border px-[12px] py-[5px] text-[12px] text-accent-ink transition-colors duration-calm hover:bg-accent-soft disabled:opacity-50"
+                  className="inline-flex min-h-10 items-center gap-[6px] whitespace-nowrap rounded-pill border px-[12px] py-[5px] text-[12px] text-accent-ink transition-colors duration-calm hover:bg-accent-soft disabled:opacity-50 sm:min-h-0"
                   style={{ borderColor: "color-mix(in srgb, var(--accent) 30%, transparent)" }}
                 >
                   <Send className="h-[12px] w-[12px]" strokeWidth={1.7} />
