@@ -343,9 +343,32 @@ export function resolveSearchCloseTarget(
  * Close target for Search. Always an in-app path from the recorded return
  * route (or /today). Never consult history.length: that can leave the app
  * on direct entry, Home Screen launch, restored tabs, or external referrers.
+ * Callers should router.replace (not push) so Close does not stack a second
+ * predecessor and bounce Search on system Back.
  */
 export function resolveSearchCloseHref(
   storage: StorageLike | null = defaultSessionStorage()
 ): string {
   return resolveSearchCloseTarget(storage);
+}
+
+/**
+ * In-search attention strip (#903 adversarial). Full-screen Search sits above
+ * shell TopStatus (z-90 vs z-30), so offline / degraded / in-flight work that
+ * would forceSurface on /search must render inside this screen or the pilot
+ * never sees it. Mirrors the same readiness signals TopStatus uses.
+ */
+export type SearchAttentionKind = "offline" | "degraded" | "scanning" | null;
+
+export function resolveSearchAttentionKind(signals: {
+  ready: boolean;
+  runnerOffline: boolean;
+  hasDegraded: boolean;
+  scanning: boolean;
+}): SearchAttentionKind {
+  if (!signals.ready) return null;
+  if (signals.runnerOffline) return "offline";
+  if (signals.hasDegraded) return "degraded";
+  if (signals.scanning) return "scanning";
+  return null;
 }
