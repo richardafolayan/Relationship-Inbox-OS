@@ -46,13 +46,16 @@ export function messageNotificationsDeviceLine(client: NotificationClientKind): 
 }
 
 export function messageNotificationsDescription(client: NotificationClientKind): string {
+  // Phone/browser use the page Notification API while the app is open.
+  // There is no background push subscription yet, so do not promise
+  // iOS background or killed-app delivery.
   if (client === "phone") {
-    return "Show a system alert when a new message arrives while this app is in the background. Quiet hours still apply.";
+    return "Show a system alert when a new message is noticed while this app is open on your phone. Alerts may not arrive if the app is fully closed. Quiet hours still apply.";
   }
   if (client === "mac") {
     return "Show a system alert when a new message arrives. Clicking it opens the thread. Quiet hours still apply, and nothing fires while this window is focused.";
   }
-  return "Show a system alert when a new message arrives. Quiet hours still apply, and nothing fires while this tab is focused.";
+  return "Show a system alert when a new message is noticed while this tab is open. Quiet hours still apply, and nothing fires while this tab is focused.";
 }
 
 /**
@@ -119,13 +122,15 @@ export function digestPreviewHint(): string {
 }
 
 export function digestBackgroundPingHint(client: NotificationClientKind): string {
+  // Align with foreground-only delivery: digests land in the in-app bell;
+  // optional OS pings only fire when the app can run the Notification API.
   if (client === "phone") {
-    return "Turn on message notifications if you also want a ping while the app is in the background.";
+    return "Turn on message notifications if you also want a system ping while the app is open on your phone.";
   }
   if (client === "mac") {
-    return "Turn on message notifications if you also want a Mac ping while the app is in the background.";
+    return "Turn on message notifications if you also want a Mac ping when the app notices new mail.";
   }
-  return "Turn on message notifications if you also want a ping while the app is in the background.";
+  return "Turn on message notifications if you also want a system ping while this tab is open.";
 }
 
 export const DIGEST_CADENCE_OPTIONS = [
