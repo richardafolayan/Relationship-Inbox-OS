@@ -12,6 +12,10 @@ import { Canvas, PageHead } from "@/components/common/canvas";
 import { DegradedBanner } from "@/components/common/degraded-banner";
 import { MacContactsHint } from "@/components/common/mac-contacts-hint";
 import { classifyConsumerFailure } from "@/lib/consumer-failure";
+import {
+  platformScanEligible,
+  resolvePlatformPrimaryAction
+} from "@/lib/platform-setup";
 import { ReceiptsDrawer } from "@/components/common/receipts-drawer";
 import { cn } from "@/lib/utils";
 
@@ -162,8 +166,8 @@ function PlatformCardView({
   const glyph = PLATFORM_GLYPH[row.platform];
   const supported = row.supported !== false;
   const connected = row.status === "CONNECTED";
-  const scanEligible =
-    connected || row.status === "DEGRADED" || row.status === "ERROR";
+  const primaryAction = resolvePlatformPrimaryAction(row);
+  const scanEligible = platformScanEligible(row);
   const statusToken =
     !supported
       ? { className: "text-ink-3", label: "Not available" }
@@ -179,7 +183,7 @@ function PlatformCardView({
     ? "macOS only"
     : row.lastScanAt
       ? `Last scanned ${formatRelative(row.lastScanAt)}`
-      : scanEligible
+      : scanEligible || row.status === "ERROR"
         ? "Not scanned yet"
         : null;
 
@@ -199,22 +203,13 @@ function PlatformCardView({
 
   const primaryLabel = !supported
     ? "Not available"
-    : scanEligible
+    : primaryAction === "scan"
       ? "Scan now"
-      : "Connect";
+      : primaryAction === "reconnect"
+        ? "Reconnect"
+        : "Connect";
 
-  const runPrimary = () => {
-    if (!supported) return;
-    if (scanEligible) {
-      runActionWithFeedback(apiPost("/runner/control/scan", { platform: row.platform }), {
-        pending: `Scanning ${display}…`,
-        success: `${display} scan queued`,
-        failure: `${display} scan failed`,
-        setError: setActionError,
-        onDone: () => refresh()
-      });
-      return;
-    }
+  const openBrowser = () =>
     runActionWithFeedback(
       apiPost("/runner/control/platform/open-browser", { platform: row.platform }),
       {
@@ -224,35 +219,60 @@ function PlatformCardView({
         setError: setActionError
       }
     );
+
+  const runConnect = () =>
+    runAction(
+      apiPost("/runner/control/platform/connect", { platform: row.platform }),
+      setActionError,
+      refresh
+    );
+
+  const runScan = () =>
+    runActionWithFeedback(apiPost("/runner/control/scan", { platform: row.platform }), {
+      pending: `Scanning ${display}…`,
+      success: `${display} scan queued`,
+      failure: `${display} scan failed`,
+      setError: setActionError,
+      onDone: () => refresh()
+    });
+
+  const runPrimary = () => {
+    if (!supported) return;
+    if (primaryAction === "scan") {
+      runScan();
+      return;
+    }
+    if (primaryAction === "reconnect") {
+      runConnect();
+      return;
+    }
+    openBrowser();
   };
 
   const moreItems: MenuItem[] = [
-    ...(scanEligible
+    ...(primaryAction === "scan"
       ? [
           {
             label: "Open browser",
-            onSelect: () =>
-              runActionWithFeedback(
-                apiPost("/runner/control/platform/open-browser", { platform: row.platform }),
-                {
-                  pending: `Opening ${display}…`,
-                  success: `${display} opened`,
-                  failure: `Couldn't open ${display}`,
-                  setError: setActionError
-                }
-              )
+            onSelect: openBrowser
           },
           {
             label: "Reconnect",
-            onSelect: () =>
-              runAction(
-                apiPost("/runner/control/platform/connect", { platform: row.platform }),
-                setActionError,
-                refresh
-              )
+            onSelect: runConnect
           }
         ]
-      : []),
+      : primaryAction === "reconnect"
+        ? [
+            {
+              label: "Open browser",
+              onSelect: openBrowser
+            },
+            {
+              label: "Scan now",
+              onSelect: runScan
+            }
+          ]
+        : []),
     {
       label: "Run selector tests",
       onSelect: () =>
