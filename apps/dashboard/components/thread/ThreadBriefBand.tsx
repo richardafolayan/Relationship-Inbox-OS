@@ -1,3 +1,8 @@
+"use client";
+
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { ChevronDown } from "lucide-react";
+
 interface ThreadBriefBandProps {
   /** brief.on_you — what this reply needs to do. */
   onYou?: string | null;
@@ -5,49 +10,111 @@ interface ThreadBriefBandProps {
   whereItStands?: string | null;
   /** Active open loops (already filtered for dismissed). */
   openLoops: string[];
+  /**
+   * Thread identity for resetting local expand state when the operator
+   * switches threads without remounting via key.
+   */
+  threadId?: string | null;
 }
 
-// A compact, always-visible reply-readiness strip pinned under the thread
-// header. It mirrors the essentials of the right-rail Reply Brief — what the
-// reply needs to do, why it matters, what's still open — so the operator can
-// understand the thread WITHOUT opening the AI rail or rereading the
-// conversation. The full Reply Brief (follow-ups, tone steer, draft coverage,
-// already-covered) stays in the rail for depth.
-//
-// Deliberately not a card: it lives inside the glassy header band, separated
-// by a single hairline, text only. No nested cards, no icons, no fills.
-export function ThreadBriefBand({ onYou, whereItStands, openLoops }: ThreadBriefBandProps) {
+const useIsoLayoutEffect = typeof window !== "undefined" ? useLayoutEffect : useEffect;
+
+function overflowsClamped(el: HTMLElement | null): boolean {
+  if (!el) return false;
+  // line-clamp sets max-height + overflow hidden; scrollHeight is full wrap.
+  return el.scrollHeight > el.clientHeight + 1;
+}
+
+// Compact reply-readiness strip under the thread header. Mirrors the
+// essentials of the right-rail Reply Brief so the operator can understand
+// the thread without opening the AI rail. On mobile it stays a short fixed
+// row (Reply job + To address); deeper context is behind a disclosure so
+// the brief never steals half the phone screen (#896).
+export function ThreadBriefBand({
+  onYou,
+  whereItStands,
+  openLoops,
+  threadId
+}: ThreadBriefBandProps) {
+  const [expanded, setExpanded] = useState(false);
+  const [leadOverflows, setLeadOverflows] = useState(false);
+  const [loopsOverflows, setLoopsOverflows] = useState(false);
+  const leadRef = useRef<HTMLSpanElement | null>(null);
+  const loopsRef = useRef<HTMLParagraphElement | null>(null);
+
   const job = (onYou ?? "").trim();
   const context = (whereItStands ?? "").trim();
   const loops = openLoops.filter((loop) => loop.trim().length > 0);
 
+  useEffect(() => {
+    setExpanded(false);
+  }, [threadId]);
+
+  useIsoLayoutEffect(() => {
+    // Overflow is only meaningful while clamp is applied. Keep the last
+    // measurement while expanded so the Less control stays available.
+    if (expanded) return;
+
+    const measure = () => {
+      setLeadOverflows(overflowsClamped(leadRef.current));
+      setLoopsOverflows(overflowsClamped(loopsRef.current));
+    };
+
+    measure();
+
+    const observed: HTMLElement[] = [];
+    if (leadRef.current) observed.push(leadRef.current);
+    if (loopsRef.current) observed.push(loopsRef.current);
+    if (observed.length === 0) return;
+
+    const observer = new ResizeObserver(() => {
+      measure();
+    });
+    for (const el of observed) observer.observe(el);
+    return () => observer.disconnect();
+  }, [expanded, job, context, loops.join("\0")]);
+
   if (!job && !context && loops.length === 0) return null;
 
-  // Lead with the reply job; fall back to the situation when no specific ask
-  // was extracted. Never show the same sentence twice.
   const lead = job || context;
   const showContext = context.length > 0 && context !== lead;
   const shownLoops = loops.slice(0, 3);
   const extraLoops = loops.length - shownLoops.length;
+  // Disclosure only when expand actually reveals something: hidden context,
+  // or lead/loops that overflow their two-line mobile clamp (measured).
+  const hasDisclosure = showContext || leadOverflows || loopsOverflows;
 
   return (
-    <div data-testid="thread-brief-band" className="mt-2 border-t border-hairline pt-2.5">
+    <div
+      data-testid="thread-brief-band"
+      className={`pt-1.5 sm:pt-2 ${
+        expanded ? "max-h-[30dvh] overflow-y-auto overscroll-contain" : ""
+      }`}
+    >
       {lead ? (
-        <p className="m-0 flex items-baseline gap-2 text-[13.5px] leading-[1.5] text-ink">
-          <span className="shrink-0 font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">
+        <p className="m-0 flex items-baseline gap-2 text-[12px] leading-[1.35] text-ink sm:text-[13.5px] sm:leading-[1.5]">
+          <span className="shrink-0 font-mono text-[9px] uppercase tracking-[0.08em] text-ink-3 sm:text-[10px]">
             {job ? "Reply job" : "Where it stands"}
           </span>
-          <span className="min-w-0 text-balance">{lead}</span>
+          <span
+            ref={leadRef}
+            className={`min-w-0 sm:text-balance ${
+              expanded ? "" : "line-clamp-2 sm:line-clamp-none"
+            }`}
+          >
+            {lead}
+          </span>
         </p>
       ) : null}
 
-      {showContext ? (
-        <p className="m-0 mt-1 line-clamp-1 text-[12.5px] leading-[1.45] text-ink-3">{context}</p>
-      ) : null}
-
       {shownLoops.length > 0 ? (
-        <p className="m-0 mt-1.5 flex flex-wrap items-baseline gap-x-2 gap-y-[3px] text-[12.5px] leading-[1.4]">
-          <span className="shrink-0 font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">
+        <p
+          ref={loopsRef}
+          className={`m-0 mt-1 flex flex-wrap items-baseline gap-x-2 gap-y-[3px] text-[12px] leading-[1.35] sm:mt-1.5 sm:text-[12.5px] sm:leading-[1.4] ${
+            expanded ? "" : "line-clamp-2 sm:line-clamp-none"
+          }`}
+        >
+          <span className="shrink-0 font-mono text-[9px] uppercase tracking-[0.08em] text-ink-3 sm:text-[10px]">
             To address
           </span>
           {shownLoops.map((loop, index) => (
@@ -58,6 +125,32 @@ export function ThreadBriefBand({ onYou, whereItStands, openLoops }: ThreadBrief
           ))}
           {extraLoops > 0 ? <span className="text-ink-3">+{extraLoops} more</span> : null}
         </p>
+      ) : null}
+
+      {showContext ? (
+        <p
+          className={`m-0 mt-1 text-[12px] leading-[1.4] text-ink-3 sm:text-[12.5px] sm:leading-[1.45] ${
+            expanded ? "block" : "hidden sm:block"
+          }`}
+        >
+          {context}
+        </p>
+      ) : null}
+
+      {hasDisclosure ? (
+        <button
+          type="button"
+          data-testid="thread-brief-expand"
+          aria-expanded={expanded}
+          onClick={() => setExpanded((v) => !v)}
+          className="mt-1 inline-flex items-center gap-1 font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3 transition-colors duration-calm hover:text-ink sm:hidden"
+        >
+          <ChevronDown
+            className={`h-3 w-3 transition-transform duration-calm ${expanded ? "rotate-180" : ""}`}
+            strokeWidth={1.8}
+          />
+          {expanded ? "Less" : "More context"}
+        </button>
       ) : null}
     </div>
   );

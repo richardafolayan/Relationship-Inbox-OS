@@ -1,4 +1,4 @@
-import type { ButtonHTMLAttributes } from "react";
+import { forwardRef, type ButtonHTMLAttributes } from "react";
 import { cn } from "@/lib/utils";
 
 type ButtonVariant = "primary" | "ghost" | "quiet" | "danger";
@@ -14,9 +14,13 @@ const variantStyles: Record<ButtonVariant, string> = {
   danger: "border border-accent-ink/50 text-accent-ink hover:bg-accent-soft"
 };
 
-export function Button({ className, variant = "ghost", ...props }: ButtonProps) {
+export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button(
+  { className, variant = "ghost", ...props },
+  ref
+) {
   return (
     <button
+      ref={ref}
       className={cn(
         "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-pill border border-transparent px-[18px] py-[11px] text-sm font-medium tracking-[-0.005em]",
         "transition-[transform,background-color,border-color,color] duration-calm ease-out",
@@ -28,4 +32,4 @@ export function Button({ className, variant = "ghost", ...props }: ButtonProps) 
       {...props}
     />
   );
-}
+});

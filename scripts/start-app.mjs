@@ -26,6 +26,13 @@ import {
   writeRuntimeState
 } from "./lib/process-lifecycle.mjs";
 
+const require = createRequire(import.meta.url);
+const {
+  readOrCreateAccessToken,
+  startPhoneAccessProxy,
+  stopPhoneAccessProxy
+} = require("../apps/desktop/phone-access.cjs");
+
 const APP_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 loadAppEnv(APP_DIR);
 const APP_NAME = resolveAppName();
@@ -303,6 +310,7 @@ function dashboardReady() {
 async function startApp(prod) {
   const children = [];
   let shuttingDown = false;
+  let phoneProxy = null;
   const state = {
     version: 1,
     appDir: APP_DIR,
@@ -320,7 +328,10 @@ async function startApp(prod) {
   const shutdown = async (code) => {
     if (shuttingDown) return;
     shuttingDown = true;
-    await stopChildGroups(children.map(({ name, child }) => ({ name, pid: child.pid })));
+    await Promise.all([
+      stopChildGroups(children.map(({ name, child }) => ({ name, pid: child.pid }))),
+      stopPhoneAccessProxy(phoneProxy?.server)
+    ]);
     removeRuntimeState(RUNTIME_STATE_PATH);
     process.exit(code);
   };
@@ -357,6 +368,21 @@ async function startApp(prod) {
     void shutdown(1);
   });
 
+  try {
+    const token = readOrCreateAccessToken(STATE_DIR);
+    phoneProxy = await startPhoneAccessProxy({
+      appName: APP_NAME,
+      dashboardPort: DASHBOARD_PORT,
+      token
+    });
+    process.env.RIOS_PHONE_ACCESS_PORT = String(phoneProxy.port);
+    process.env.RIOS_PHONE_ACCESS_TOKEN = token;
+  } catch (error) {
+    delete process.env.RIOS_PHONE_ACCESS_PORT;
+    delete process.env.RIOS_PHONE_ACCESS_TOKEN;
+    say(`Phone access is unavailable: ${error.message}`);
+  }
+
   if (prod) {
     launch("runner", process.execPath, [join(APP_DIR, "apps", "runner", "dist", "index.js")]);
   } else {
@@ -370,7 +396,15 @@ async function startApp(prod) {
   if (prod) {
     launch("dashboard", process.execPath, packagedDashboardArgs(APP_DIR, DASHBOARD_PORT));
   } else {
-    launch("dashboard", NPM_COMMAND, ["run", "dev", "--workspace", "@inbox-os/dashboard"]);
+    launch("dashboard", NPM_COMMAND, [
+      "run",
+      "dev",
+      "--workspace",
+      "@inbox-os/dashboard",
+      "--",
+      "-H",
+      "127.0.0.1"
+    ]);
   }
   if (!(await waitFor("The app window", dashboardReady, 180_000))) {
     await shutdown(1);

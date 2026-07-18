@@ -2,16 +2,36 @@
 
 import { useEffect, useRef, useState } from "react";
 import { X } from "lucide-react";
+import { MediaFallbackCard } from "@/components/thread/media-fallback";
+import {
+  mediaKindLabel,
+  rewriteLocalMediaUrl,
+  withMediaRetryParam
+} from "@/lib/media-url";
 
 interface PhotoViewerProps {
   alt: string;
   className: string;
   src: string;
+  /** Coarse attachment kind for the failed-media card label. */
+  kind?: string | null;
+  /** Filename / raw label shown when the image fails to load. */
+  filename?: string | null;
 }
 
-export function PhotoViewer({ alt, className, src }: PhotoViewerProps) {
+export function PhotoViewer({ alt, className, src, kind, filename }: PhotoViewerProps) {
   const [open, setOpen] = useState(false);
+  const [failed, setFailed] = useState(false);
+  const [attempt, setAttempt] = useState(0);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
+
+  const safeSrc = withMediaRetryParam(rewriteLocalMediaUrl(src), attempt);
+  const kindLabel = mediaKindLabel(kind ?? "photo");
+  const displayName = filename ?? alt;
+
+  useEffect(() => {
+    setFailed(false);
+  }, [src]);
 
   useEffect(() => {
     if (!open) return;
@@ -25,6 +45,20 @@ export function PhotoViewer({ alt, className, src }: PhotoViewerProps) {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [open]);
 
+  if (!safeSrc || failed) {
+    return (
+      <MediaFallbackCard
+        kindLabel={kindLabel}
+        filename={displayName}
+        href={safeSrc || null}
+        onRetry={() => {
+          setFailed(false);
+          setAttempt((n) => n + 1);
+        }}
+      />
+    );
+  }
+
   return (
     <>
       <button
@@ -33,7 +67,14 @@ export function PhotoViewer({ alt, className, src }: PhotoViewerProps) {
         className="block cursor-zoom-in"
         aria-label={`Open ${alt}`}
       >
-        <img src={src} alt={alt} className={className} loading="lazy" />
+        <img
+          key={attempt}
+          src={safeSrc}
+          alt={alt}
+          className={className}
+          loading="lazy"
+          onError={() => setFailed(true)}
+        />
       </button>
       {open ? (
         <div
@@ -54,7 +95,13 @@ export function PhotoViewer({ alt, className, src }: PhotoViewerProps) {
             <X className="h-4 w-4" aria-hidden="true" />
             Close
           </button>
-          <img src={src} alt={alt} className="max-h-full max-w-full rounded-[12px] object-contain" />
+          <img
+            key={`full-${attempt}`}
+            src={safeSrc}
+            alt={alt}
+            className="max-h-full max-w-full rounded-[12px] object-contain"
+            onError={() => setFailed(true)}
+          />
         </div>
       ) : null}
     </>

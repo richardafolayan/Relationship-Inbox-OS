@@ -692,12 +692,29 @@ export interface ThreadResponse {
   receipts: AuditLogRow[];
 }
 
+export interface HostDeviceInfo {
+  /** Raw OS hostname (may include .local). Dashboard humanizes for display. */
+  hostname?: string | null;
+  /** process.platform from the host that runs the runner (darwin/win32/…). */
+  platform?: string | null;
+  /** Runner-resolved friendly label (ComputerName / hostname). Prefer when set. */
+  label?: string | null;
+  /** Coarse device kind from the runner host-device service. */
+  kind?: "mac" | "pc" | "computer" | null;
+}
+
 export interface HealthResponse {
   runnerStatus: "ONLINE" | "SCANNING" | "ERROR";
   lastScanAt: string | null;
   queueDepth: number;
   connectedPlatforms: number;
   availablePlatforms?: PlatformName[];
+  /**
+   * Identity of the machine that runs scans, models, and updates. Phone
+   * Settings uses this for the host-device banner. Optional so older
+   * runner builds still parse cleanly.
+   */
+  hostDevice?: HostDeviceInfo;
   /**
    * Platform currently being scanned. Used by the status bar so the
    * "Scanning …" label names the actual platform (LinkedIn, iMessage)
@@ -753,6 +770,11 @@ export interface HealthResponse {
 
 export type PresenterDemoMode = "off" | "sandbox" | "live";
 
+export interface QuietHoursWindowSettings {
+  start: string;
+  end: string;
+}
+
 export interface AppSettings {
   scanIntervalSeconds: number;
   amberHours: number;
@@ -768,4 +790,7 @@ export interface AppSettings {
   aiProvider?: AiProvider;
   glmModel?: string;
   geminiModel?: string;
+  /** Shared host quiet hours (phone + Mac). See runner AppSettings. */
+  quietHoursEnabled?: boolean;
+  quietHoursWindow?: QuietHoursWindowSettings;
 }

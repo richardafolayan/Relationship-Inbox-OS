@@ -7,12 +7,17 @@ import { runActionWithFeedback } from "@/lib/feedback";
 import type { AuditLogRow, PlatformCard } from "@/lib/types";
 import { formatRelative } from "@/lib/time";
 import { Button } from "@/components/ui/button";
-import { Menu } from "@/components/ui/menu";
+import { Menu, type MenuItem } from "@/components/ui/menu";
 import { Canvas, PageHead } from "@/components/common/canvas";
 import { DegradedBanner } from "@/components/common/degraded-banner";
 import { MacContactsHint } from "@/components/common/mac-contacts-hint";
 import { classifyConsumerFailure } from "@/lib/consumer-failure";
+import {
+  platformScanEligible,
+  resolvePlatformPrimaryAction
+} from "@/lib/platform-setup";
 import { ReceiptsDrawer } from "@/components/common/receipts-drawer";
+import { cn } from "@/lib/utils";
 
 const PLATFORM_DISPLAY: Record<PlatformCard["platform"], string> = {
   LINKEDIN: "LinkedIn",
@@ -32,11 +37,8 @@ const PLATFORM_GLYPH: Record<PlatformCard["platform"], string> = {
   GOOGLE_MESSAGES: "gm"
 };
 
-// Platforms - 2-up card grid. Each card: glyph (left), name + one-line
-// status (centre), icon row of actions (right). Coming-soon platforms
-// get dashed empty cards in the same grid instead of a footer note, so
-// the future state previews rather than disclaims. See section 03 of the
-// redesign doc.
+// Platforms - 2-up card grid. Each card: glyph, name, connection status,
+// last scan, one primary action, and a secondary More menu for recovery.
 export default function PlatformsPage() {
   const [rows, setRows] = useState<PlatformCard[]>([]);
   const [logs, setLogs] = useState<AuditLogRow[]>([]);
@@ -110,7 +112,7 @@ export default function PlatformsPage() {
           />
         ))}
 
-      <div className="grid grid-cols-1 gap-[14px] md:grid-cols-2">
+      <div className="grid grid-cols-1 gap-3 sm:gap-[14px] md:grid-cols-2">
         {visibleRows.map((row) => (
           <PlatformCardView
             key={row.platform}
@@ -162,35 +164,145 @@ function PlatformCardView({
 }: PlatformCardViewProps) {
   const display = PLATFORM_DISPLAY[row.platform];
   const glyph = PLATFORM_GLYPH[row.platform];
+  const supported = row.supported !== false;
+  const connected = row.status === "CONNECTED";
+  const primaryAction = resolvePlatformPrimaryAction(row);
+  const scanEligible = platformScanEligible(row);
   const statusToken =
-    row.supported === false
-      ? { className: "text-ink-3", label: "not available" }
-      : row.status === "CONNECTED"
-      ? { className: "text-risk-fresh", label: "connected" }
-      : row.status === "DEGRADED"
-        ? { className: "text-risk-waiting", label: "needs a look" }
-        : row.status === "ERROR"
-          ? { className: "text-ink-2", label: "needs attention" }
-          : { className: "text-ink-3", label: "not connected" };
+    !supported
+      ? { className: "text-ink-3", label: "Not available" }
+      : connected
+        ? { className: "text-risk-fresh", label: "Connected" }
+        : row.status === "DEGRADED"
+          ? { className: "text-risk-waiting", label: "Needs a look" }
+          : row.status === "ERROR"
+            ? { className: "text-ink-2", label: "Needs attention" }
+            : { className: "text-ink-3", label: "Not connected" };
 
-  const scanLine = row.supported === false
+  const lastScanLine = !supported
     ? "macOS only"
     : row.lastScanAt
-    ? `last scan ${formatRelative(row.lastScanAt)}`
-    : row.lastError
+      ? `Last scanned ${formatRelative(row.lastScanAt)}`
+      : scanEligible || row.status === "ERROR"
+        ? "Not scanned yet"
+        : null;
+
+  const connectHint =
+    !row.lastScanAt && row.lastError && !scanEligible
       ? classifyConsumerFailure(new Error(row.lastError), {
           path: "/runner/control/platform/connect",
           method: "POST"
         }).message
-      : "sign in to enable";
+      : !scanEligible && supported
+        ? "Sign in to enable"
+        : null;
 
   const report = row.latestSelectorReport;
   const passes = report?.results.filter((r) => r.status === "PASS").length ?? 0;
   const totalSelectors = report?.results.length ?? 0;
 
+  const primaryLabel = !supported
+    ? "Not available"
+    : primaryAction === "scan"
+      ? "Scan now"
+      : primaryAction === "reconnect"
+        ? "Reconnect"
+        : "Connect";
+
+  const openBrowser = () =>
+    runActionWithFeedback(
+      apiPost("/runner/control/platform/open-browser", { platform: row.platform }),
+      {
+        pending: `Opening ${display}…`,
+        success: `${display} opened`,
+        failure: `Couldn't open ${display}`,
+        setError: setActionError
+      }
+    );
+
+  const runConnect = () =>
+    runAction(
+      apiPost("/runner/control/platform/connect", { platform: row.platform }),
+      setActionError,
+      refresh
+    );
+
+  const runScan = () =>
+    runActionWithFeedback(apiPost("/runner/control/scan", { platform: row.platform }), {
+      pending: `Scanning ${display}…`,
+      success: `${display} scan queued`,
+      failure: `${display} scan failed`,
+      setError: setActionError,
+      onDone: () => refresh()
+    });
+
+  const runPrimary = () => {
+    if (!supported) return;
+    if (primaryAction === "scan") {
+      runScan();
+      return;
+    }
+    if (primaryAction === "reconnect") {
+      runConnect();
+      return;
+    }
+    openBrowser();
+  };
+
+  const moreItems: MenuItem[] = [
+    ...(primaryAction === "scan"
+      ? [
+          {
+            label: "Open browser",
+            onSelect: openBrowser
+          },
+          {
+            label: "Reconnect",
+            onSelect: runConnect
+          }
+        ]
+      : primaryAction === "reconnect"
+        ? [
+            {
+              label: "Open browser",
+              onSelect: openBrowser
+            },
+            {
+              label: "Scan now",
+              onSelect: runScan
+            }
+          ]
+        : []),
+    {
+      label: "Run selector tests",
+      onSelect: () =>
+        runAction(
+          apiPost("/runner/control/platform/test-selectors", { platform: row.platform }),
+          setActionError,
+          refresh
+        )
+    },
+    {
+      label: "Reset session…",
+      danger: true,
+      onSelect: () => {
+        if (
+          !window.confirm(`Reset the ${display} session? You'll need to sign in again.`)
+        ) {
+          return;
+        }
+        runAction(
+          apiPost("/runner/control/platform/reset-session", { platform: row.platform }),
+          setActionError,
+          refresh
+        );
+      }
+    }
+  ];
+
   return (
     <article className="rounded-[16px] border border-hairline bg-paper">
-      <div className="grid grid-cols-[36px_1fr_auto] items-center gap-[14px] px-[20px] py-[18px]">
+      <div className="grid grid-cols-[36px_minmax(0,1fr)] items-start gap-x-3 gap-y-3 px-4 py-4 sm:grid-cols-[36px_1fr_auto] sm:gap-[14px] sm:px-[20px] sm:py-[18px]">
         <span
           aria-hidden
           className="grid h-[36px] w-[36px] place-items-center rounded-[10px] bg-paper-2 font-mono text-[14px] font-semibold text-ink-2"
@@ -201,125 +313,70 @@ function PlatformCardView({
           <h4 className="m-0 mb-[2px] flex items-center gap-2 font-display text-[16px] font-semibold tracking-[-0.01em] text-ink">
             {display}
           </h4>
-          <p className="m-0 truncate font-mono text-[11px] text-ink-3">
-            <span className={statusToken.className}>● {statusToken.label}</span>
-            <span className="mx-1">·</span>
-            <span>{scanLine}</span>
-            {report ? (
-              <>
-                <span className="mx-1">·</span>
-                <span>selectors {passes}/{totalSelectors}</span>
-              </>
-            ) : null}
+          <p
+            className={cn("m-0 text-[13px] font-medium", statusToken.className)}
+            data-testid="platform-connection-status"
+          >
+            {statusToken.label}
           </p>
+          {lastScanLine ? (
+            <p className="m-0 mt-0.5 font-mono text-[11px] text-ink-3" data-testid="platform-last-scan">
+              {lastScanLine}
+            </p>
+          ) : null}
+          {connectHint ? (
+            <p className="m-0 mt-0.5 font-mono text-[11px] text-ink-3">{connectHint}</p>
+          ) : null}
+          {report ? (
+            <p className="m-0 mt-0.5 font-mono text-[11px] text-ink-3">
+              selectors {passes}/{totalSelectors}
+            </p>
+          ) : null}
         </div>
-        <div className="flex items-center gap-1">
+        <div className="col-span-2 flex items-center justify-end gap-2 sm:col-auto sm:justify-start">
           <button
             type="button"
             onClick={onToggleDetail}
             aria-label="Profile details"
             aria-expanded={detailOpen}
-            className="grid h-[30px] w-[30px] place-items-center rounded-[8px] text-ink-3 transition-colors duration-calm hover:bg-paper-2 hover:text-ink"
+            className="grid h-[40px] w-[40px] place-items-center rounded-[10px] text-ink-3 transition-colors duration-calm hover:bg-paper-2 hover:text-ink"
             title="Profile details"
           >
             <Info className="h-[14px] w-[14px]" strokeWidth={1.6} />
           </button>
-          {row.supported === false ? (
-            <Button variant="quiet" className="px-[12px] py-[7px] text-[12px]" disabled>
-              Not available
-            </Button>
-          ) : (
+          {supported ? (
             <Button
               variant="quiet"
-              className="px-[12px] py-[7px] text-[12px]"
-              onClick={() =>
-                runActionWithFeedback(
-                  apiPost("/runner/control/platform/open-browser", { platform: row.platform }),
-                  {
-                    pending: `Opening ${display}…`,
-                    success: `${display} opened`,
-                    failure: `Couldn't open ${display}`,
-                    setError: setActionError
-                  }
-                )
-              }
+              className="min-h-[40px] px-[14px] py-[8px] text-[12.5px]"
+              onClick={runPrimary}
             >
-              {row.status === "CONNECTED" ? "Open browser" : "Connect"}
+              {primaryLabel}
+            </Button>
+          ) : (
+            <Button variant="quiet" className="min-h-[40px] px-[14px] py-[8px] text-[12.5px]" disabled>
+              Not available
             </Button>
           )}
-          {row.supported !== false ? <Menu
-            trigger={
-              <button
-                type="button"
-                aria-label="More actions"
-                className="grid h-[30px] w-[30px] place-items-center rounded-[8px] text-ink-3 transition-colors duration-calm hover:bg-paper-2 hover:text-ink"
-                title="More"
-              >
-                <MoreVertical className="h-[14px] w-[14px]" strokeWidth={2} />
-              </button>
-            }
-            items={[
-              {
-                label: "Scan now",
-                onSelect: () =>
-                  runActionWithFeedback(
-                    apiPost("/runner/control/scan", { platform: row.platform }),
-                    {
-                      pending: `Scanning ${display}…`,
-                      success: `${display} scan queued`,
-                      failure: `${display} scan failed`,
-                      setError: setActionError,
-                      onDone: () => refresh()
-                    }
-                  )
-              },
-              ...(row.status === "CONNECTED"
-                ? [
-                    {
-                      label: "Reconnect",
-                      onSelect: () =>
-                        runAction(
-                          apiPost("/runner/control/platform/connect", { platform: row.platform }),
-                          setActionError,
-                          refresh
-                        )
-                    }
-                  ]
-                : []),
-              {
-                label: "Run selector tests",
-                onSelect: () =>
-                  runAction(
-                    apiPost("/runner/control/platform/test-selectors", { platform: row.platform }),
-                    setActionError,
-                    refresh
-                  )
-              },
-              {
-                label: "Reset session…",
-                danger: true,
-                onSelect: () => {
-                  if (
-                    !window.confirm(
-                      `Reset the ${display} session? You'll need to sign in again.`
-                    )
-                  ) {
-                    return;
-                  }
-                  runAction(
-                    apiPost("/runner/control/platform/reset-session", { platform: row.platform }),
-                    setActionError,
-                    refresh
-                  );
-                }
+          {supported ? (
+            <Menu
+              trigger={
+                <button
+                  type="button"
+                  aria-label="More actions"
+                  className="grid h-[40px] w-[40px] place-items-center rounded-[10px] border border-hairline text-ink-3 transition-colors duration-calm hover:bg-paper-2 hover:text-ink"
+                  title="More"
+                >
+                  <MoreVertical className="h-[14px] w-[14px]" strokeWidth={2} />
+                </button>
               }
-            ]}
-          /> : null}
+              items={moreItems}
+            />
+          ) : null}
         </div>
       </div>
 
       {detailOpen ? (
-        <div className="border-t border-hairline px-[20px] py-[16px]">
+        <div className="border-t border-hairline px-4 py-4 sm:px-[20px] sm:py-[16px]">
           <div className="grid grid-cols-1 gap-x-8 gap-y-1 font-mono text-[12px] text-ink-2 sm:grid-cols-2">
             <p className="m-0">
               profile dir <span className="text-ink-3">·</span>{" "}

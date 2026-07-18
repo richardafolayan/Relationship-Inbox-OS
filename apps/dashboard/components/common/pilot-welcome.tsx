@@ -3,19 +3,40 @@
 import { X } from "lucide-react";
 import { APP_NAME } from "@/lib/branding";
 
-// A calm product note for pilot testers — not a landing page. Used in three
+// A calm product note for pilot testers, not a landing page. Used in three
 // places:
 //   - Today right rail: the compact variant, sitting beside the focus block
 //     (Richard: "reply properly, not just fast" reads better on the side),
-//   - Settings: the full static panel (no onDismiss) so it stays findable.
+//   - Settings Pilot: the concise settings variant so it does not dominate
+//     the phone viewport,
+//   - Legacy full panel when neither compact nor settings is set.
 // The dismiss + localStorage behaviour is owned by the caller via onDismiss.
 export function PilotWelcomeCard({
   onDismiss,
-  compact
+  compact,
+  settings
 }: {
   onDismiss?: () => void;
   compact?: boolean;
+  settings?: boolean;
 }) {
+  if (settings) {
+    return (
+      <section
+        data-testid="pilot-welcome"
+        className="rounded-[12px] border border-hairline bg-paper px-4 py-3.5"
+      >
+        <p className="m-0 font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">
+          Welcome to {APP_NAME}
+        </p>
+        <p className="m-0 mt-1.5 text-[13.5px] leading-[1.45] text-ink-2">
+          See who is waiting, what they said, and what still needs a reply. You write in your own
+          words. Nothing sends unless you choose to.
+        </p>
+      </section>
+    );
+  }
+
   if (compact) {
     return (
       <section

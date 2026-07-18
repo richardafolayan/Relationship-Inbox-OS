@@ -27,6 +27,7 @@ import {
   PanelLeftOpen,
   Paperclip,
   Pencil,
+  Plus,
   Quote,
   Save,
   Send,
@@ -38,6 +39,7 @@ import {
   X
 } from "lucide-react";
 import { Menu } from "@/components/ui/menu";
+import { ActionSheet, type ActionSheetGroup } from "@/components/ui/action-sheet";
 import { apiGet, apiPost, apiPostForm, peekCache, runAction } from "@/lib/api";
 import { BrandLoader } from "@/components/common/brand-loader";
 import { APP_NAME } from "@/lib/branding";
@@ -72,6 +74,12 @@ import { initials, isDegradedAndInUse, PLATFORM_LABEL, toDisplayRisk } from "@/l
 import { PersonAvatar } from "@/components/common/person-avatar";
 import { Button } from "@/components/ui/button";
 import { ActionButton } from "@/components/ui/action-button";
+import {
+  GUIDED_TOUR_SURFACE_EVENT,
+  isGuidedTourSurfaceActive,
+  planTourOverlayConflicts,
+  type GuidedTourSurfaceDetail
+} from "@/lib/guided-tour";
 // Drawers are lazy-loaded: they're heavy (ProfileDrawer ~390 LOC + its own
 // data fetch) and only ever shown on demand, so they stay out of the most-
 // opened page's initial JS chunk. An "opened-once" latch below keeps them
@@ -172,17 +180,16 @@ type PendingSend = {
   errorKind?: "AUTH_REQUIRED" | "SELECTOR_FAIL" | "PROFILE_LOCKED" | "TRANSIENT" | "DELIVERY_UNCERTAIN" | "UNKNOWN";
 };
 
-// Picks the topmost visible message bubble below the sticky header to
-// anchor scroll preservation on. Selecting by data-message-id (set on
-// every bubble in the JSX) avoids accidentally anchoring on a wrapper
-// div whose position doesn't map cleanly to a message — the wrapper's
-// rect can stay constant while the messages inside it shift, leaving
-// scroll preservation off by tens of pixels. Each bubble is rendered
-// with key={message.id}, so React preserves the DOM node across the
-// re-render that prepends older messages.
+// Picks the topmost visible message bubble to anchor scroll preservation
+// on. Selecting by data-message-id (set on every bubble in the JSX)
+// avoids accidentally anchoring on a wrapper div whose position doesn't
+// map cleanly to a message. The contact header and reply brief live
+// outside this scroller (#896), so only a small top inset is needed.
+// Each bubble is rendered with key={message.id}, so React preserves the
+// DOM node across the re-render that prepends older messages.
 function pickScrollAnchor(scroller: HTMLElement, scrollerTop: number): HTMLElement | null {
-  const stickyBand = 80;
-  const probeTop = scrollerTop + stickyBand;
+  const topInset = 8;
+  const probeTop = scrollerTop + topInset;
   const probeBottom = scrollerTop + scroller.clientHeight;
   let best: { el: HTMLElement; top: number } | null = null;
   const candidates = scroller.querySelectorAll<HTMLElement>("[data-message-id]");
@@ -249,8 +256,8 @@ function startScrollSettlingGuard(scroller: HTMLElement, repin: () => void): () 
     if (!active) return;
     repin();
   });
-  // Observe each non-sticky child of the scroller — that's where the
-  // message-list growth happens. (The sticky header doesn't count.)
+  // Observe non-sticky children (message list growth). Sticky in-scroller
+  // chrome such as the focused-thread pill is skipped.
   for (const child of Array.from(scroller.children) as HTMLElement[]) {
     if (getComputedStyle(child).position !== "sticky") ro.observe(child);
   }
@@ -744,22 +751,267 @@ export default function ThreadPage() {
   const [aiCoverageItems, setAiCoverageItems] = useState<
     Array<{ loop: string; status: "addressed" | "partial"; reason?: string }>
   >([]);
-  const chipsMenuRef = useRef<HTMLDivElement>(null);
+
   // AI assist rail starts collapsed so a 1-message thread doesn't burn 25%
   // of the viewport on duplicate paraphrases. Operator opens it explicitly.
   const [aiOpen, setAiOpen] = useState(false);
+  // Below xl the AI panel is an overlay (phone full-screen / tablet slide-over).
+  // Tracked as state so rotation re-renders subordinate brief content + a11y.
+  const [aiOverlayMode, setAiOverlayMode] = useState(false);
+  const aiCloseButtonRef = useRef<HTMLButtonElement>(null);
+  const aiReturnFocusRef = useRef<HTMLElement | null>(null);
+  const aiTimelineScrollRef = useRef<number | null>(null);
+  const aiHistoryPushedRef = useRef(false);
+  const closeAiAssist = useCallback(() => {
+    setAiOpen(false);
+  }, []);
+  const openAiAssist = useCallback(() => {
+    const active = document.activeElement;
+    aiReturnFocusRef.current =
+      active instanceof HTMLElement ? active : null;
+    setAiOpen(true);
+  }, []);
+  const toggleAiAssist = useCallback(() => {
+    if (isGuidedTourSurfaceActive()) {
+      closeAiAssist();
+      return;
+    }
+    if (aiOpen) closeAiAssist();
+    else openAiAssist();
+  }, [aiOpen, closeAiAssist, openAiAssist]);
+  // Walkthrough owns the primary overlay surface: close AI Assist when the
+  // tour starts so the two never stack, and refuse re-open while active.
+  const aiOpenRef = useRef(false);
+  aiOpenRef.current = aiOpen;
+  useEffect(() => {
+    if (isGuidedTourSurfaceActive() && aiOpenRef.current) setAiOpen(false);
+    const onSurface = (event: Event) => {
+      const detail = (event as CustomEvent<GuidedTourSurfaceDetail>).detail;
+      const tourActive = detail?.active ?? isGuidedTourSurfaceActive();
+      const plan = planTourOverlayConflicts({
+        tourActive,
+        aiAssistOpen: aiOpenRef.current,
+        paletteOpen: false
+      });
+      if (plan.closeAiAssist) setAiOpen(false);
+    };
+    window.addEventListener(GUIDED_TOUR_SURFACE_EVENT, onSurface);
+    return () => window.removeEventListener(GUIDED_TOUR_SURFACE_EVENT, onSurface);
+  }, []);
   // Phone-width header: the secondary actions (save draft, snooze, archive)
   // leave no room for the person's name, so below sm they fold into the
-  // kebab menu instead. Tracked as state (not a render-time matchMedia
-  // read) so rotation / window resizes re-render the menu items.
+  // overflow menu / action sheet instead. Tracked as state (not a
+  // render-time matchMedia read) so rotation / window resizes re-render.
   const [compactActions, setCompactActions] = useState(false);
+  // Issue #901. Phone uses a bottom action sheet; desktop keeps the
+  // existing popover Menu. Controlled open state + trigger ref so we can
+  // restore focus and lock thread scroll while the sheet is up.
+  const [overflowOpen, setOverflowOpen] = useState(false);
+  const overflowTriggerRef = useRef<HTMLButtonElement>(null);
   useEffect(() => {
     const mq = window.matchMedia("(max-width: 639px)");
-    const update = () => setCompactActions(mq.matches);
+    const update = () => {
+      const phone = mq.matches;
+      setCompactActions(phone);
+      if (!phone) setOverflowOpen(false);
+    };
     update();
     mq.addEventListener("change", update);
     return () => mq.removeEventListener("change", update);
   }, []);
+  useEffect(() => {
+    const mq = window.matchMedia("(max-width: 1279px)");
+    const update = () => setAiOverlayMode(mq.matches);
+    update();
+    mq.addEventListener("change", update);
+    return () => mq.removeEventListener("change", update);
+  }, []);
+  // Escape closes the AI panel (compose mode menu wins first when open).
+  // Capture + stopImmediatePropagation so app-shell Esc→/today cannot also fire.
+  useEffect(() => {
+    if (!aiOpen) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopPropagation();
+      event.stopImmediatePropagation();
+      if (composeModeMenuOpen) {
+        setComposeModeMenuOpen(false);
+        return;
+      }
+      closeAiAssist();
+    };
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => window.removeEventListener("keydown", onKeyDown, true);
+  }, [aiOpen, closeAiAssist, composeModeMenuOpen]);
+  // Focus moves into the panel on open (overlay modes) and returns to the
+  // trigger on close so keyboard flow stays predictable.
+  useEffect(() => {
+    if (aiOpen) {
+      if (aiOverlayMode) {
+        // Defer so the close button is mounted before focus lands.
+        const id = window.requestAnimationFrame(() => {
+          aiCloseButtonRef.current?.focus();
+        });
+        return () => window.cancelAnimationFrame(id);
+      }
+      return;
+    }
+    const returnTo = aiReturnFocusRef.current;
+    aiReturnFocusRef.current = null;
+    if (returnTo && document.contains(returnTo)) {
+      returnTo.focus();
+    }
+  }, [aiOpen, aiOverlayMode]);
+  // Overlay dialog: trap Tab inside the panel so focus cannot leave into
+  // scroll-locked background controls.
+  useEffect(() => {
+    if (!aiOpen || !aiOverlayMode) return;
+    const FOCUSABLE =
+      'a[href],button:not([disabled]),textarea:not([disabled]),input:not([disabled]),select:not([disabled]),[tabindex]:not([tabindex="-1"])';
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Tab") return;
+      const panel = document.getElementById("ai-assist-panel");
+      if (!panel) return;
+      const nodes = Array.from(panel.querySelectorAll<HTMLElement>(FOCUSABLE)).filter(
+        (el) => el.getClientRects().length > 0
+      );
+      if (nodes.length === 0) return;
+      const first = nodes[0]!;
+      const last = nodes[nodes.length - 1]!;
+      const active = document.activeElement as HTMLElement | null;
+      const inside = active ? panel.contains(active) : false;
+      if (event.shiftKey) {
+        if (!inside || active === first) {
+          event.preventDefault();
+          last.focus();
+        }
+      } else if (!inside || active === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [aiOpen, aiOverlayMode]);
+  // Phone: system Back / browser back closes AI Assist before leaving the
+  // thread. pushState on open; popstate closes; button/Escape close pops
+  // the extra history entry only (never the thread itself). In-panel
+  // navigations (e.g. Settings) pop first so a phantom aiAssist entry is
+  // not left under the destination.
+  useEffect(() => {
+    if (!aiOpen || !aiOverlayMode) return;
+    const isPhone = window.matchMedia("(max-width: 639px)").matches;
+    if (!isPhone) return;
+
+    window.history.pushState({ aiAssist: true }, "");
+    aiHistoryPushedRef.current = true;
+
+    // Swipe-back / browser Back: browser already consumed our synthetic
+    // entry. Close the panel without calling history.back again.
+    const onPopState = () => {
+      if (!aiHistoryPushedRef.current) return;
+      aiHistoryPushedRef.current = false;
+      setAiOpen(false);
+    };
+    window.addEventListener("popstate", onPopState);
+
+    const panel = document.getElementById("ai-assist-panel");
+    const onNavClickCapture = (event: MouseEvent) => {
+      if (!aiHistoryPushedRef.current) return;
+      const target = event.target as Element | null;
+      const anchor = target?.closest?.("a[href]") as HTMLAnchorElement | null;
+      if (!anchor || !panel?.contains(anchor)) return;
+      if (
+        anchor.target === "_blank" ||
+        event.metaKey ||
+        event.ctrlKey ||
+        event.shiftKey ||
+        event.altKey
+      ) {
+        return;
+      }
+      const hrefAttr = anchor.getAttribute("href");
+      if (!hrefAttr || hrefAttr.startsWith("#")) return;
+      let url: URL;
+      try {
+        url = new URL(anchor.href, window.location.href);
+      } catch {
+        return;
+      }
+      if (url.origin !== window.location.origin) return;
+
+      event.preventDefault();
+      event.stopPropagation();
+      // Clear before back so onPopState does not also react; only our
+      // synthetic entry is popped, then we navigate.
+      aiHistoryPushedRef.current = false;
+      const path = `${url.pathname}${url.search}${url.hash}`;
+      const onPopThenNav = () => {
+        window.removeEventListener("popstate", onPopThenNav);
+        setAiOpen(false);
+        router.push(path);
+      };
+      window.addEventListener("popstate", onPopThenNav);
+      window.history.back();
+    };
+    panel?.addEventListener("click", onNavClickCapture, true);
+
+    return () => {
+      window.removeEventListener("popstate", onPopState);
+      panel?.removeEventListener("click", onNavClickCapture, true);
+      // Close button / Escape / unmount: pop only the synthetic entry we
+      // pushed. Ref is already false after swipe-back or in-panel nav, so
+      // those paths never double-pop into the thread history.
+      if (aiHistoryPushedRef.current) {
+        aiHistoryPushedRef.current = false;
+        window.history.back();
+      }
+    };
+  }, [aiOpen, aiOverlayMode, router]);
+  // Phone overlay: size the fixed panel from visualViewport so the action
+  // footer stays above the software keyboard. iOS often keeps the layout
+  // viewport tall while the keyboard covers the lower portion; bottom inset
+  // alone is not enough when offsetTop shifts, so pin top + height to vv.
+  useEffect(() => {
+    if (!aiOpen || !aiOverlayMode) return;
+    const isPhone = window.matchMedia("(max-width: 639px)").matches;
+    if (!isPhone) return;
+    const vv = window.visualViewport;
+    if (!vv) return;
+    const panel = document.getElementById("ai-assist-panel");
+    if (!panel) return;
+
+    const clearViewportBox = () => {
+      panel.style.top = "";
+      panel.style.height = "";
+      panel.style.bottom = "";
+      panel.style.maxHeight = "";
+    };
+
+    const syncViewportBox = () => {
+      const top = Math.max(0, vv.offsetTop);
+      const height = Math.max(0, vv.height);
+      panel.style.top = `${top}px`;
+      panel.style.height = `${height}px`;
+      panel.style.maxHeight = `${height}px`;
+      panel.style.bottom = "auto";
+      const active = document.activeElement as HTMLElement | null;
+      if (active && panel.contains(active) && typeof active.scrollIntoView === "function") {
+        active.scrollIntoView({ block: "nearest", inline: "nearest" });
+      }
+    };
+    vv.addEventListener("resize", syncViewportBox);
+    vv.addEventListener("scroll", syncViewportBox);
+    window.addEventListener("orientationchange", syncViewportBox);
+    syncViewportBox();
+    return () => {
+      vv.removeEventListener("resize", syncViewportBox);
+      vv.removeEventListener("scroll", syncViewportBox);
+      window.removeEventListener("orientationchange", syncViewportBox);
+      clearViewportBox();
+    };
+  }, [aiOpen, aiOverlayMode]);
   // How much AI writing help to surface is driven by the operator's
   // configured aiHelpLevel (see the `profile` state below). Full sendable
   // drafts, predraft, and compose-in-voice only appear at "full_drafts".
@@ -794,6 +1046,7 @@ export default function ThreadPage() {
     const hasBriefContent = Boolean(
       brief && (brief.where_it_stands?.trim() || brief.on_you?.trim())
     );
+    if (isGuidedTourSurfaceActive()) return;
     if (
       hasBriefContent ||
       thread.openLoops.length > 0 ||
@@ -837,6 +1090,9 @@ export default function ThreadPage() {
   // enqueuing immediately. The picker also exposes a custom datetime-local
   // input for arbitrary times.
   const [scheduleMenuOpen, setScheduleMenuOpen] = useState(false);
+  // Mobile progressive disclosure (#900): secondary composer actions live
+  // behind a + sheet so the default phone chrome stays [text] [+] [mic] [Send].
+  const [composerMoreOpen, setComposerMoreOpen] = useState(false);
   const [customScheduleValue, setCustomScheduleValue] = useState("");
   const [scheduling, setScheduling] = useState(false);
   const [cancellingScheduledId, setCancellingScheduledId] = useState<string | null>(null);
@@ -851,7 +1107,12 @@ export default function ThreadPage() {
   const [editingScheduledTime, setEditingScheduledTime] = useState("");
   const [originalScheduledTime, setOriginalScheduledTime] = useState("");
   const [savingScheduledId, setSavingScheduledId] = useState<string | null>(null);
-  const scheduleMenuRef = useRef<HTMLDivElement>(null);
+  // Desktop + mobile each mount their own schedule/chips menus (one is
+  // display:none at a time). Outside-click must check both wrappers.
+  const scheduleMenuDesktopRef = useRef<HTMLDivElement>(null);
+  const scheduleMenuMobileRef = useRef<HTMLDivElement>(null);
+  const chipsMenuDesktopRef = useRef<HTMLDivElement>(null);
+  const chipsMenuMobileRef = useRef<HTMLDivElement>(null);
 
   // Coarse once-a-minute clock. The late-night LinkedIn schedule nudge below
   // the composer keys off the local time, so this lets it appear/disappear
@@ -886,6 +1147,28 @@ export default function ThreadPage() {
   }, [thread?.siblingIds, threadId]);
 
   const timelineRef = useRef<HTMLDivElement>(null);
+  // Lock the thread timeline while the AI overlay is open; restore scrollTop
+  // on close so the operator lands back on the same messages.
+  useEffect(() => {
+    if (!aiOpen || !aiOverlayMode) return;
+    const timeline = timelineRef.current;
+    if (timeline) {
+      aiTimelineScrollRef.current = timeline.scrollTop;
+      timeline.style.overflow = "hidden";
+    }
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      if (timeline) {
+        timeline.style.overflow = "";
+        if (aiTimelineScrollRef.current != null) {
+          timeline.scrollTop = aiTimelineScrollRef.current;
+        }
+        aiTimelineScrollRef.current = null;
+      }
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [aiOpen, aiOverlayMode]);
   const stickToBottomRef = useRef(true);
   // #461 (pilot R-0060): controls the floating "jump to latest" button.
   // True when the operator has scrolled up away from the newest message.
@@ -1151,6 +1434,10 @@ export default function ThreadPage() {
     setWhatsAppPollAllowMultiple(true);
     setWhatsAppPollSending(false);
     setWhatsAppPollSent(false);
+    setComposerMoreOpen(false);
+    setScheduleMenuOpen(false);
+    setChipsMenuOpen(false);
+    setMemoryOpen(false);
     setComposerAttachments((prev) => {
       for (const a of prev) {
         if (a.previewUrl) URL.revokeObjectURL(a.previewUrl);
@@ -2092,7 +2379,11 @@ export default function ThreadPage() {
   useEffect(() => {
     if (!scheduleMenuOpen) return undefined;
     const onClick = (event: MouseEvent) => {
-      if (!scheduleMenuRef.current?.contains(event.target as Node)) {
+      const target = event.target as Node;
+      if (
+        !scheduleMenuDesktopRef.current?.contains(target) &&
+        !scheduleMenuMobileRef.current?.contains(target)
+      ) {
         setScheduleMenuOpen(false);
       }
     };
@@ -2111,7 +2402,11 @@ export default function ThreadPage() {
   useEffect(() => {
     if (!chipsMenuOpen) return undefined;
     const onClick = (event: MouseEvent) => {
-      if (!chipsMenuRef.current?.contains(event.target as Node)) {
+      const target = event.target as Node;
+      if (
+        !chipsMenuDesktopRef.current?.contains(target) &&
+        !chipsMenuMobileRef.current?.contains(target)
+      ) {
         setChipsMenuOpen(false);
       }
     };
@@ -2864,20 +3159,19 @@ export default function ThreadPage() {
       `[data-message-id="${focusedThreadParentId}"]`
     ) as HTMLElement | null;
     if (!container || !target) return;
-    // #465 (pilot R-0064): position the focused message as HIGH as
-    // possible — its top sits just below the sticky header — rather than
-    // centring it, so the message and the replies beneath it read
-    // top-down. scrollTop clamps at the bottom, so a focused message near
-    // the end of the thread still lands as high as the remaining content
-    // allows. Bubbles + dividers collapse over 150ms (see bubble/DayDivider
-    // className), so re-align on every layout change during that window
-    // rather than relying on a one-shot calculation.
+    // #465 (pilot R-0064): position the focused message as high as
+    // possible so the message and replies beneath it read top-down.
+    // Header/brief live outside the scroller (#896); clearance is only
+    // for the sticky focused-thread pill (top-2 + ~28–36px tall). scrollTop
+    // clamps at the bottom, so a focused message near the end still lands
+    // as high as remaining content allows. Bubbles + dividers collapse
+    // over 150ms, so re-align on every layout change during that window.
     const realignToTop = () => {
       const containerRect = container.getBoundingClientRect();
       const targetRect = target.getBoundingClientRect();
-      // FOCUS_HEADER_OFFSET matches the scroller's scrollPaddingTop so the
-      // message clears the glassy sticky header.
-      const FOCUS_HEADER_OFFSET = 64;
+      // Pill is sticky top-2 (~8px) with py-[6px] mono label (~28–36px).
+      // 48px clears the pill bottom so the parent is not tucked under it.
+      const FOCUS_HEADER_OFFSET = 48;
       const delta = (targetRect.top - containerRect.top) - FOCUS_HEADER_OFFSET;
       container.scrollTop = container.scrollTop + delta;
     };
@@ -3197,6 +3491,214 @@ export default function ThreadPage() {
 
   const platformLabel = PLATFORM_LABEL[thread.platform];
 
+  // Overflow actions shared by the phone action sheet (#901) and the desktop
+  // popover Menu. Grouping only applies on phone; desktop stays a flat list.
+  const saveDraftAction = {
+    label: "Save draft",
+    onSelect: () =>
+      runActionWithFeedback(
+        apiPost(`/runner/control/thread/${thread.id}/draft`, { text: composer }),
+        {
+          pending: "Saving draft…",
+          success: "Draft saved",
+          setError,
+          onDone: () => setHasSavedDraft(composer.trim().length > 0)
+        }
+      )
+  };
+  const deleteDraftAction = {
+    label: "Delete draft",
+    danger: true as const,
+    onSelect: () =>
+      runActionWithFeedback(
+        apiPost(`/runner/control/thread/${thread.id}/delete-draft`, {}),
+        {
+          pending: "Deleting draft…",
+          success: "Draft deleted",
+          setError,
+          onDone: () => {
+            predraftDismissedRef.current.add(thread.id);
+            setComposer("");
+            setComposerSource("empty");
+            setHasSavedDraft(false);
+          }
+        }
+      )
+  };
+  const snoozeOverflowAction =
+    thread.snoozedUntil && Date.parse(thread.snoozedUntil) > Date.now()
+      ? {
+          label: "Wake up",
+          onSelect: () =>
+            runAction(
+              apiPost(`/runner/control/thread/${thread.id}/unsnooze`, {}),
+              setError,
+              refresh
+            )
+        }
+      : {
+          label: "Snooze…",
+          onSelect: () => {
+            if (!snoozeSuggestions) {
+              setSnoozeSuggestions({ loading: true, items: [] });
+              void apiGet<{
+                suggestions: Array<{ label: string; hours: number; reason: string }>;
+              }>(`/runner/control/thread/${thread.id}/suggest-snooze`)
+                .then((r) =>
+                  setSnoozeSuggestions({ loading: false, items: r.suggestions ?? [] })
+                )
+                .catch(() => setSnoozeSuggestions({ loading: false, items: [] }));
+            }
+            setSnoozeMenuOpen(true);
+          }
+        };
+  const archiveOverflowAction = {
+    label: thread.archivedAt
+      ? unarchiving
+        ? "Unarchiving…"
+        : "Unarchive"
+      : archiving
+        ? "Archiving…"
+        : "Archive",
+    danger: !thread.archivedAt,
+    onSelect: () => {
+      // Soft confirm on Archive only: unarchive is a recovery path.
+      if (!thread.archivedAt) {
+        const ok = window.confirm(
+          "Archive this conversation? You can find it later under Archived."
+        );
+        if (!ok) return;
+      }
+      if (thread.archivedAt) unarchiveThread();
+      else archiveThread();
+    }
+  };
+  const reassessOverflowAction = {
+    label: reassessing ? "Reassessing…" : "Reassess",
+    disabled: reassessing,
+    onSelect: () => {
+      if (reassessing) return;
+      void reassessThread();
+    }
+  };
+  const remindOverflowAction = {
+    // Issue #392 / R-0032. "Remind me to follow up in 3 days"
+    // → AI parses → thread snoozes until then with the
+    // reminder text saved on Thread.reminderText. When the
+    // snooze expires the thread returns to inbox with a
+    // "Reminder: <text>" banner. window.prompt for the
+    // input is intentionally rough — see #392 for the
+    // upcoming dedicated compose-mode polish.
+    label: "Remind me…",
+    onSelect: () => {
+      if (!thread) return;
+      const intent = window.prompt(
+        "Remind me to…\n\nExample: \"follow up with him next Tuesday\" or \"ask about the offer in 3 days\"."
+      );
+      if (!intent || !intent.trim()) return;
+      apiPost<{
+        ok: boolean;
+        remindAt?: string;
+        reminderText?: string;
+        needsClarification?: boolean;
+        reason?: string;
+      }>(`/runner/control/thread/${thread.id}/remind`, { intent: intent.trim() })
+        .then(async (res) => {
+          if (res.ok && res.remindAt && res.reminderText) {
+            const whenLabel = new Date(res.remindAt).toLocaleString(undefined, {
+              weekday: "short",
+              month: "short",
+              day: "numeric",
+              hour: "numeric",
+              minute: "2-digit"
+            });
+            showToast({
+              kind: "success",
+              title: `Reminder set for ${whenLabel}`,
+              description: res.reminderText
+            });
+            await refresh();
+          } else {
+            showToast({
+              kind: "error",
+              title: "Couldn't set the reminder",
+              description:
+                res.reason ??
+                "Try rewriting with a clearer time, like 'in 3 days' or 'next Tuesday'.",
+              durationMs: 9000
+            });
+          }
+        })
+        .catch((err) => {
+          showToast({
+            kind: "error",
+            title: "Reminder failed",
+            description: err instanceof Error ? err.message : String(err),
+            durationMs: 9000
+          });
+        });
+    }
+  };
+  const openInPlatformAction = {
+    label: `Open in ${platformLabel}`,
+    onSelect: () =>
+      runAction(apiPost(`/runner/control/thread/${thread.id}/open`, {}), setError)
+  };
+  const rescanOverflowAction = {
+    // Progress lives in the TopStatus ticker ("Checking
+    // <name>'s messages"), not the thread header — the
+    // menu label only flips while running so a re-click
+    // reads as already in flight.
+    label: rescanStage ? "Checking for new messages…" : "Check for new messages",
+    disabled: Boolean(rescanStage),
+    onSelect: () => {
+      if (rescanStage) return;
+      runAction(
+        apiPost(`/runner/control/thread/${thread.id}/rescan`, {}),
+        setError,
+        refresh
+      );
+    }
+  };
+  const receiptsOverflowAction = {
+    label: "Receipts",
+    onSelect: () => setReceiptsOpen(true)
+  };
+
+  // Phone sheet groups (#901): Primary / Conversation tools / External.
+  const overflowSheetGroups: ActionSheetGroup[] = [
+    {
+      id: "primary",
+      label: "Primary",
+      items: [
+        saveDraftAction,
+        ...(hasSavedDraft ? [deleteDraftAction] : []),
+        snoozeOverflowAction,
+        archiveOverflowAction
+      ]
+    },
+    {
+      id: "conversation",
+      label: "Conversation tools",
+      items: [remindOverflowAction, reassessOverflowAction, rescanOverflowAction]
+    },
+    {
+      id: "external",
+      label: "External",
+      items: [openInPlatformAction, receiptsOverflowAction]
+    }
+  ];
+
+  // Desktop / tablet popover stays a flat list of secondary actions.
+  // Primary phone-only actions live exclusively in the action sheet groups.
+  const overflowMenuItems = [
+    reassessOverflowAction,
+    remindOverflowAction,
+    openInPlatformAction,
+    rescanOverflowAction,
+    receiptsOverflowAction
+  ];
+
   // Reply Brief, computed once and shared between the always-visible brief
   // band (pinned under the header, the default-visible reply-readiness
   // summary) and the full Reply Brief in the AI rail.
@@ -3221,7 +3723,7 @@ export default function ThreadPage() {
       // apply from lg/xl up. Setting gridTemplateColumns as a plain inline
       // style kept the 240px/360px rail tracks reserved at every width,
       // which crushed the conversation into a thin centre strip on phones.
-      className="grid h-full min-h-0 grid-cols-1 lg:[grid-template-columns:var(--thread-cols-lg)] xl:[grid-template-columns:var(--thread-cols-xl)]"
+      className="relative grid h-full min-h-0 grid-cols-1 overflow-hidden lg:[grid-template-columns:var(--thread-cols-lg)] xl:[grid-template-columns:var(--thread-cols-xl)]"
       style={
         {
           "--thread-cols-lg": gridColsLg,
@@ -3362,9 +3864,14 @@ export default function ThreadPage() {
         </ul>
       </aside>
 
-      {/* ───── Chat column ───── */}
+      {/* ───── Chat column ─────
+          Four fixed rows on every width: header | brief | messages | composer.
+          Only the message timeline scrolls (#896). Header and brief are
+          layout rows, not sticky-inside-scroller, so they stay put even if
+          an outer shell still scrolls. Desktop rails stay separate columns. */}
       <div
-        className="relative flex h-full min-h-0 flex-col border-r border-hairline"
+        data-testid="thread-chat-column"
+        className="relative flex h-full min-h-0 flex-col overflow-hidden border-r border-hairline"
         onDragEnter={onComposerDragEnter}
         onDragOver={onComposerDragOver}
         onDragLeave={onComposerDragLeave}
@@ -3403,44 +3910,14 @@ export default function ThreadPage() {
           </div>
         ) : null}
 
+        {/* Fixed contact header row. Outside the message scroller so it
+            never competes with timeline scroll or sticky-in-scroller
+            fragility on mobile (#896). */}
         <div
-          ref={timelineRef}
-          onScroll={onTimelineScroll}
-          // overflow-x-hidden is load-bearing: overflow-y-auto alone makes
-          // the browser compute overflow-x as auto, so any too-wide child
-          // (an unbroken URL, a future embed) turns into a horizontal
-          // scrollbar that drags the sticky header along with it.
-          className="relative min-h-0 flex-1 overflow-y-auto overflow-x-hidden"
-          // overflowAnchor: disable the browser's native scroll anchoring
-          // so it doesn't race with the load-older restoration in
-          // useLayoutEffect. When both fire on the same prepend, the
-          // browser anchors on its own heuristic-picked element (often a
-          // wrapper) and our code anchors on a specific message bubble —
-          // the difference shows up as a small visible jolt as the scroll
-          // position settles.
-          //
-          // scrollPaddingTop: the glassy sticky header below sits INSIDE
-          // this scroller, so any programmatic scroll (scrollIntoView,
-          // future snap-to-message features) would otherwise land target
-          // elements at scroll-container-top — i.e. behind the header.
-          // Reserving a top scroll-padding zone the size of the header
-          // makes those alignments respect the header. Value tuned to the
-          // header's resting height (single row, h-9 avatar + py-2.5 ≈
-          // 60-64px); if the header grows another row of chips this may
-          // need a ref-based measurement.
-          style={{ overflowAnchor: "none", scrollPaddingTop: "64px" }}
+          data-testid="thread-header-band"
+          className="shrink-0 border-b border-hairline bg-[color-mix(in_oklch,var(--paper)_96%,transparent)] backdrop-blur-md backdrop-saturate-150 px-2 py-2 sm:px-6 sm:py-2.5 lg:px-8"
         >
-          {/* Glassy sticky header. Sits inside the scroll container so the
-              timeline scrolls visibly behind it - matches the iOS / Apple
-              translucent-bar aesthetic the rest of the redesign nods at.
-              Single-row layout keeps vertical real estate for the chat.
-              Opacity is high (92%) on purpose: at lower values (~70%)
-              message bubbles passing behind the bar stayed legible enough
-              to read as a layout bug — the operator saw a clipped bubble
-              rather than a tinted bar. 92% + backdrop-blur reads as
-              frosted glass while making clipped content visually fade. */}
-          <div className="sticky top-0 z-10 border-b border-hairline bg-[color-mix(in_oklch,var(--paper)_92%,transparent)] backdrop-blur-md backdrop-saturate-150 px-2 py-2 sm:px-6 sm:py-2.5 lg:px-8">
-            <header className="flex items-center gap-1 sm:gap-2">
+          <header className="flex items-center gap-1 sm:gap-2">
               <button
                 type="button"
                 onClick={() => router.push("/today")}
@@ -3641,211 +4118,97 @@ export default function ThreadPage() {
               </div>
               <Button
                 variant={aiOpen ? "primary" : "quiet"}
-                onClick={() => setAiOpen((v) => !v)}
-                title="Toggle the AI assist sidebar"
+                onClick={toggleAiAssist}
+                title="Toggle AI Assist"
+                aria-expanded={aiOpen}
+                aria-controls="ai-assist-panel"
+                data-testid="ai-assist-toggle"
                 className="px-3 py-1.5 text-[12px]"
               >
                 <Sparkles className="h-[13px] w-[13px]" strokeWidth={1.6} />
                 AI
               </Button>
-              <Menu
-                align="end"
-                trigger={
+              {compactActions ? (
+                <>
                   <Button
+                    ref={overflowTriggerRef}
                     variant="ghost"
                     aria-label="More actions"
                     title="More actions"
+                    aria-expanded={overflowOpen}
+                    aria-haspopup="dialog"
+                    data-testid="thread-overflow-trigger"
+                    onClick={() => setOverflowOpen(true)}
                     className="px-2 py-1.5 text-[12px]"
                   >
                     <MoreHorizontal className="h-[14px] w-[14px]" strokeWidth={1.6} />
                   </Button>
-                }
-                items={[
-                  // Phone-width header: the secondary actions live here so
-                  // the person's name keeps its space. Menu-launched actions
-                  // surface progress via pending/success toasts because the
-                  // menu closes on select (no inline button state to show).
-                  ...(compactActions
-                    ? [
-                        {
-                          label: "Save draft",
-                          onSelect: () =>
-                            runActionWithFeedback(
-                              apiPost(`/runner/control/thread/${thread.id}/draft`, { text: composer }),
-                              {
-                                pending: "Saving draft…",
-                                success: "Draft saved",
-                                setError,
-                                onDone: () => setHasSavedDraft(composer.trim().length > 0)
-                              }
-                            )
-                        },
-                        ...(hasSavedDraft
-                          ? [
-                              {
-                                label: "Delete draft",
-                                onSelect: () =>
-                                  runActionWithFeedback(
-                                    apiPost(`/runner/control/thread/${thread.id}/delete-draft`, {}),
-                                    {
-                                      pending: "Deleting draft…",
-                                      success: "Draft deleted",
-                                      setError,
-                                      onDone: () => {
-                                        predraftDismissedRef.current.add(thread.id);
-                                        setComposer("");
-                                        setComposerSource("empty");
-                                        setHasSavedDraft(false);
-                                      }
-                                    }
-                                  )
-                              }
-                            ]
-                          : []),
-                        thread.snoozedUntil && Date.parse(thread.snoozedUntil) > Date.now()
-                          ? {
-                              label: "Wake up",
-                              onSelect: () =>
-                                runAction(
-                                  apiPost(`/runner/control/thread/${thread.id}/unsnooze`, {}),
-                                  setError,
-                                  refresh
-                                )
-                            }
-                          : {
-                              label: "Snooze…",
-                              onSelect: () => {
-                                if (!snoozeSuggestions) {
-                                  setSnoozeSuggestions({ loading: true, items: [] });
-                                  void apiGet<{ suggestions: Array<{ label: string; hours: number; reason: string }> }>(
-                                    `/runner/control/thread/${thread.id}/suggest-snooze`
-                                  )
-                                    .then((r) =>
-                                      setSnoozeSuggestions({ loading: false, items: r.suggestions ?? [] })
-                                    )
-                                    .catch(() => setSnoozeSuggestions({ loading: false, items: [] }));
-                                }
-                                setSnoozeMenuOpen(true);
-                              }
-                            },
-                        {
-                          label: thread.archivedAt
-                            ? unarchiving
-                              ? "Unarchiving…"
-                              : "Unarchive"
-                            : archiving
-                              ? "Archiving…"
-                              : "Archive",
-                          onSelect: () => (thread.archivedAt ? unarchiveThread() : archiveThread())
-                        }
-                      ]
-                    : []),
-                  {
-                    label: reassessing ? "Reassessing…" : "Reassess",
-                    onSelect: () => {
-                      if (reassessing) return;
-                      void reassessThread();
-                    }
-                  },
-                  {
-                    // Issue #392 / R-0032. "Remind me to follow up in 3 days"
-                    // → AI parses → thread snoozes until then with the
-                    // reminder text saved on Thread.reminderText. When the
-                    // snooze expires the thread returns to inbox with a
-                    // "Reminder: <text>" banner. window.prompt for the
-                    // input is intentionally rough — see #392 for the
-                    // upcoming dedicated compose-mode polish.
-                    label: "Remind me…",
-                    onSelect: () => {
-                      if (!thread) return;
-                      const intent = window.prompt(
-                        "Remind me to…\n\nExample: \"follow up with him next Tuesday\" or \"ask about the offer in 3 days\"."
-                      );
-                      if (!intent || !intent.trim()) return;
-                      apiPost<{
-                        ok: boolean;
-                        remindAt?: string;
-                        reminderText?: string;
-                        needsClarification?: boolean;
-                        reason?: string;
-                      }>(`/runner/control/thread/${thread.id}/remind`, { intent: intent.trim() })
-                        .then(async (res) => {
-                          if (res.ok && res.remindAt && res.reminderText) {
-                            const whenLabel = new Date(res.remindAt).toLocaleString(undefined, {
-                              weekday: "short",
-                              month: "short",
-                              day: "numeric",
-                              hour: "numeric",
-                              minute: "2-digit"
-                            });
-                            showToast({
-                              kind: "success",
-                              title: `Reminder set for ${whenLabel}`,
-                              description: res.reminderText
-                            });
-                            await refresh();
-                          } else {
-                            showToast({
-                              kind: "error",
-                              title: "Couldn't set the reminder",
-                              description:
-                                res.reason ??
-                                "Try rewriting with a clearer time, like 'in 3 days' or 'next Tuesday'.",
-                              durationMs: 9000
-                            });
-                          }
-                        })
-                        .catch((err) => {
-                          showToast({
-                            kind: "error",
-                            title: "Reminder failed",
-                            description: err instanceof Error ? err.message : String(err),
-                            durationMs: 9000
-                          });
-                        });
-                    }
-                  },
-                  {
-                    label: `Open in ${platformLabel}`,
-                    onSelect: () =>
-                      runAction(apiPost(`/runner/control/thread/${thread.id}/open`, {}), setError)
-                  },
-                  {
-                    // Progress lives in the TopStatus ticker ("Checking
-                    // <name>'s messages"), not the thread header — the
-                    // menu label only flips while running so a re-click
-                    // reads as already in flight.
-                    label: rescanStage ? "Checking for new messages…" : "Check for new messages",
-                    onSelect: () => {
-                      if (rescanStage) return;
-                      runAction(
-                        apiPost(`/runner/control/thread/${thread.id}/rescan`, {}),
-                        setError,
-                        refresh
-                      );
-                    }
-                  },
-                  { label: "Receipts", onSelect: () => setReceiptsOpen(true) }
-                ]}
-              />
-            </header>
-            {/* Always-visible reply-readiness band: what the reply needs to
-                do, why it matters, what's still open — so the operator
-                understands the thread without opening the AI rail or
-                rereading. Pinned with the header. Hidden at lg only when the
-                full rail is open (it supersedes the summary there); stays
-                visible on mobile, where the rail can't open. */}
-            {thread.needsReply !== false ? (
-              <div className={aiOpen ? "xl:hidden" : undefined}>
-                <ThreadBriefBand
-                  onYou={displayBrief.on_you}
-                  whereItStands={displayBrief.where_it_stands}
-                  openLoops={activeOpenLoops}
+                  <ActionSheet
+                    open={overflowOpen}
+                    onClose={() => setOverflowOpen(false)}
+                    title="Thread actions"
+                    groups={overflowSheetGroups}
+                    returnFocusRef={overflowTriggerRef}
+                    scrollLockTargetRef={timelineRef}
+                    historyKey="threadOverflow"
+                  />
+                </>
+              ) : (
+                <Menu
+                  align="end"
+                  trigger={
+                    <Button
+                      variant="ghost"
+                      aria-label="More actions"
+                      title="More actions"
+                      className="px-2 py-1.5 text-[12px]"
+                    >
+                      <MoreHorizontal className="h-[14px] w-[14px]" strokeWidth={1.6} />
+                    </Button>
+                  }
+                  items={overflowMenuItems}
                 />
-              </div>
-            ) : null}
-          </div>
+              )}
+            </header>
+        </div>
 
+        {/* Fixed reply brief. Layout row under the header, not sticky
+            inside the timeline. Compact/collapsible on mobile via
+            ThreadBriefBand. Hidden at xl when the full AI rail is open. */}
+        {thread.needsReply !== false ? (
+          <div
+            data-testid="thread-brief-row"
+            className={`shrink-0 border-b border-hairline bg-paper px-2 pb-2 pt-0 sm:px-6 lg:px-8 ${
+              aiOpen ? "xl:hidden" : ""
+            }`}
+          >
+            <ThreadBriefBand
+              key={threadId}
+              threadId={threadId}
+              onYou={displayBrief.on_you}
+              whereItStands={displayBrief.where_it_stands}
+              openLoops={activeOpenLoops}
+            />
+          </div>
+        ) : null}
+
+        {/* Message timeline: the only scroller in the chat column. */}
+        <div
+          ref={timelineRef}
+          data-testid="thread-message-timeline"
+          data-scroll-owner="thread-messages"
+          onScroll={onTimelineScroll}
+          // overflow-x-hidden is load-bearing: overflow-y-auto alone makes
+          // the browser compute overflow-x as auto, so any too-wide child
+          // (an unbroken URL, a future embed) turns into a horizontal
+          // scrollbar under the chat. overscroll-contain keeps pull
+          // gestures from bubbling to an outer shell scroller.
+          className="relative min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain"
+          // overflowAnchor: disable the browser's native scroll anchoring
+          // so it doesn't race with the load-older restoration in
+          // useLayoutEffect.
+          style={{ overflowAnchor: "none" }}
+        >
           <div className="mx-auto flex w-full max-w-[820px] flex-col gap-[18px] px-4 py-3 sm:px-8 lg:px-12">
             {/* Issue #412. "🎂 birthday in N days" pill. Surfaces when
                 the contact's birthday is within the next 30 days
@@ -4608,15 +4971,17 @@ export default function ThreadPage() {
           </div>
         </div>
 
-        <div className="relative flex-shrink-0 border-t border-hairline bg-paper">
-          {/* #461 (pilot R-0060): floating jump-to-latest button. Centred
-              above the composer's top edge so it sits in the middle just
-              above the input, with a glassy frosted-surface treatment that
-              matches the sticky header. Hidden in focused mode (the stack is
-              bounded there). */}
+        <div
+          data-testid="thread-composer-footer"
+          className="relative shrink-0 border-t border-hairline bg-paper"
+        >
+          {/* #461 (pilot R-0060) / #896: jump-to-latest is positioned
+              relative to the message viewport + composer foot, not the
+              browser viewport. Hidden in focused mode (bounded stack). */}
           {showJumpToLatest && !focusedThreadParentId ? (
             <button
               type="button"
+              data-testid="jump-to-latest"
               onClick={scrollToLatest}
               aria-label="Jump to latest message"
               title="Jump to latest"
@@ -4625,6 +4990,8 @@ export default function ThreadPage() {
               <ChevronDown className="h-[18px] w-[18px]" strokeWidth={2} />
             </button>
           ) : null}
+          {/* Safe-area pad: the mobile dock is hidden on /thread/*, so the
+              composer owns the home-indicator inset (not the shell). */}
           <div className="mx-auto w-full max-w-[820px] px-3 pb-[max(8px,env(safe-area-inset-bottom))] pt-2 sm:px-8 sm:pb-2">
             {error ? (
               <p className="mb-1.5 rounded-[10px] border border-hairline bg-paper-2 px-2.5 py-1.5 text-[12px] leading-[1.45] text-ink-2">{error}</p>
@@ -4701,29 +5068,46 @@ export default function ThreadPage() {
                 >
                   <span className="flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-[0.06em] text-accent-ink">
                     <Sparkles className="h-[12px] w-[12px]" />
-                    {isReopenMode ? "AI opener · review before sending" : "AI predraft · review before sending"}
+                    <span className="md:hidden">AI draft</span>
+                    <span className="hidden md:inline">
+                      {isReopenMode
+                        ? "AI opener · review before sending"
+                        : "AI predraft · review before sending"}
+                    </span>
                   </span>
-                  {/* Bumped from a tiny "clear" link to a proper Discard
-                      button at body-text size with an icon (#350). Old
-                      treatment was easy to miss when the operator wanted
-                      to throw away the AI draft and write their own. */}
-                  <button
-                    type="button"
-                    onClick={() => {
-                      predraftDismissedRef.current.add(threadId);
-                      setComposer("");
-                      setComposerSource("empty");
-                    }}
-                    title="Discard the AI draft and start fresh"
-                    className="flex items-center gap-1 rounded-[6px] px-2 py-1 text-[12px] text-ink-2 transition-colors duration-calm hover:bg-paper-2 hover:text-ink"
-                  >
-                    <X className="h-[12px] w-[12px]" strokeWidth={1.6} />
-                    Discard
-                  </button>
+                  <div className="flex items-center gap-1">
+                    <button
+                      type="button"
+                      onClick={() => composerInputRef.current?.focus()}
+                      title="Edit the AI draft"
+                      className="flex items-center gap-1 rounded-[6px] px-2 py-1 text-[12px] text-ink-2 transition-colors duration-calm hover:bg-paper-2 hover:text-ink md:hidden"
+                    >
+                      <Pencil className="h-[12px] w-[12px]" strokeWidth={1.6} />
+                      Edit
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        predraftDismissedRef.current.add(threadId);
+                        setComposer("");
+                        setComposerSource("empty");
+                      }}
+                      title="Discard the AI draft and start fresh"
+                      className="flex items-center gap-1 rounded-[6px] px-2 py-1 text-[12px] text-ink-2 transition-colors duration-calm hover:bg-paper-2 hover:text-ink"
+                    >
+                      <X className="h-[12px] w-[12px]" strokeWidth={1.6} />
+                      Discard
+                    </button>
+                  </div>
                 </div>
               ) : null}
               {thread.platform === "WHATSAPP" ? (
-                <div className="mb-2 flex flex-wrap items-center gap-1.5">
+                <div
+                  className={cn(
+                    "mb-2 flex flex-wrap items-center gap-1.5",
+                    composerMoreOpen ? "flex" : "hidden md:flex"
+                  )}
+                >
                   <span className="mr-1 font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3">
                     WhatsApp
                   </span>
@@ -4960,142 +5344,161 @@ export default function ThreadPage() {
                   }
                 }}
                 rows={2}
+                data-testid="thread-composer-input"
                 ref={(el) => {
                   composerInputRef.current = el;
                   if (!el) return;
-                  // Autosize: grow with content from 2 rows up to ~7 rows
-                  // before capping so the composer doesn't eat the chat
-                  // when pasting walls of text.
+                  // Autosize with a phone-safe cap (#900): min(160px, 28dvh)
+                  // so a long draft scrolls inside the field instead of
+                  // eating the message history.
+                  const capPx = Math.min(
+                    160,
+                    Math.round((typeof window !== "undefined" ? window.innerHeight : 640) * 0.28)
+                  );
                   el.style.height = "auto";
-                  el.style.height = `${Math.min(Math.max(el.scrollHeight, 44), 160)}px`;
+                  el.style.height = `${Math.min(Math.max(el.scrollHeight, 44), capPx)}px`;
                 }}
-                className="block w-full resize-none border-0 bg-transparent text-[14px] leading-[1.45] text-ink outline-none placeholder:text-ink-4"
-                style={{ minHeight: 44, maxHeight: 160 }}
+                className="block w-full resize-none overflow-y-auto border-0 bg-transparent text-[14px] leading-[1.45] text-ink outline-none placeholder:text-ink-4"
+                style={{ minHeight: 44, maxHeight: "min(160px, 28dvh)" }}
               />
-              <div className="mt-1.5 flex flex-wrap items-center gap-2">
-                {/* Memory icon - opens the prior-conversations popover.
-                    Compact replacement for the old chip that used to sit
-                    above the composer and burn a row of vertical space. */}
-                {thread.relationshipMemory && thread.relationshipMemory.otherThreadCount > 0 ? (
-                  <div data-testid="memory-chip" className="relative">
-                    <button
-                      type="button"
-                      onClick={() => setMemoryOpen((prev) => !prev)}
-                      aria-expanded={memoryOpen}
-                      title={`Memory · ${thread.relationshipMemory.otherThreadCount} prior conversation${thread.relationshipMemory.otherThreadCount === 1 ? "" : "s"}${thread.relationshipMemory.tags.length > 0 ? ` · ${thread.relationshipMemory.tags.length} tag${thread.relationshipMemory.tags.length === 1 ? "" : "s"}` : ""}`}
-                      className="relative grid h-[30px] w-[30px] place-items-center rounded-full border border-hairline bg-paper text-ink-2 transition-colors duration-calm hover:border-hairline-strong hover:bg-paper-2 hover:text-ink"
-                    >
-                      <Sparkles className="h-[13px] w-[13px]" strokeWidth={1.6} />
-                      <span className="absolute -right-[2px] -top-[2px] grid h-[14px] min-w-[14px] place-items-center rounded-full bg-ink px-[3px] font-mono text-[9px] font-medium text-paper">
-                        {thread.relationshipMemory.otherThreadCount}
-                      </span>
-                    </button>
-                    {memoryOpen ? (
-                      <div className="absolute bottom-[calc(100%+8px)] left-0 z-20 w-[480px] max-w-[80vw] rounded-card border border-hairline bg-paper p-3 text-[12px] leading-snug shadow-card">
-                        <div className="mb-2 font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3">
-                          What the AI can lean on
-                        </div>
-                        {thread.relationshipMemory.tags.length > 0 ? (
-                          <div className="mb-2 flex flex-wrap gap-1">
-                            {thread.relationshipMemory.tags.map((tag) => (
-                              <span
-                                key={tag}
-                                className="rounded-full border border-hairline-strong px-2 py-[1px] text-[11px] text-ink-2"
-                              >
-                                {tag}
-                              </span>
-                            ))}
+              {(thread.platform === "IMESSAGE" ||
+                thread.platform === "WHATSAPP" ||
+                thread.platform === "GOOGLE_MESSAGES") && (
+                <input
+                  type="file"
+                  multiple
+                  accept={
+                    thread.platform === "WHATSAPP"
+                      ? "image/*,video/*,audio/*,application/pdf,.gif"
+                      : "image/*,video/*,audio/*,application/pdf"
+                  }
+                  className="hidden"
+                  id="composer-file-input"
+                  onChange={(e) => {
+                    if (e.target.files) addFiles(e.target.files);
+                    e.target.value = "";
+                  }}
+                />
+              )}
+              {/* Mobile secondary tools (#900): attachments, schedule, poll
+                  formatting (above), AI rewrite, suggestions. Hidden until
+                  the operator opens +. Desktop uses the full toolbar below. */}
+              {composerMoreOpen ? (
+                <div
+                  data-testid="composer-more-sheet"
+                  className="mt-1.5 flex flex-wrap items-center gap-2 border-t border-hairline pt-2 md:hidden"
+                >
+                  {thread.relationshipMemory && thread.relationshipMemory.otherThreadCount > 0 ? (
+                    <div data-testid="memory-chip-mobile" className="relative">
+                      <button
+                        type="button"
+                        onClick={() => setMemoryOpen((prev) => !prev)}
+                        aria-expanded={memoryOpen}
+                        title={`Memory · ${thread.relationshipMemory.otherThreadCount} prior conversation${thread.relationshipMemory.otherThreadCount === 1 ? "" : "s"}`}
+                        className="relative grid h-[30px] w-[30px] place-items-center rounded-full border border-hairline bg-paper text-ink-2 transition-colors duration-calm hover:border-hairline-strong hover:bg-paper-2 hover:text-ink"
+                      >
+                        <Sparkles className="h-[13px] w-[13px]" strokeWidth={1.6} />
+                        <span className="absolute -right-[2px] -top-[2px] grid h-[14px] min-w-[14px] place-items-center rounded-full bg-ink px-[3px] font-mono text-[9px] font-medium text-paper">
+                          {thread.relationshipMemory.otherThreadCount}
+                        </span>
+                      </button>
+                      {memoryOpen ? (
+                        <div className="absolute bottom-[calc(100%+8px)] left-0 z-20 w-[min(480px,calc(100vw-32px))] rounded-card border border-hairline bg-paper p-3 text-[12px] leading-snug shadow-card">
+                          <div className="mb-2 font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3">
+                            What the AI can lean on
                           </div>
-                        ) : null}
-                        {thread.relationshipMemory.notes ? (
-                          <p className="mb-2 text-ink-2">{thread.relationshipMemory.notes}</p>
-                        ) : null}
-                        <ul className="space-y-1">
-                          {thread.relationshipMemory.recentExchanges.map((ex) => (
-                            <li key={ex.threadId} className="text-ink-2">
-                              <span className="font-mono text-[10px] uppercase tracking-[0.04em] text-ink-3">
-                                {ex.platform.toLowerCase()}
-                                {ex.lastMessageAt ? ` · ${formatRelative(ex.lastMessageAt)}` : ""}
-                              </span>
-                              <br />
-                              <span className="text-ink-2">
-                                {ex.preview ?? ex.whatTheyWant ?? "(no recent message)"}
-                              </span>
-                            </li>
-                          ))}
-                        </ul>
-                      </div>
-                    ) : null}
-                  </div>
-                ) : null}
-                {/* Suggested-replies dropdown. Complete sendable drafts —
-                    shown only when the operator has opted into full AI
-                    drafts via the AI help level. Lower levels keep the
-                    composer centred on the operator's own writing. */}
-                {showFullDrafts ? (
-                <div className="relative" ref={chipsMenuRef}>
-                  <button
-                    type="button"
-                    onClick={() => setChipsMenuOpen((v) => !v)}
-                    disabled={repliesGenerating}
-                    className="inline-flex items-center gap-1.5 rounded-pill border border-hairline px-2.5 py-1 text-[11px] text-ink-2 transition-colors duration-calm hover:border-hairline-strong hover:bg-paper-2 hover:text-ink disabled:opacity-50"
-                  >
-                    {repliesGenerating ? (
-                      <Loader2 className="h-[13px] w-[13px] animate-spin" />
-                    ) : (
-                      <Sparkles className="h-[13px] w-[13px]" strokeWidth={1.6} />
-                    )}
-                    {repliesGenerating ? "Generating suggestions…" : "Suggested replies"}
-                    {repliesGenerating ? null : (
-                      <ChevronDown
-                        className={`h-[13px] w-[13px] transition-transform duration-calm ${chipsMenuOpen ? "rotate-180" : ""}`}
-                        strokeWidth={1.6}
-                      />
-                    )}
-                  </button>
-                  {chipsMenuOpen && !repliesGenerating ? (
-                    <div className="absolute bottom-[calc(100%+8px)] left-0 z-20 w-[min(360px,calc(100vw-32px))] overflow-hidden rounded-row border border-hairline bg-paper p-[6px] shadow-pop">
-                      {fallbackSource ? (
-                        <p
-                          className="m-0 mb-1 px-3 pb-2 pt-2 font-mono text-[10.5px] uppercase tracking-[0.06em] text-ink-3"
-                          title={fallbackSource.fellBackMessage ?? undefined}
-                        >
-                          generated with{" "}
-                          {fallbackSource.providerDisplayName ?? "fallback provider"} ·{" "}
-                          {fallbackSource.fellBackFromProviderDisplayName ??
-                            fallbackSource.fellBackFromProviderId}{" "}
-                          unavailable
-                          {fallbackSource.fellBackReason
-                            ? ` (${fallbackSource.fellBackReason.replace(/_/g, " ")})`
-                            : ""}
-                        </p>
+                          {thread.relationshipMemory.tags.length > 0 ? (
+                            <div className="mb-2 flex flex-wrap gap-1">
+                              {thread.relationshipMemory.tags.map((tag) => (
+                                <span
+                                  key={tag}
+                                  className="rounded-full border border-hairline-strong px-2 py-[1px] text-[11px] text-ink-2"
+                                >
+                                  {tag}
+                                </span>
+                              ))}
+                            </div>
+                          ) : null}
+                          {thread.relationshipMemory.notes ? (
+                            <p className="mb-2 text-ink-2">{thread.relationshipMemory.notes}</p>
+                          ) : null}
+                          <ul className="space-y-1">
+                            {thread.relationshipMemory.recentExchanges.map((ex) => (
+                              <li key={ex.threadId} className="text-ink-2">
+                                <span className="font-mono text-[10px] uppercase tracking-[0.04em] text-ink-3">
+                                  {ex.platform.toLowerCase()}
+                                  {ex.lastMessageAt ? ` · ${formatRelative(ex.lastMessageAt)}` : ""}
+                                </span>
+                                <br />
+                                <span className="text-ink-2">
+                                  {ex.preview ?? ex.whatTheyWant ?? "(no recent message)"}
+                                </span>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
                       ) : null}
-                      {chips.map((chip) => (
-                        <button
-                          key={chip.intent}
-                          type="button"
-                          onClick={() => {
-                            setComposer(chip.text);
-                            setChipsMenuOpen(false);
-                          }}
-                          className="block w-full rounded-[10px] px-3 py-[10px] text-left transition-colors duration-calm hover:bg-paper-2"
-                        >
-                          <p className="m-0 text-[13px] font-medium text-ink">{chip.intent}</p>
-                          <p className="m-0 mt-1 line-clamp-2 text-[12.5px] leading-[1.45] text-ink-3">
-                            {chip.text}
-                          </p>
-                        </button>
-                      ))}
                     </div>
                   ) : null}
-                </div>
-                ) : null}
-                {/* Tools take a full row of their own on phone (the cluster
-                    doesn't fit beside the suggestions pill), right-aligned
-                    like the design's composer foot. */}
-                <div className="flex w-full flex-wrap items-center justify-end gap-2 sm:w-auto sm:flex-1">
-                  {/* "shorten" / "warmer" rewrite the operator's OWN draft —
-                      writing support, shown unless AI help is memory-only. */}
+                  {showFullDrafts ? (
+                    <div className="relative" ref={chipsMenuMobileRef}>
+                      <button
+                        type="button"
+                        onClick={() => setChipsMenuOpen((v) => !v)}
+                        disabled={repliesGenerating}
+                        className="inline-flex items-center gap-1.5 rounded-pill border border-hairline px-2.5 py-1 text-[11px] text-ink-2 transition-colors duration-calm hover:border-hairline-strong hover:bg-paper-2 hover:text-ink disabled:opacity-50"
+                      >
+                        {repliesGenerating ? (
+                          <Loader2 className="h-[13px] w-[13px] animate-spin" />
+                        ) : (
+                          <Sparkles className="h-[13px] w-[13px]" strokeWidth={1.6} />
+                        )}
+                        {repliesGenerating ? "Generating suggestions…" : "Suggested replies"}
+                        {repliesGenerating ? null : (
+                          <ChevronDown
+                            className={`h-[13px] w-[13px] transition-transform duration-calm ${chipsMenuOpen ? "rotate-180" : ""}`}
+                            strokeWidth={1.6}
+                          />
+                        )}
+                      </button>
+                      {chipsMenuOpen && !repliesGenerating ? (
+                        <div className="absolute bottom-[calc(100%+8px)] left-0 z-20 w-[min(360px,calc(100vw-32px))] overflow-hidden rounded-row border border-hairline bg-paper p-[6px] shadow-pop">
+                          {fallbackSource ? (
+                            <p
+                              className="m-0 mb-1 px-3 pb-2 pt-2 font-mono text-[10.5px] uppercase tracking-[0.06em] text-ink-3"
+                              title={fallbackSource.fellBackMessage ?? undefined}
+                            >
+                              generated with{" "}
+                              {fallbackSource.providerDisplayName ?? "fallback provider"} ·{" "}
+                              {fallbackSource.fellBackFromProviderDisplayName ??
+                                fallbackSource.fellBackFromProviderId}{" "}
+                              unavailable
+                              {fallbackSource.fellBackReason
+                                ? ` (${fallbackSource.fellBackReason.replace(/_/g, " ")})`
+                                : ""}
+                            </p>
+                          ) : null}
+                          {chips.map((chip) => (
+                            <button
+                              key={chip.intent}
+                              type="button"
+                              onClick={() => {
+                                setComposer(chip.text);
+                                setChipsMenuOpen(false);
+                                setComposerMoreOpen(false);
+                              }}
+                              className="block w-full rounded-[10px] px-3 py-[10px] text-left transition-colors duration-calm hover:bg-paper-2"
+                            >
+                              <p className="m-0 text-[13px] font-medium text-ink">{chip.intent}</p>
+                              <p className="m-0 mt-1 line-clamp-2 text-[12.5px] leading-[1.45] text-ink-3">
+                                {chip.text}
+                              </p>
+                            </button>
+                          ))}
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : null}
                   {showWritingSupport ? (
                     <>
                       <button
@@ -5116,52 +5519,7 @@ export default function ThreadPage() {
                       </button>
                     </>
                   ) : null}
-                  {/* #462 (pilot R-0061): Dictate — record speech and have
-                      the runner transcribe it into the composer for review.
-                      Distinct from the iMessage voice-note mic (that attaches
-                      audio to send). Available on every platform; disabled
-                      with an explanation when transcription isn't configured. */}
-                  <button
-                    type="button"
-                    onClick={() =>
-                      dictationStatus === "recording" ? stopDictation() : void startDictation()
-                    }
-                    disabled={!dictationAvailable || dictationStatus === "transcribing"}
-                    title={
-                      dictationAvailable
-                        ? dictationStatus === "recording"
-                          ? "Stop and transcribe"
-                          : "Dictate your reply"
-                        : "Voice dictation needs transcription enabled on the runner"
-                    }
-                    aria-label="Dictate"
-                    className={`inline-flex items-center gap-1.5 rounded-pill border px-2.5 py-1 text-[11px] transition-colors duration-calm disabled:cursor-not-allowed disabled:opacity-50 ${
-                      dictationStatus === "recording"
-                        ? "border-risk-overdue bg-risk-overdue/10 text-risk-overdue"
-                        : "border-hairline text-ink-2 hover:border-hairline-strong hover:bg-paper-2 hover:text-ink"
-                    }`}
-                  >
-                    {dictationStatus === "transcribing" ? (
-                      <Loader2 className="h-[13px] w-[13px] animate-spin" strokeWidth={1.8} />
-                    ) : (
-                      <Mic
-                        className={`h-[13px] w-[13px] ${dictationStatus === "recording" ? "animate-pulse" : ""}`}
-                        strokeWidth={1.8}
-                      />
-                    )}
-                    {/* Icon-only at rest until the chat column is genuinely
-                        wide (2xl, matching the header labels); the running
-                        states keep their label at every width so the
-                        in-flight status stays visible. */}
-                    <span className={dictationStatus === "idle" ? "hidden 2xl:inline" : undefined}>
-                      {dictationStatus === "recording"
-                        ? "Stop"
-                        : dictationStatus === "transcribing"
-                          ? "Transcribing…"
-                          : "Dictate"}
-                    </span>
-                  </button>
-                  <div className="relative" ref={scheduleMenuRef}>
+                  <div className="relative" ref={scheduleMenuMobileRef}>
                     <button
                       type="button"
                       onClick={() => setScheduleMenuOpen((v) => !v)}
@@ -5227,22 +5585,280 @@ export default function ThreadPage() {
                   thread.platform === "WHATSAPP" ||
                   thread.platform === "GOOGLE_MESSAGES" ? (
                     <>
-                      <input
-                        type="file"
-                        multiple
-                        accept={thread.platform === "WHATSAPP" ? "image/*,video/*,audio/*,application/pdf,.gif" : "image/*,video/*,audio/*,application/pdf"}
-                        className="hidden"
-                        id="composer-file-input"
-                        onChange={(e) => {
-                          if (e.target.files) addFiles(e.target.files);
-                          e.target.value = "";
-                        }}
-                      />
                       <button
                         type="button"
                         onClick={() => document.getElementById("composer-file-input")?.click()}
                         className="grid h-[30px] w-[30px] place-items-center rounded-full border border-hairline bg-paper text-ink-2 hover:text-ink"
-                        title={thread.platform === "WHATSAPP" ? "Attach photos, GIFs, videos or files" : "Attach photos / files"}
+                        title={
+                          thread.platform === "WHATSAPP"
+                            ? "Attach photos, GIFs, videos or files"
+                            : "Attach photos / files"
+                        }
+                        aria-label="Attach files"
+                      >
+                        <Paperclip className="h-[13px] w-[13px]" strokeWidth={1.8} />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => (recording ? stopRecording() : void startRecording())}
+                        className={`grid h-[30px] w-[30px] place-items-center rounded-full border ${
+                          recording
+                            ? "border-risk-overdue bg-risk-overdue/10 text-risk-overdue animate-pulse"
+                            : "border-hairline bg-paper text-ink-2 hover:text-ink"
+                        }`}
+                        title={recording ? "Stop recording" : "Record voice note"}
+                        aria-label={recording ? "Stop recording" : "Record voice note"}
+                      >
+                        <Mic className="h-[13px] w-[13px]" strokeWidth={1.8} />
+                      </button>
+                    </>
+                  ) : null}
+                </div>
+              ) : null}
+              {/* Desktop full toolbar (unchanged layout at md+). */}
+              <div className="mt-1.5 hidden flex-wrap items-center gap-2 md:flex">
+                {thread.relationshipMemory && thread.relationshipMemory.otherThreadCount > 0 ? (
+                  <div data-testid="memory-chip" className="relative">
+                    <button
+                      type="button"
+                      onClick={() => setMemoryOpen((prev) => !prev)}
+                      aria-expanded={memoryOpen}
+                      title={`Memory · ${thread.relationshipMemory.otherThreadCount} prior conversation${thread.relationshipMemory.otherThreadCount === 1 ? "" : "s"}${thread.relationshipMemory.tags.length > 0 ? ` · ${thread.relationshipMemory.tags.length} tag${thread.relationshipMemory.tags.length === 1 ? "" : "s"}` : ""}`}
+                      className="relative grid h-[30px] w-[30px] place-items-center rounded-full border border-hairline bg-paper text-ink-2 transition-colors duration-calm hover:border-hairline-strong hover:bg-paper-2 hover:text-ink"
+                    >
+                      <Sparkles className="h-[13px] w-[13px]" strokeWidth={1.6} />
+                      <span className="absolute -right-[2px] -top-[2px] grid h-[14px] min-w-[14px] place-items-center rounded-full bg-ink px-[3px] font-mono text-[9px] font-medium text-paper">
+                        {thread.relationshipMemory.otherThreadCount}
+                      </span>
+                    </button>
+                    {memoryOpen ? (
+                      <div className="absolute bottom-[calc(100%+8px)] left-0 z-20 w-[480px] max-w-[80vw] rounded-card border border-hairline bg-paper p-3 text-[12px] leading-snug shadow-card">
+                        <div className="mb-2 font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3">
+                          What the AI can lean on
+                        </div>
+                        {thread.relationshipMemory.tags.length > 0 ? (
+                          <div className="mb-2 flex flex-wrap gap-1">
+                            {thread.relationshipMemory.tags.map((tag) => (
+                              <span
+                                key={tag}
+                                className="rounded-full border border-hairline-strong px-2 py-[1px] text-[11px] text-ink-2"
+                              >
+                                {tag}
+                              </span>
+                            ))}
+                          </div>
+                        ) : null}
+                        {thread.relationshipMemory.notes ? (
+                          <p className="mb-2 text-ink-2">{thread.relationshipMemory.notes}</p>
+                        ) : null}
+                        <ul className="space-y-1">
+                          {thread.relationshipMemory.recentExchanges.map((ex) => (
+                            <li key={ex.threadId} className="text-ink-2">
+                              <span className="font-mono text-[10px] uppercase tracking-[0.04em] text-ink-3">
+                                {ex.platform.toLowerCase()}
+                                {ex.lastMessageAt ? ` · ${formatRelative(ex.lastMessageAt)}` : ""}
+                              </span>
+                              <br />
+                              <span className="text-ink-2">
+                                {ex.preview ?? ex.whatTheyWant ?? "(no recent message)"}
+                              </span>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
+                {showFullDrafts ? (
+                  <div className="relative" ref={chipsMenuDesktopRef}>
+                    <button
+                      type="button"
+                      onClick={() => setChipsMenuOpen((v) => !v)}
+                      disabled={repliesGenerating}
+                      className="inline-flex items-center gap-1.5 rounded-pill border border-hairline px-2.5 py-1 text-[11px] text-ink-2 transition-colors duration-calm hover:border-hairline-strong hover:bg-paper-2 hover:text-ink disabled:opacity-50"
+                    >
+                      {repliesGenerating ? (
+                        <Loader2 className="h-[13px] w-[13px] animate-spin" />
+                      ) : (
+                        <Sparkles className="h-[13px] w-[13px]" strokeWidth={1.6} />
+                      )}
+                      {repliesGenerating ? "Generating suggestions…" : "Suggested replies"}
+                      {repliesGenerating ? null : (
+                        <ChevronDown
+                          className={`h-[13px] w-[13px] transition-transform duration-calm ${chipsMenuOpen ? "rotate-180" : ""}`}
+                          strokeWidth={1.6}
+                        />
+                      )}
+                    </button>
+                    {chipsMenuOpen && !repliesGenerating ? (
+                      <div className="absolute bottom-[calc(100%+8px)] left-0 z-20 w-[min(360px,calc(100vw-32px))] overflow-hidden rounded-row border border-hairline bg-paper p-[6px] shadow-pop">
+                        {fallbackSource ? (
+                          <p
+                            className="m-0 mb-1 px-3 pb-2 pt-2 font-mono text-[10.5px] uppercase tracking-[0.06em] text-ink-3"
+                            title={fallbackSource.fellBackMessage ?? undefined}
+                          >
+                            generated with{" "}
+                            {fallbackSource.providerDisplayName ?? "fallback provider"} ·{" "}
+                            {fallbackSource.fellBackFromProviderDisplayName ??
+                              fallbackSource.fellBackFromProviderId}{" "}
+                            unavailable
+                            {fallbackSource.fellBackReason
+                              ? ` (${fallbackSource.fellBackReason.replace(/_/g, " ")})`
+                              : ""}
+                          </p>
+                        ) : null}
+                        {chips.map((chip) => (
+                          <button
+                            key={chip.intent}
+                            type="button"
+                            onClick={() => {
+                              setComposer(chip.text);
+                              setChipsMenuOpen(false);
+                            }}
+                            className="block w-full rounded-[10px] px-3 py-[10px] text-left transition-colors duration-calm hover:bg-paper-2"
+                          >
+                            <p className="m-0 text-[13px] font-medium text-ink">{chip.intent}</p>
+                            <p className="m-0 mt-1 line-clamp-2 text-[12.5px] leading-[1.45] text-ink-3">
+                              {chip.text}
+                            </p>
+                          </button>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
+                <div className="flex w-full flex-wrap items-center justify-end gap-2 sm:w-auto sm:flex-1">
+                  {showWritingSupport ? (
+                    <>
+                      <button
+                        type="button"
+                        disabled={!composer.trim() || transforming !== null}
+                        onClick={() => void transform("SHORTEN")}
+                        className="font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3 hover:text-ink disabled:opacity-40"
+                      >
+                        {transforming === "SHORTEN" ? "shortening…" : "shorten"}
+                      </button>
+                      <button
+                        type="button"
+                        disabled={!composer.trim() || transforming !== null}
+                        onClick={() => void transform("MAKE_WARMER")}
+                        className="font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3 hover:text-ink disabled:opacity-40"
+                      >
+                        {transforming === "MAKE_WARMER" ? "warming…" : "warmer"}
+                      </button>
+                    </>
+                  ) : null}
+                  <button
+                    type="button"
+                    onClick={() =>
+                      dictationStatus === "recording" ? stopDictation() : void startDictation()
+                    }
+                    disabled={!dictationAvailable || dictationStatus === "transcribing"}
+                    title={
+                      dictationAvailable
+                        ? dictationStatus === "recording"
+                          ? "Stop and transcribe"
+                          : "Dictate your reply"
+                        : "Voice dictation needs transcription enabled on the runner"
+                    }
+                    aria-label="Dictate"
+                    className={`inline-flex items-center gap-1.5 rounded-pill border px-2.5 py-1 text-[11px] transition-colors duration-calm disabled:cursor-not-allowed disabled:opacity-50 ${
+                      dictationStatus === "recording"
+                        ? "border-risk-overdue bg-risk-overdue/10 text-risk-overdue"
+                        : "border-hairline text-ink-2 hover:border-hairline-strong hover:bg-paper-2 hover:text-ink"
+                    }`}
+                  >
+                    {dictationStatus === "transcribing" ? (
+                      <Loader2 className="h-[13px] w-[13px] animate-spin" strokeWidth={1.8} />
+                    ) : (
+                      <Mic
+                        className={`h-[13px] w-[13px] ${dictationStatus === "recording" ? "animate-pulse" : ""}`}
+                        strokeWidth={1.8}
+                      />
+                    )}
+                    <span className={dictationStatus === "idle" ? "hidden 2xl:inline" : undefined}>
+                      {dictationStatus === "recording"
+                        ? "Stop"
+                        : dictationStatus === "transcribing"
+                          ? "Transcribing…"
+                          : "Dictate"}
+                    </span>
+                  </button>
+                  <div className="relative" ref={scheduleMenuDesktopRef}>
+                    <button
+                      type="button"
+                      onClick={() => setScheduleMenuOpen((v) => !v)}
+                      disabled={!composer.trim() || sending || scheduling}
+                      title="Schedule send"
+                      aria-label="Schedule send"
+                      className="inline-flex h-[30px] w-[30px] items-center justify-center rounded-full border border-hairline text-ink-2 transition-colors duration-calm hover:border-hairline-strong hover:bg-paper-2 hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      <Clock className="h-[13px] w-[13px]" strokeWidth={1.8} />
+                    </button>
+                    {scheduleMenuOpen ? (
+                      <div className="absolute bottom-[calc(100%+8px)] right-0 z-20 w-[min(300px,calc(100vw-32px))] overflow-hidden rounded-row border border-hairline bg-paper p-[6px] shadow-pop">
+                        <p className="m-0 px-3 pb-2 pt-2 font-mono text-[10.5px] uppercase tracking-[0.06em] text-ink-3">
+                          Schedule send
+                        </p>
+                        {buildSchedulePresets(new Date()).map((preset) => (
+                          <button
+                            key={preset.label}
+                            type="button"
+                            onClick={() => void scheduleSend(preset.at)}
+                            disabled={scheduling}
+                            className="flex w-full items-center justify-between rounded-[10px] px-3 py-[10px] text-left transition-colors duration-calm hover:bg-paper-2 disabled:opacity-50"
+                          >
+                            <span className="text-[13px] font-medium text-ink">{preset.label}</span>
+                            <span className="font-mono text-[11px] text-ink-3">{preset.sub}</span>
+                          </button>
+                        ))}
+                        <div className="mx-2 my-2 border-t border-hairline" />
+                        <div className="px-3 pb-2 pt-1">
+                          <p className="mb-1 font-mono text-[10.5px] uppercase tracking-[0.06em] text-ink-3">
+                            Custom
+                          </p>
+                          <input
+                            type="datetime-local"
+                            value={customScheduleValue}
+                            onChange={(e) => setCustomScheduleValue(e.target.value)}
+                            className="w-full rounded-row border border-hairline bg-paper px-3 py-[7px] text-[13px] text-ink outline-none transition-[border-color] duration-calm focus:border-hairline-strong"
+                          />
+                          <button
+                            type="button"
+                            disabled={!customScheduleValue || scheduling}
+                            onClick={() => {
+                              const at = new Date(customScheduleValue);
+                              if (Number.isNaN(at.getTime())) {
+                                setError("Pick a valid date and time.");
+                                return;
+                              }
+                              if (at.getTime() <= Date.now()) {
+                                setError("Pick a time in the future.");
+                                return;
+                              }
+                              void scheduleSend(at);
+                            }}
+                            className="mt-2 w-full rounded-pill bg-ink px-3 py-[7px] text-[12px] font-medium text-paper hover:bg-ink-2 disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            {scheduling ? "Scheduling…" : "Schedule"}
+                          </button>
+                        </div>
+                      </div>
+                    ) : null}
+                  </div>
+                  {thread.platform === "IMESSAGE" ||
+                  thread.platform === "WHATSAPP" ||
+                  thread.platform === "GOOGLE_MESSAGES" ? (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => document.getElementById("composer-file-input")?.click()}
+                        className="grid h-[30px] w-[30px] place-items-center rounded-full border border-hairline bg-paper text-ink-2 hover:text-ink"
+                        title={
+                          thread.platform === "WHATSAPP"
+                            ? "Attach photos, GIFs, videos or files"
+                            : "Attach photos / files"
+                        }
                         aria-label="Attach files"
                       >
                         <Paperclip className="h-[13px] w-[13px]" strokeWidth={1.8} />
@@ -5268,10 +5884,94 @@ export default function ThreadPage() {
                     disabled={sending || (!composer.trim() && composerAttachments.length === 0)}
                     className="px-3.5 py-1.5 text-[12px]"
                   >
-                    {sending ? <Loader2 className="h-[13px] w-[13px] animate-spin" /> : <Send className="h-[13px] w-[13px]" strokeWidth={1.8} />}
+                    {sending ? (
+                      <Loader2 className="h-[13px] w-[13px] animate-spin" />
+                    ) : (
+                      <Send className="h-[13px] w-[13px]" strokeWidth={1.8} />
+                    )}
                     Send
                   </Button>
                 </div>
+              </div>
+              {/* Mobile primary actions: [+] [mic] ........ [Send] */}
+              <div
+                data-testid="composer-mobile-actions"
+                className="mt-1.5 flex items-center gap-2 md:hidden"
+              >
+                <button
+                  type="button"
+                  data-testid="composer-more-toggle"
+                  onClick={() => {
+                    setComposerMoreOpen((prev) => {
+                      if (prev) {
+                        setScheduleMenuOpen(false);
+                        setChipsMenuOpen(false);
+                        setMemoryOpen(false);
+                      }
+                      return !prev;
+                    });
+                  }}
+                  aria-expanded={composerMoreOpen}
+                  aria-label={composerMoreOpen ? "Hide more actions" : "More actions"}
+                  title={composerMoreOpen ? "Hide more actions" : "More actions"}
+                  className={cn(
+                    "grid h-[34px] w-[34px] shrink-0 place-items-center rounded-full border transition-colors duration-calm",
+                    composerMoreOpen
+                      ? "border-hairline-strong bg-paper-2 text-ink"
+                      : "border-hairline bg-paper text-ink-2 hover:border-hairline-strong hover:bg-paper-2 hover:text-ink"
+                  )}
+                >
+                  {composerMoreOpen ? (
+                    <X className="h-[15px] w-[15px]" strokeWidth={1.8} />
+                  ) : (
+                    <Plus className="h-[15px] w-[15px]" strokeWidth={1.8} />
+                  )}
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    dictationStatus === "recording" ? stopDictation() : void startDictation()
+                  }
+                  disabled={!dictationAvailable || dictationStatus === "transcribing"}
+                  title={
+                    dictationAvailable
+                      ? dictationStatus === "recording"
+                        ? "Stop and transcribe"
+                        : "Dictate your reply"
+                      : "Voice dictation needs transcription enabled on the runner"
+                  }
+                  aria-label="Dictate"
+                  className={cn(
+                    "grid h-[34px] w-[34px] shrink-0 place-items-center rounded-full border transition-colors duration-calm disabled:cursor-not-allowed disabled:opacity-50",
+                    dictationStatus === "recording"
+                      ? "border-risk-overdue bg-risk-overdue/10 text-risk-overdue"
+                      : "border-hairline bg-paper text-ink-2 hover:border-hairline-strong hover:bg-paper-2 hover:text-ink"
+                  )}
+                >
+                  {dictationStatus === "transcribing" ? (
+                    <Loader2 className="h-[15px] w-[15px] animate-spin" strokeWidth={1.8} />
+                  ) : (
+                    <Mic
+                      className={`h-[15px] w-[15px] ${dictationStatus === "recording" ? "animate-pulse" : ""}`}
+                      strokeWidth={1.8}
+                    />
+                  )}
+                </button>
+                <div className="min-w-0 flex-1" />
+                <Button
+                  variant="primary"
+                  onClick={() => void onSend()}
+                  disabled={sending || (!composer.trim() && composerAttachments.length === 0)}
+                  className="px-3.5 py-1.5 text-[12px]"
+                  data-testid="composer-mobile-send"
+                >
+                  {sending ? (
+                    <Loader2 className="h-[13px] w-[13px] animate-spin" />
+                  ) : (
+                    <Send className="h-[13px] w-[13px]" strokeWidth={1.8} />
+                  )}
+                  Send
+                </Button>
               </div>
               {showLateNightNudge && lateNightSlot ? (
                 <button
@@ -5391,71 +6091,161 @@ export default function ThreadPage() {
         </div>
       </div>
 
-      {/* ───── Context rail ───── */}
-      {/* Below xl there is no grid column wide enough to live in, so the
-          open rail becomes a right-hand slide-over above the conversation
-          (the design's tablet/phone pattern) — same content, same AI
-          toggle. The backdrop closes it with a tap. */}
-      {aiOpen ? (
+      {/* ───── AI Assist ───── */}
+      {/* Three presentation modes (#898):
+          - phone (<sm): full-screen overlay over app content
+          - tablet (sm–xl): right-hand slide-over with dimmed backdrop
+          - desktop (xl+): docked right rail in the grid
+          Internal layout is fixed header | scrollable context | keyboard-safe
+          action area so Compose/Ask stays reachable without scrolling past
+          the brief first. */}
+      {aiOpen && aiOverlayMode ? (
         <button
           type="button"
           aria-label="Close AI assist"
-          onClick={() => setAiOpen(false)}
-          className="fixed inset-0 z-30 cursor-default bg-ink/20 xl:hidden"
+          onClick={closeAiAssist}
+          className="fixed inset-0 z-[60] cursor-default bg-ink/20 hidden sm:block xl:hidden"
         />
       ) : null}
       <aside
+        id="ai-assist-panel"
+        data-testid="ai-assist-panel"
+        role={aiOpen && aiOverlayMode ? "dialog" : undefined}
+        aria-modal={aiOpen && aiOverlayMode ? true : undefined}
+        aria-label="AI Assist"
         className={
           aiOpen
-            ? "fixed inset-y-0 right-0 z-40 w-[min(92vw,380px)] overflow-y-auto border-l border-hairline bg-paper shadow-pop xl:static xl:z-auto xl:h-full xl:min-h-0 xl:w-auto xl:border-l-0 xl:bg-paper-2/40 xl:shadow-none"
+            ? [
+                "z-[70] flex min-h-0 flex-col bg-paper",
+                // Phone: full-screen over app content (no 8% thread strip).
+                "fixed inset-0 w-full",
+                // Tablet: right slide-over.
+                "sm:inset-y-0 sm:left-auto sm:right-0 sm:w-[min(92vw,380px)] sm:border-l sm:border-hairline sm:shadow-pop",
+                // Desktop: docked rail.
+                "xl:static xl:z-auto xl:h-full xl:w-auto xl:border-l-0 xl:bg-paper-2/40 xl:shadow-none"
+              ].join(" ")
             : "hidden"
         }
       >
-        <div className="flex items-center justify-between border-b border-hairline px-5 py-3 xl:hidden">
-          <span className="font-mono text-[11px] uppercase tracking-[0.08em] text-ink-3">
-            AI assist
-          </span>
+        <div className="flex shrink-0 items-center justify-between border-b border-hairline px-5 py-3 xl:hidden">
+          <div className="flex min-w-0 items-center gap-2">
+            <span className="font-mono text-[11px] uppercase tracking-[0.08em] text-ink-3">
+              AI Assist
+            </span>
+            <span className="truncate font-mono text-[10px] uppercase tracking-[0.06em] text-ink-4">
+              {effectiveComposeMode === "write" ? "Compose" : "Ask"}
+            </span>
+          </div>
           <button
+            ref={aiCloseButtonRef}
             type="button"
-            onClick={() => setAiOpen(false)}
+            onClick={closeAiAssist}
             aria-label="Close AI assist"
+            data-testid="ai-assist-close"
             className="grid h-8 w-8 place-items-center rounded-[8px] text-ink-3 transition-colors duration-calm hover:bg-paper-2 hover:text-ink"
           >
             <X className="h-[16px] w-[16px]" strokeWidth={1.6} />
           </button>
         </div>
-        <div className="flex flex-col gap-7 px-5 py-6 sm:px-7 xl:py-10">
-          {/* Reply Brief - the single adaptive panel that drives the rail.
-              Default visible card carries only Where it stands + On you so
-              the operator can read the thread in under 10 seconds; everything
-              else (optional follow-ups, fuller context, tone steer, the
-              gated reply checklist with its existing auto-tick / dismiss
-              behaviour) sits behind one collapsed disclosure. Falls back to
-              a safe brief derived from the legacy fields when the runner
-              hasn't yet generated one for this row. */}
-          <ReplyBriefPanel
-            threadId={thread.id}
-            brief={displayBrief}
-            openLoops={thread.openLoops}
-            dismissedOpenLoops={thread.dismissedOpenLoops}
-            onDismissLoop={(loop, dismissed) => void toggleOpenLoop(loop, dismissed)}
-            aiCoverageItems={aiCoverageItems}
-            aiCoverageMode={
-              aiHelpLevel === "memory_only"
-                ? "off"
-                : aiHelpLevel === "full_drafts"
-                  ? "auto-tick"
-                  : "highlight"
-            }
-          />
 
-          {/* Things to remember - durable facts (exams, trips, life events)
-              the AI re-derives from the transcript each scan. Stays separate
-              from the Reply Brief on purpose: this is life context the
-              operator wants to carry forward, not reply-state. Read-only and
-              self-hiding when empty. */}
-          <ThingsToRemember remember={thread.remember ?? []} />
+        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-5 py-5 sm:px-7 xl:py-10">
+          <div className="flex flex-col gap-6 xl:gap-7">
+            {/* Reply Brief drives the rail. On overlay widths the thread
+                already shows the brief band, so secondary narrative is
+                subordinated (#898). Falls back to a safe brief derived from
+                legacy fields when the runner has not generated one yet. */}
+            <ReplyBriefPanel
+              threadId={thread.id}
+              brief={displayBrief}
+              openLoops={thread.openLoops}
+              dismissedOpenLoops={thread.dismissedOpenLoops}
+              onDismissLoop={(loop, dismissed) => void toggleOpenLoop(loop, dismissed)}
+              aiCoverageItems={aiCoverageItems}
+              aiCoverageMode={
+                aiHelpLevel === "memory_only"
+                  ? "off"
+                  : aiHelpLevel === "full_drafts"
+                    ? "auto-tick"
+                    : "highlight"
+              }
+              subordinateContext={aiOverlayMode}
+            />
 
+            {/* Things to remember: durable life facts, not reply-state.
+                Self-hiding when empty. */}
+            <ThingsToRemember remember={thread.remember ?? []} />
+
+            {/* Drafts/answers live in the scroll middle so long Compose
+                results stay reachable under overlay body scroll-lock.
+                Footer stays intent + primary action only (#898 F1). */}
+            {composeDraft ? (
+              // #436.4: "try again" re-runs composeFromIntent, which keeps the
+              // old draft mounted while the new one streams. Fade the stale
+              // text and swap the actions for a Regenerating… indicator so two
+              // suggestions never sit side by side.
+              <div
+                id="ai-assist-result"
+                data-testid="ai-assist-compose-draft"
+                className={`rounded-row border border-hairline bg-paper p-3 text-[13.5px] leading-[1.55] text-ink transition-opacity duration-calm ${
+                  composing ? "opacity-40" : "opacity-100"
+                }`}
+              >
+                <p className="m-0 whitespace-pre-wrap [overflow-wrap:anywhere]">{composeDraft}</p>
+                <div className="mt-3 flex items-center gap-3">
+                  {composing ? (
+                    <span className="inline-flex items-center gap-2 font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3">
+                      <Loader2 className="h-[12px] w-[12px] animate-spin" />
+                      Regenerating…
+                    </span>
+                  ) : (
+                    <>
+                      <Button variant="quiet" onClick={useDraft}>
+                        Use this
+                      </Button>
+                      <button
+                        type="button"
+                        onClick={() => void composeFromIntent()}
+                        className="font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3 hover:text-ink"
+                      >
+                        try again
+                      </button>
+                    </>
+                  )}
+                </div>
+              </div>
+            ) : null}
+            {askAnswer ? (
+              <div
+                id="ai-assist-result"
+                data-testid="ai-assist-ask-answer"
+                className="rounded-row border border-hairline bg-paper-2/50 p-3 text-[13.5px] leading-[1.55] text-ink"
+              >
+                <p className="mb-2 font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3">
+                  Answer
+                </p>
+                <p className="m-0 whitespace-pre-wrap [overflow-wrap:anywhere] text-ink-2">{askAnswer}</p>
+                <div className="mt-3 flex items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setAskAnswer(null)}
+                    className="font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3 hover:text-ink"
+                  >
+                    dismiss
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void askAi()}
+                    className="font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3 hover:text-ink"
+                  >
+                    ask again
+                  </button>
+                </div>
+              </div>
+            ) : null}
+          </div>
+        </div>
+
+        <div className="shrink-0 border-t border-hairline bg-paper px-5 pt-3 pb-[calc(24px+env(safe-area-inset-bottom))] sm:px-7 xl:border-t-0 xl:bg-transparent xl:pb-10 xl:pt-0">
           <section>
             <p className="mb-2 font-mono text-[11px] uppercase tracking-[0.08em] text-ink-3">
               {effectiveComposeMode === "write" ? "Compose" : "Ask"}
@@ -5613,64 +6403,6 @@ export default function ThreadPage() {
                 <span className="rounded-[8px] border border-hairline bg-paper-2 px-2 py-1 text-[11px] text-ink-2">{composeError}</span>
               ) : null}
             </div>
-            {composeDraft ? (
-              // #436.4: "try again" re-runs composeFromIntent, which keeps the
-              // old draft mounted while the new one streams. Fade the stale
-              // text and swap the actions for a Regenerating… indicator so two
-              // suggestions never sit side by side.
-              <div
-                className={`mt-3 rounded-row border border-hairline bg-paper p-3 text-[13.5px] leading-[1.55] text-ink transition-opacity duration-calm ${
-                  composing ? "opacity-40" : "opacity-100"
-                }`}
-              >
-                <p className="m-0 whitespace-pre-wrap [overflow-wrap:anywhere]">{composeDraft}</p>
-                <div className="mt-3 flex items-center gap-3">
-                  {composing ? (
-                    <span className="inline-flex items-center gap-2 font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3">
-                      <Loader2 className="h-[12px] w-[12px] animate-spin" />
-                      Regenerating…
-                    </span>
-                  ) : (
-                    <>
-                      <Button variant="quiet" onClick={useDraft}>
-                        Use this
-                      </Button>
-                      <button
-                        type="button"
-                        onClick={() => void composeFromIntent()}
-                        className="font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3 hover:text-ink"
-                      >
-                        try again
-                      </button>
-                    </>
-                  )}
-                </div>
-              </div>
-            ) : null}
-            {askAnswer ? (
-              <div className="mt-3 rounded-row border border-hairline bg-paper-2/50 p-3 text-[13.5px] leading-[1.55] text-ink">
-                <p className="mb-2 font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3">
-                  Answer
-                </p>
-                <p className="m-0 whitespace-pre-wrap [overflow-wrap:anywhere] text-ink-2">{askAnswer}</p>
-                <div className="mt-3 flex items-center gap-3">
-                  <button
-                    type="button"
-                    onClick={() => setAskAnswer(null)}
-                    className="font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3 hover:text-ink"
-                  >
-                    dismiss
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => void askAi()}
-                    className="font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3 hover:text-ink"
-                  >
-                    ask again
-                  </button>
-                </div>
-              </div>
-            ) : null}
           </section>
         </div>
       </aside>

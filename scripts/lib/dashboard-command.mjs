@@ -7,6 +7,8 @@ export function packagedDashboardArgs(appDir, port, platform = process.platform)
     "start",
     pathApi.join(appDir, "apps", "dashboard"),
     "-p",
-    String(port)
+    String(port),
+    "-H",
+    "127.0.0.1"
   ];
 }

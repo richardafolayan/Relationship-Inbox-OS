@@ -1,7 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, type MouseEvent } from "react";
 import Link from "next/link";
+import { Loader2 } from "lucide-react";
 import { apiGet, apiPost } from "@/lib/api";
 import type { InboxResponse, InboxRow } from "@/lib/types";
 import { Canvas, PageHead, CaughtUp } from "@/components/common/canvas";
@@ -10,7 +11,9 @@ import {
   combinedReconnectScore,
   interpretRefreshScoresResult,
   isReconnectCandidate,
-  rankReconnectCandidates
+  rankReconnectCandidates,
+  RECONNECT_SCROLL_KEY,
+  shouldDiscloseReconnectReason
 } from "@/lib/reconnect";
 import type { RefreshScoresStatus } from "@/lib/reconnect";
 import { formatDuration } from "@/lib/time";
@@ -37,20 +40,54 @@ interface RefreshScoresResponse {
 type RefreshState =
   | { kind: "idle" }
   | { kind: "running" }
-  // The "done" state holds the last summary so the operator can see what
-  // happened. It clears back to idle after a few seconds via a timer in
-  // the click handler.
   | { kind: "done"; summary: string; tone: "ok" | "warn" }
   | { kind: "error"; message: string };
+
+// Route scroll owner: mobile #921 scrolls Canvas (data-scroll-owner=canvas)
+// while shell <main> is overflow-hidden. Desktop still scrolls <main>.
+function getListScroller(): HTMLElement | null {
+  if (typeof document === "undefined") return null;
+  return (
+    document.querySelector<HTMLElement>('[data-scroll-owner="canvas"]') ??
+    document.querySelector<HTMLElement>('[data-scroll-owner="list"]') ??
+    document.querySelector("main")
+  );
+}
+
+function readScrollY(): number {
+  try {
+    const raw = sessionStorage.getItem(RECONNECT_SCROLL_KEY);
+    if (raw == null) return 0;
+    const y = Number(raw);
+    return Number.isFinite(y) && y > 0 ? y : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function writeScrollY(y: number): void {
+  try {
+    sessionStorage.setItem(RECONNECT_SCROLL_KEY, String(Math.max(0, Math.round(y))));
+  } catch {
+    // Private mode / blocked storage: scroll restore is best-effort.
+  }
+}
+
+function captureListScrollY(): number {
+  return getListScroller()?.scrollTop ?? 0;
+}
+
+function restoreListScrollY(y: number): void {
+  const scroller = getListScroller();
+  if (scroller) scroller.scrollTop = y;
+}
 
 export default function ReconnectPage() {
   const [data, setData] = useState<InboxResponse | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // Inline running/success state for the "Refresh AI scores" button.
-  // Memory note: every action button surfaces inline running / success
-  // status, not just a label flip — that is what this state drives.
   const [refresh_state, setRefreshState] = useState<RefreshState>({ kind: "idle" });
+  const [aboutOpen, setAboutOpen] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -70,6 +107,24 @@ export default function ReconnectPage() {
     return () => window.removeEventListener("runner-resync", onResync);
   }, [refresh]);
 
+  // Restore list place after a thread visit so the operator can keep scanning.
+  useEffect(() => {
+    if (!loaded) return;
+    const scroller = getListScroller();
+    const y = readScrollY();
+    if (y > 0) {
+      requestAnimationFrame(() => {
+        restoreListScrollY(y);
+      });
+    }
+    const onScroll = () => writeScrollY(captureListScrollY());
+    scroller?.addEventListener("scroll", onScroll, { passive: true });
+    return () => {
+      writeScrollY(captureListScrollY());
+      scroller?.removeEventListener("scroll", onScroll);
+    };
+  }, [loaded]);
+
   const candidates = useMemo(() => {
     if (!data) return [] as InboxRow[];
     return rankReconnectCandidates(data.rows.filter(isReconnectCandidate));
@@ -79,25 +134,13 @@ export default function ReconnectPage() {
     if (refresh_state.kind === "running") return;
     setRefreshState({ kind: "running" });
     try {
-      // Limit 20 matches the runner's default. Higher values are allowed
-      // (up to 100) but 20 is a calm pace: it covers the typical pilot
-      // backlog in two clicks without spiking provider usage.
       const result = await apiPost<RefreshScoresResponse>(
         "/runner/control/reconnect/refresh-scores",
         { limit: 20 }
       );
-      // Pull the freshly-persisted scores into the page so the order
-      // and captions update without a manual reload.
       await refresh();
-      // Mirror the Inbox "Refresh closed verdicts" handler so both consumers of
-      // the runner's refresh contract agree. In particular this surfaces the
-      // runner's `disabled_by_settings` status as "AI is off (Settings)" in a
-      // warn tone, instead of the old neutral "Scored 0" that implied the
-      // scorer ran and simply found nothing when AI is turned off in Settings.
       const { summary, tone } = interpretRefreshScoresResult(result);
       setRefreshState({ kind: "done", summary, tone });
-      // Settle back to idle after a few seconds so the button is ready
-      // for another click without the operator having to click away.
       window.setTimeout(() => {
         setRefreshState((current) => (current.kind === "done" ? { kind: "idle" } : current));
       }, 4500);
@@ -115,47 +158,79 @@ export default function ReconnectPage() {
     if (refresh_state.kind === "running") return "Scoring…";
     if (refresh_state.kind === "done") return refresh_state.summary;
     if (refresh_state.kind === "error") return refresh_state.message;
-    return "Refresh AI scores";
+    return "Refresh scores";
   })();
   const refreshButtonTone =
     refresh_state.kind === "error"
-      ? "text-risk-overdue"
+      ? "text-risk-overdue border-risk-overdue/40"
       : refresh_state.kind === "done" && refresh_state.tone === "warn"
-        ? "text-risk-waiting"
-        : "text-ink-3";
+        ? "text-risk-waiting border-risk-waiting/40"
+        : refresh_state.kind === "done"
+          ? "text-ink border-hairline-strong"
+          : "text-ink-2 border-hairline";
 
   return (
-    <Canvas>
+    <Canvas data-testid="reconnect-page">
       <PageHead
         eyebrow="Worth a hello"
         title="Reconnect"
-        subtitle="LinkedIn catch-ups only. iMessage replies stay in Today and Inbox, where they are treated as active conversations. Open one to write the message yourself, nothing here is auto-sent."
+        subtitle="LinkedIn people who went quiet. Open one to write a hello yourself."
         meta={
           loaded ? (
-            <span className="flex items-baseline gap-4">
+            <span className="flex items-baseline justify-end gap-4">
               <span>
                 <strong className="font-medium text-ink">{candidates.length}</strong>{" "}
                 {candidates.length === 1 ? "person" : "people"}
               </span>
-              {candidates.length > 0 ? (
-                <button
-                  type="button"
-                  onClick={() => void handleRefreshScores()}
-                  disabled={refresh_state.kind === "running"}
-                  className={`font-mono text-[11px] uppercase tracking-[0.06em] transition-colors duration-calm hover:text-ink disabled:opacity-60 ${refreshButtonTone}`}
-                  data-testid="reconnect-refresh-scores"
-                  aria-live="polite"
-                >
-                  {refreshButtonLabel}
-                </button>
-              ) : null}
             </span>
           ) : null
         }
       />
 
+      <div className="mb-4 flex flex-col gap-3 sm:mb-5 sm:flex-row sm:items-center sm:justify-between">
+        <div className="min-w-0">
+          <button
+            type="button"
+            onClick={() => setAboutOpen((open) => !open)}
+            className="min-h-[36px] text-left text-[12px] text-ink-3 underline-offset-2 hover:text-ink-2 hover:underline"
+            data-testid="reconnect-about-toggle"
+            aria-expanded={aboutOpen}
+          >
+            {aboutOpen ? "Hide list notes" : "About this list"}
+          </button>
+          {aboutOpen ? (
+            <p
+              className="mt-1 max-w-[60ch] text-[12px] leading-[1.5] text-ink-3"
+              data-testid="reconnect-about-body"
+            >
+              LinkedIn catch-ups only. iMessage replies stay in Today and Inbox as
+              active conversations. Nothing here is auto-sent.
+            </p>
+          ) : null}
+        </div>
+
+        {loaded && candidates.length > 0 ? (
+          <button
+            type="button"
+            onClick={() => void handleRefreshScores()}
+            disabled={refresh_state.kind === "running"}
+            className={`inline-flex min-h-[44px] shrink-0 items-center justify-center gap-2 rounded-pill border px-4 text-[13px] font-medium tracking-[-0.005em] transition-colors duration-calm hover:border-hairline-strong hover:text-ink disabled:opacity-60 ${refreshButtonTone}`}
+            data-testid="reconnect-refresh-scores"
+            aria-live="polite"
+            aria-busy={refresh_state.kind === "running"}
+          >
+            {refresh_state.kind === "running" ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
+            ) : null}
+            <span className="max-w-[240px] truncate sm:max-w-[320px]">{refreshButtonLabel}</span>
+          </button>
+        ) : null}
+      </div>
+
       {error ? (
-        <p className="mb-6 rounded-row border border-hairline bg-paper-2 px-4 py-3 text-[12px] leading-[1.5] text-ink-2">{error}</p>
+        <p className="mb-6 rounded-row border border-hairline bg-paper-2 px-4 py-3 text-[12px] leading-[1.5] text-ink-2">
+          {error}
+        </p>
       ) : null}
 
       {!loaded ? (
@@ -166,16 +241,13 @@ export default function ReconnectPage() {
           body="When LinkedIn threads go quiet for more than 30 days they will show up here. iMessage replies stay in Today and Inbox."
         />
       ) : (
-        <div className="flex flex-col">
+        <div className="flex flex-col" data-testid="reconnect-list">
           {candidates.map((row, index) => (
             <ReconnectRow
               key={row.id}
               row={row}
-              // The first few rows scoring above the "worth a hello"
-              // threshold get a quiet accent. The threshold is gentle so
-              // that even a deterministic-only ranking surfaces the
-              // best handful at the top with a subtle "Suggested" mark.
               suggested={index < 3 && combinedReconnectScore(row) >= 55}
+              onNavigate={() => writeScrollY(captureListScrollY())}
             />
           ))}
         </div>
@@ -187,48 +259,109 @@ export default function ReconnectPage() {
 interface ReconnectRowProps {
   row: InboxRow;
   suggested: boolean;
+  onNavigate: () => void;
 }
 
-// Reconnect row layout deliberately differs from Inbox: there is no risk
-// dot or unread badge to defuse - everything here is, by definition,
-// quiet. The right column shows "quiet for Nm" so the operator can pick
-// the freshest-still-rememberable threads first. When the AI reconnect
-// scorer (phase 3.5) ran for this thread the reason caption sits under
-// the preview as a quiet "why".
-function ReconnectRow({ row, suggested }: ReconnectRowProps) {
+// Compact two-level row for fast mobile scanning:
+//   Name                                          52d
+//   You: last message preview…
+//   Suggested · Why this person?  (disclosure for long AI reasons)
+function ReconnectRow({ row, suggested, onNavigate }: ReconnectRowProps) {
   const preview = normalizePreview(row.preview);
-  const previewBody =
-    row.lastMessageDirection === "OUT" ? `You: ${preview}` : preview;
+  const previewBody = row.lastMessageDirection === "OUT" ? `You: ${preview}` : preview;
   const quietFor = formatDuration(row.lastMessageAt);
   const reason = row.reconnectScoreReason?.trim() || null;
+  const discloseReason = shouldDiscloseReconnectReason(reason);
+  const [reasonOpen, setReasonOpen] = useState(false);
+
+  const toggleReason = (event: MouseEvent<HTMLButtonElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setReasonOpen((open) => !open);
+  };
+
   return (
-    <Link
-      href={`/thread/${row.id}`}
-      className="grid grid-cols-[28px_1fr_auto] items-start gap-[14px] border-b border-hairline px-1 py-[13px] transition-colors duration-calm hover:bg-paper-2"
+    <article
+      className={`border-b border-hairline ${
+        suggested ? "border-l-2 border-l-accent/50 pl-2 sm:pl-3" : "pl-1"
+      }`}
+      data-testid="reconnect-row"
+      data-suggested={suggested ? "true" : "false"}
     >
-      <PersonAvatar
-        name={row.personName}
-        avatarUrl={row.personAvatarUrl}
-        size={28}
-        className="text-[11px]"
-      />
-      <span className="flex min-w-0 flex-col gap-[3px]">
-        <span className="flex min-w-0 items-baseline gap-[10px]">
-          <span className="shrink-0 text-[14px] font-medium tracking-[-0.005em] text-ink">
-            {row.personName}
+      <Link
+        href={`/thread/${row.id}`}
+        onClick={onNavigate}
+        className="grid min-h-[56px] grid-cols-[32px_minmax(0,1fr)_auto] items-start gap-x-3 py-3 transition-colors duration-calm hover:bg-paper-2 sm:min-h-[60px] sm:gap-x-3.5 sm:py-[14px]"
+        data-testid="reconnect-row-link"
+      >
+        <PersonAvatar
+          name={row.personName}
+          avatarUrl={row.personAvatarUrl}
+          size={32}
+          className="text-[11px]"
+        />
+        <span className="flex min-w-0 flex-col gap-0.5">
+          <span className="flex min-w-0 items-baseline gap-2">
+            <span
+              className="min-w-0 truncate text-[14px] font-medium tracking-[-0.005em] text-ink sm:text-[15px]"
+              data-testid="reconnect-row-name"
+            >
+              {row.personName}
+            </span>
+            {suggested ? (
+              <span
+                className="shrink-0 rounded-full bg-accent/15 px-[7px] py-[2px] font-mono text-[10px] uppercase tracking-[0.08em] text-accent-ink"
+                data-testid="reconnect-row-suggested"
+              >
+                Suggested
+              </span>
+            ) : null}
           </span>
-          {suggested ? (
-            <span className="shrink-0 rounded-full bg-accent/15 px-[7px] py-[2px] font-mono text-[10px] uppercase tracking-[0.08em] text-accent-ink">
-              Suggested
+          <span
+            className="block min-w-0 truncate text-[13px] leading-[1.4] text-ink-3"
+            data-testid="reconnect-row-preview"
+          >
+            {previewBody}
+          </span>
+          {reason && !discloseReason ? (
+            <span
+              className="block min-w-0 truncate text-[12px] leading-[1.4] text-ink-3"
+              data-testid="reconnect-row-reason"
+            >
+              {reason}
             </span>
           ) : null}
-          <span className="min-w-0 truncate text-[13px] text-ink-3">{previewBody}</span>
         </span>
-        {reason ? (
-          <span className="block text-[12px] text-ink-3">{reason}</span>
-        ) : null}
-      </span>
-      <span className="font-mono text-[11px] text-ink-3">quiet for {quietFor}</span>
-    </Link>
+        <span
+          className="shrink-0 pt-0.5 font-mono text-[11px] tabular-nums text-ink-3"
+          data-testid="reconnect-row-elapsed"
+          title={`quiet for ${quietFor}`}
+        >
+          {quietFor}
+        </span>
+      </Link>
+
+      {reason && discloseReason ? (
+        <div className="pb-3 pl-[44px] pr-1 sm:pl-[46px]" data-testid="reconnect-row-reason-wrap">
+          <button
+            type="button"
+            onClick={toggleReason}
+            className="min-h-[36px] text-left text-[12px] font-medium text-ink-2 underline-offset-2 hover:text-ink hover:underline"
+            data-testid="reconnect-row-why"
+            aria-expanded={reasonOpen}
+          >
+            {reasonOpen ? "Hide reason" : "Why this person?"}
+          </button>
+          {reasonOpen ? (
+            <p
+              className="mt-1 max-w-[64ch] text-[12px] leading-[1.45] text-ink-3"
+              data-testid="reconnect-row-reason"
+            >
+              {reason}
+            </p>
+          ) : null}
+        </div>
+      ) : null}
+    </article>
   );
 }

@@ -783,6 +783,7 @@ function createMenu() {
     { role: "about" },
     { type: "separator" },
     { label: "Settings...", accelerator: "CommandOrControl+,", click: () => openDashboardPath("/settings") },
+    { label: `Use ${APP_NAME} on Your Phone...`, click: () => openDashboardPath("/settings#phone") },
     { type: "separator" },
     ...(macPermissionsSupported
       ? [{ label: "Check Permissions...", click: () => void showPermissionHelp() }]

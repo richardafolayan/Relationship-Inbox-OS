@@ -20,7 +20,7 @@ export default function GlobalError({ error, reset }: { error: Error & { digest?
   return (
     <html lang="en-GB">
       <body style={{ margin: 0, background: "#f7f5ef", color: "#24231f", fontFamily: "system-ui, sans-serif" }}>
-        <main style={{ maxWidth: 560, margin: "0 auto", padding: "72px 24px" }}>
+        <main style={{ maxWidth: 560, minHeight: "100dvh", margin: "0 auto", maxHeight: "100dvh", overflowY: "auto", padding: "32px 16px" }}>
           <section style={{ border: "1px solid #d8d4c9", borderRadius: 14, background: "#fffdf8", padding: 24 }}>
             <h1 style={{ margin: 0, fontSize: 20 }}>{APP_NAME} needs to reopen this view.</h1>
             <p style={{ margin: "10px 0 0", fontSize: 14, lineHeight: 1.55, color: "#666258" }}>

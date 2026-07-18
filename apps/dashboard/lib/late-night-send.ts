@@ -12,13 +12,12 @@
 //   - LinkedIn only. iMessage is excluded (a late personal text is normal),
 //     and Instagram / TikTok are out of scope for now. Widening later is a
 //     one-line change to LATE_NIGHT_NUDGE_PLATFORMS plus a test.
-//   - The window check reuses isWithinQuietWindow() so this stays in lockstep
-//     with the canonical quiet-hours definition. It deliberately does NOT
-//     consult the quiet-hours *toggle* (isQuietHoursEnabled): that toggle
-//     mutes the operator's own scans and notifications, whereas this nudge is
-//     about the hour the *recipient* would receive the message.
+//   - The window check uses the fixed default quiet window (22:00-06:00),
+//     not the operator's custom quiet-hours times. Those times mute the
+//     operator's own scans and notifications; this nudge is about the hour
+//     the *recipient* would receive the message.
 
-import { isWithinQuietWindow } from "./quiet-hours";
+import { DEFAULT_QUIET_HOURS_WINDOW, isWithinQuietWindow } from "./quiet-hours";
 
 // Platforms where a late-night message reads badly and the nudge applies.
 const LATE_NIGHT_NUDGE_PLATFORMS = new Set<string>(["LINKEDIN"]);
@@ -59,6 +58,6 @@ export function shouldOfferLateNightSchedule(input: {
   return (
     input.hasDraft &&
     isLateNightSchedulePlatform(input.platform) &&
-    isWithinQuietWindow(now)
+    isWithinQuietWindow(now, DEFAULT_QUIET_HOURS_WINDOW)
   );
 }

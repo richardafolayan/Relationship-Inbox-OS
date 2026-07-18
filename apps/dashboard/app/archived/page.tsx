@@ -330,49 +330,47 @@ export default function ArchivedPage() {
   const isEmpty = !rows || rows.length === 0;
 
   return (
-    <Canvas>
-      <Link
-        href="/inbox"
-        className="mb-[16px] inline-flex items-center gap-[5px] font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3 transition-colors duration-calm hover:text-ink"
-      >
-        <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth={1.8}>
-          <path d="M15 18l-6-6 6-6" strokeLinecap="round" strokeLinejoin="round" />
-        </svg>
-        Back to inbox
-      </Link>
+    // Mobile (#897): same contained list shell as Inbox. Compact fixed
+    // header + one search row; conversation list is the only vertical
+    // scroller. Sort/platform stay in popovers. Desktop long-page stays.
+    <Canvas className="flex h-full min-h-0 flex-col overflow-hidden pb-0 md:block md:h-auto md:overflow-visible md:pb-[120px]">
+      <div data-testid="archived-controls" className="shrink-0">
+        <Link
+          href="/inbox"
+          className="mb-2 inline-flex items-center gap-[5px] font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3 transition-colors duration-calm hover:text-ink sm:mb-[12px]"
+        >
+          <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth={1.8}>
+            <path d="M15 18l-6-6 6-6" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+          Back to inbox
+        </Link>
 
-      <header className="mb-[20px] flex items-start justify-between gap-6">
-        <div>
-          <p className="mb-1 font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">
-            Done &amp; dusted
-          </p>
-          <h1 className="m-0 font-display text-[40px] font-semibold leading-[1.04] tracking-[-0.035em]">
-            Archived
-          </h1>
-        </div>
-        {rows && rows.length > 0 ? (
-          <div className="shrink-0 pt-1 text-right font-mono text-[12.5px] text-ink-3">
-            <strong className="font-medium text-ink">{visible.length}</strong> of {rows.length} threads
-            {oldestMonthLabel ? (
-              <>
-                <br />
-                oldest {oldestMonthLabel}
-              </>
-            ) : null}
+        <header className="mb-3 flex items-start justify-between gap-4 sm:mb-[20px] sm:gap-6">
+          <div className="min-w-0">
+            <p className="mb-0.5 font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3 sm:mb-1">
+              Done &amp; dusted
+            </p>
+            <h1 className="m-0 font-display text-[20px] font-semibold leading-[1.1] tracking-[-0.02em] sm:text-[40px] sm:leading-[1.04] sm:tracking-[-0.035em]">
+              Archived
+            </h1>
           </div>
-        ) : null}
-      </header>
+          {rows && rows.length > 0 ? (
+            <div className="shrink-0 pt-1 text-right font-mono text-[11px] text-ink-3 sm:text-[12.5px]">
+              <strong className="font-medium text-ink">{visible.length}</strong> of {rows.length} threads
+              {oldestMonthLabel ? (
+                <>
+                  <br />
+                  oldest {oldestMonthLabel}
+                </>
+              ) : null}
+            </div>
+          ) : null}
+        </header>
 
-      {error ? <p className="mb-6 rounded-row border border-hairline bg-paper-2 px-4 py-3 text-[12px] leading-[1.5] text-ink-2">{error}</p> : null}
-
-      {isEmpty ? (
-        <CaughtUp title="No archived threads yet." body="Threads you mark as handled land here." />
-      ) : (
-        <>
-          {/* Ghost search */}
+        {!isEmpty ? (
           <label
             className={cn(
-              "mb-[16px] flex items-center gap-[10px] rounded-[12px] border bg-transparent px-[14px] py-[10px] transition-colors duration-calm",
+              "mb-3 flex items-center gap-[10px] rounded-[12px] border bg-transparent px-[14px] py-[9px] transition-colors duration-calm sm:mb-[16px] sm:py-[10px]",
               query
                 ? "border-hairline-strong"
                 : "border-hairline hover:border-hairline-strong focus-within:border-ink-3 focus-within:bg-paper"
@@ -386,9 +384,9 @@ export default function ArchivedPage() {
               type="text"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              placeholder="Search archived threads by person, channel, or phrase…"
+              placeholder="Search archived…"
               autoComplete="off"
-              className="flex-1 border-0 bg-transparent text-[14px] text-ink outline-none placeholder:text-ink-3"
+              className="min-w-0 flex-1 border-0 bg-transparent text-[14px] text-ink outline-none placeholder:text-ink-3"
             />
             {query ? (
               <button
@@ -401,10 +399,9 @@ export default function ArchivedPage() {
               </button>
             ) : null}
           </label>
+        ) : null}
 
-          {/* Outcome tabs + tools cluster. On phone the tools sit above a
-              horizontally-scrollable tab strip (no wrap) so the bar stays
-              two calm rows instead of a tall pile. */}
+        {!isEmpty ? (
           <div className="flex flex-col-reverse gap-1 border-b border-hairline sm:flex-row sm:flex-wrap sm:items-end sm:gap-[14px]">
             <div className="flex min-w-0 flex-1 gap-[1px] overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden sm:flex-wrap sm:overflow-x-visible">
               {OUTCOME_TABS.map((entry) => {
@@ -458,90 +455,105 @@ export default function ArchivedPage() {
               ) : null}
             </div>
           </div>
+        ) : null}
+      </div>
 
-          {platformFilter !== "all" ? (
-            <div className="flex flex-wrap items-center gap-2 pt-[14px]">
-              <span className="inline-flex items-center gap-[6px] rounded-pill border border-hairline bg-paper px-[10px] py-[4px] font-mono text-[11.5px] text-ink-2">
-                <span className="opacity-60">Platform</span>
-                {PLATFORM_FILTERS.find((p) => p.key === platformFilter)?.label}
-                <button
-                  type="button"
-                  onClick={() => setPlatformFilter("all")}
-                  aria-label="Remove platform filter"
-                  className="ml-[1px] rounded p-[1px] opacity-70 transition-opacity duration-calm hover:opacity-100"
-                >
-                  <XIcon />
-                </button>
-              </span>
-            </div>
-          ) : null}
+      <div
+        data-testid="archived-list-scroller"
+        data-scroll-owner="list"
+        className="min-h-0 flex-1 overflow-y-auto overscroll-contain pb-4 md:overflow-visible md:pb-0"
+      >
+        {error ? (
+          <p className="mb-4 mt-3 rounded-row border border-hairline bg-paper-2 px-4 py-3 text-[12px] leading-[1.5] text-ink-2 sm:mb-6">
+            {error}
+          </p>
+        ) : null}
 
-          {visible.length === 0 ? (
-            <CaughtUp
-              title="Nothing matches that filter."
-              body="Clear the filter or try a different phrase."
-            />
-          ) : (
-            <div className="mt-1">
-              {sections.map((section) => (
-                <section key={section.key}>
-                  {section.label ? (
-                    <header className="mb-[2px] mt-[32px] flex items-center gap-[10px] font-mono text-[11px] font-semibold uppercase tracking-[0.1em] text-ink-3 first:mt-[22px]">
-                      <span>{section.label}</span>
-                      <span aria-hidden className="h-px flex-1 bg-hairline" />
-                      <span className="text-ink-4">{section.items.length}</span>
-                    </header>
-                  ) : null}
-                  <div className="flex flex-col">
-                    {section.items.map((row) => (
-                      <ArchivedRowItem
-                        key={row.id}
-                        row={row}
-                        selectMode={selectMode}
-                        selected={selectedSet.has(row.id)}
-                        onToggle={toggleId}
-                      />
-                    ))}
-                  </div>
-                </section>
-              ))}
-            </div>
-          )}
+        {!isEmpty && platformFilter !== "all" ? (
+          <div className="flex flex-wrap items-center gap-2 pt-[14px]">
+            <span className="inline-flex items-center gap-[6px] rounded-pill border border-hairline bg-paper px-[10px] py-[4px] font-mono text-[11.5px] text-ink-2">
+              <span className="opacity-60">Platform</span>
+              {PLATFORM_FILTERS.find((p) => p.key === platformFilter)?.label}
+              <button
+                type="button"
+                onClick={() => setPlatformFilter("all")}
+                aria-label="Remove platform filter"
+                className="ml-[1px] rounded p-[1px] opacity-70 transition-opacity duration-calm hover:opacity-100"
+              >
+                <XIcon />
+              </button>
+            </span>
+          </div>
+        ) : null}
 
-          {/* Bulk bar (Restore only — Delete is intentionally not wired). */}
-          {selectMode ? (
-            <div
-              data-testid="archived-bulk-bar"
-              className="sticky bottom-6 z-40 mt-3 flex items-center gap-4 rounded-[12px] bg-ink px-[18px] py-[14px] text-paper shadow-pop"
+        {isEmpty ? (
+          <CaughtUp title="No archived threads yet." body="Threads you mark as handled land here." />
+        ) : visible.length === 0 ? (
+          <CaughtUp
+            title="Nothing matches that filter."
+            body="Clear the filter or try a different phrase."
+          />
+        ) : (
+          <div className="mt-1">
+            {sections.map((section) => (
+              <section key={section.key}>
+                {section.label ? (
+                  <header className="mb-[2px] mt-[32px] flex items-center gap-[10px] font-mono text-[11px] font-semibold uppercase tracking-[0.1em] text-ink-3 first:mt-[22px]">
+                    <span>{section.label}</span>
+                    <span aria-hidden className="h-px flex-1 bg-hairline" />
+                    <span className="text-ink-4">{section.items.length}</span>
+                  </header>
+                ) : null}
+                <div className="flex flex-col">
+                  {section.items.map((row) => (
+                    <ArchivedRowItem
+                      key={row.id}
+                      row={row}
+                      selectMode={selectMode}
+                      selected={selectedSet.has(row.id)}
+                      onToggle={toggleId}
+                    />
+                  ))}
+                </div>
+              </section>
+            ))}
+          </div>
+        )}
+
+        {selectMode ? (
+          <div
+            data-testid="archived-bulk-bar"
+            className="sticky bottom-3 z-40 mt-3 flex items-center gap-4 rounded-[12px] bg-ink px-[18px] py-[14px] text-paper shadow-pop"
+          >
+            <span className="font-mono text-[13px]">{selectedIds.length} selected</span>
+            <span className="flex-1" />
+            <button
+              type="button"
+              disabled={bulkPending || selectedIds.length === 0}
+              onClick={() => void restoreSelected()}
+              className="rounded-[8px] bg-white/[0.12] px-[13px] py-[8px] text-[13px] transition-colors duration-calm hover:bg-white/[0.2] disabled:opacity-50"
             >
-              <span className="font-mono text-[13px]">{selectedIds.length} selected</span>
-              <span className="flex-1" />
-              <button
-                type="button"
-                disabled={bulkPending || selectedIds.length === 0}
-                onClick={() => void restoreSelected()}
-                className="rounded-[8px] bg-white/[0.12] px-[13px] py-[8px] text-[13px] transition-colors duration-calm hover:bg-white/[0.2] disabled:opacity-50"
-              >
-                {bulkPending ? "Restoring…" : "Restore to inbox"}
-              </button>
-              <button
-                type="button"
-                onClick={clearSelection}
-                className="px-[6px] py-[8px] text-[13px] text-paper/70 transition-colors duration-calm hover:text-paper"
-              >
-                Cancel
-              </button>
-            </div>
-          ) : null}
+              {bulkPending ? "Restoring…" : "Restore to inbox"}
+            </button>
+            <button
+              type="button"
+              onClick={clearSelection}
+              className="px-[6px] py-[8px] text-[13px] text-paper/70 transition-colors duration-calm hover:text-paper"
+            >
+              Cancel
+            </button>
+          </div>
+        ) : null}
 
+        {!isEmpty ? (
           <div className="mt-9 flex flex-col items-center gap-4 pt-5 text-center">
             <p className="m-0 font-mono text-[11.5px] text-ink-3">
-              Threads move here once they’re handled, snoozed out, or go cold. Nothing is deleted
+              Threads move here once they are handled, snoozed out, or go cold. Nothing is deleted
               automatically.
             </p>
           </div>
-        </>
-      )}
+        ) : null}
+      </div>
     </Canvas>
   );
 }
@@ -622,7 +634,7 @@ function ArchivedRowItem({ row, selectMode, selected, onToggle }: ArchivedRowIte
       href={`/thread/${row.id}`}
       onClick={onClick}
       className={cn(
-        "group grid grid-cols-[28px_1fr_auto] items-center gap-[14px] border-b border-hairline px-1 py-[13px] transition-colors duration-calm hover:bg-paper-2",
+        "group grid grid-cols-[28px_1fr] items-center gap-[14px] border-b border-hairline px-1 py-[13px] transition-colors duration-calm hover:bg-paper-2 sm:grid-cols-[28px_1fr_auto]",
         selected ? "bg-paper-2" : ""
       )}
     >
@@ -655,20 +667,24 @@ function ArchivedRowItem({ row, selectMode, selected, onToggle }: ArchivedRowIte
         </button>
       </span>
 
-      <span className="flex min-w-0 items-center gap-[12px]">
+      <span className="flex min-w-0 flex-col gap-[2px] sm:flex-row sm:items-center sm:gap-[12px]">
         <span className="truncate text-[14px] font-medium tracking-[-0.005em] text-ink">
           {row.personName}
         </span>
-        <span className="inline-flex shrink-0 items-center gap-[7px] font-mono text-[11.5px] text-ink-3">
-          <span aria-hidden className={`h-[6px] w-[6px] rounded-full ${outcomeDot(outcome.key)}`} />
-          {outcome.key}
+        <span className="flex min-w-0 flex-wrap items-center gap-x-[10px] gap-y-[2px] font-mono text-[11.5px] text-ink-3">
+          <span className="inline-flex shrink-0 items-center gap-[7px]">
+            <span aria-hidden className={`h-[6px] w-[6px] rounded-full ${outcomeDot(outcome.key)}`} />
+            {outcome.key}
+          </span>
+          {outcome.note ? (
+            <span className="shrink-0 text-ink-4">{outcome.note}</span>
+          ) : null}
+          <span className="sm:hidden">{when}</span>
+          <span className="sm:hidden text-ink-4">{PLATFORM_LABEL[row.platform]}</span>
         </span>
-        {outcome.note ? (
-          <span className="shrink-0 font-mono text-[11.5px] text-ink-4">{outcome.note}</span>
-        ) : null}
       </span>
 
-      <span className="flex items-center gap-[12px] font-mono text-[11px] text-ink-3">
+      <span className="hidden items-center gap-[12px] font-mono text-[11px] text-ink-3 sm:flex">
         <span>{when}</span>
         <span className="text-ink-3">{PLATFORM_LABEL[row.platform]}</span>
       </span>

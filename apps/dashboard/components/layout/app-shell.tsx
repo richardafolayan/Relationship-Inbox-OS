@@ -1,13 +1,14 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { usePathname, useRouter } from "next/navigation";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import type { CSSProperties, ReactNode } from "react";
 import { resolveAutoScanDisabled, resolveAutoScanInitialEnabled } from "@inbox-os/core/autoscan";
 import { Sidebar } from "@/components/layout/sidebar";
 import { MobileDock } from "@/components/layout/mobile-dock";
 import { CommandPalette } from "@/components/layout/command-palette";
 import { TopStatus } from "@/components/layout/top-status";
+import { resolveMobileStatusChrome } from "@/lib/mobile-status-chrome";
 import { ConsumerRecovery } from "@/components/common/consumer-recovery";
 import { FullDiskAccessBanner } from "@/components/common/full-disk-access-banner";
 import { ToastHost } from "@/components/common/toast-host";
@@ -15,11 +16,18 @@ import { PilotFeedbackModal } from "@/components/common/pilot-feedback-modal";
 import { PilotTour } from "@/components/common/PilotTour";
 import { SetupWizard } from "@/components/common/SetupWizard";
 import { FocusOverlays } from "@/components/common/focus/focus-overlays";
+import { usePrimaryOverlay } from "@/components/common/mobile-overlay-provider";
 import { FullDemoBanner } from "@/components/full-demo/FullDemoBanner";
 import { apiGet, apiGetRaw, apiPost } from "@/lib/api";
 import { startAppUpdate } from "@/lib/app-update-action";
 import { useVisiblePolling } from "@/lib/use-visible-polling";
-import { isQuietHoursActive } from "@/lib/quiet-hours";
+import {
+  applyQuietHoursFromRunner,
+  isQuietHoursActive,
+  QUIET_HOURS_CHANGE_EVENT,
+  shouldSkipAutoScanForQuietHours,
+  type QuietHoursWindow
+} from "@/lib/quiet-hours";
 import {
   DEFAULT_SCAN_INTERVAL,
   nextScanDelayMs,
@@ -75,14 +83,24 @@ import {
   type OverdueDigestTickResult
 } from "@/lib/overdue-digest";
 import type { HealthResponse, InboxResponse, InboxRow, OperatorProfile } from "@/lib/types";
+import { buildInAppHref, recordSearchReturn } from "@/lib/mobile-search";
 import { recordThreadSource } from "@/lib/thread-source";
 import { isInTodayQueue } from "@/lib/today";
 import { recordClientError } from "@/lib/client-error-log";
+import { installAppVisualViewport } from "@/lib/app-visual-viewport";
+import { cn } from "@/lib/utils";
 import {
   classifyConsumerFailure,
   logConsumerFailure,
   type ConsumerFailure
 } from "@/lib/consumer-failure";
+import {
+  GUIDED_TOUR_SURFACE_EVENT,
+  isGuidedTourSurfaceActive,
+  planTourOverlayConflicts,
+  shouldQueueLiveBanner,
+  type GuidedTourSurfaceDetail
+} from "@/lib/guided-tour";
 
 const linkedInAutoScanStorageKey = "linkedin_dashboard_autoscan_enabled";
 // Auto-scan cadence is randomised per firing rather than a hard loop: a
@@ -132,6 +150,18 @@ function isWithinActiveHours(now: Date = new Date()): boolean {
 }
 const sidebarCollapsedStorageKey = "dashboard_sidebar_collapsed";
 
+function SearchReturnRecorder({ pathname }: { pathname: string }) {
+  const searchParams = useSearchParams();
+  const searchKey = searchParams?.toString() ?? "";
+
+  useEffect(() => {
+    const hash = window.location.hash;
+    recordSearchReturn(buildInAppHref(pathname, searchKey ? `?${searchKey}` : "", hash));
+  }, [pathname, searchKey]);
+
+  return null;
+}
+
 export function AppShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
@@ -139,6 +169,8 @@ export function AppShell({ children }: { children: ReactNode }) {
   // archiving a thread can return the operator to wherever they came
   // from rather than always bouncing to /today. Lives in the shell so
   // every list page contributes without needing per-page wiring.
+  // Also record the last non-search in-app href for mobile Search Close
+  // (#903), including query and hash (e.g. /settings#platforms).
   useEffect(() => {
     recordThreadSource(pathname);
   }, [pathname]);
@@ -155,6 +187,14 @@ export function AppShell({ children }: { children: ReactNode }) {
   const [runtimeFailure, setRuntimeFailure] = useState<ConsumerFailure | null>(null);
   const [recovering, setRecovering] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const closePalette = useCallback(() => setPaletteOpen(false), []);
+  usePrimaryOverlay({
+    kind: "search",
+    id: "command-palette",
+    open: paletteOpen,
+    onRequestClose: closePalette
+  });
+  const [tourSurfaceActive, setTourSurfaceActive] = useState(false);
   const [autoScanEnabled, setAutoScanEnabled] = useState(false);
   const [attentionCount, setAttentionCount] = useState(0);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -180,6 +220,34 @@ export function AppShell({ children }: { children: ReactNode }) {
       }),
     []
   );
+  // Track the guided walkthrough surface so Search cannot stack on top of
+  // it and live new-message banners stay queued until the tour ends.
+  const paletteOpenRef = useRef(paletteOpen);
+  paletteOpenRef.current = paletteOpen;
+  useEffect(() => {
+    setTourSurfaceActive(isGuidedTourSurfaceActive());
+    const onSurface = (event: Event) => {
+      const detail = (event as CustomEvent<GuidedTourSurfaceDetail>).detail;
+      const active = detail?.active ?? isGuidedTourSurfaceActive();
+      setTourSurfaceActive(active);
+      if (active) {
+        const plan = planTourOverlayConflicts({
+          tourActive: true,
+          aiAssistOpen: false,
+          paletteOpen: paletteOpenRef.current
+        });
+        if (plan.closePalette) setPaletteOpen(false);
+      }
+    };
+    window.addEventListener(GUIDED_TOUR_SURFACE_EVENT, onSurface);
+    return () => window.removeEventListener(GUIDED_TOUR_SURFACE_EVENT, onSurface);
+  }, []);
+
+  const openSearch = useCallback(() => {
+    if (tourSurfaceActive || isGuidedTourSurfaceActive()) return;
+    setPaletteOpen(true);
+  }, [tourSurfaceActive]);
+
   // Diff the latest inbox poll against the previous one and surface any
   // thread that gained a new inbound message. Gated so it stays a signal,
   // not noise: silent on the first poll (baseline only) and rolled up when
@@ -188,6 +256,8 @@ export function AppShell({ children }: { children: ReactNode }) {
   //   - tab hidden: a desktop notification (suppressed during quiet hours),
   //   - tab focused: a quiet, clickable in-app toast, so a new message is
   //     visible without having to open the thread to discover it.
+  // While a walkthrough is active, still record into the notification
+  // center but skip visible banners so the coach sheet stays deterministic.
   const maybeNotify = useCallback(
     (rows: InboxRow[]) => {
       // #758 (R-0091): threads the operator has since replied to (from the
@@ -207,6 +277,9 @@ export function AppShell({ children }: { children: ReactNode }) {
       // silence): the bell must answer "what came in while I was away" even
       // when the alert itself was missed or suppressed.
       recordNewMessageNotifications(fresh);
+      if (shouldQueueLiveBanner(isGuidedTourSurfaceActive())) {
+        return;
+      }
       const tabHidden =
         typeof document !== "undefined" && document.visibilityState === "hidden";
       const plan = planNewMessageNotice({
@@ -478,9 +551,37 @@ export function AppShell({ children }: { children: ReactNode }) {
   // Operator-chosen scan cadence (pilot R-0087 / #754). Changing it in
   // Settings re-arms the loop immediately - the effect below depends on it.
   const [scanInterval, setScanInterval] = useState<ScanIntervalId>(DEFAULT_SCAN_INTERVAL);
+  // Quiet hours come from runner AppSettings (shared phone + Mac), not the
+  // current browser origin's localStorage. Version bumps re-render sidebar
+  // attention and re-arm scan when Settings changes the host value.
+  const [quietHoursVersion, setQuietHoursVersion] = useState(0);
   useEffect(() => {
     setScanInterval(readScanInterval());
     return onScanIntervalChange(() => setScanInterval(readScanInterval()));
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    void apiGet<{
+      quietHoursEnabled?: boolean;
+      quietHoursWindow?: QuietHoursWindow | null;
+    }>("/runner/data/settings")
+      .then((data) => {
+        if (cancelled) return;
+        applyQuietHoursFromRunner(data ?? null);
+        setQuietHoursVersion((n) => n + 1);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        applyQuietHoursFromRunner(null);
+        setQuietHoursVersion((n) => n + 1);
+      });
+    const onQuietHoursChange = () => setQuietHoursVersion((n) => n + 1);
+    window.addEventListener(QUIET_HOURS_CHANGE_EVENT, onQuietHoursChange);
+    return () => {
+      cancelled = true;
+      window.removeEventListener(QUIET_HOURS_CHANGE_EVENT, onQuietHoursChange);
+    };
   }, []);
 
   useEffect(() => {
@@ -491,11 +592,14 @@ export function AppShell({ children }: { children: ReactNode }) {
       if (cancelled) return;
       // Three reasons we skip a tick:
       //   - already mid-scan (don't pile up requests)
-      //   - quiet hours toggle is on (22:00-06:00 user override)
+      //   - quiet hours toggle is on (shared runner host value)
       //   - outside plausible active hours (weekend / before 08:00 /
       //     after 19:00 — keeps the scrape footprint matched to a
       //     real person's working pattern rather than a 24/7 bot)
-      const skip = autoScanInFlightRef.current || isQuietHoursActive() || !isWithinActiveHours();
+      const skip =
+        autoScanInFlightRef.current ||
+        shouldSkipAutoScanForQuietHours() ||
+        !isWithinActiveHours();
       if (!skip) {
         autoScanInFlightRef.current = true;
         void apiPost("/runner/control/scan", { scope: "update" }).catch(() => undefined).finally(() => {
@@ -514,7 +618,7 @@ export function AppShell({ children }: { children: ReactNode }) {
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
-  }, [autoScanDisabled, autoScanEnabled, scanInterval]);
+  }, [autoScanDisabled, autoScanEnabled, scanInterval, quietHoursVersion]);
 
   // #359: notification permission is no longer requested on mount.
   // Asking pre-intent (i.e. on every page load before the operator has
@@ -670,21 +774,33 @@ export function AppShell({ children }: { children: ReactNode }) {
     return () => source.close();
   }, []);
 
-  // ⌘K toggles the palette. Esc closes the palette and, when there is no
-  // palette open, navigates back from a thread to /today (matches the
-  // prototype's "Esc closes thread" behaviour).
+  // ⌘K opens the desktop palette or the dedicated phone Search route.
+  // Escape for primary overlays is owned by MobileOverlayProvider; when no
+  // primary is open, it returns a thread to Today.
   useEffect(() => {
     const onKeydown = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
         event.preventDefault();
+        if (isGuidedTourSurfaceActive()) return;
+        const phoneSearch = typeof window !== "undefined" && window.matchMedia("(max-width: 767px)").matches;
+        if (phoneSearch) {
+          setPaletteOpen(false);
+          if (pathname !== "/search") router.push("/search");
+          return;
+        }
         setPaletteOpen((value) => !value);
         return;
       }
       if (event.key === "Escape") {
         if (paletteOpen) {
+          // Provider capture-phase handler usually wins; keep this as a
+          // same-tick fallback when the palette is the open primary.
           setPaletteOpen(false);
           return;
         }
+        // Nested overlays (AI Assist, modals) own Escape; do not also leave the thread.
+        if (event.defaultPrevented) return;
+        if (document.querySelector('[aria-modal="true"]')) return;
         if (pathname.startsWith("/thread/")) {
           router.push("/today");
         }
@@ -738,10 +854,22 @@ export function AppShell({ children }: { children: ReactNode }) {
     };
   }, []);
 
+  // Keep .h-app-screen matched to the visual viewport (iOS keyboard /
+  // browser chrome). Falls back to the height:100% chain when unavailable.
+  useEffect(() => {
+    const { disconnect } = installAppVisualViewport();
+    return disconnect;
+  }, []);
+
   // Quiet hours: when the toggle is on AND the local time is between
   // 22:00 and 06:00, mute the sidebar attention dot and pause auto-scan
   // (gated above). Keeps the toggle honest with its label (#94).
   const sidebarAttention = isQuietHoursActive() ? 0 : attentionCount;
+  // #914: route-aware mobile status density. Desktop always keeps full chrome.
+  const mobileStatusChrome = useMemo(
+    () => resolveMobileStatusChrome(pathname),
+    [pathname]
+  );
 
   return (
     <div
@@ -749,22 +877,31 @@ export function AppShell({ children }: { children: ReactNode }) {
       // over). The sidebar width lives in a CSS var so the inline style
       // can't override the phone layout — a plain gridTemplateColumns
       // style would keep reserving the sidebar track at every width.
+      //
+      // Scroll model (mobile): document is locked; shell clips; Canvas
+      // owns list scroll; thread owns its message scroller. data-scroll-owner
+      // markers coordinate with #928 / #897 so later PRs do not restore two
+      // nested scrollers.
       className="grid h-app-screen grid-cols-1 overflow-hidden bg-paper text-ink md:[grid-template-columns:var(--shell-cols)]"
+      data-scroll-owner="shell"
       style={{
         "--shell-cols": sidebarCollapsed ? "56px 1fr" : "200px 1fr"
       } as CSSProperties}
     >
+      <Suspense fallback={null}>
+        <SearchReturnRecorder pathname={pathname} />
+      </Suspense>
       <Sidebar
         health={health}
         attentionCount={sidebarAttention}
-        onOpenSearch={() => setPaletteOpen(true)}
+        onOpenSearch={openSearch}
         collapsed={sidebarCollapsed}
         onToggleCollapsed={() => setSidebarCollapsed((prev) => !prev)}
         operatorDisplayName={operatorDisplayName}
       />
-      <div className="flex h-app-screen min-h-0 flex-col">
+      <div className="flex h-full min-h-0 flex-col overflow-hidden">
         <FullDemoBanner />
-        <TopStatus />
+        <TopStatus mobileChrome={mobileStatusChrome} />
         <FullDiskAccessBanner />
         {runtimeFailure ?? startupFailure ? (
           <div className="border-b border-hairline bg-paper px-3 py-2 sm:px-6">
@@ -778,10 +915,35 @@ export function AppShell({ children }: { children: ReactNode }) {
             />
           </div>
         ) : null}
-        <main className="min-h-0 flex-1 overflow-y-auto">{children}</main>
+        <main
+          // Inbox / Archived / Thread own an inner scroller on mobile. Keep
+          // main from also scrolling so a broken height chain cannot create
+          // two nested scroll owners. Desktop long-page routes still scroll
+          // on main (md:overflow-y-auto).
+          data-scroll-owner={
+            pathname === "/inbox" ||
+            pathname === "/archived" ||
+            pathname.startsWith("/thread/")
+              ? "child"
+              : "main"
+          }
+          className={cn(
+            "min-h-0 flex-1",
+            pathname === "/inbox" ||
+              pathname === "/archived" ||
+              pathname.startsWith("/thread/")
+              ? "overflow-hidden md:overflow-y-auto"
+              : "overflow-y-auto"
+          )}
+        >
+          {children}
+        </main>
+        {/* Dock is a real shell row on phone so pages do not need large
+            bottom padding to clear a fixed overlay. Hidden on md+ where
+            the sidebar owns navigation; returns null inside /thread. */}
+        <MobileDock attentionCount={sidebarAttention} />
       </div>
-      <MobileDock attentionCount={sidebarAttention} onOpenSearch={() => setPaletteOpen(true)} />
-      <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
+      <CommandPalette open={paletteOpen && !tourSurfaceActive} onClose={() => setPaletteOpen(false)} />
       <ToastHost />
       <PilotFeedbackModal />
       <PilotTour />

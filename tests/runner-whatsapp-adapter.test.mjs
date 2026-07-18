@@ -1253,3 +1253,44 @@ test("getPollVotes throws a readable error when the poll message cannot be found
     /poll message not found/
   );
 });
+
+test("getPollVotes rethrows session failures from voter contact lookup (#883)", async () => {
+  let destroyed = false;
+  const states = [];
+  const client = createFakeClient({
+    getMessageById: async () => ({
+      type: "poll_creation",
+      getPollVotes: async () => [
+        {
+          voter: "447111222333@c.us",
+          selectedOptions: [{ name: "Yes" }],
+          interractedAtTs: 1_780_000_000_000
+        }
+      ]
+    }),
+    getContactById: async () => {
+      throw new Error("Attempted to use detached Frame '7EE3D604511108886782BA4502E441CD'.");
+    },
+    destroy: async () => {
+      destroyed = true;
+    }
+  });
+  const adapter = new WhatsAppAdapter({
+    ...baseDeps(),
+    createClient: () => client,
+    onStateChange: (state) => states.push(state)
+  });
+  const ready = adapter.ensureConnected();
+  setImmediate(() => client.emit("ready"));
+  await ready;
+
+  await assert.rejects(
+    adapter.getPollVotes(
+      { platformThreadId: "447111222333@c.us", displayName: "Cynthia", lastMessagePreview: "" },
+      "poll-msg-1"
+    ),
+    /WhatsApp lost its connection/
+  );
+  assert.equal(destroyed, true);
+  assert.deepEqual(states, ["connecting", "connected", "disconnected"]);
+});

@@ -1,7 +1,10 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { MoreVertical } from "lucide-react";
 import { apiGetRaw, apiPost } from "@/lib/api";
+import { formatRelative } from "@/lib/time";
+import { Menu } from "@/components/ui/menu";
 import { cn } from "@/lib/utils";
 
 // WhatsApp connect card (#774). Off unless the runner reports enabled
@@ -18,10 +21,18 @@ interface WhatsAppStatus {
 
 export function WhatsAppConnect({
   onScan,
-  scanBusy = false
+  scanBusy = false,
+  lastScanAt = null,
+  deviceLabel,
+  remoteDisabled = false,
+  offlineExplanation
 }: {
   onScan?: () => void;
   scanBusy?: boolean;
+  lastScanAt?: string | null;
+  deviceLabel?: string;
+  remoteDisabled?: boolean;
+  offlineExplanation?: string;
 } = {}) {
   const [status, setStatus] = useState<WhatsAppStatus | null>(null);
   const [connecting, setConnecting] = useState(false);
@@ -57,7 +68,7 @@ export function WhatsAppConnect({
   }, [status?.state, refresh]);
 
   const connect = async () => {
-    if (connecting) return;
+    if (connecting || remoteDisabled) return;
     setConnecting(true);
     setError("");
     setNotice("");
@@ -72,7 +83,7 @@ export function WhatsAppConnect({
   };
 
   const refreshQr = async () => {
-    if (refreshingQr) return;
+    if (refreshingQr || remoteDisabled) return;
     setRefreshingQr(true);
     setError("");
     setNotice("");
@@ -87,7 +98,14 @@ export function WhatsAppConnect({
   };
 
   const reset = async () => {
-    if (resetting) return;
+    if (resetting || remoteDisabled) return;
+    if (
+      !window.confirm(
+        "Reset WhatsApp? You will need to scan a new QR code to link the phone again."
+      )
+    ) {
+      return;
+    }
     setResetting(true);
     setError("");
     setNotice("");
@@ -116,24 +134,41 @@ export function WhatsAppConnect({
         : state === "connecting"
           ? "Connecting..."
           : "Not connected";
+  const lastScanLabel = lastScanAt
+    ? `Last scanned ${formatRelative(lastScanAt)}`
+    : connected
+      ? "Not scanned yet"
+      : null;
+  const showReset = (connected || status?.hasPersistedSession) && state !== "connecting";
+  const primaryBusy = connecting || refreshingQr || resetting || scanBusy;
 
   return (
     <div>
-      <div className="flex items-start justify-between gap-4">
-        <div className="min-w-0">
-          <p className="m-0 text-[16px] font-semibold text-ink">WhatsApp</p>
-          <p className="m-0 mt-1 text-[13.5px] leading-[1.45] text-ink-3" style={{ textWrap: "pretty" }}>
-            Link WhatsApp from your phone. The app reads chats into your inbox. You still press send.
-          </p>
-        </div>
-        <span
+      <div className="min-w-0">
+        <p className="m-0 text-[16px] font-semibold text-ink">WhatsApp</p>
+        <p
           className={cn(
-            "shrink-0 rounded-pill px-2 py-[3px] font-mono text-[10.5px]",
-            connected ? "bg-risk-fresh/15 text-risk-fresh" : "bg-paper-3 text-ink-3"
+            "m-0 mt-1 text-[13px] font-medium",
+            connected ? "text-risk-fresh" : "text-ink-2"
           )}
+          data-testid="platform-connection-status"
         >
           {statusLabel}
-        </span>
+        </p>
+        {lastScanLabel ? (
+          <p className="m-0 mt-0.5 font-mono text-[11px] text-ink-3" data-testid="platform-last-scan">
+            {lastScanLabel}
+          </p>
+        ) : null}
+        <p
+          className="m-0 mt-2 text-[13.5px] leading-[1.45] text-ink-3"
+          style={{ textWrap: "pretty" }}
+        >
+          Link WhatsApp from your phone. The app reads chats into your inbox. You still press send.
+        </p>
+        {deviceLabel ? (
+          <p className="m-0 mt-1.5 text-[12px] leading-[1.4] text-ink-3">{deviceLabel}</p>
+        ) : null}
       </div>
       <div>
         {state === "qr_ready" && status?.qrDataUrl ? (
@@ -151,29 +186,34 @@ export function WhatsAppConnect({
             </p>
           </div>
         ) : null}
-        {error ? <p className="m-0 mt-[8px] rounded-row border border-hairline bg-paper px-3 py-2 text-[12px] leading-[1.45] text-ink-2">{error}</p> : null}
-        {notice ? <p className="m-0 mt-[8px] font-mono text-[11px] text-risk-fresh">{notice}</p> : null}
+        {error ? (
+          <p className="m-0 mt-[8px] rounded-row border border-hairline bg-paper px-3 py-2 text-[12px] leading-[1.45] text-ink-2">
+            {error}
+          </p>
+        ) : null}
+        {notice ? (
+          <p className="m-0 mt-[8px] font-mono text-[11px] text-risk-fresh">{notice}</p>
+        ) : null}
       </div>
       <div className="mt-4 flex flex-wrap items-center gap-2">
         {connected && onScan ? (
           <button
             type="button"
             onClick={onScan}
-            disabled={scanBusy || resetting}
-            className="inline-flex items-center rounded-pill bg-ink px-3 py-[7px] text-[12.5px] font-medium text-paper hover:bg-ink-2 disabled:cursor-not-allowed disabled:opacity-50"
+            disabled={primaryBusy || remoteDisabled}
+            title={remoteDisabled ? offlineExplanation : undefined}
+            className="inline-flex min-h-[40px] items-center rounded-pill bg-ink px-4 py-[8px] text-[12.5px] font-medium text-paper hover:bg-ink-2 disabled:cursor-not-allowed disabled:opacity-50"
           >
-            {scanBusy ? "Working..." : "Scan WhatsApp"}
+            {scanBusy ? "Working..." : "Scan now"}
           </button>
-        ) : null}
-        {connected && onScan ? (
-          <span className="font-mono text-[11px] text-ink-3">Scan ready</span>
         ) : null}
         {state === "qr_ready" ? (
           <button
             type="button"
             onClick={refreshQr}
-            disabled={refreshingQr || resetting}
-            className="inline-flex items-center rounded-pill border border-hairline bg-paper px-3 py-[7px] text-[12px] font-medium text-ink hover:bg-paper-2 disabled:cursor-not-allowed disabled:opacity-50"
+            disabled={primaryBusy || remoteDisabled}
+            title={remoteDisabled ? offlineExplanation : undefined}
+            className="inline-flex min-h-[40px] items-center rounded-pill bg-ink px-4 py-[8px] text-[12.5px] font-medium text-paper hover:bg-ink-2 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {refreshingQr ? "Refreshing..." : "New QR code"}
           </button>
@@ -182,21 +222,41 @@ export function WhatsAppConnect({
           <button
             type="button"
             onClick={connect}
-            disabled={connecting || resetting || state === "connecting"}
-            className="inline-flex items-center rounded-pill bg-ink px-3 py-[7px] text-[12px] font-medium text-paper hover:bg-ink-2 disabled:cursor-not-allowed disabled:opacity-50"
+            disabled={primaryBusy || state === "connecting" || remoteDisabled}
+            title={remoteDisabled ? offlineExplanation : undefined}
+            className="inline-flex min-h-[40px] items-center rounded-pill bg-ink px-4 py-[8px] text-[12.5px] font-medium text-paper hover:bg-ink-2 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {state === "connecting" ? "Connecting..." : "Connect WhatsApp"}
           </button>
         ) : null}
-        {(connected || status?.hasPersistedSession) && state !== "connecting" ? (
-          <button
-            type="button"
-            onClick={reset}
-            disabled={resetting || refreshingQr}
-            className="inline-flex items-center rounded-pill border border-hairline bg-transparent px-3 py-[7px] text-[12px] font-medium text-ink-2 hover:bg-paper-2 hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            {resetting ? "Resetting..." : "Reset WhatsApp"}
-          </button>
+        {showReset ? (
+          <Menu
+            trigger={
+              <button
+                type="button"
+                aria-label="More actions"
+                disabled={resetting || refreshingQr || remoteDisabled}
+                className="grid h-[40px] w-[40px] place-items-center rounded-[10px] border border-hairline text-ink-2 transition-colors duration-calm hover:bg-paper hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
+                title="More"
+              >
+                <MoreVertical className="h-[16px] w-[16px]" strokeWidth={2} />
+              </button>
+            }
+            items={[
+              {
+                label: resetting ? "Resetting..." : "Reset WhatsApp",
+                danger: true,
+                onSelect: () => {
+                  void reset();
+                }
+              }
+            ]}
+          />
+        ) : null}
+        {remoteDisabled && offlineExplanation ? (
+          <span className="max-w-[36ch] text-[11.5px] leading-[1.4] text-ink-3">
+            {offlineExplanation}
+          </span>
         ) : null}
       </div>
     </div>
