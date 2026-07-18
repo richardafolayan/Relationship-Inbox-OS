@@ -37,6 +37,35 @@ import { PilotTourInviteCard } from "@/components/common/PilotTourInviteCard";
 import { PILOT_WELCOME_DISMISSED_KEY } from "@/lib/pilot";
 import { isTourSeen, markTourSeen, startPilotTour } from "@/lib/pilot-tour";
 
+// Tailwind `md` (768px). Used to mount stateful surfaces once: CSS
+// `hidden md:block` + `md:hidden` would keep both in the React tree.
+const MD_UP_QUERY = "(min-width: 768px)";
+
+function subscribeMdUp(onStoreChange: () => void): () => void {
+  if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
+    return () => undefined;
+  }
+  const mql = window.matchMedia(MD_UP_QUERY);
+  const handler = () => onStoreChange();
+  mql.addEventListener("change", handler);
+  return () => mql.removeEventListener("change", handler);
+}
+
+function getMdUpSnapshot(): boolean {
+  if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
+    return false;
+  }
+  return window.matchMedia(MD_UP_QUERY).matches;
+}
+
+function getMdUpServerSnapshot(): boolean {
+  return false;
+}
+
+function useMdUp(): boolean {
+  return useSyncExternalStore(subscribeMdUp, getMdUpSnapshot, getMdUpServerSnapshot);
+}
+
 // "Today" - the home. Hero card (most-overdue first) with keyboard hints
 // on each action, a "queue peek" of the next few people below it, and a
 // right-rail day outline tracking overdue → waiting → fresh → done.
@@ -121,6 +150,9 @@ function clockTextSnapshot(): string {
 }
 
 export default function TodayPage() {
+  // Mount tour invite + voice setup once: CSS dual-slot would double-mount
+  // stateful UserVoiceProfile (and tour card). Branch by md media query.
+  const isMdUp = useMdUp();
   const router = useRouter();
   // Seed from the shared client cache so revisiting Today (e.g. back from a
   // thread) paints the last-known queue instantly instead of a blank skeleton,
@@ -667,12 +699,14 @@ export default function TodayPage() {
 
       <NotificationCta />
 
-      {/* Desktop: tour + voice setup lead the page. Mobile: they sit below
-          the reply workflow so First up stays in the first viewport. */}
-      <div className="hidden md:block">
-        {renderTourInvite()}
-        {renderVoiceSetup()}
-      </div>
+      {/* Desktop only: tour + voice lead the page. Single mount via isMdUp
+          so UserVoiceProfile is not double-mounted with the mobile slot. */}
+      {isMdUp ? (
+        <div data-testid="today-desktop-setup">
+          {renderTourInvite()}
+          {renderVoiceSetup()}
+        </div>
+      ) : null}
 
       {degraded ? (
         <DegradedBanner
@@ -931,10 +965,12 @@ export default function TodayPage() {
           </section>
         ) : null}
 
-        <div className="md:hidden" data-testid="today-mobile-secondary">
-          {renderTourInvite()}
-          {renderVoiceSetup()}
-        </div>
+        {!isMdUp ? (
+          <div data-testid="today-mobile-secondary">
+            {renderTourInvite()}
+            {renderVoiceSetup()}
+          </div>
+        ) : null}
 
         <aside className="lg:col-start-2 lg:row-start-1" data-testid="today-secondary-rail">
           <div className="flex flex-col gap-8 lg:sticky lg:top-[110px] lg:gap-10">

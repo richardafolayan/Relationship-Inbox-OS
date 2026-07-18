@@ -47,8 +47,52 @@ test("mobile secondary content sits below the reply workflow", () => {
   assert.match(TODAY, /data-testid="today-mobile-secondary"/);
   assert.match(TODAY, /data-testid="today-secondary-rail"/);
   // Tour/setup lead on desktop only; mobile copies live under the workflow.
-  assert.match(TODAY, /hidden md:block[\s\S]*?renderTourInvite\(\)/);
+  assert.match(TODAY, /today-desktop-setup[\s\S]*?renderTourInvite\(\)/);
   assert.match(TODAY, /today-mobile-secondary[\s\S]*?renderTourInvite\(\)/);
+});
+
+test("stateful tour invite and voice setup mount only once (media-query branch)", () => {
+  // CSS dual-slot (hidden md:block + md:hidden) would keep two UserVoiceProfile
+  // instances mounted. Layout must branch on a media query / isMdUp so only one
+  // of the desktop or mobile slots is in the React tree at a time.
+  assert.match(TODAY, /useMdUp|isMdUp/);
+  assert.match(TODAY, /min-width:\s*768px/);
+  assert.match(TODAY, /isMdUp\s*\?/);
+  assert.match(TODAY, /!isMdUp\s*\?/);
+
+  // Each stateful surface is invoked at most once per branch, never both CSS slots.
+  assert.doesNotMatch(
+    TODAY,
+    /className="hidden md:block"[\s\S]{0,120}renderTourInvite\(\)[\s\S]{0,80}renderVoiceSetup\(\)/
+  );
+  assert.doesNotMatch(
+    TODAY,
+    /className="md:hidden"[\s\S]{0,80}renderTourInvite\(\)[\s\S]{0,80}renderVoiceSetup\(\)/
+  );
+
+  // UserVoiceProfile appears only inside renderVoiceSetup (single component site).
+  const voiceMounts = [...TODAY.matchAll(/<UserVoiceProfile\b/g)];
+  assert.equal(
+    voiceMounts.length,
+    1,
+    "exactly one <UserVoiceProfile> JSX site (renderVoiceSetup)"
+  );
+
+  // renderTourInvite / renderVoiceSetup are each defined once and called from
+  // mutually exclusive isMdUp branches (two call sites total, one active).
+  const tourCalls = [...TODAY.matchAll(/renderTourInvite\(\)/g)];
+  const voiceCalls = [...TODAY.matchAll(/renderVoiceSetup\(\)/g)];
+  // Definition is `const renderTourInvite = () =>` - calls are the bare form.
+  const tourInvocations = tourCalls.filter((m) => {
+    const idx = m.index ?? 0;
+    const before = TODAY.slice(Math.max(0, idx - 30), idx);
+    return !/const\s+$/.test(before) && !/=\s*$/.test(before.trimEnd());
+  });
+  // Simpler: count call sites next to the branch wrappers.
+  assert.match(TODAY, /isMdUp \? \([\s\S]*?renderTourInvite\(\)[\s\S]*?renderVoiceSetup\(\)/);
+  assert.match(TODAY, /!isMdUp \? \([\s\S]*?renderTourInvite\(\)[\s\S]*?renderVoiceSetup\(\)/);
+  assert.ok(tourCalls.length >= 2);
+  assert.ok(voiceCalls.length >= 2);
 });
 
 test("desktop Then these + full Tonight progress remain intact", () => {
