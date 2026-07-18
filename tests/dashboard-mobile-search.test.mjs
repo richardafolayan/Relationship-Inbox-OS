@@ -20,8 +20,15 @@ const {
   resolveSearchCloseTarget,
   resolveSearchCloseHref,
   resolveSearchAttentionKind,
+  buildInAppHref,
+  buildSearchHistoryHref,
+  readSearchQueryParam,
+  rememberSearchScroll,
+  readSearchScroll,
   MOBILE_SEARCH_RETURN_KEY,
-  MOBILE_SEARCH_RETURN_FALLBACK
+  MOBILE_SEARCH_RETURN_FALLBACK,
+  MOBILE_SEARCH_SCROLL_KEY,
+  MOBILE_SEARCH_QUERY_PARAM
 } = await import("../apps/dashboard/lib/mobile-search.ts");
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -240,6 +247,9 @@ function makeStorage(seed = {}) {
     getItem: (key) => (data.has(key) ? data.get(key) : null),
     setItem: (key, value) => {
       data.set(key, value);
+    },
+    removeItem: (key) => {
+      data.delete(key);
     }
   };
 }
@@ -251,7 +261,10 @@ test("#903: Close uses app-owned return route via replace, not history.length or
   // replace avoids stacking a second predecessor and Search ↔ back bounce.
   assert.match(mobileSearchSrc, /router\.replace\(resolveSearchCloseHref\(\)\)/);
   assert.doesNotMatch(mobileSearchSrc, /router\.push\(resolveSearchCloseHref\(\)\)/);
-  assert.match(appShellSrc, /recordSearchReturn\(pathname\)/);
+  // Full safe href (pathname + search + hash), not pathname alone.
+  assert.match(appShellSrc, /recordSearchReturn\(buildInAppHref\(/);
+  assert.match(appShellSrc, /useSearchParams/);
+  assert.match(appShellSrc, /window\.location\.hash/);
 });
 
 test("#903: Search surfaces offline/degraded/scanning attention inside the overlay", () => {
@@ -350,4 +363,59 @@ test("#903: unsafe return paths are rejected in favour of /today", () => {
     const storage = makeStorage({ [MOBILE_SEARCH_RETURN_KEY]: bad });
     assert.equal(resolveSearchCloseHref(storage), "/today", bad);
   }
+});
+
+test("#903: recordSearchReturn stores full safe href including query and hash", () => {
+  const storage = makeStorage();
+  recordSearchReturn("/settings#platforms", storage);
+  assert.equal(resolveSearchCloseHref(storage), "/settings#platforms");
+
+  recordSearchReturn("/inbox?filter=needs-reply", storage);
+  assert.equal(resolveSearchCloseHref(storage), "/inbox?filter=needs-reply");
+
+  recordSearchReturn(buildInAppHref("/people", "?tab=all", "#top"), storage);
+  assert.equal(resolveSearchCloseHref(storage), "/people?tab=all#top");
+
+  // /search (with or without query) must not overwrite the predecessor.
+  recordSearchReturn("/search?q=priya", storage);
+  assert.equal(resolveSearchCloseHref(storage), "/people?tab=all#top");
+  recordSearchReturn("/search", storage);
+  assert.equal(resolveSearchCloseHref(storage), "/people?tab=all#top");
+});
+
+test("#903: buildInAppHref and safe path validation", () => {
+  assert.equal(buildInAppHref("/settings", "", "#platforms"), "/settings#platforms");
+  assert.equal(buildInAppHref("/settings", "tab=1", "platforms"), "/settings?tab=1#platforms");
+  assert.equal(buildInAppHref("/inbox", "?q=a", ""), "/inbox?q=a");
+  assert.equal(buildInAppHref("/today"), "/today");
+});
+
+test("#903: Search query persists in history href for result → Back", () => {
+  assert.equal(buildSearchHistoryHref(""), "/search");
+  assert.equal(buildSearchHistoryHref("  "), "/search");
+  assert.equal(buildSearchHistoryHref("priya"), `/search?${MOBILE_SEARCH_QUERY_PARAM}=priya`);
+  assert.equal(
+    buildSearchHistoryHref("a b"),
+    `/search?${MOBILE_SEARCH_QUERY_PARAM}=a%20b`
+  );
+  assert.equal(readSearchQueryParam("?q=hello"), "hello");
+  assert.equal(readSearchQueryParam(new URLSearchParams("q=world")), "world");
+  assert.equal(readSearchQueryParam(""), "");
+
+  // Component wires URL restore + history replace + scroll memory.
+  assert.match(mobileSearchSrc, /buildSearchHistoryHref/);
+  assert.match(mobileSearchSrc, /readSearchQueryParam/);
+  assert.match(mobileSearchSrc, /history\.replaceState/);
+  assert.match(mobileSearchSrc, /rememberSearchScroll/);
+  assert.match(mobileSearchSrc, /readSearchScroll/);
+  assert.match(mobileSearchSrc, /useSearchParams/);
+});
+
+test("#903: Search list scroll is remembered for result → Back restore", () => {
+  const storage = makeStorage();
+  rememberSearchScroll(240, storage);
+  assert.equal(storage.raw.get(MOBILE_SEARCH_SCROLL_KEY), "240");
+  assert.equal(readSearchScroll(storage), 240);
+  rememberSearchScroll(0, storage);
+  assert.equal(readSearchScroll(storage), 0);
 });

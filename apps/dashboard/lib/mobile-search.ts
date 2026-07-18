@@ -297,14 +297,19 @@ export function isPhoneSearchWidth(width: number): boolean {
 // App-owned return path for /search (#903 review). history.length is not a
 // safe Back signal: direct opens, Home Screen launches, restored tabs and
 // external referrers can all report length > 1 while the previous entry is
-// outside the app. Record the last non-search in-app route; Close always
-// routes inside the app, falling back to /today.
+// outside the app. Record the last non-search in-app href (pathname + search
+// + hash); Close always routes inside the app, falling back to /today.
 export const MOBILE_SEARCH_RETURN_KEY = "search:return";
 export const MOBILE_SEARCH_RETURN_FALLBACK = "/today";
+// Result list scroll is restored when browser Back returns to Search after
+// opening a conversation. Query lives in the /search?q= URL so history keeps it.
+export const MOBILE_SEARCH_SCROLL_KEY = "search:scroll";
+export const MOBILE_SEARCH_QUERY_PARAM = "q";
 
 interface StorageLike {
   getItem(key: string): string | null;
   setItem(key: string, value: string): void;
+  removeItem?(key: string): void;
 }
 
 function defaultSessionStorage(): StorageLike | null {
@@ -314,6 +319,34 @@ function defaultSessionStorage(): StorageLike | null {
   } catch {
     return null;
   }
+}
+
+/** Pathname only, stripping ?query and #hash for route checks. */
+export function pathnameOnly(href: string): string {
+  const noHash = href.split("#")[0] ?? href;
+  return noHash.split("?")[0] ?? noHash;
+}
+
+/**
+ * Build a full in-app href from pathname, search, and hash pieces.
+ * search may be with or without a leading "?"; hash with or without "#".
+ */
+export function buildInAppHref(
+  pathname: string | null | undefined,
+  search?: string | null,
+  hash?: string | null
+): string {
+  const path = (pathname ?? "").trim() || "/";
+  let href = path.startsWith("/") ? path : `/${path}`;
+  const q = (search ?? "").trim();
+  if (q && q !== "?") {
+    href += q.startsWith("?") ? q : `?${q}`;
+  }
+  const h = (hash ?? "").trim();
+  if (h && h !== "#") {
+    href += h.startsWith("#") ? h : `#${h}`;
+  }
+  return href;
 }
 
 function isSafeAppPath(path: string): boolean {
@@ -327,19 +360,24 @@ function isSafeAppPath(path: string): boolean {
     return false;
   }
   if (offOrigin.test(decoded)) return false;
-  if (path === "/search" || path.startsWith("/search/")) return false;
+  // Reject protocol / scheme smuggling via query or hash too.
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(path.slice(1))) return false;
+  const route = pathnameOnly(path);
+  const decodedRoute = pathnameOnly(decoded);
+  if (route === "/search" || route.startsWith("/search/")) return false;
+  if (decodedRoute === "/search" || decodedRoute.startsWith("/search/")) return false;
   return true;
 }
 
-/** Remember the latest non-search route so Close can return inside the app. */
+/** Remember the latest non-search in-app href so Close can restore query/hash. */
 export function recordSearchReturn(
-  pathname: string | null | undefined,
+  href: string | null | undefined,
   storage: StorageLike | null = defaultSessionStorage()
 ): void {
-  if (!storage || !pathname) return;
-  if (!isSafeAppPath(pathname)) return;
+  if (!storage || !href) return;
+  if (!isSafeAppPath(href)) return;
   try {
-    storage.setItem(MOBILE_SEARCH_RETURN_KEY, pathname);
+    storage.setItem(MOBILE_SEARCH_RETURN_KEY, href);
   } catch {
     // Optional polish; ignore quota / security errors.
   }
@@ -375,6 +413,60 @@ export function resolveSearchCloseHref(
   storage: StorageLike | null = defaultSessionStorage()
 ): string {
   return resolveSearchCloseTarget(storage);
+}
+
+/** Read q from a search string or URLSearchParams-like value. */
+export function readSearchQueryParam(
+  search: string | URLSearchParams | null | undefined
+): string {
+  if (search == null) return "";
+  if (typeof search === "string") {
+    const raw = search.startsWith("?") ? search.slice(1) : search;
+    try {
+      return new URLSearchParams(raw).get(MOBILE_SEARCH_QUERY_PARAM) ?? "";
+    } catch {
+      return "";
+    }
+  }
+  return search.get(MOBILE_SEARCH_QUERY_PARAM) ?? "";
+}
+
+/** Build the Search history href that preserves the current query. */
+export function buildSearchHistoryHref(query: string): string {
+  const trimmed = query.trim();
+  if (!trimmed) return "/search";
+  return `/search?${MOBILE_SEARCH_QUERY_PARAM}=${encodeURIComponent(trimmed)}`;
+}
+
+export function rememberSearchScroll(
+  scrollTop: number,
+  storage: StorageLike | null = defaultSessionStorage()
+): void {
+  if (!storage) return;
+  try {
+    if (!Number.isFinite(scrollTop) || scrollTop <= 0) {
+      storage.removeItem?.(MOBILE_SEARCH_SCROLL_KEY);
+      storage.setItem(MOBILE_SEARCH_SCROLL_KEY, "0");
+      return;
+    }
+    storage.setItem(MOBILE_SEARCH_SCROLL_KEY, String(Math.round(scrollTop)));
+  } catch {
+    // optional
+  }
+}
+
+export function readSearchScroll(
+  storage: StorageLike | null = defaultSessionStorage()
+): number {
+  if (!storage) return 0;
+  try {
+    const raw = storage.getItem(MOBILE_SEARCH_SCROLL_KEY);
+    if (!raw) return 0;
+    const n = Number(raw);
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  } catch {
+    return 0;
+  }
 }
 
 /**
