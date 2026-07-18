@@ -8,6 +8,14 @@
 
 export const MOBILE_OVERLAY_HISTORY_KEY = "__riosMobileOverlay";
 
+export interface ScrollOwnerLockTarget {
+  /** Inline style bag (Element.style in the browser). */
+  style: {
+    overflow: string;
+    overscrollBehavior?: string;
+  };
+}
+
 export interface ScrollLockHost {
   bodyStyle: {
     overflow: string;
@@ -19,6 +27,12 @@ export interface ScrollLockHost {
   };
   /** Optional scrollbar compensation (window.innerWidth - documentElement.clientWidth). */
   scrollbarGapPx?: number;
+  /**
+   * Explicit page scrollers (shell main, Canvas, thread timeline, and any
+   * `[data-scroll-owner]`). Body overflow alone is not enough after the shell
+   * moved real scroll off document onto these owners.
+   */
+  scrollOwners?: ScrollOwnerLockTarget[];
 }
 
 export interface ScrollLockHandle {
@@ -26,17 +40,29 @@ export interface ScrollLockHandle {
 }
 
 /**
- * Lock background scrolling. Nested locks are ref-counted via the returned
- * release function; only the outermost release restores the prior styles.
+ * Lock background scrolling on body and every explicit scroll owner.
+ * Nested locks are ref-counted via the returned release function; only the
+ * outermost release restores the prior styles.
  */
 export function createScrollLock(host: ScrollLockHost): ScrollLockHandle {
   const previousOverflow = host.bodyStyle.overflow;
   const previousPaddingRight = host.bodyStyle.paddingRight;
   const gap = host.scrollbarGapPx ?? 0;
+  const ownerSnapshots = (host.scrollOwners ?? []).map((owner) => ({
+    style: owner.style,
+    overflow: owner.style.overflow,
+    overscrollBehavior: owner.style.overscrollBehavior ?? ""
+  }));
 
   host.bodyStyle.overflow = "hidden";
   if (gap > 0) {
     host.bodyStyle.paddingRight = `${gap}px`;
+  }
+  for (const owner of ownerSnapshots) {
+    owner.style.overflow = "hidden";
+    if ("overscrollBehavior" in owner.style) {
+      owner.style.overscrollBehavior = "none";
+    }
   }
   host.documentElementStyle?.setProperty("--overlay-scroll-locked", "1");
 
@@ -47,6 +73,12 @@ export function createScrollLock(host: ScrollLockHost): ScrollLockHandle {
       released = true;
       host.bodyStyle.overflow = previousOverflow;
       host.bodyStyle.paddingRight = previousPaddingRight;
+      for (const owner of ownerSnapshots) {
+        owner.style.overflow = owner.overflow;
+        if ("overscrollBehavior" in owner.style) {
+          owner.style.overscrollBehavior = owner.overscrollBehavior;
+        }
+      }
       host.documentElementStyle?.removeProperty("--overlay-scroll-locked");
     }
   };
@@ -294,6 +326,52 @@ export function bindVisualViewport(host: VisualViewportHost): VisualViewportBind
   };
 }
 
+/**
+ * Collect explicit scroll owners to lock while a primary overlay is open.
+ * Prefers `[data-scroll-owner]` markers (shell / Canvas / timeline); also
+ * includes `main` and common timeline/canvas fallbacks so branches without
+ * markers still stop background scroll.
+ */
+type ScrollOwnerQueryDoc = {
+  querySelectorAll: (selectors: string) => ArrayLike<Element>;
+  querySelector: (selectors: string) => Element | null;
+};
+
+function isStyleOwner(
+  el: Element | null | undefined
+): el is Element & { style: ScrollOwnerLockTarget["style"] } {
+  return Boolean(el && typeof (el as HTMLElement).style === "object" && (el as HTMLElement).style);
+}
+
+export function collectBrowserScrollOwners(
+  doc: ScrollOwnerQueryDoc = document
+): ScrollOwnerLockTarget[] {
+  const seen = new Set<Element>();
+  const owners: ScrollOwnerLockTarget[] = [];
+  const add = (el: Element | null | undefined) => {
+    if (!isStyleOwner(el) || seen.has(el)) return;
+    seen.add(el);
+    owners.push({ style: el.style });
+  };
+
+  for (const el of Array.from(doc.querySelectorAll("[data-scroll-owner]"))) {
+    add(el);
+  }
+  add(doc.querySelector("main"));
+  // Fallbacks when markers are not yet on the tree (pre-shell-viewport merge).
+  add(doc.querySelector("[data-scroll-owner='canvas']"));
+  add(doc.querySelector("[data-scroll-owner='thread-messages']"));
+  add(doc.querySelector("[data-scroll-owner='shell-main']"));
+  // Thread message stream is often the only overflow scroller on /thread.
+  for (const el of Array.from(
+    doc.querySelectorAll("[data-testid='thread-timeline'], [data-testid='thread-messages']")
+  )) {
+    add(el);
+  }
+
+  return owners;
+}
+
 /** Build a ScrollLockHost from the real document (browser only). */
 export function browserScrollLockHost(): ScrollLockHost | null {
   if (typeof document === "undefined") return null;
@@ -304,7 +382,8 @@ export function browserScrollLockHost(): ScrollLockHost | null {
   return {
     bodyStyle: document.body.style,
     documentElementStyle: document.documentElement.style,
-    scrollbarGapPx: gap
+    scrollbarGapPx: gap,
+    scrollOwners: collectBrowserScrollOwners(document)
   };
 }
 
@@ -318,20 +397,35 @@ export function browserHistoryHost(): HistoryHost | null {
   return window.history as unknown as HistoryHost;
 }
 
+/**
+ * Live visualViewport + innerHeight getters. Snapshotting height/offsetTop
+ * at create time freezes values; resize/scroll listeners then write stale CSS vars.
+ */
 export function browserVisualViewportHost(): VisualViewportHost | null {
   if (typeof window === "undefined" || typeof document === "undefined") return null;
+
+  const liveVisualViewport = (): VisualViewportHost["visualViewport"] => {
+    const vv = window.visualViewport;
+    if (!vv) return null;
+    return {
+      get height() {
+        return vv.height;
+      },
+      get offsetTop() {
+        return vv.offsetTop;
+      },
+      addEventListener: (type, listener) => vv.addEventListener(type, listener),
+      removeEventListener: (type, listener) => vv.removeEventListener(type, listener)
+    };
+  };
+
   return {
-    visualViewport: window.visualViewport
-      ? {
-          height: window.visualViewport.height,
-          offsetTop: window.visualViewport.offsetTop,
-          addEventListener: (type, listener) =>
-            window.visualViewport!.addEventListener(type, listener),
-          removeEventListener: (type, listener) =>
-            window.visualViewport!.removeEventListener(type, listener)
-        }
-      : null,
-    innerHeight: window.innerHeight,
+    get visualViewport() {
+      return liveVisualViewport();
+    },
+    get innerHeight() {
+      return window.innerHeight;
+    },
     documentElementStyle: document.documentElement.style
   };
 }
