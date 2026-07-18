@@ -4,10 +4,13 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   existsSync,
+  closeSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readFileSync,
+  readSync,
   readdirSync,
   renameSync,
   rmSync,
@@ -52,6 +55,9 @@ export function parseArgs(argv) {
     else if (arg === "--ref") out.ref = next();
     else if (arg === "--channel") out.channel = next();
     else if (arg === "--node-dir") out.nodeDir = next();
+    else if (arg === "--update-feed-url") out.updateFeedUrl = next();
+    else if (arg === "--update-url") out.updateUrl = next();
+    else if (arg === "--note") out.notes.push(next());
     else if (arg === "--skip-install") out.skipInstall = true;
     else if (arg === "--skip-build") out.skipBuild = true;
     else if (arg === "--skip-dmg") out.skipDmg = true;
@@ -236,7 +242,11 @@ function stageSource(ref, appResourceDir) {
     run("git", ["archive", "--format=tar", "--output", tarPath, ref]);
     run("tar", ["-xf", tarPath, "-C", appResourceDir]);
   } finally {
-    rmSync(temp, { recursive: true, force: true });
+    try {
+      rmSync(temp, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    } catch (error) {
+      process.stderr.write(`Warning: could not remove temporary build directory ${temp}: ${error?.message || String(error)}\n`);
+    }
   }
 }
 
@@ -390,21 +400,118 @@ function renameElectronExecutable(appPath) {
   plistSet(join(appPath, "Contents", "Info.plist"), "CFBundleExecutable", APP_NAME);
 }
 
-function signApp(appPath, identity) {
+const MACH_O_MAGICS = new Set([
+  0xfeedface, 0xfeedfacf, 0xcefaedfe, 0xcffaedfe,
+  0xcafebabe, 0xbebafeca, 0xcafebabf, 0xbfbafeca
+]);
+
+function isMachO(path) {
+  let fd;
+  try {
+    fd = openSync(path, "r");
+    const header = Buffer.allocUnsafe(4);
+    return readSync(fd, header, 0, 4, 0) === 4 && MACH_O_MAGICS.has(header.readUInt32BE(0));
+  } catch {
+    return false;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+
+function collectNestedCode(appPath) {
+  const binaries = [];
+  const bundles = [];
+  const walk = (path) => {
+    const stats = lstatSync(path);
+    if (stats.isSymbolicLink()) return;
+    if (stats.isDirectory()) {
+      if (path !== appPath && (path.endsWith(".app") || path.endsWith(".framework"))) bundles.push(path);
+      for (const entry of readdirSync(path)) walk(join(path, entry));
+      return;
+    }
+    if (stats.isFile() && isMachO(path)) binaries.push(path);
+  };
+  walk(appPath);
+  const deepestFirst = (left, right) => right.split("/").length - left.split("/").length;
+  return { binaries: binaries.sort(deepestFirst), bundles: bundles.sort(deepestFirst) };
+}
+
+export async function signApp(appPath, identity, certificatePath = "") {
   const signIdentity = identity || "-";
   const entitlements = join(ROOT, "apps", "desktop", "entitlements.mac.plist");
-  run("codesign", [
+  if (identity) {
+    const certificateHash = certificatePath ? certificateSha1(certificatePath) : "";
+    const requirement = certificateHash
+      ? `=${stableDesignatedRequirement(certificateHash, BUNDLE_ID)}`
+      : undefined;
+    const nested = collectNestedCode(appPath);
+    const common = ["--force", "--options", "runtime", "--timestamp=none", "--sign", certificateHash || identity];
+    for (const binary of nested.binaries) run("codesign", [...common, binary]);
+    for (const bundle of nested.bundles) {
+      run("codesign", [...common, "--entitlements", entitlements, bundle]);
+    }
+    const outer = [...common, "--entitlements", entitlements];
+    if (requirement) outer.push("--requirements", requirement);
+    run("codesign", [...outer, appPath]);
+    if (process.env.RIOS_CODESIGN_SKIP_TRUST_VERIFY !== "1") {
+      run("codesign", ["--verify", "--deep", "--strict", "--verbose=2", appPath]);
+    }
+    return;
+  }
+  const args = [
     "--force",
     "--deep",
     "--options",
     "runtime",
     "--entitlements",
     entitlements,
-    "--sign",
-    signIdentity,
-    appPath
-  ]);
+    "--sign", signIdentity
+  ];
+  args.push(appPath);
+  run("codesign", args);
   run("codesign", ["--verify", "--deep", "--strict", "--verbose=2", appPath]);
+}
+
+export function stableDesignatedRequirement(certificateHash, bundleId = BUNDLE_ID) {
+  const sha1 = String(certificateHash).replace(/\s/g, "").toUpperCase();
+  if (!/^[A-F0-9]{40}$/.test(sha1)) throw new Error("code-signing certificate SHA-1 must contain 40 hex characters");
+  if (!/^[A-Za-z0-9.-]+$/.test(bundleId)) throw new Error("bundle identifier contains unsupported characters");
+  return `designated => certificate leaf = H\"${sha1}\" and identifier \"${bundleId}\"`;
+}
+
+function certificateSha1(certificatePath) {
+  const output = capture("openssl", [
+    "x509", "-inform", "DER", "-in", certificatePath, "-noout", "-fingerprint", "-sha1"
+  ]);
+  const match = output.match(/Fingerprint=([A-F0-9:]+)/i);
+  if (!match) throw new Error(`could not read the SHA-1 fingerprint from ${certificatePath}`);
+  return match[1].replace(/:/g, "");
+}
+
+export function squirrelManifest({ version, build, commit, channel, updateUrl, sha256, notes = [] }) {
+  const releaseNotes = notes.length ? notes : [`${APP_NAME} ${version}`];
+  return {
+    version,
+    build,
+    commit,
+    channel,
+    zipUrl: updateUrl,
+    sha256,
+    releaseNotes,
+    minimumInstallerVersion: channel === "dev" ? "0.0.1" : appVersion(),
+    url: updateUrl,
+    name: version,
+    notes: releaseNotes.join("\n"),
+    pub_date: build
+  };
+}
+
+export function createUpdateZip(appPath, outDir, version) {
+  const updateZipPath = join(outDir, `${APP_NAME}-${version}-mac.zip`);
+  rmSync(updateZipPath, { force: true });
+  run("ditto", ["-c", "-k", "--sequesterRsrc", "--keepParent", appPath, updateZipPath]);
+  const sha256 = createHash("sha256").update(readFileSync(updateZipPath)).digest("hex");
+  return { updateZipPath, sha256 };
 }
 
 function copyBundle(source, destination) {
@@ -412,7 +519,7 @@ function copyBundle(source, destination) {
   run("ditto", [source, destination]);
 }
 
-function createDmg(appPath, outDir, version) {
+export function createDmg(appPath, outDir, version) {
   ensureTool("hdiutil");
   const dmgRoot = join(outDir, "dmg-root");
   const dmgPath = join(outDir, `${APP_NAME}-${version}.dmg`);
@@ -438,13 +545,15 @@ export function planPaths({ out, version = appVersion() } = {}) {
   const outDir = resolve(ROOT, out || "release-dist/macos");
   const appPath = join(outDir, `${APP_NAME}.app`);
   const dmgPath = join(outDir, `${APP_NAME}-${version}.dmg`);
+  const updateZipPath = join(outDir, `${APP_NAME}-${version}-mac.zip`);
+  const updateManifestPath = join(outDir, "latest-macos.json");
   const runtimeDir = join(outDir, "runtime", `node-v${REQUIRED_NODE_MAJOR}-darwin-${macArchToNodeArch()}`);
-  return { outDir, appPath, dmgPath, runtimeDir };
+  return { outDir, appPath, dmgPath, updateZipPath, updateManifestPath, runtimeDir };
 }
 
 export async function buildMacosDmg(options = {}) {
   ensureMac();
-  for (const tool of ["git", "tar", "sips", "iconutil", "hdiutil", "ditto"]) ensureTool(tool);
+  for (const tool of ["git", "tar", "sips", "iconutil", "hdiutil", "ditto", "openssl"]) ensureTool(tool);
 
   const version = appVersion();
   const paths = planPaths({ out: options.out, version });
@@ -455,6 +564,20 @@ export async function buildMacosDmg(options = {}) {
   }
   const iconSvg = join(ROOT, "apps", "desktop", "assets", "icon.svg");
   const nodeDir = resolve(options.nodeDir || paths.runtimeDir);
+  const signingIdentity = process.env.RIOS_CODESIGN_IDENTITY?.trim() || "";
+  const signingCertificate = process.env.RIOS_CODESIGN_CERTIFICATE?.trim() || "";
+  const updateFeedUrl = options.updateFeedUrl?.trim() || "";
+  const updateUrl = options.updateUrl?.trim() || "";
+  if ((updateFeedUrl || updateUrl) && (!updateFeedUrl || !updateUrl)) {
+    throw new Error("--update-feed-url and --update-url must be provided together");
+  }
+  if (updateFeedUrl && (!signingIdentity || !signingCertificate || options.noSign)) {
+    throw new Error("seamless macOS updates require signing plus RIOS_CODESIGN_IDENTITY and RIOS_CODESIGN_CERTIFICATE");
+  }
+  if (signingCertificate && !existsSync(signingCertificate)) throw new Error("RIOS_CODESIGN_CERTIFICATE does not exist");
+  for (const url of [updateFeedUrl, updateUrl].filter(Boolean)) {
+    if (!url.startsWith("https://")) throw new Error("macOS update URLs must use HTTPS");
+  }
 
   if (options.dryRun) {
     return { ...paths, nodeDir, ref, version, channel, dryRun: true };
@@ -484,16 +607,26 @@ export async function buildMacosDmg(options = {}) {
       channel,
       appName: APP_NAME
     };
-    if (channel === "dev") releaseInfo.updateFeedUrl = devUpdateFeedUrl();
+    if (updateFeedUrl) {
+      releaseInfo.updateFeedUrl = updateFeedUrl;
+      releaseInfo.updateMode = "squirrel-mac";
+      releaseInfo.signingMode = "self-signed";
+      releaseInfo.signingCertificate = "../tovi-update-signing.cer";
+    } else if (channel === "dev") {
+      releaseInfo.updateFeedUrl = devUpdateFeedUrl();
+    }
     writeFileSync(
       join(appResourceDir, "release.json"),
       JSON.stringify(releaseInfo, null, 2) + "\n"
     );
+    if (signingCertificate) {
+      copyBundle(signingCertificate, join(resourcesDir, "tovi-update-signing.cer"));
+    }
 
     if (!options.skipInstall) installDependencies(appResourceDir, nodeDir);
     if (!options.skipBuild) buildRuntimeArtifacts(appResourceDir, nodeDir);
     generateIcon(iconSvg, resourcesDir, temp);
-    rewriteInfoPlist(paths.appPath, version);
+    rewriteInfoPlist(paths.appPath, releaseVersion);
     renameElectronExecutable(paths.appPath);
 
     const packagedNodeDir = join(resourcesDir, "runtime", "node");
@@ -508,17 +641,35 @@ export async function buildMacosDmg(options = {}) {
       packagedNodeDir
     });
 
-    if (!options.noSign) signApp(paths.appPath, process.env.RIOS_CODESIGN_IDENTITY);
+    if (!options.noSign) await signApp(paths.appPath, signingIdentity, signingCertificate);
+    let updateZipPath = "";
+    let updateManifestPath = "";
+    if (updateUrl) {
+      const update = createUpdateZip(paths.appPath, paths.outDir, releaseVersion);
+      updateZipPath = update.updateZipPath;
+      updateManifestPath = paths.updateManifestPath;
+      writeFileSync(updateManifestPath, JSON.stringify(squirrelManifest({
+        version: releaseVersion,
+        build: releaseInfo.build,
+        commit: releaseInfo.commit,
+        channel,
+        updateUrl,
+        sha256: update.sha256,
+        notes: options.notes
+      }), null, 2) + "\n");
+    }
     const dmgPath = options.skipDmg ? "" : createDmg(paths.appPath, paths.outDir, version);
     return {
       ...paths,
       dmgPath,
+      updateZipPath,
+      updateManifestPath,
       nodeDir,
       ref,
       version,
       footprint,
       appSizeBytes: logicalBytes(paths.appPath),
-      signingIdentity: options.noSign ? "unsigned" : process.env.RIOS_CODESIGN_IDENTITY || "ad-hoc"
+      signingIdentity: options.noSign ? "unsigned" : signingIdentity || "ad-hoc"
     };
   } finally {
     rmSync(temp, { recursive: true, force: true });
@@ -538,6 +689,9 @@ Options:
                      self-updates from the GitHub dev prerelease feed) or
                      "student" (no baked feed; updates come from RIOS_UPDATE_FEED_URL)
   --node-dir DIR     Reuse/download Node 22 in this directory
+  --update-feed-url  HTTPS JSON feed used by Electron's signed updater
+  --update-url       HTTPS URL of the signed update zip advertised by the feed
+  --note TEXT        Release note (repeatable)
   --skip-install     Do not run npm ci in the staged app
   --skip-build       Do not prebuild Prisma, runner, core, or dashboard
   --skip-dmg         Build the .app only
@@ -561,6 +715,8 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     }
     process.stdout.write(`Built ${result.appPath}\n`);
     if (result.dmgPath) process.stdout.write(`Created ${result.dmgPath}\n`);
+    if (result.updateZipPath) process.stdout.write(`Created ${result.updateZipPath}\n`);
+    if (result.updateManifestPath) process.stdout.write(`Created ${result.updateManifestPath}\n`);
     process.stdout.write(`Removed ${result.footprint.removedBytes} bytes of build-only or incompatible packaged files\n`);
   }).catch((error) => {
     process.stderr.write(`\n  build failed: ${error?.message || String(error)}\n`);

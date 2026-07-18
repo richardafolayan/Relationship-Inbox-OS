@@ -113,10 +113,10 @@ import { createBirthdaySync } from "./services/birthday-sync";
 import { createImessageNameSync, type ImessageNameSync } from "./services/imessage-name-sync";
 import {
   canSelfUpdateInPlace,
-  containingAppBundle,
   createAutomaticUpdateScheduler,
   launchUpdateApplyAndRestart,
   readAppVersion,
+  requestNativeUpdate,
   resolveUpdateFeedUrl,
   runUpdateCheck,
   stagePendingUpdate
@@ -2664,9 +2664,10 @@ app.get("/system/update-check", asyncRoute(async (_req, res) => {
   res.json({
     configured: true,
     automaticUpdates: settings.automaticUpdates,
-    // Dev-channel packaged installs self-update in place (quit, swap, relaunch);
-    // student packaged installs still ask for a DMG reinstall.
-    applyMode: packaged && !canSelfUpdateInPlace(projectRoot, packaged) ? "replace_app" : "automatic",
+    applyMode: packaged && (
+      !canSelfUpdateInPlace(projectRoot, packaged) ||
+      !process.env.RIOS_NATIVE_UPDATE_REQUEST?.trim()
+    ) ? "replace_app" : "automatic",
     ...result,
     commit: current.commit,
     channel: current.channel,
@@ -2689,6 +2690,7 @@ let updateStartInProgress = false;
 
 async function checkAndStartAvailableUpdate(): Promise<UpdateStartResult> {
   const packaged = process.env.RIOS_PACKAGED_APP === "1";
+  const nativeRequestPath = packaged ? process.env.RIOS_NATIVE_UPDATE_REQUEST?.trim() || "" : "";
   const feedUrl = resolveUpdateFeedUrl(projectRoot, runnerConfig.updateFeedUrl);
   if (!feedUrl) return { status: "no_feed_configured" };
   if (existsSync(join(projectRoot, ".git"))) {
@@ -2701,18 +2703,11 @@ async function checkAndStartAvailableUpdate(): Promise<UpdateStartResult> {
   if (!check.updateAvailable) {
     return { status: "no_update_available", currentVersion: check.currentVersion };
   }
-  if (packaged && !canSelfUpdateInPlace(projectRoot, packaged)) {
+  if (packaged && (!canSelfUpdateInPlace(projectRoot, packaged) || !nativeRequestPath)) {
     return {
       status: "replace_app_required",
       message:
         `Quit ${resolveAppName()}, install the latest DMG by replacing the app in Applications, then reopen it. Remove the old ${LEGACY_APP_NAME} app if it is still in Applications. Your data and settings in Application Support are preserved.`
-    };
-  }
-  const appBundle = packaged ? containingAppBundle(projectRoot) : "";
-  if (packaged && !appBundle) {
-    return {
-      status: "replace_app_required",
-      message: "This packaged install has an unexpected layout, so the in-place updater refuses to run. Reinstall from the latest DMG instead."
     };
   }
   const intent = {
@@ -2721,11 +2716,20 @@ async function checkAndStartAvailableUpdate(): Promise<UpdateStartResult> {
     toVersion: check.latestVersion,
     feedUrl
   };
+  if (nativeRequestPath) {
+    requestNativeUpdate(nativeRequestPath, intent);
+    updateLaunchInProgress = true;
+    return {
+      status: "started",
+      fromVersion: intent.fromVersion,
+      toVersion: intent.toVersion,
+      logPath: nativeRequestPath
+    };
+  }
   stagePendingUpdate(dataDir, intent);
   const restart = launchUpdateApplyAndRestart({
     projectRoot,
-    feedUrl,
-    ...(appBundle ? { appBundle } : {})
+    feedUrl
   });
   updateLaunchInProgress = true;
   return {

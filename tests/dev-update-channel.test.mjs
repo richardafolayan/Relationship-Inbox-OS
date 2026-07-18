@@ -95,12 +95,16 @@ test("resolveUpdateFeedUrl prefers the baked dev feed over the env feed", () => 
   }
 });
 
-test("canSelfUpdateInPlace gates packaged installs on the dev channel", () => {
+test("canSelfUpdateInPlace gates packaged installs on the native signed updater", () => {
   const dir = mkdtempSync(join(tmpdir(), "rios-gate-"));
   try {
     writeFileSync(join(dir, "release.json"), JSON.stringify({ version: "1.0.0-dev.1", channel: "dev" }));
-    assert.equal(canSelfUpdateInPlace(dir, true), true);
+    assert.equal(canSelfUpdateInPlace(dir, true), false, "legacy ad-hoc dev apps cannot safely replace themselves");
     assert.equal(canSelfUpdateInPlace(dir, false), true);
+    writeFileSync(join(dir, "release.json"), JSON.stringify({
+      version: "1.0.0-dev.2", channel: "dev", updateMode: "squirrel-mac"
+    }));
+    assert.equal(canSelfUpdateInPlace(dir, true), true);
     writeFileSync(join(dir, "release.json"), JSON.stringify({ version: "1.0.0", channel: "student" }));
     assert.equal(canSelfUpdateInPlace(dir, true), false);
     assert.equal(canSelfUpdateInPlace(dir, false), true, "zip installs always self-update");

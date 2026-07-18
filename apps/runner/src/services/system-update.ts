@@ -15,6 +15,7 @@ export interface AppVersion {
   releaseNotes?: string[];
   /** Dev-channel builds bake the feed they self-update from into release.json. */
   updateFeedUrl?: string;
+  updateMode?: string;
 }
 
 export interface UpdateCheckResult {
@@ -51,7 +52,8 @@ export function readAppVersion(projectRoot: string): AppVersion {
           releaseNotes: Array.isArray(parsed.releaseNotes)
             ? parsed.releaseNotes.filter((note: unknown): note is string => typeof note === "string")
             : undefined,
-          updateFeedUrl: typeof parsed.updateFeedUrl === "string" ? parsed.updateFeedUrl : undefined
+          updateFeedUrl: typeof parsed.updateFeedUrl === "string" ? parsed.updateFeedUrl : undefined,
+          updateMode: typeof parsed.updateMode === "string" ? parsed.updateMode : undefined
         };
       }
     } catch {
@@ -86,7 +88,7 @@ export function resolveUpdateFeedUrl(projectRoot: string, configuredUrl?: string
  */
 export function canSelfUpdateInPlace(projectRoot: string, packaged: boolean): boolean {
   if (!packaged) return true;
-  return readAppVersion(projectRoot).channel === "dev";
+  return readAppVersion(projectRoot).updateMode === "squirrel-mac";
 }
 
 /**
@@ -175,6 +177,12 @@ export function pendingUpdatePath(dataDir: string): string {
 export function stagePendingUpdate(dataDir: string, intent: PendingUpdateIntent): string {
   mkdirSync(dataDir, { recursive: true });
   const path = pendingUpdatePath(dataDir);
+  writeFileSync(path, JSON.stringify(intent, null, 2));
+  return path;
+}
+
+export function requestNativeUpdate(path: string, intent: PendingUpdateIntent): string {
+  mkdirSync(resolve(path, ".."), { recursive: true });
   writeFileSync(path, JSON.stringify(intent, null, 2));
   return path;
 }

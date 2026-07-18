@@ -8,6 +8,7 @@ coverage
 # Student release artefacts (zips, latest.json, checksums) + backups the
 # updater makes. Never commit built release zips — rebuild them.
 /release-dist/
+/.release-signing/
 /.update-backups/
 release.json
 # Local publishing config: Dropbox token + stable URLs. NEVER commit.

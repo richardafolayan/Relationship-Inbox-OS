@@ -166,6 +166,10 @@ Builds must run on macOS. The builder:
 - runs strict code-sign verification;
 - creates and verifies a compressed DMG with an Applications shortcut.
 
+The free stable-signing release path, certificate setup, secrets, and native
+updater are documented in
+[`free-macos-signing.md`](free-macos-signing.md).
+
 Plan without building:
 
 ```bash
@@ -186,9 +190,9 @@ Outputs are under `release-dist/macos` by default.
 - Ad-hoc signing is not Developer ID signing and no notarization/stapling step
   exists.
 - The automatic Dropbox source-release workflow does not publish the DMG.
-- In-app apply is intentionally disabled for a packaged build. The update card
-  reports `replace_app`; install the newer DMG while retaining the external
-  Application Support data.
+- Ad-hoc packaged builds report `replace_app`. A build made with the stable
+  self-signed identity and `squirrel-mac` feed uses the native updater after
+  the public certificate has been trusted once.
 
 Do not describe this DMG as consumer-distribution-ready until signing,
 notarization, fresh install, permissions, replacement update, and recovery
@@ -232,10 +236,11 @@ pending intent before boot and clears it first so a failed update cannot loop.
 Developer checkouts containing `.git` are refused by the self-updater. Update
 them with Git instead.
 
-Packaged Electron builds return `applyMode: "replace_app"` from the update
-check and refuse `POST /system/update`. Download and install a newer DMG; the
-database, `.env`, profiles, and state remain in Application Support rather
-than inside the replaced app bundle.
+Ad-hoc packaged Electron builds return `applyMode: "replace_app"`. Free stable
+signed builds hand the update request to Electron, which downloads a complete
+pre-signed app, quits, replaces the bundle, and relaunches. Database, `.env`,
+profiles, and state remain in Application Support rather than inside the
+replaced app bundle.
 
 ## Rollback
 

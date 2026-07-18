@@ -222,17 +222,16 @@ How it differs from the pilot channel:
   `channel: "dev"`. The updater refuses to apply a feed whose channel does not
   match the install, so a dev install can never swallow a pilot build or the
   other way round.
-- **In-place packaged updates.** A dev-channel `Tovi.app` (built with
-  `npm run build:macos-dmg`, which stamps `channel: "dev"` and the dev feed URL
-  into `release.json` by default) updates itself from Settings: the app quits,
-  the helper swaps `Contents/Resources/app`, reinstalls dependencies, rebuilds,
-  ad-hoc re-signs the bundle, and reopens it. Student packaged installs keep
-  the "install the new DMG" instructions.
+- **Stable packaged updates.** The free signed macOS workflow publishes a
+  complete pre-signed app zip and a Squirrel JSON feed. After the one-time
+  certificate trust step, Settings can quit, replace, and reopen the app while
+  keeping one designated requirement. Ad-hoc builds keep the "install the new
+  DMG" instructions and never modify their signed bundle in place.
 - **No feedback token.** Dev zips never bake the pilot-feedback token
   (release assets are world-readable); an installed app keeps the values
   already present in its `.env`.
 
-Bootstrap: an install made before this existed lacks the dev updater code and
-channel stamp, so build and install one dev DMG by hand
-(`npm run build:macos-dmg`); every update after that is one click in
+Bootstrap: an install made before this existed has a hash-based ad-hoc identity.
+Install one free stable signed DMG by hand, open it through Gatekeeper once,
+and accept the certificate trust prompt. Every later update is one click in
 Settings > App updates.
