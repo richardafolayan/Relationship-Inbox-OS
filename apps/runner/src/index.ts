@@ -2031,6 +2031,18 @@ app.get("/health", asyncRoute(async (_req, res) => {
     queueDepth: scanQueue.getQueueDepth(),
     connectedPlatforms,
     availablePlatforms: runnerConfig.availablePlatforms,
+    // Host machine identity for phone Settings and App updates.
+    // Resolved once in services/host-device so hostname/ComputerName logic is
+    // not duplicated across /health and /system/version / update-check.
+    hostDevice: (() => {
+      const host = resolveHostDeviceInfo();
+      return {
+        hostname: host.hostname,
+        platform: host.platform,
+        label: host.label,
+        kind: host.kind
+      };
+    })(),
     // Current platform being scanned, if any. Drives the status bar's
     // "Scanning <platform>" label so it stops claiming "linkedin" when
     // an iMessage scan is running.

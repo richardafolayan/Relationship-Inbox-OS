@@ -9,6 +9,7 @@ import {
   extractBranchRef,
   extractPullRequestRef,
   hostAppTitle,
+  hostKindToPlatform,
   hostOfflineCheckMessage,
   installLocationCopy,
   presentReleaseNotes,
@@ -20,6 +21,10 @@ import {
   type HostDeviceKind,
   type UpdateUiState
 } from "@/lib/app-update-presentation";
+import {
+  hostOfflineExplanation,
+  type HostPlatformId
+} from "@/lib/host-device";
 
 // Calm "App updates" card for Settings. Updates always apply to the host
 // computer running the app (often viewed from a phone on the same Wi-Fi).
@@ -98,7 +103,25 @@ function snapshotFromState(input: {
   };
 }
 
-export function AppUpdates() {
+function platformToKind(platform?: HostPlatformId | null): HostDeviceKind | null {
+  if (platform === "darwin") return "mac";
+  if (platform === "win32") return "pc";
+  if (platform === "linux") return "computer";
+  return null;
+}
+
+export function AppUpdates({
+  hostDeviceLabel: hostDeviceLabelProp,
+  hostPlatform,
+  remoteAvailable = true,
+  offlineExplanation
+}: {
+  /** Phone Settings action label, e.g. "Updates install on your Mac". */
+  hostDeviceLabel?: string;
+  hostPlatform?: HostPlatformId | null;
+  remoteAvailable?: boolean;
+  offlineExplanation?: string;
+} = {}) {
   const cached = readAppUpdatesSnapshot();
   const [info, setInfo] = useState<UpdateCheck | null>(() =>
     cached
@@ -132,17 +155,31 @@ export function AppUpdates() {
   const [savingAutomaticUpdates, setSavingAutomaticUpdates] = useState(false);
   const [automaticUpdatesMsg, setAutomaticUpdatesMsg] = useState("");
   const [hostLabel, setHostLabel] = useState(cached?.hostLabel ?? "your Mac");
-  const [hostKind, setHostKind] = useState<HostDeviceKind>(cached?.hostKind ?? "mac");
+  const [hostKind, setHostKind] = useState<HostDeviceKind>(
+    cached?.hostKind ?? platformToKind(hostPlatform) ?? "mac"
+  );
   const [statusOverride, setStatusOverride] = useState<UpdateUiState | null>(
     cached && (cached.status === "updating" || cached.status === "restart_required")
       ? cached.status
       : null
   );
 
+  const remoteBlocked = remoteAvailable === false;
+  const hostOffline = runnerOffline || remoteBlocked;
+  const offlineMessage =
+    offlineExplanation ||
+    hostOfflineCheckMessage(hostKind) ||
+    hostOfflineExplanation(hostPlatform ?? hostKindToPlatform(hostKind), APP_NAME);
+
   const applyHost = useCallback((res: { hostDeviceLabel?: string; hostDeviceKind?: HostDeviceKind }) => {
     if (res.hostDeviceLabel?.trim()) setHostLabel(res.hostDeviceLabel.trim());
     if (res.hostDeviceKind) setHostKind(res.hostDeviceKind);
   }, []);
+
+  useEffect(() => {
+    const kind = platformToKind(hostPlatform);
+    if (kind) setHostKind(kind);
+  }, [hostPlatform]);
 
   const check = useCallback(async (manual: boolean) => {
     setChecking(true);
@@ -184,12 +221,12 @@ export function AppUpdates() {
       } catch {
         setRunnerOffline(true);
         setInfo(null);
-        setError(hostOfflineCheckMessage(hostKind));
+        setError(offlineMessage);
       }
     } finally {
       setChecking(false);
     }
-  }, [applyHost, automaticUpdates, hostKind]);
+  }, [applyHost, automaticUpdates, offlineMessage]);
 
   useEffect(() => {
     void check(false);
@@ -199,7 +236,7 @@ export function AppUpdates() {
     if (statusOverride) return statusOverride;
     if (checking && !info) return "loading";
     if (checking) return "checking";
-    if (runnerOffline) return "host_offline";
+    if (hostOffline) return "host_offline";
     if (updating) return "updating";
     if (started) return "restart_required";
     if (error && !info?.updateAvailable) return "error";
@@ -207,7 +244,7 @@ export function AppUpdates() {
     if (info && !info.configured) return "not_configured";
     if (info) return "up_to_date";
     return "loading";
-  }, [checking, error, info, runnerOffline, started, statusOverride, updating]);
+  }, [checking, error, hostOffline, info, started, statusOverride, updating]);
 
   const statusMessage = useMemo(
     () =>
@@ -246,6 +283,10 @@ export function AppUpdates() {
   ]);
 
   const prepareUpdate = useCallback(async () => {
+    if (hostOffline) {
+      setError(offlineMessage);
+      return;
+    }
     if (info?.applyMode === "replace_app") {
       setInstallHelp(
         `Quit ${APP_NAME}, open the latest DMG, drag ${APP_NAME} into Applications and choose Replace, then reopen it. If an app named ${LEGACY_APP_NAME} is still in Applications, remove it. Your messages and settings are kept.`
@@ -275,7 +316,7 @@ export function AppUpdates() {
     } finally {
       setUpdating(false);
     }
-  }, [info]);
+  }, [hostOffline, info, offlineMessage]);
 
   const startRunner = useCallback(async () => {
     setRunnerStarting(true);
@@ -297,6 +338,10 @@ export function AppUpdates() {
   }, [check]);
 
   const toggleAutomaticUpdates = useCallback(async () => {
+    if (hostOffline) {
+      setError(offlineMessage);
+      return;
+    }
     const next = !automaticUpdates;
     setSavingAutomaticUpdates(true);
     setAutomaticUpdatesMsg("Saving…");
@@ -315,7 +360,7 @@ export function AppUpdates() {
     } finally {
       setSavingAutomaticUpdates(false);
     }
-  }, [automaticUpdates]);
+  }, [automaticUpdates, hostOffline, offlineMessage]);
 
   const version = info?.currentVersion ?? cached?.currentVersion ?? "…";
   const currentNotes = presentReleaseNotes(info?.currentReleaseNotes ?? []);
@@ -339,7 +384,7 @@ export function AppUpdates() {
   });
   const showTechnical = technicalDetails.length > 0;
   const techOpenDefault = technicalDetailsOpenByDefault(info?.channel);
-  const checkDisabled = checking || runnerOffline || updating || Boolean(started);
+  const checkDisabled = checking || hostOffline || updating || Boolean(started);
   const title = hostAppTitle(APP_NAME, hostLabel);
 
   return (
@@ -350,6 +395,9 @@ export function AppUpdates() {
           <p className="text-[13px] text-ink-2">
             Version <span className="font-mono">{version}</span>
           </p>
+          {hostDeviceLabelProp ? (
+            <p className="text-[12px] text-ink-3">{hostDeviceLabelProp}</p>
+          ) : null}
           <p className="text-[12.5px] text-ink-3" aria-live="polite">
             {statusMessage}
           </p>
@@ -359,12 +407,12 @@ export function AppUpdates() {
             type="button"
             onClick={() => void check(true)}
             disabled={checkDisabled}
-            title={runnerOffline ? hostOfflineCheckMessage(hostKind) : undefined}
+            title={hostOffline ? offlineMessage : undefined}
             className="inline-flex items-center rounded-pill border border-hairline px-[14px] py-[8px] text-[12.5px] font-medium text-ink-2 transition-colors duration-calm hover:border-hairline-strong hover:bg-paper hover:text-ink disabled:opacity-60"
           >
             {checking ? "Checking…" : "Check for updates"}
           </button>
-          {runnerOffline ? (
+          {runnerOffline && !hostDeviceLabelProp ? (
             <button
               type="button"
               onClick={() => void startRunner()}
@@ -378,7 +426,8 @@ export function AppUpdates() {
             <button
               type="button"
               onClick={() => void prepareUpdate()}
-              disabled={updating || runnerOffline}
+              disabled={updating || hostOffline}
+              title={hostOffline ? offlineMessage : undefined}
               className="inline-flex items-center rounded-pill border border-hairline-strong px-[14px] py-[8px] text-[12.5px] font-medium text-accent-ink transition-colors duration-calm hover:bg-paper disabled:opacity-60"
             >
               {updating
@@ -391,9 +440,9 @@ export function AppUpdates() {
         </div>
       </div>
 
-      {runnerOffline ? (
+      {hostOffline ? (
         <p className="mt-3 text-[12px] leading-relaxed text-ink-2" aria-live="polite">
-          {hostOfflineCheckMessage(hostKind)}
+          {offlineMessage}
         </p>
       ) : null}
 
@@ -416,7 +465,7 @@ export function AppUpdates() {
             aria-checked={automaticUpdates}
             aria-label="Automatic updates"
             onClick={() => void toggleAutomaticUpdates()}
-            disabled={savingAutomaticUpdates || info?.applyMode === "replace_app" || runnerOffline}
+            disabled={savingAutomaticUpdates || info?.applyMode === "replace_app" || hostOffline}
             className={`relative h-[20px] w-[36px] shrink-0 rounded-pill transition-colors duration-calm ${
               automaticUpdates ? "bg-accent" : "bg-hairline-strong"
             } disabled:cursor-not-allowed disabled:opacity-50`}
@@ -494,7 +543,7 @@ export function AppUpdates() {
         </p>
       ) : null}
 
-      {error && !runnerOffline ? (
+      {error && !hostOffline ? (
         <p
           className="mt-3 rounded-row border border-hairline bg-paper px-3 py-2 text-[12px] leading-relaxed text-ink-2"
           aria-live="polite"

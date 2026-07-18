@@ -22,11 +22,17 @@ interface WhatsAppStatus {
 export function WhatsAppConnect({
   onScan,
   scanBusy = false,
-  lastScanAt = null
+  lastScanAt = null,
+  deviceLabel,
+  remoteDisabled = false,
+  offlineExplanation
 }: {
   onScan?: () => void;
   scanBusy?: boolean;
   lastScanAt?: string | null;
+  deviceLabel?: string;
+  remoteDisabled?: boolean;
+  offlineExplanation?: string;
 } = {}) {
   const [status, setStatus] = useState<WhatsAppStatus | null>(null);
   const [connecting, setConnecting] = useState(false);
@@ -62,7 +68,7 @@ export function WhatsAppConnect({
   }, [status?.state, refresh]);
 
   const connect = async () => {
-    if (connecting) return;
+    if (connecting || remoteDisabled) return;
     setConnecting(true);
     setError("");
     setNotice("");
@@ -77,7 +83,7 @@ export function WhatsAppConnect({
   };
 
   const refreshQr = async () => {
-    if (refreshingQr) return;
+    if (refreshingQr || remoteDisabled) return;
     setRefreshingQr(true);
     setError("");
     setNotice("");
@@ -92,7 +98,7 @@ export function WhatsAppConnect({
   };
 
   const reset = async () => {
-    if (resetting) return;
+    if (resetting || remoteDisabled) return;
     if (
       !window.confirm(
         "Reset WhatsApp? You will need to scan a new QR code to link the phone again."
@@ -160,6 +166,9 @@ export function WhatsAppConnect({
         >
           Link WhatsApp from your phone. The app reads chats into your inbox. You still press send.
         </p>
+        {deviceLabel ? (
+          <p className="m-0 mt-1.5 text-[12px] leading-[1.4] text-ink-3">{deviceLabel}</p>
+        ) : null}
       </div>
       <div>
         {state === "qr_ready" && status?.qrDataUrl ? (
@@ -191,7 +200,8 @@ export function WhatsAppConnect({
           <button
             type="button"
             onClick={onScan}
-            disabled={primaryBusy}
+            disabled={primaryBusy || remoteDisabled}
+            title={remoteDisabled ? offlineExplanation : undefined}
             className="inline-flex min-h-[40px] items-center rounded-pill bg-ink px-4 py-[8px] text-[12.5px] font-medium text-paper hover:bg-ink-2 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {scanBusy ? "Working..." : "Scan now"}
@@ -201,7 +211,8 @@ export function WhatsAppConnect({
           <button
             type="button"
             onClick={refreshQr}
-            disabled={primaryBusy}
+            disabled={primaryBusy || remoteDisabled}
+            title={remoteDisabled ? offlineExplanation : undefined}
             className="inline-flex min-h-[40px] items-center rounded-pill bg-ink px-4 py-[8px] text-[12.5px] font-medium text-paper hover:bg-ink-2 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {refreshingQr ? "Refreshing..." : "New QR code"}
@@ -211,7 +222,8 @@ export function WhatsAppConnect({
           <button
             type="button"
             onClick={connect}
-            disabled={primaryBusy || state === "connecting"}
+            disabled={primaryBusy || state === "connecting" || remoteDisabled}
+            title={remoteDisabled ? offlineExplanation : undefined}
             className="inline-flex min-h-[40px] items-center rounded-pill bg-ink px-4 py-[8px] text-[12.5px] font-medium text-paper hover:bg-ink-2 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {state === "connecting" ? "Connecting..." : "Connect WhatsApp"}
@@ -223,7 +235,7 @@ export function WhatsAppConnect({
               <button
                 type="button"
                 aria-label="More actions"
-                disabled={resetting || refreshingQr}
+                disabled={resetting || refreshingQr || remoteDisabled}
                 className="grid h-[40px] w-[40px] place-items-center rounded-[10px] border border-hairline text-ink-2 transition-colors duration-calm hover:bg-paper hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
                 title="More"
               >
@@ -240,6 +252,11 @@ export function WhatsAppConnect({
               }
             ]}
           />
+        ) : null}
+        {remoteDisabled && offlineExplanation ? (
+          <span className="max-w-[36ch] text-[11.5px] leading-[1.4] text-ink-3">
+            {offlineExplanation}
+          </span>
         ) : null}
       </div>
     </div>

@@ -30,8 +30,8 @@ test("hostAppTitle names the app and the host device", () => {
 
 test("install location copy points at the host, not the phone", () => {
   assert.equal(installLocationCopy("mac"), "Updates install on your Mac");
-  assert.equal(installLocationCopy("pc"), "Updates install on this PC");
-  assert.equal(installLocationCopy("computer"), "Updates install on this computer");
+  assert.equal(installLocationCopy("pc"), "Updates install on your PC");
+  assert.equal(installLocationCopy("computer"), "Updates install on your computer");
 });
 
 test("host offline copy explains why Check for updates is unavailable", () => {

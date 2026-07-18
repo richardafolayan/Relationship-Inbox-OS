@@ -3,6 +3,11 @@
 import { useCallback, useEffect, useState } from "react";
 import { Download, Trash2 } from "lucide-react";
 import { apiGetRaw, apiPost } from "@/lib/api";
+import {
+  remoteActionLabel,
+  voiceModelSizeLabel,
+  type HostPlatformId
+} from "@/lib/host-device";
 import { cn } from "@/lib/utils";
 
 type Mode = "off" | "standard" | "enhanced";
@@ -20,7 +25,17 @@ interface AiStatus {
   configuredProviders: string[];
 }
 
-export function OptionalComponents() {
+export function OptionalComponents({
+  phoneLayout = false,
+  hostPlatform = "mac",
+  remoteAvailable = true,
+  offlineExplanation
+}: {
+  phoneLayout?: boolean;
+  hostPlatform?: HostPlatformId;
+  remoteAvailable?: boolean;
+  offlineExplanation?: string;
+} = {}) {
   const [transcription, setTranscription] = useState<TranscriptionStatus | null>(null);
   const [ai, setAi] = useState<AiStatus | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -97,13 +112,13 @@ export function OptionalComponents() {
     {
       mode: "standard",
       label: "Standard",
-      size: "About 150 MB",
+      size: phoneLayout ? voiceModelSizeLabel("About 150 MB", hostPlatform) : "About 150 MB",
       body: "Good everyday English transcription."
     },
     {
       mode: "enhanced",
       label: "Enhanced",
-      size: "About 500 MB",
+      size: phoneLayout ? voiceModelSizeLabel("About 500 MB", hostPlatform) : "About 500 MB",
       body: "A larger local model for better accuracy."
     }
   ];
@@ -111,15 +126,29 @@ export function OptionalComponents() {
   const aiOn = ai?.enabled ?? false;
   const downloading = transcription?.phase === "downloading";
   const modeBusy = busy !== null;
+  const remoteBlocked = phoneLayout && !remoteAvailable;
 
   return (
     <section className="mb-7 rounded-[10px] border border-hairline bg-paper p-4 sm:p-5">
       <div>
         <p className="m-0 text-[15.5px] font-medium text-ink">Optional components</p>
         <p className="m-0 mt-1 text-[13px] leading-5 text-ink-3">
-          Turn features on or off and remove local downloads whenever you like.
+          {phoneLayout
+            ? "Turn features on or off. Local models download to your Mac storage."
+            : "Turn features on or off and remove local downloads whenever you like."}
         </p>
+        {phoneLayout ? (
+          <p className="m-0 mt-1 text-[12px] leading-[1.4] text-ink-3">
+            {remoteActionLabel("voiceModel", hostPlatform)}
+          </p>
+        ) : null}
       </div>
+
+      {remoteBlocked && offlineExplanation ? (
+        <p className="m-0 mt-3 rounded-[7px] border border-hairline bg-paper-2 px-3 py-2 text-[12px] text-ink-2">
+          {offlineExplanation}
+        </p>
+      ) : null}
 
       <div className="mt-5 border-t border-hairline pt-4">
         <div className="flex min-h-[44px] items-center justify-between gap-4">
@@ -138,12 +167,14 @@ export function OptionalComponents() {
               role="switch"
               aria-checked={aiOn}
               aria-label="AI help"
-              disabled={busy === "ai"}
+              disabled={busy === "ai" || remoteBlocked}
               onClick={() => void setAiEnabled(!aiOn)}
               className={cn(
                 "relative h-[24px] w-[44px] shrink-0 rounded-pill transition-colors duration-calm",
                 aiOn ? "bg-accent" : "bg-hairline-strong",
-                busy === "ai" ? "cursor-not-allowed opacity-50" : "cursor-pointer"
+                busy === "ai" || remoteBlocked
+                  ? "cursor-not-allowed opacity-50"
+                  : "cursor-pointer"
               )}
             >
               <span
@@ -166,7 +197,9 @@ export function OptionalComponents() {
       <div className="mt-4 border-t border-hairline pt-4">
         <p className="m-0 text-[13.5px] font-medium text-ink">Voice transcription</p>
         <p className="m-0 mt-0.5 text-[12px] text-ink-3">
-          Choose one local model. Only the selected option is active.
+          {phoneLayout
+            ? "Choose one local model. It installs on your Mac, not your phone."
+            : "Choose one local model. Only the selected option is active."}
         </p>
         <div
           role="radiogroup"
@@ -183,7 +216,7 @@ export function OptionalComponents() {
                 type="button"
                 role="radio"
                 aria-checked={selected}
-                disabled={modeBusy || downloading}
+                disabled={modeBusy || downloading || remoteBlocked}
                 onClick={() => void setMode(option.mode)}
                 className={cn(
                   "grid min-h-[48px] grid-cols-[22px_minmax(0,1fr)_auto] items-start gap-3 rounded-[10px] px-3 py-3 text-left transition-colors duration-calm disabled:opacity-55",
@@ -220,7 +253,9 @@ export function OptionalComponents() {
         {downloading ? (
           <p className="mt-3 flex items-center gap-2 text-[12px] text-ink-2">
             <Download className="h-3.5 w-3.5 shrink-0" aria-hidden />
-            Downloading the selected model. It turns on when ready.
+            {phoneLayout
+              ? "Downloading the selected model on your Mac. It turns on when ready."
+              : "Downloading the selected model. It turns on when ready."}
           </p>
         ) : null}
         {transcription?.phase === "error" && transcription.error ? (
@@ -229,7 +264,7 @@ export function OptionalComponents() {
         {transcription?.installedMode !== "off" && transcription?.mode === "off" ? (
           <button
             type="button"
-            disabled={modeBusy}
+            disabled={modeBusy || remoteBlocked}
             onClick={() => void setMode("off", true)}
             className="mt-3 inline-flex min-h-[40px] items-center gap-1.5 text-[12px] text-ink-2 underline underline-offset-2"
           >

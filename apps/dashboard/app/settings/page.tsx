@@ -23,7 +23,10 @@ import { UserVoiceProfile } from "@/components/settings/UserVoiceProfile";
 import { FocusSettingsSection } from "@/components/settings/FocusSettingsSection";
 import { CalendarFocusSection } from "@/components/settings/CalendarFocusSection";
 import { AppUpdates } from "@/components/settings/AppUpdates";
+import { HostDeviceBanner } from "@/components/settings/HostDeviceBanner";
 import { WhatsAppConnect } from "@/components/settings/WhatsAppConnect";
+import { useHostDevice, usePhoneSettingsLayout } from "@/lib/use-host-device";
+import type { HostDeviceState } from "@/lib/use-host-device";
 import { PilotWelcomeCard } from "@/components/common/pilot-welcome";
 import { FullDemoSettingsCard } from "@/components/full-demo/FullDemoSettingsCard";
 import { openPilotFeedback, PILOT_WELCOME_DISMISSED_KEY } from "@/lib/pilot";
@@ -231,6 +234,8 @@ function clearSettingsHashUrl(): string {
 // platforms, danger-zone wipe, runner restart) were stripped in PR1;
 // restore from archive/pre-v1-stripback if they're needed back.
 export default function SettingsPage() {
+  const host = useHostDevice();
+  const phoneLayout = usePhoneSettingsLayout();
   const [activeTab, setActiveTab] = useState<SettingsTabId>(DEFAULT_SETTINGS_TAB);
   // Phone: no category hash means the landing list; a hash opens a subpage.
   // Desktop ignores this and always shows the multi-column layout.
@@ -560,7 +565,11 @@ export default function SettingsPage() {
             </p>
           ) : null}
 
-          {activeTab === "setup" ? <SetupGuideSection rows={platformRows} /> : null}
+          {phoneLayout ? <HostDeviceBanner host={host} className="mb-5" /> : null}
+
+          {activeTab === "setup" ? (
+            <SetupGuideSection rows={platformRows} host={host} phoneLayout={phoneLayout} />
+          ) : null}
 
           {activeTab === "platforms" ? (
             <PlatformSettingsSection
@@ -569,6 +578,8 @@ export default function SettingsPage() {
               error={platformError}
               notice={platformNotice}
               onAction={platformAction}
+              host={host}
+              phoneLayout={phoneLayout}
             />
           ) : null}
 
@@ -622,8 +633,14 @@ export default function SettingsPage() {
                 <SettingRow
                   name="Headless browser"
                   desc="Off by default: the real Chrome runs headful but offscreen, so scans never disrupt you and keep a full human fingerprint. Turn on only for CI or speed. Headless is one of the strongest bot signals and is far more detectable for LinkedIn."
-                  onActivate={toggleHeadless}
-                  disabled={!headlessReady || headlessStatus === "saving"}
+                  deviceLabel={phoneLayout ? host.actionLabel("headless") : undefined}
+                  unavailableReason={
+                    phoneLayout && !host.remoteAvailable ? host.offlineExplanation : undefined
+                  }
+                  onActivate={() => {
+                    if (host.remoteAvailable) void toggleHeadless();
+                  }}
+                  disabled={!headlessReady || headlessStatus === "saving" || !host.remoteAvailable}
                   trailing={
                     <div className="flex items-center gap-[10px]">
                       <span className="font-mono text-[11px] text-ink-3">
@@ -639,8 +656,10 @@ export default function SettingsPage() {
                       </span>
                       <Toggle
                         on={headless}
-                        disabled={!headlessReady || headlessStatus === "saving"}
-                        onChange={toggleHeadless}
+                        disabled={!headlessReady || headlessStatus === "saving" || !host.remoteAvailable}
+                        onChange={() => {
+                          if (host.remoteAvailable) void toggleHeadless();
+                        }}
                         label="Headless browser"
                       />
                     </div>
@@ -666,7 +685,16 @@ export default function SettingsPage() {
                 <SettingRow
                   name="Reassess all threads"
                   desc="Clear cached briefs and suggested replies on every active thread so they regenerate against the latest AI prompts. Each thread refreshes lazily when next viewed or scanned. Use after a prompt change ships."
-                  trailing={<ReassessAllControl />}
+                  deviceLabel={phoneLayout ? host.actionLabel("reassess") : undefined}
+                  unavailableReason={
+                    phoneLayout && !host.remoteAvailable ? host.offlineExplanation : undefined
+                  }
+                  trailing={
+                    <ReassessAllControl
+                      remoteAvailable={host.remoteAvailable}
+                      offlineExplanation={host.offlineExplanation}
+                    />
+                  }
                 />
               </SettingsGroup>
               <div data-demo-target="settings-user-voice">
@@ -687,7 +715,11 @@ export default function SettingsPage() {
               <SettingsGroup head="Display">
                 <SettingRow
                   name="Text size"
-                  desc="Scale the whole interface on this Mac."
+                  desc={
+                    phoneLayout
+                      ? "Scale the whole interface. This applies on this phone only."
+                      : "Scale the whole interface on this Mac."
+                  }
                   trailing={
                     <SegmentedControl
                       options={UI_SCALE_OPTIONS}
@@ -715,7 +747,12 @@ export default function SettingsPage() {
                     highlightUpdates && "ring-2 ring-accent/70"
                   )}
                 >
-                  <AppUpdates />
+                  <AppUpdates
+                    hostDeviceLabel={phoneLayout ? host.actionLabel("updates") : undefined}
+                    hostPlatform={host.platform}
+                    remoteAvailable={host.remoteAvailable}
+                    offlineExplanation={host.offlineExplanation}
+                  />
                 </div>
               </section>
             </>
@@ -852,13 +889,17 @@ function PlatformSettingsSection({
   busy,
   error,
   notice,
-  onAction
+  onAction,
+  host,
+  phoneLayout
 }: {
   rows: PlatformCard[];
   busy: PlatformCard["platform"] | null;
   error: string;
   notice: string;
   onAction: (platform: PlatformCard["platform"], endpoint: PlatformActionEndpoint) => void;
+  host: HostDeviceState;
+  phoneLayout: boolean;
 }) {
   const findRow = (platform: PlatformCard["platform"]) =>
     rows.find((row) => row.platform === platform);
@@ -871,6 +912,7 @@ function PlatformSettingsSection({
     ? resolvePlatformPrimaryAction(googleMessagesRow)
     : "connect";
   const linkedinPrimary = linkedinRow ? resolvePlatformPrimaryAction(linkedinRow) : "connect";
+  const remoteDisabled = phoneLayout && !host.remoteAvailable;
 
   return (
     <section className="mb-9">
@@ -879,6 +921,11 @@ function PlatformSettingsSection({
       </p>
       {error ? <p className="m-0 mb-3 rounded-row border border-hairline bg-paper px-3 py-2 text-[12px] leading-[1.45] text-ink-2">{error}</p> : null}
       {notice ? <p className="m-0 mb-3 font-mono text-[11px] text-risk-fresh">{notice}</p> : null}
+      {remoteDisabled ? (
+        <p className="m-0 mb-3 rounded-row border border-hairline bg-paper px-3 py-2 text-[12px] leading-[1.45] text-ink-2">
+          {host.offlineExplanation}
+        </p>
+      ) : null}
       <div className="grid gap-3 xl:grid-cols-2 3xl:grid-cols-3">
         {imessageRow ? (
           <PlatformSetupCard
@@ -886,6 +933,14 @@ function PlatformSettingsSection({
             title="iMessage"
             body="Reads Messages on this Mac. macOS will not show a Full Disk Access pop-up."
             primaryLabel={imessageNeedsFullDiskAccess ? "Open Full Disk Access" : "Scan now"}
+            deviceLabel={
+              phoneLayout
+                ? host.actionLabel(imessageNeedsFullDiskAccess ? "fullDiskAccess" : "scan")
+                : undefined
+            }
+            hideProcessPath={phoneLayout}
+            remoteDisabled={remoteDisabled}
+            offlineExplanation={host.offlineExplanation}
             busy={busy === "IMESSAGE"}
             onPrimary={() =>
               onAction("IMESSAGE", imessageNeedsFullDiskAccess ? "full-disk-access" : "scan")
@@ -919,6 +974,13 @@ function PlatformSettingsSection({
                   ? "Reconnect"
                   : "Pair Android phone"
             }
+            deviceLabel={
+              phoneLayout
+                ? host.actionLabel(googleMessagesPrimary === "scan" ? "scan" : "connect")
+                : undefined
+            }
+            remoteDisabled={remoteDisabled}
+            offlineExplanation={host.offlineExplanation}
             busy={busy === "GOOGLE_MESSAGES"}
             onPrimary={() =>
               onAction(
@@ -971,6 +1033,13 @@ function PlatformSettingsSection({
                   ? "Reconnect"
                   : "Connect LinkedIn"
             }
+            deviceLabel={
+              phoneLayout
+                ? host.actionLabel(linkedinPrimary === "scan" ? "scan" : "connect")
+                : undefined
+            }
+            remoteDisabled={remoteDisabled}
+            offlineExplanation={host.offlineExplanation}
             busy={busy === "LINKEDIN"}
             onPrimary={() =>
               onAction("LINKEDIN", linkedinPrimary === "scan" ? "scan" : "connect")
@@ -1006,6 +1075,9 @@ function PlatformSettingsSection({
               scanBusy={busy === "WHATSAPP"}
               lastScanAt={whatsappRow.lastScanAt}
               onScan={() => onAction("WHATSAPP", "scan")}
+              deviceLabel={phoneLayout ? host.actionLabel("scan") : undefined}
+              remoteDisabled={remoteDisabled}
+              offlineExplanation={host.offlineExplanation}
             />
           </div>
         ) : null}
@@ -1019,6 +1091,10 @@ function PlatformSetupCard({
   title,
   body,
   primaryLabel,
+  deviceLabel,
+  hideProcessPath = false,
+  remoteDisabled = false,
+  offlineExplanation,
   busy,
   onPrimary,
   moreItems
@@ -1027,6 +1103,10 @@ function PlatformSetupCard({
   title: string;
   body: string;
   primaryLabel: string;
+  deviceLabel?: string;
+  hideProcessPath?: boolean;
+  remoteDisabled?: boolean;
+  offlineExplanation?: string;
   busy: boolean;
   onPrimary: () => void;
   moreItems?: MenuItem[];
@@ -1081,13 +1161,16 @@ function PlatformSetupCard({
           </p>
         ) : null}
         <p className="m-0 mt-2 text-[13.5px] leading-[1.45] text-ink-3">{body}</p>
+        {deviceLabel ? (
+          <p className="m-0 mt-1.5 text-[12px] leading-[1.4] text-ink-3">{deviceLabel}</p>
+        ) : null}
       </div>
       {supported && platformFailure ? (
         <p className="m-0 mt-3 rounded-row border border-hairline bg-paper px-3 py-2 text-[12.5px] leading-[1.45] text-ink-2">
           {platformFailure.message} {platformFailure.nextAction}
         </p>
       ) : null}
-      {runnerProcess?.executablePath ? (
+      {runnerProcess?.executablePath && !hideProcessPath ? (
         <p className="m-0 mt-3 break-all font-mono text-[11px] leading-[1.45] text-ink-3">
           In Full Disk Access, this runner may appear as {runnerProcess.executableName}:{" "}
           {runnerProcess.executablePath}
@@ -1097,7 +1180,8 @@ function PlatformSetupCard({
         <button
           type="button"
           onClick={onPrimary}
-          disabled={busy || !enabled || !supported}
+          disabled={busy || !enabled || !supported || remoteDisabled}
+          title={remoteDisabled ? offlineExplanation : undefined}
           className="inline-flex min-h-[40px] items-center rounded-pill bg-ink px-4 py-[8px] text-[12.5px] font-medium text-paper hover:bg-ink-2 disabled:cursor-not-allowed disabled:opacity-50"
         >
           {busy ? "Working..." : primaryLabel}
@@ -1108,7 +1192,7 @@ function PlatformSetupCard({
               <button
                 type="button"
                 aria-label="More actions"
-                disabled={busy || !enabled}
+                disabled={busy || !enabled || remoteDisabled}
                 className="grid h-[40px] w-[40px] place-items-center rounded-[10px] border border-hairline bg-transparent text-ink-2 transition-colors duration-calm hover:bg-paper hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
                 title="More"
               >
@@ -1118,13 +1202,27 @@ function PlatformSetupCard({
             items={secondaryItems}
           />
         ) : null}
+        {remoteDisabled && offlineExplanation ? (
+          <span className="max-w-[36ch] text-[11.5px] leading-[1.4] text-ink-3">
+            {offlineExplanation}
+          </span>
+        ) : null}
       </div>
     </article>
   );
 }
 
-function SetupGuideSection({ rows }: { rows: PlatformCard[] }) {
+function SetupGuideSection({
+  rows,
+  host,
+  phoneLayout
+}: {
+  rows: PlatformCard[];
+  host: HostDeviceState;
+  phoneLayout: boolean;
+}) {
   const available = new Set(rows.map((row) => row.platform));
+  const macSetupLabel = host.actionLabel("setupMac");
   return (
     <section className="mb-9">
       <div className="mb-5 flex flex-wrap items-center justify-between gap-3 rounded-[8px] bg-paper-2/45 px-4 py-4">
@@ -1133,28 +1231,61 @@ function SetupGuideSection({ rows }: { rows: PlatformCard[] }) {
           <p className="m-0 mt-[3px] text-[13.5px] leading-[1.45] text-ink-3">
             Choose message sources, Contacts, optional AI, voice transcription, and updates, step by step.
           </p>
+          {phoneLayout ? (
+            <p className="m-0 mt-1.5 text-[12px] leading-[1.4] text-ink-3">{macSetupLabel}</p>
+          ) : null}
         </div>
         <button
           type="button"
           onClick={() => startSetupWizard()}
-          className="inline-flex items-center rounded-pill bg-ink px-3 py-[7px] text-[12.5px] font-medium text-paper hover:bg-ink-2"
+          disabled={phoneLayout && !host.remoteAvailable}
+          title={phoneLayout && !host.remoteAvailable ? host.offlineExplanation : undefined}
+          className="inline-flex items-center rounded-pill bg-ink px-3 py-[7px] text-[12.5px] font-medium text-paper hover:bg-ink-2 disabled:cursor-not-allowed disabled:opacity-50"
         >
           Run setup assistant
         </button>
       </div>
-      <OptionalComponents />
+      {phoneLayout && !host.remoteAvailable ? (
+        <p className="m-0 mb-4 rounded-row border border-hairline bg-paper px-3 py-2 text-[12px] leading-[1.45] text-ink-2">
+          {host.offlineExplanation}
+        </p>
+      ) : null}
+      <OptionalComponents
+        phoneLayout={phoneLayout}
+        hostPlatform={host.platform}
+        remoteAvailable={host.remoteAvailable}
+        offlineExplanation={host.offlineExplanation}
+      />
       <p className="mb-3 font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">
-        Setup guide
+        {phoneLayout ? "Mac setup" : "Setup guide"}
       </p>
+      {phoneLayout ? (
+        <p className="m-0 mb-3 max-w-[58ch] text-[12.5px] leading-[1.45] text-ink-3">
+          These steps happen on your Mac. Your phone only shows status and remote controls.
+        </p>
+      ) : null}
       <div className="grid gap-3 xl:grid-cols-2 3xl:grid-cols-3">
         <SetupGuideDrawer
           name="Keep the app running"
-          desc="The launcher keeps the app in the background."
-          steps={[
-            "Start it from Terminal with npm run start:student in the app folder.",
-            "Stop it from Terminal with npm run stop:student in the app folder.",
-            "If the runner is offline, start it again and reload the browser."
-          ]}
+          desc={
+            phoneLayout
+              ? `${APP_NAME} must stay open on your Mac for phone access.`
+              : "The launcher keeps the app in the background."
+          }
+          deviceLabel={phoneLayout ? macSetupLabel : undefined}
+          steps={
+            phoneLayout
+              ? [
+                  `Open ${APP_NAME} from Applications on your Mac and leave it running.`,
+                  "Keep your phone on the same Wi-Fi as the Mac.",
+                  `If this phone says the Mac is offline, reopen ${APP_NAME} on the Mac.`
+                ]
+              : [
+                  "Start it from Terminal with npm run start:student in the app folder.",
+                  "Stop it from Terminal with npm run stop:student in the app folder.",
+                  "If the runner is offline, start it again and reload the browser."
+                ]
+          }
           defaultOpen
         />
         {available.has("IMESSAGE") ? (
@@ -1220,11 +1351,13 @@ function SetupGuideDrawer({
   name,
   desc,
   steps,
+  deviceLabel,
   defaultOpen
 }: {
   name: string;
   desc: string;
   steps: string[];
+  deviceLabel?: string;
   defaultOpen?: boolean;
 }) {
   return (
@@ -1236,6 +1369,9 @@ function SetupGuideDrawer({
         <span>
           <span className="block text-[15.5px] font-medium text-ink">{name}</span>
           <span className="mt-[3px] block text-[13.5px] leading-[1.45] text-ink-3">{desc}</span>
+          {deviceLabel ? (
+            <span className="mt-1 block text-[12px] leading-[1.4] text-ink-3">{deviceLabel}</span>
+          ) : null}
         </span>
         <ChevronDown
           className="mt-[2px] h-[17px] w-[17px] text-ink-3 transition-transform duration-calm group-open:rotate-180"
@@ -1265,12 +1401,18 @@ function SetupGuideDrawer({
 // The success line names the count concretely ("345 active threads
 // reset for reassessment") rather than a vague "done", so the action
 // feels grounded.
-function ReassessAllControl() {
+function ReassessAllControl({
+  remoteAvailable = true,
+  offlineExplanation
+}: {
+  remoteAvailable?: boolean;
+  offlineExplanation?: string;
+}) {
   const [status, setStatus] = useState<"idle" | "running" | "done" | "intercepted" | "error">("idle");
   const [count, setCount] = useState<number | null>(null);
 
   const handleClick = async () => {
-    if (status === "running") return;
+    if (status === "running" || !remoteAvailable) return;
     const ok = window.confirm(
       "Clear cached AI briefs and suggested replies for every active thread? This cannot be undone. Each thread will regenerate lazily as it is next viewed or reassessed."
     );
@@ -1311,7 +1453,8 @@ function ReassessAllControl() {
       <button
         type="button"
         onClick={handleClick}
-        disabled={status === "running"}
+        disabled={status === "running" || !remoteAvailable}
+        title={!remoteAvailable ? offlineExplanation : undefined}
         className="inline-flex items-center rounded-pill border border-hairline px-[14px] py-[8px] text-[12.5px] font-medium text-ink-2 transition-colors duration-calm hover:border-hairline-strong hover:bg-paper-2 hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
       >
         {status === "running" ? "Resetting…" : "Reset all for reassessment"}
@@ -1350,12 +1493,16 @@ function SettingsGroup({ head, children }: { head: string; children: React.React
 function SettingRow({
   name,
   desc,
+  deviceLabel,
+  unavailableReason,
   trailing,
   onActivate,
   disabled
 }: {
   name: string;
   desc?: string;
+  deviceLabel?: string;
+  unavailableReason?: string;
   trailing: React.ReactNode;
   /**
    * Issue #394. When set, the entire row is clickable — not just the
@@ -1513,6 +1660,16 @@ function MobileSwitchRow({
               style={{ textWrap: "pretty" }}
             >
               {desc}
+            </p>
+          ) : null}
+          {deviceLabel ? (
+            <p className="m-0 mt-[4px] max-w-[58ch] text-[12px] leading-[1.4] text-ink-3">
+              {deviceLabel}
+            </p>
+          ) : null}
+          {unavailableReason ? (
+            <p className="m-0 mt-[4px] max-w-[58ch] text-[12px] leading-[1.4] text-ink-2">
+              {unavailableReason}
             </p>
           ) : null}
         </div>

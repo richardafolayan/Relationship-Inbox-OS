@@ -1,7 +1,19 @@
 // Pure helpers for the Settings "App updates" card: host identity, calm
 // user-facing release notes, technical metadata disclosure, and state copy.
+// Shared host labels/offline copy live in @/lib/host-device.
+
+import {
+  updatesInstallLabel,
+  type HostPlatformId
+} from "./host-device";
 
 export type HostDeviceKind = "mac" | "pc" | "computer";
+
+export function hostKindToPlatform(kind: HostDeviceKind = "mac"): HostPlatformId {
+  if (kind === "mac") return "darwin";
+  if (kind === "pc") return "win32";
+  return "linux";
+}
 
 export type UpdateUiState =
   | "loading"
@@ -148,9 +160,7 @@ export function hostAppTitle(appName: string, hostLabel: string): string {
 }
 
 export function installLocationCopy(kind: HostDeviceKind = "mac"): string {
-  if (kind === "pc") return "Updates install on this PC";
-  if (kind === "computer") return "Updates install on this computer";
-  return "Updates install on your Mac";
+  return updatesInstallLabel(hostKindToPlatform(kind));
 }
 
 export function hostOfflineCheckMessage(kind: HostDeviceKind = "mac"): string {
