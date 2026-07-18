@@ -2,10 +2,15 @@
  * Collapse duplicate bubbles at the final thread render boundary (#881).
  *
  * Prefer a stable platformMessageKey on every platform. Content-key fallback
- * (threadId|direction|timestamp|normalizedText|mediaFingerprint) is WhatsApp-
- * only: WA can persist the same physical message under two Prisma ids when
- * send-time and scan-time keys diverge. Other platforms can legitimately
- * repeat the same text at the same timestamp, so content dedupe stays off.
+ * (threadId|direction|timestamp|normalizedText) is WhatsApp-only: WA can
+ * persist the same physical message under two Prisma ids when send-time and
+ * scan-time keys diverge. Other platforms can legitimately repeat the same
+ * text at the same timestamp, so content dedupe stays off.
+ *
+ * Media: placeholder / empty attachment fingerprints are ignored when matching
+ * so a scrape without a real GUID still collides with the richer GUID twin.
+ * Two real, different non-placeholder GUIDs stay distinct (two same-caption
+ * media sends).
  */
 
 export type DedupeThreadMessage = {
@@ -35,27 +40,26 @@ function normalizeText(value: string): string {
   return value.replace(/\s+/g, " ").trim();
 }
 
-function mediaFingerprint(
+/**
+ * Real media GUIDs only. Empty, missing, or placeholder metadata produce ""
+ * so they do not split the content identity of the same physical message.
+ */
+export function realMediaFingerprint(
   attachments: DedupeThreadMessage["attachments"]
 ): string {
   if (!attachments || attachments.length === 0) return "";
-  return attachments
-    .map((a) => {
-      if (a.guid && a.guid.length > 0) return `g:${a.guid}`;
-      const kind = a.kind ?? a.type ?? "unknown";
-      const size = typeof a.byteSize === "number" ? String(a.byteSize) : "";
-      return `k:${kind}:${size}`;
-    })
-    .join(",");
+  const guids = attachments
+    .map((a) => (typeof a.guid === "string" ? a.guid.trim() : ""))
+    .filter((g) => g.length > 0);
+  if (guids.length === 0) return "";
+  return guids.map((g) => `g:${g}`).join(",");
 }
 
 /**
- * Content fallback key. Callers that know the thread id should pass it so
- * the key matches the investigation note shape; within a single-thread list
- * it is optional. senderName is included so two group members saying the
- * same thing in the same second are not collapsed into one bubble.
+ * Identity key for content-key dedupe (no media). senderName is included so
+ * two group members saying the same thing in the same second stay distinct.
  */
-export function threadMessageContentKey(
+export function threadMessageIdentityKey(
   message: DedupeThreadMessage,
   threadId = ""
 ): string {
@@ -64,9 +68,42 @@ export function threadMessageContentKey(
     message.direction,
     message.timestamp,
     normalizeText(message.senderName ?? ""),
-    normalizeText(message.text ?? ""),
-    mediaFingerprint(message.attachments)
+    normalizeText(message.text ?? "")
   ].join("|");
+}
+
+/**
+ * Content fallback key. Media fingerprint is only real GUIDs; placeholders
+ * contribute nothing so placeholder-vs-rich twins share a key when compared
+ * via {@link contentKeysCollide}.
+ */
+export function threadMessageContentKey(
+  message: DedupeThreadMessage,
+  threadId = ""
+): string {
+  return [
+    threadMessageIdentityKey(message, threadId),
+    realMediaFingerprint(message.attachments)
+  ].join("|");
+}
+
+/**
+ * Two WhatsApp rows collide on content when identity matches and media does
+ * not prove them distinct. Empty/placeholder media is a wildcard; two
+ * different non-empty real GUID fingerprints do not collide.
+ */
+export function contentKeysCollide(
+  a: DedupeThreadMessage,
+  b: DedupeThreadMessage,
+  threadId = ""
+): boolean {
+  if (threadMessageIdentityKey(a, threadId) !== threadMessageIdentityKey(b, threadId)) {
+    return false;
+  }
+  const mediaA = realMediaFingerprint(a.attachments);
+  const mediaB = realMediaFingerprint(b.attachments);
+  if (!mediaA || !mediaB) return true;
+  return mediaA === mediaB;
 }
 
 function richness(message: DedupeThreadMessage): number {
@@ -113,45 +150,48 @@ export function dedupeThreadMessages<T extends DedupeThreadMessage>(
 
   const useContentDedupe = isWhatsAppPlatform(platform);
   const result: T[] = [];
-  // Index into `result` for each key we have already accepted.
   const byPlatformKey = new Map<string, number>();
-  const byContentKey = new Map<string, number>();
+  // Indices already accepted under each identity key (content path).
+  const byIdentity = new Map<string, number[]>();
 
   for (const message of messages) {
     const platformKey = message.platformMessageKey?.trim() || "";
-    const contentKey = useContentDedupe
-      ? threadMessageContentKey(message, threadId)
-      : "";
 
     let existingIdx: number | undefined;
     if (platformKey) {
       existingIdx = byPlatformKey.get(platformKey);
     }
     if (existingIdx === undefined && useContentDedupe) {
-      existingIdx = byContentKey.get(contentKey);
+      const identity = threadMessageIdentityKey(message, threadId);
+      const candidates = byIdentity.get(identity) ?? [];
+      for (const idx of candidates) {
+        if (contentKeysCollide(message, result[idx]!, threadId)) {
+          existingIdx = idx;
+          break;
+        }
+      }
     }
 
     if (existingIdx === undefined) {
       const idx = result.length;
       result.push(message);
       if (platformKey) byPlatformKey.set(platformKey, idx);
-      if (useContentDedupe) byContentKey.set(contentKey, idx);
+      if (useContentDedupe) {
+        const identity = threadMessageIdentityKey(message, threadId);
+        const list = byIdentity.get(identity) ?? [];
+        list.push(idx);
+        byIdentity.set(identity, list);
+      }
       continue;
     }
 
     const existing = result[existingIdx]!;
     if (richness(message) > richness(existing)) {
       result[existingIdx] = message;
-      // Re-index so both the old and new keys resolve to the survivor.
       const prevPlatform = existing.platformMessageKey?.trim() || "";
       if (prevPlatform) byPlatformKey.set(prevPlatform, existingIdx);
       if (platformKey) byPlatformKey.set(platformKey, existingIdx);
-      if (useContentDedupe) {
-        byContentKey.set(threadMessageContentKey(existing, threadId), existingIdx);
-        byContentKey.set(contentKey, existingIdx);
-      }
     } else if (platformKey) {
-      // Loser still teaches us its platform key so a third copy is caught.
       byPlatformKey.set(platformKey, existingIdx);
     }
   }

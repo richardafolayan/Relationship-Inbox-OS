@@ -228,3 +228,97 @@ test("omitting platform disables content-key dedupe (safe default)", () => {
   const out = dedupeThreadMessages(rows, "thread-fdlm");
   assert.equal(out.length, 2);
 });
+
+test("placeholder vs rich media GUID twins collapse; richer GUID survives", () => {
+  // Different platform keys, same identity. One scrape only has placeholder
+  // attachment metadata (no guid); the later scrape has the real media GUID.
+  // Content-key must ignore empty/placeholder media so they collide.
+  const identity = {
+    direction: "IN",
+    timestamp: "2026-07-17T09:15:00.000Z",
+    text: "check this photo",
+    senderName: "Bruce Hirwa"
+  };
+  const rows = [
+    waRow({
+      id: "placeholder-scrape",
+      platformMessageKey: "stable-hash-no-id",
+      ...identity,
+      attachments: [{ kind: "photo", type: "image/jpeg", byteSize: null }]
+    }),
+    waRow({
+      id: "rich-scrape",
+      platformMessageKey: "false_447@c.us_REALMEDIA1",
+      ...identity,
+      attachments: [
+        {
+          guid: "false_447@c.us_REALMEDIA1",
+          kind: "photo",
+          type: "image/jpeg",
+          byteSize: 184320
+        }
+      ]
+    })
+  ];
+  const out = dedupeThreadMessages(rows, "thread-media", "WHATSAPP");
+  assert.equal(out.length, 1);
+  assert.equal(out[0].id, "rich-scrape");
+  assert.equal(out[0].attachments[0].guid, "false_447@c.us_REALMEDIA1");
+});
+
+test("rich first then placeholder still keeps the richer GUID survivor", () => {
+  const identity = {
+    direction: "OUT",
+    timestamp: "2026-07-17T09:16:00.000Z",
+    text: "sent you the clip",
+    senderName: null
+  };
+  const rows = [
+    waRow({
+      id: "rich-first",
+      platformMessageKey: "true_447@c.us_CLIP",
+      ...identity,
+      attachments: [{ guid: "true_447@c.us_CLIP", kind: "video", type: "video/mp4" }]
+    }),
+    waRow({
+      id: "placeholder-later",
+      platformMessageKey: "hash-send-time",
+      ...identity,
+      attachments: [{ kind: "video", type: "video/mp4" }]
+    })
+  ];
+  const out = dedupeThreadMessages(rows, "thread-media", "WHATSAPP");
+  assert.equal(out.length, 1);
+  assert.equal(out[0].id, "rich-first");
+  assert.equal(out[0].attachments[0].guid, "true_447@c.us_CLIP");
+});
+
+test("two real different media GUIDs with same caption stay as two bubbles", () => {
+  // Genuinely distinct same-caption media sends must not collapse.
+  const identity = {
+    direction: "IN",
+    timestamp: "2026-07-17T09:20:00.000Z",
+    text: "photo",
+    senderName: "Alex"
+  };
+  const rows = [
+    waRow({
+      id: "media-a",
+      platformMessageKey: "false_447@c.us_GUID_A",
+      ...identity,
+      attachments: [{ guid: "false_447@c.us_GUID_A", kind: "photo", type: "image/jpeg" }]
+    }),
+    waRow({
+      id: "media-b",
+      platformMessageKey: "false_447@c.us_GUID_B",
+      ...identity,
+      attachments: [{ guid: "false_447@c.us_GUID_B", kind: "photo", type: "image/jpeg" }]
+    })
+  ];
+  const out = dedupeThreadMessages(rows, "thread-media", "WHATSAPP");
+  assert.equal(out.length, 2);
+  assert.deepEqual(
+    out.map((m) => m.id),
+    ["media-a", "media-b"]
+  );
+});
