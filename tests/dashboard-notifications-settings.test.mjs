@@ -88,9 +88,15 @@ test("message notification copy names the device, not the browser, on phone", ()
   assert.equal(messageNotificationsTitle("phone"), "Message notifications");
   assert.equal(messageNotificationsDeviceLine("phone"), "On this phone");
   assert.equal(messageNotificationsDeviceLine("mac"), "On this Mac");
-  assert.match(messageNotificationsDescription("phone"), /this app is in the background/i);
+  // Phone copy must not overpromise iOS background / killed-app push.
+  assert.match(messageNotificationsDescription("phone"), /while this app is open/i);
+  assert.match(messageNotificationsDescription("phone"), /fully closed/i);
+  assert.doesNotMatch(messageNotificationsDescription("phone"), /in the background/i);
   assert.doesNotMatch(messageNotificationsDescription("phone"), /desktop/i);
   assert.doesNotMatch(messageNotificationsDescription("phone"), /browser/i);
+  // Browser path is also foreground/tab-open only (no SW push stack yet).
+  assert.match(messageNotificationsDescription("browser"), /while this tab is open/i);
+  assert.doesNotMatch(messageNotificationsDescription("browser"), /in the background/i);
 
   assert.equal(
     messageNotificationsPermissionCaption("granted", "phone"),
@@ -109,6 +115,29 @@ test("message notification copy names the device, not the browser, on phone", ()
     messageNotificationsPermissionCaption("granted", "phone"),
     /browser/i
   );
+});
+
+test("notification copy claims match foreground-only Notification API behaviour", () => {
+  // No service worker / PushManager path exists; copy must not promise
+  // delivery when the phone app is backgrounded or killed.
+  for (const client of ["phone", "mac", "browser"]) {
+    const desc = messageNotificationsDescription(client);
+    const hint = digestBackgroundPingHint(client);
+    assert.doesNotMatch(desc, /push notification/i);
+    assert.doesNotMatch(hint, /push notification/i);
+    assert.doesNotMatch(desc, /even when (the app|it) is closed/i);
+    assert.doesNotMatch(desc, /locked screen/i);
+  }
+  assert.match(messageNotificationsDescription("phone"), /may not arrive if the app is fully closed/i);
+  assert.match(digestBackgroundPingHint("phone"), /while the app is open/i);
+  assert.doesNotMatch(digestBackgroundPingHint("phone"), /in the background/i);
+  assert.doesNotMatch(digestBackgroundPingHint("browser"), /in the background/i);
+
+  // Settings page must not invent a web-push stack.
+  const page = read("apps/dashboard/app/settings/page.tsx");
+  assert.doesNotMatch(page, /serviceWorker|PushManager|web-push|web push/i);
+  const helpers = read("apps/dashboard/lib/notifications-settings.ts");
+  assert.doesNotMatch(helpers, /\bPushManager\b|\bserviceWorker\b|\bweb-push\b/i);
 });
 
 test("settings groups separate phone notifications from Mac scanning", () => {
@@ -130,6 +159,7 @@ test("digest frequency options and non-interactive preview copy", () => {
   assert.match(digestPreviewHint(), /Preview only/i);
   assert.match(digestBackgroundPingHint("phone"), /message notifications/i);
   assert.doesNotMatch(digestBackgroundPingHint("phone"), /desktop notifications/i);
+  assert.doesNotMatch(digestBackgroundPingHint("phone"), /in the background/i);
 });
 
 test("quiet hours window parse, format, and overnight membership", () => {
