@@ -169,7 +169,7 @@ export const FULL_DEMO_SCRIPT: DemoStep[] = [
     target: "settings-full-demo",
     placement: "right",
     title: "Run it again",
-    body: "Settings starts this demo. Sandbox uses seeded data. Live mode is read-only against your real threads."
+    body: "Settings starts this demo. Sample mode uses practice conversations. Real mode is read-only against threads you choose. Nothing is sent automatically."
   },
   {
     id: "closing",
