@@ -19,7 +19,13 @@ import { FullDemoBanner } from "@/components/full-demo/FullDemoBanner";
 import { apiGet, apiGetRaw, apiPost } from "@/lib/api";
 import { startAppUpdate } from "@/lib/app-update-action";
 import { useVisiblePolling } from "@/lib/use-visible-polling";
-import { isQuietHoursActive } from "@/lib/quiet-hours";
+import {
+  applyQuietHoursFromRunner,
+  isQuietHoursActive,
+  QUIET_HOURS_CHANGE_EVENT,
+  shouldSkipAutoScanForQuietHours,
+  type QuietHoursWindow
+} from "@/lib/quiet-hours";
 import {
   DEFAULT_SCAN_INTERVAL,
   nextScanDelayMs,
@@ -478,9 +484,37 @@ export function AppShell({ children }: { children: ReactNode }) {
   // Operator-chosen scan cadence (pilot R-0087 / #754). Changing it in
   // Settings re-arms the loop immediately - the effect below depends on it.
   const [scanInterval, setScanInterval] = useState<ScanIntervalId>(DEFAULT_SCAN_INTERVAL);
+  // Quiet hours come from runner AppSettings (shared phone + Mac), not the
+  // current browser origin's localStorage. Version bumps re-render sidebar
+  // attention and re-arm scan when Settings changes the host value.
+  const [quietHoursVersion, setQuietHoursVersion] = useState(0);
   useEffect(() => {
     setScanInterval(readScanInterval());
     return onScanIntervalChange(() => setScanInterval(readScanInterval()));
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    void apiGet<{
+      quietHoursEnabled?: boolean;
+      quietHoursWindow?: QuietHoursWindow | null;
+    }>("/runner/data/settings")
+      .then((data) => {
+        if (cancelled) return;
+        applyQuietHoursFromRunner(data ?? null);
+        setQuietHoursVersion((n) => n + 1);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        applyQuietHoursFromRunner(null);
+        setQuietHoursVersion((n) => n + 1);
+      });
+    const onQuietHoursChange = () => setQuietHoursVersion((n) => n + 1);
+    window.addEventListener(QUIET_HOURS_CHANGE_EVENT, onQuietHoursChange);
+    return () => {
+      cancelled = true;
+      window.removeEventListener(QUIET_HOURS_CHANGE_EVENT, onQuietHoursChange);
+    };
   }, []);
 
   useEffect(() => {
@@ -491,11 +525,14 @@ export function AppShell({ children }: { children: ReactNode }) {
       if (cancelled) return;
       // Three reasons we skip a tick:
       //   - already mid-scan (don't pile up requests)
-      //   - quiet hours toggle is on (22:00-06:00 user override)
+      //   - quiet hours toggle is on (shared runner host value)
       //   - outside plausible active hours (weekend / before 08:00 /
       //     after 19:00 — keeps the scrape footprint matched to a
       //     real person's working pattern rather than a 24/7 bot)
-      const skip = autoScanInFlightRef.current || isQuietHoursActive() || !isWithinActiveHours();
+      const skip =
+        autoScanInFlightRef.current ||
+        shouldSkipAutoScanForQuietHours() ||
+        !isWithinActiveHours();
       if (!skip) {
         autoScanInFlightRef.current = true;
         void apiPost("/runner/control/scan", { scope: "update" }).catch(() => undefined).finally(() => {
@@ -514,7 +551,7 @@ export function AppShell({ children }: { children: ReactNode }) {
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
-  }, [autoScanDisabled, autoScanEnabled, scanInterval]);
+  }, [autoScanDisabled, autoScanEnabled, scanInterval, quietHoursVersion]);
 
   // #359: notification permission is no longer requested on mount.
   // Asking pre-intent (i.e. on every page load before the operator has

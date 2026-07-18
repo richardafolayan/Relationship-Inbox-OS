@@ -753,6 +753,11 @@ export interface HealthResponse {
 
 export type PresenterDemoMode = "off" | "sandbox" | "live";
 
+export interface QuietHoursWindowSettings {
+  start: string;
+  end: string;
+}
+
 export interface AppSettings {
   scanIntervalSeconds: number;
   amberHours: number;
@@ -768,4 +773,7 @@ export interface AppSettings {
   aiProvider?: AiProvider;
   glmModel?: string;
   geminiModel?: string;
+  /** Shared host quiet hours (phone + Mac). See runner AppSettings. */
+  quietHoursEnabled?: boolean;
+  quietHoursWindow?: QuietHoursWindowSettings;
 }

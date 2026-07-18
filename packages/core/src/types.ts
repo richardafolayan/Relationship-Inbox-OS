@@ -466,6 +466,14 @@ export type AiErrorKind =
  */
 export type PresenterDemoMode = "off" | "sandbox" | "live";
 
+/** Local quiet-hours window stored on the runner host (shared phone + Mac). */
+export interface QuietHoursWindowSettings {
+  /** Local HH:MM, inclusive. */
+  start: string;
+  /** Local HH:MM, exclusive. */
+  end: string;
+}
+
 export interface AppSettings {
   scanIntervalSeconds: number;
   automaticUpdates: boolean;
@@ -502,4 +510,12 @@ export interface AppSettings {
   // Gemma works through Google's OpenAI-compat endpoint once the
   // thinking_level=MINIMAL extra is set; see services/ai.ts:geminiExtraBody.
   geminiModel?: string;
+  /**
+   * Pause Mac auto-scan (and mute desktop alerts) inside quietHoursWindow.
+   * Optional so pre-existing app_settings rows still parse; undefined means
+   * the dashboard may dual-read browser localStorage until first save.
+   */
+  quietHoursEnabled?: boolean;
+  /** Local quiet window; defaults to 22:00-06:00 when absent or invalid. */
+  quietHoursWindow?: QuietHoursWindowSettings;
 }

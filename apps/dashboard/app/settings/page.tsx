@@ -72,11 +72,11 @@ import {
 } from "@/lib/scan-interval";
 import {
   DEFAULT_QUIET_HOURS_WINDOW,
+  applyQuietHoursFromRunner,
   formatQuietHoursRange,
-  isQuietHoursEnabled,
-  readQuietHoursWindow,
-  writeQuietHoursEnabled,
-  writeQuietHoursWindow,
+  quietHoursPayloadForRunner,
+  setQuietHoursHostState,
+  shouldMigrateLocalQuietHours,
   type QuietHoursWindow
 } from "@/lib/quiet-hours";
 import { cn } from "@/lib/utils";
@@ -208,12 +208,14 @@ export default function SettingsPage() {
   const [scanInterval, setScanInterval] = useState<ScanIntervalId>(DEFAULT_SCAN_INTERVAL);
   const [savedAt, setSavedAt] = useState<number | null>(null);
 
-  // Headless lives in the runner's persisted settings (the runner reads
-  // settings.headless when launching Chrome), so unlike autoScan/quietHours
-  // it round-trips through the API rather than localStorage.
+  // Headless and quiet hours live in the runner's persisted AppSettings so
+  // every origin (Mac desktop, phone Tailscale URL) shares one host value.
+  // Quiet hours still dual-writes localStorage briefly for migration.
   const [headless, setHeadless] = useState(true);
   const [headlessReady, setHeadlessReady] = useState(false);
   const [headlessStatus, setHeadlessStatus] = useState<"idle" | "saving" | "error">("idle");
+  const [quietHoursReady, setQuietHoursReady] = useState(false);
+  const [quietHoursStatus, setQuietHoursStatus] = useState<"idle" | "saving" | "error">("idle");
 
   // Clearing the dismissed flag brings the welcome card back on Today.
   const [welcomeReset, setWelcomeReset] = useState(false);
@@ -262,16 +264,33 @@ export default function SettingsPage() {
     );
     setAutoScan(window.localStorage.getItem(AUTO_SCAN_KEY) === "true");
     setScanInterval(readScanInterval());
-    setQuietHours(isQuietHoursEnabled());
-    setQuietWindow(readQuietHoursWindow());
     setNotificationClient(classifyNotificationClient(readClientHintsFromWindow()));
     setUiScale(readUiScale());
-    void apiGet<{ headless?: boolean }>("/runner/data/settings")
+    void apiGet<{
+      headless?: boolean;
+      quietHoursEnabled?: boolean;
+      quietHoursWindow?: QuietHoursWindow | null;
+    }>("/runner/data/settings")
       .then((data) => {
         if (data && typeof data.headless === "boolean") setHeadless(data.headless);
         setHeadlessReady(true);
+        const applied = applyQuietHoursFromRunner(data ?? null);
+        setQuietHours(applied.enabled);
+        setQuietWindow(applied.window);
+        setQuietHoursReady(true);
+        if (shouldMigrateLocalQuietHours(data ?? null)) {
+          void apiPost("/runner/control/settings", quietHoursPayloadForRunner(applied)).catch(
+            () => undefined
+          );
+        }
       })
-      .catch(() => setHeadlessReady(true));
+      .catch(() => {
+        setHeadlessReady(true);
+        const applied = applyQuietHoursFromRunner(null);
+        setQuietHours(applied.enabled);
+        setQuietWindow(applied.window);
+        setQuietHoursReady(true);
+      });
   }, []);
 
   const refreshPlatforms = useCallback(async () => {
@@ -288,17 +307,32 @@ export default function SettingsPage() {
 
   useEffect(() => onUiScaleChange(() => setUiScale(readUiScale())), []);
 
+  const persistQuietHours = async (next: {
+    enabled: boolean;
+    window: QuietHoursWindow;
+  }) => {
+    if (quietHoursStatus === "saving") return;
+    const applied = setQuietHoursHostState(next);
+    setQuietHours(applied.enabled);
+    setQuietWindow(applied.window);
+    setQuietHoursStatus("saving");
+    try {
+      await apiPost("/runner/control/settings", quietHoursPayloadForRunner(applied));
+      setQuietHoursStatus("idle");
+      setSavedAt(Date.now());
+    } catch {
+      setQuietHoursStatus("error");
+    }
+  };
+
   const toggleQuietHours = () => {
-    const next = !quietHours;
-    setQuietHours(next);
-    writeQuietHoursEnabled(next);
-    setSavedAt(Date.now());
+    if (!quietHoursReady) return;
+    void persistQuietHours({ enabled: !quietHours, window: quietWindow });
   };
 
   const updateQuietWindow = (next: QuietHoursWindow) => {
-    const saved = writeQuietHoursWindow(next);
-    setQuietWindow(saved);
-    setSavedAt(Date.now());
+    if (!quietHoursReady) return;
+    void persistQuietHours({ enabled: quietHours, window: next });
   };
 
   const toggleAutoScan = () => {
