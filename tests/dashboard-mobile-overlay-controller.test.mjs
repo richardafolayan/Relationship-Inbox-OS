@@ -12,7 +12,9 @@ const {
   MOBILE_OVERLAY_HISTORY_KEY,
   bindOverlayHistory,
   bindVisualViewport,
+  browserVisualViewportHost,
   captureFocus,
+  collectBrowserScrollOwners,
   createScrollLock,
   createScrollLockManager
 } = await import("../apps/dashboard/lib/mobile-overlay-effects.ts");
@@ -569,6 +571,69 @@ test("createScrollLock hides body overflow and restores previous styles", () => 
   assert.equal(bodyStyle.overflow, "", "double release is a no-op");
 });
 
+test("createScrollLock also locks explicit scroll owners (main/canvas/timeline)", () => {
+  const bodyStyle = { overflow: "", paddingRight: "" };
+  const mainStyle = { overflow: "auto", overscrollBehavior: "contain" };
+  const canvasStyle = { overflow: "auto", overscrollBehavior: "contain" };
+  const timelineStyle = { overflow: "auto", overscrollBehavior: "auto" };
+  const host = {
+    bodyStyle,
+    scrollbarGapPx: 0,
+    scrollOwners: [
+      { style: mainStyle },
+      { style: canvasStyle },
+      { style: timelineStyle }
+    ]
+  };
+
+  const lock = createScrollLock(host);
+  assert.equal(bodyStyle.overflow, "hidden");
+  assert.equal(mainStyle.overflow, "hidden");
+  assert.equal(canvasStyle.overflow, "hidden");
+  assert.equal(timelineStyle.overflow, "hidden");
+  assert.equal(mainStyle.overscrollBehavior, "none");
+  assert.equal(canvasStyle.overscrollBehavior, "none");
+  assert.equal(timelineStyle.overscrollBehavior, "none");
+
+  lock.release();
+  assert.equal(mainStyle.overflow, "auto");
+  assert.equal(canvasStyle.overflow, "auto");
+  assert.equal(timelineStyle.overflow, "auto");
+  assert.equal(mainStyle.overscrollBehavior, "contain");
+  assert.equal(canvasStyle.overscrollBehavior, "contain");
+  assert.equal(timelineStyle.overscrollBehavior, "auto");
+});
+
+test("collectBrowserScrollOwners de-dupes data-scroll-owner and main", () => {
+  const mainStyle = { overflow: "auto" };
+  const canvasStyle = { overflow: "scroll" };
+  const timelineStyle = { overflow: "auto" };
+  const main = { style: mainStyle };
+  const canvas = { style: canvasStyle };
+  const timeline = { style: timelineStyle };
+
+  const doc = {
+    querySelectorAll(sel) {
+      if (sel === "[data-scroll-owner]") return [main, canvas];
+      if (sel.includes("thread-timeline") || sel.includes("thread-messages")) {
+        return [timeline];
+      }
+      return [];
+    },
+    querySelector(sel) {
+      if (sel === "main") return main;
+      if (sel.includes("data-scroll-owner")) return null;
+      return null;
+    }
+  };
+
+  const owners = collectBrowserScrollOwners(doc);
+  assert.equal(owners.length, 3, "main+canvas+timeline once each");
+  assert.equal(owners[0].style, mainStyle);
+  assert.equal(owners[1].style, canvasStyle);
+  assert.equal(owners[2].style, timelineStyle);
+});
+
 test("scroll lock manager is ref-counted and only unlocks at depth 0", () => {
   const bodyStyle = { overflow: "auto", paddingRight: "0px" };
   const host = { bodyStyle, scrollbarGapPx: 0 };
@@ -636,6 +701,85 @@ test("bindVisualViewport writes CSS vars and clears them on release", () => {
   assert.equal(listeners.resize.size, 0);
 });
 
+test("visualViewport host uses live getters so viewport changes without mutating the wrapper", () => {
+  // Models the browser adapter: underlying visualViewport mutates in place;
+  // the host wrapper must not snapshot height/offsetTop at create time.
+  const underlying = {
+    height: 640,
+    offsetTop: 0,
+    listeners: { resize: new Set(), scroll: new Set() },
+    addEventListener(type, listener) {
+      this.listeners[type].add(listener);
+    },
+    removeEventListener(type, listener) {
+      this.listeners[type].delete(listener);
+    }
+  };
+  let innerHeight = 800;
+  const props = new Map();
+
+  const host = {
+    get visualViewport() {
+      return {
+        get height() {
+          return underlying.height;
+        },
+        get offsetTop() {
+          return underlying.offsetTop;
+        },
+        addEventListener: (type, listener) => underlying.addEventListener(type, listener),
+        removeEventListener: (type, listener) =>
+          underlying.removeEventListener(type, listener)
+      };
+    },
+    get innerHeight() {
+      return innerHeight;
+    },
+    documentElementStyle: {
+      setProperty: (name, value) => props.set(name, value),
+      removeProperty: (name) => props.delete(name)
+    }
+  };
+
+  const binding = bindVisualViewport(host);
+  assert.equal(props.get("--overlay-vvh"), "640px");
+  assert.equal(props.get("--overlay-keyboard-inset"), "160px");
+
+  // Change only the underlying viewport; do not mutate the wrapper object.
+  underlying.height = 420;
+  underlying.offsetTop = 40;
+  for (const listener of underlying.listeners.resize) listener();
+
+  assert.equal(props.get("--overlay-vvh"), "420px");
+  assert.equal(props.get("--overlay-vv-offset-top"), "40px");
+  assert.equal(props.get("--overlay-keyboard-inset"), "340px");
+  assert.equal(binding.getOverlayHeightPx(), 420);
+
+  binding.release();
+  assert.equal(underlying.listeners.resize.size, 0);
+});
+
+test("browserVisualViewportHost source uses live getters, not one-shot copies", () => {
+  const effects = readFileSync(
+    join(ROOT, "apps/dashboard/lib/mobile-overlay-effects.ts"),
+    "utf8"
+  );
+  // Adapter must not assign height/offsetTop from window.visualViewport as
+  // plain data properties at create (stale after keyboard/chrome resize).
+  assert.match(effects, /get height\(\)/);
+  assert.match(effects, /get offsetTop\(\)/);
+  assert.match(effects, /get innerHeight\(\)/);
+  assert.match(effects, /get visualViewport\(\)/);
+  assert.doesNotMatch(
+    effects,
+    /visualViewport:\s*window\.visualViewport\s*\?\s*\{\s*height:\s*window\.visualViewport\.height/
+  );
+  assert.match(effects, /collectBrowserScrollOwners/);
+  assert.match(effects, /scrollOwners/);
+  // browserVisualViewportHost is the production adapter under test via source.
+  assert.equal(typeof browserVisualViewportHost, "function");
+});
+
 // ─────────────────────────── wiring (source contracts) ───────────────────────────
 
 test("layout wraps the shell in MobileOverlayProvider", () => {
@@ -681,4 +825,6 @@ test("controller and effects modules export the public API surface", () => {
   assert.match(effects, /export function bindOverlayHistory/);
   assert.match(effects, /export function bindVisualViewport/);
   assert.match(effects, /export function captureFocus/);
+  assert.match(effects, /export function collectBrowserScrollOwners/);
+  assert.match(effects, /export function browserVisualViewportHost/);
 });
