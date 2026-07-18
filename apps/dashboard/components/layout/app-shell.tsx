@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import type { CSSProperties, ReactNode } from "react";
 import { resolveAutoScanDisabled, resolveAutoScanInitialEnabled } from "@inbox-os/core/autoscan";
@@ -150,9 +150,20 @@ function isWithinActiveHours(now: Date = new Date()): boolean {
 }
 const sidebarCollapsedStorageKey = "dashboard_sidebar_collapsed";
 
+function SearchReturnRecorder({ pathname }: { pathname: string }) {
+  const searchParams = useSearchParams();
+  const searchKey = searchParams?.toString() ?? "";
+
+  useEffect(() => {
+    const hash = window.location.hash;
+    recordSearchReturn(buildInAppHref(pathname, searchKey ? `?${searchKey}` : "", hash));
+  }, [pathname, searchKey]);
+
+  return null;
+}
+
 export function AppShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
-  const searchParams = useSearchParams();
   const router = useRouter();
   // Issue #336. Remember the most recent non-thread route so that
   // archiving a thread can return the operator to wherever they came
@@ -160,12 +171,9 @@ export function AppShell({ children }: { children: ReactNode }) {
   // every list page contributes without needing per-page wiring.
   // Also record the last non-search in-app href for mobile Search Close
   // (#903), including query and hash (e.g. /settings#platforms).
-  const searchKey = searchParams?.toString() ?? "";
   useEffect(() => {
     recordThreadSource(pathname);
-    const hash = typeof window !== "undefined" ? window.location.hash : "";
-    recordSearchReturn(buildInAppHref(pathname, searchKey ? `?${searchKey}` : "", hash));
-  }, [pathname, searchKey]);
+  }, [pathname]);
   // Issue #435 (R-0057). Tri-state, not a binary. `undefined` means the
   // first /health fetch hasn't resolved yet (a cold mount / reload),
   // which the sidebar renders as a calm "Connecting…" rather than the
@@ -880,6 +888,9 @@ export function AppShell({ children }: { children: ReactNode }) {
         "--shell-cols": sidebarCollapsed ? "56px 1fr" : "200px 1fr"
       } as CSSProperties}
     >
+      <Suspense fallback={null}>
+        <SearchReturnRecorder pathname={pathname} />
+      </Suspense>
       <Sidebar
         health={health}
         attentionCount={sidebarAttention}
