@@ -189,7 +189,7 @@ const draftCoverageSchema = z.object({
 });
 
 // Voice + style rules applied to every AI generation (summary, suggested
-// replies, transformReply, classifier). Centralised so a tweak is one edit.
+// replies and classifiers). Centralised so a tweak is one edit.
 // Three constraints in particular drive the rest of the prompts in this file:
 //   - 1-2 sentence outputs (informs prompt examples + zod max-length checks)
 //   - No em-dashes / en-dashes / semicolons / colons (post-processing strips
@@ -2846,40 +2846,6 @@ ${recentExchange || "(no recent messages)"}`;
     };
   }
 
-  async function transformReply(input: { mode: "SHORTEN" | "MAKE_WARMER"; text: string }): Promise<string> {
-    const { client, model, provider } = await resolveActive();
-    if (!client) {
-      return input.text;
-    }
-
-    try {
-      const instruction =
-        input.mode === "SHORTEN"
-          ? "Shorten this message to <= 160 characters while preserving intent."
-          : "Make this message warmer while preserving intent and keeping it concise.";
-
-      const response = await client.chat.completions.create({
-        model,
-        messages: [
-          { role: "system", content: SYSTEM_PROMPT },
-          { role: "user", content: `${instruction}\n\n${input.text}` }
-        ],
-        // No response_format: this returns plain text. The voice-rule
-        // post-processor handles em-dash / semicolon / colon scrubbing.
-        ...providerOptions(provider, model),
-        ...geminiExtraBody(provider, model)
-      });
-
-      const raw = response.choices[0]?.message?.content?.trim() || input.text;
-      return enforceSentenceStartCapitals(applyVoiceRules(raw));
-    } catch (error) {
-      console.warn(
-        `[ai] transformReply failed (provider=${provider}, model=${model}, mode=${input.mode}); returning original text. ${classifyLlmError(error, provider)}`
-      );
-      return input.text;
-    }
-  }
-
   async function formatDictationMessages(input: {
     transcript: string;
     contactName?: string | null;
@@ -4166,7 +4132,6 @@ ${safeTruncate(input.draft, 2000)}`;
   return {
     updateThreadSummary,
     generateSuggestedReplies,
-    transformReply,
     formatDictationMessages,
     classifyThreadCategory,
     classifyThreadClosed,

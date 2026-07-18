@@ -38,8 +38,11 @@ test("secondary mobile tools live behind the + sheet", () => {
   const sheetBlock = src.slice(sheetIdx, sheetEnd === -1 ? sheetIdx + 12000 : sheetEnd);
   assert.match(sheetBlock, /aria-label="Schedule send"/);
   assert.match(sheetBlock, /aria-label="Attach files"/);
-  assert.match(sheetBlock, /\{transforming === "SHORTEN" \? "shortening…" : "shorten"\}/);
-  assert.match(sheetBlock, /\{transforming === "MAKE_WARMER" \? "warming…" : "warmer"\}/);
+  assert.match(sheetBlock, /aria-label=\{recording \? "Stop recording" : "Record voice note"\}/);
+  assert.match(sheetBlock, /\n\s*Past context\n/);
+  assert.match(sheetBlock, /\n\s*Schedule\n/);
+  assert.match(sheetBlock, /\? "Stop voice note" : "Voice note"/);
+  assert.doesNotMatch(sheetBlock, /Shorten|Warmer|SHORTEN|MAKE_WARMER/);
   assert.match(sheetBlock, /Suggested replies/);
   assert.match(src, /composerMoreOpen \? "flex" : "hidden md:flex"/);
 });
