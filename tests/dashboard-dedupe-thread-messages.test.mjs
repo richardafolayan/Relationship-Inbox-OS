@@ -32,7 +32,7 @@ test("two identical WhatsApp rows collapse to one bubble", () => {
       platformMessageKey: "stable-hash-different-key"
     })
   ];
-  const out = dedupeThreadMessages(rows, "thread-fdlm");
+  const out = dedupeThreadMessages(rows, "thread-fdlm", "WHATSAPP");
   assert.equal(out.length, 1);
   assert.equal(out[0].text, "Yoo! It's July / Too early");
 });
@@ -58,7 +58,7 @@ test("identical outbound WhatsApp rows also collapse", () => {
       platformMessageKey: "hash-send-time-fallback"
     })
   ];
-  const out = dedupeThreadMessages(rows, "thread-fdlm");
+  const out = dedupeThreadMessages(rows, "thread-fdlm", "WHATSAPP");
   assert.equal(out.length, 1);
   // Prefer the richer row (automation tag + real-looking platform key).
   assert.equal(out[0].id, "out-1");
@@ -71,7 +71,7 @@ test("same platformMessageKey collapses even when text differs slightly", () => 
     waRow({ id: "a", platformMessageKey: key, text: "hello" }),
     waRow({ id: "b", platformMessageKey: key, text: "hello " })
   ];
-  const out = dedupeThreadMessages(rows);
+  const out = dedupeThreadMessages(rows, "", "WHATSAPP");
   assert.equal(out.length, 1);
 });
 
@@ -93,7 +93,7 @@ test("keeps the richer of two twins sharing a platformMessageKey (attachments wi
       attachments: [{ guid: "false_447@c.us_MEDIA", kind: "photo", type: "image/jpeg" }]
     })
   ];
-  const out = dedupeThreadMessages(rows, "t1");
+  const out = dedupeThreadMessages(rows, "t1", "WHATSAPP");
   assert.equal(out.length, 1);
   assert.equal(out[0].id, "with-media");
   assert.equal(out[0].attachments[0].guid, "false_447@c.us_MEDIA");
@@ -109,7 +109,7 @@ test("distinct messages with different content stay", () => {
       platformMessageKey: "other-key"
     })
   ];
-  const out = dedupeThreadMessages(rows, "t1");
+  const out = dedupeThreadMessages(rows, "t1", "WHATSAPP");
   assert.equal(out.length, 2);
   assert.deepEqual(
     out.map((m) => m.id),
@@ -134,7 +134,7 @@ test("group: same text and timestamp from different senders stay as two bubbles"
       platformMessageKey: "k-alex"
     })
   ];
-  const out = dedupeThreadMessages(rows, "group-thread");
+  const out = dedupeThreadMessages(rows, "group-thread", "WHATSAPP");
   assert.equal(out.length, 2);
 });
 
@@ -150,7 +150,7 @@ test("preserves order of first-seen survivors", () => {
     }),
     waRow({ id: "3", text: "gamma", timestamp: "2026-07-17T08:02:00.000Z", platformMessageKey: "k3" })
   ];
-  const out = dedupeThreadMessages(rows, "t1");
+  const out = dedupeThreadMessages(rows, "t1", "WHATSAPP");
   assert.deepEqual(
     out.map((m) => m.id),
     ["1", "2", "3"]
@@ -174,4 +174,57 @@ test("empty / single-element lists are passthrough", () => {
   const one = [waRow()];
   assert.equal(dedupeThreadMessages(one).length, 1);
   assert.equal(dedupeThreadMessages(one)[0].id, "msg-a");
+});
+
+test("content-key dedupe is WhatsApp-only; non-WhatsApp repeated messages stay distinct", () => {
+  // Same direction/sender/timestamp/text with different platform keys would
+  // collapse under content-key rules. iMessage/LinkedIn can legitimately
+  // send that pattern, so only platform-key dedupe applies.
+  const twin = {
+    direction: "IN",
+    timestamp: "2026-07-17T08:03:00.000Z",
+    text: "ping",
+    senderName: "Alex",
+    attachments: []
+  };
+  for (const platform of ["IMESSAGE", "LINKEDIN", "GOOGLE_MESSAGES", "INSTAGRAM"]) {
+    const rows = [
+      { ...twin, id: "a", platformMessageKey: "key-a" },
+      { ...twin, id: "b", platformMessageKey: "key-b" }
+    ];
+    const out = dedupeThreadMessages(rows, "thread-1", platform);
+    assert.equal(out.length, 2, `${platform} must keep both repeated messages`);
+    assert.deepEqual(
+      out.map((m) => m.id),
+      ["a", "b"]
+    );
+  }
+});
+
+test("non-WhatsApp still collapses on shared platformMessageKey", () => {
+  const key = "imessage-guid-same";
+  const rows = [
+    waRow({ id: "a", platformMessageKey: key, text: "hello" }),
+    waRow({ id: "b", platformMessageKey: key, text: "hello " })
+  ];
+  const out = dedupeThreadMessages(rows, "t1", "IMESSAGE");
+  assert.equal(out.length, 1);
+});
+
+test("content-key dedupe still runs for WhatsApp when platform keys differ", () => {
+  const rows = [
+    waRow({ id: "msg-a", platformMessageKey: "wa-key-1" }),
+    waRow({ id: "msg-b", platformMessageKey: "wa-key-2" })
+  ];
+  const out = dedupeThreadMessages(rows, "thread-fdlm", "WHATSAPP");
+  assert.equal(out.length, 1);
+});
+
+test("omitting platform disables content-key dedupe (safe default)", () => {
+  const rows = [
+    waRow({ id: "msg-a", platformMessageKey: "wa-key-1" }),
+    waRow({ id: "msg-b", platformMessageKey: "wa-key-2" })
+  ];
+  const out = dedupeThreadMessages(rows, "thread-fdlm");
+  assert.equal(out.length, 2);
 });

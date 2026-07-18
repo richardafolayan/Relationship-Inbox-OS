@@ -2679,7 +2679,11 @@ export default function ThreadPage() {
   // fold and reply-graph memos below — they only recompute when messages
   // actually change.
   const visibleMessagesBeforeReactionFold: ThreadMessage[] = useMemo(() => {
-    const deduped = dedupeThreadMessages(thread?.messages ?? [], thread?.id ?? "");
+    const deduped = dedupeThreadMessages(
+      thread?.messages ?? [],
+      thread?.id ?? "",
+      thread?.platform
+    );
     return deduped.filter((m) => {
       if (isNonContentIMessageSystemEvent(m.text)) return false;
       const text = (m.text ?? "").trim();
@@ -2694,7 +2698,7 @@ export default function ThreadPage() {
         m.audioTranscription.transcript.trim().length > 0;
       return hasText || hasPlayable || hasTranscript;
     });
-  }, [thread?.messages, thread?.id]);
+  }, [thread?.messages, thread?.id, thread?.platform]);
   // #422: iMessage stores arbitrary-emoji reactions as "Reacted X to
   // 'Y'" text bubbles when either party isn't on iOS 18. Collapse those
   // synthesised bubbles into reaction stickers on the parent so the

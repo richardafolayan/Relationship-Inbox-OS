@@ -1,12 +1,11 @@
 /**
  * Collapse duplicate bubbles at the final thread render boundary (#881).
  *
- * WhatsApp (and occasionally other platforms) can persist the same physical
- * message under two different Prisma ids when send-time and scan-time keys
- * diverge, or when a platform id is missing on one scrape and present on the
- * next. Client merges only key on Message.id, so both rows reach the
- * timeline. Prefer a stable platformMessageKey; fall back to
- * threadId|direction|timestamp|normalizedText|mediaFingerprint.
+ * Prefer a stable platformMessageKey on every platform. Content-key fallback
+ * (threadId|direction|timestamp|normalizedText|mediaFingerprint) is WhatsApp-
+ * only: WA can persist the same physical message under two Prisma ids when
+ * send-time and scan-time keys diverge. Other platforms can legitimately
+ * repeat the same text at the same timestamp, so content dedupe stays off.
  */
 
 export type DedupeThreadMessage = {
@@ -94,17 +93,25 @@ function richness(message: DedupeThreadMessage): number {
   return score;
 }
 
+function isWhatsAppPlatform(platform?: string | null): boolean {
+  return (platform ?? "").trim().toUpperCase() === "WHATSAPP";
+}
+
 /**
  * Returns messages in original order with exact duplicates removed.
- * When two rows collide, keeps the richer one (media metadata, real
- * platform key, automation tag, transcript) and drops the other.
+ * Platform-key collisions are collapsed on every platform. Content-key
+ * collisions only collapse when `platform` is WhatsApp. When two rows
+ * collide, keeps the richer one (media metadata, real platform key,
+ * automation tag, transcript) and drops the other.
  */
 export function dedupeThreadMessages<T extends DedupeThreadMessage>(
   messages: readonly T[],
-  threadId = ""
+  threadId = "",
+  platform?: string | null
 ): T[] {
   if (messages.length < 2) return messages.slice() as T[];
 
+  const useContentDedupe = isWhatsAppPlatform(platform);
   const result: T[] = [];
   // Index into `result` for each key we have already accepted.
   const byPlatformKey = new Map<string, number>();
@@ -112,13 +119,15 @@ export function dedupeThreadMessages<T extends DedupeThreadMessage>(
 
   for (const message of messages) {
     const platformKey = message.platformMessageKey?.trim() || "";
-    const contentKey = threadMessageContentKey(message, threadId);
+    const contentKey = useContentDedupe
+      ? threadMessageContentKey(message, threadId)
+      : "";
 
     let existingIdx: number | undefined;
     if (platformKey) {
       existingIdx = byPlatformKey.get(platformKey);
     }
-    if (existingIdx === undefined) {
+    if (existingIdx === undefined && useContentDedupe) {
       existingIdx = byContentKey.get(contentKey);
     }
 
@@ -126,7 +135,7 @@ export function dedupeThreadMessages<T extends DedupeThreadMessage>(
       const idx = result.length;
       result.push(message);
       if (platformKey) byPlatformKey.set(platformKey, idx);
-      byContentKey.set(contentKey, idx);
+      if (useContentDedupe) byContentKey.set(contentKey, idx);
       continue;
     }
 
@@ -137,8 +146,10 @@ export function dedupeThreadMessages<T extends DedupeThreadMessage>(
       const prevPlatform = existing.platformMessageKey?.trim() || "";
       if (prevPlatform) byPlatformKey.set(prevPlatform, existingIdx);
       if (platformKey) byPlatformKey.set(platformKey, existingIdx);
-      byContentKey.set(threadMessageContentKey(existing, threadId), existingIdx);
-      byContentKey.set(contentKey, existingIdx);
+      if (useContentDedupe) {
+        byContentKey.set(threadMessageContentKey(existing, threadId), existingIdx);
+        byContentKey.set(contentKey, existingIdx);
+      }
     } else if (platformKey) {
       // Loser still teaches us its platform key so a third copy is caught.
       byPlatformKey.set(platformKey, existingIdx);
