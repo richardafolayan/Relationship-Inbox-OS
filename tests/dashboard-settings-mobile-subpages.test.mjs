@@ -36,10 +36,13 @@ test("phone Settings opens as a category landing list without in-page section gr
     /<nav aria-label="Settings sections" className="md:hidden">/
   );
   assert.match(SOURCE, /onMobileChoose=\{openMobileCategory\}/);
-  // Capture list offset from the shell scroller (<main>), not window.
+  // Capture list offset from the route scroller (canvas/list owner, then main).
+  assert.match(SOURCE, /function getRouteScroller\(\)/);
+  assert.match(SOURCE, /data-scroll-owner=["']canvas["']/);
+  assert.match(SOURCE, /data-scroll-owner=["']list["']/);
   assert.match(
     SOURCE,
-    /listScrollYRef\.current = document\.querySelector\(["']main["']\)\?\.scrollTop/
+    /listScrollYRef\.current = getRouteScroller\(\)\?\.scrollTop/
   );
   // Landing is a simple vertical list (not the old 2-col card grid on phone).
   assert.doesNotMatch(
@@ -67,14 +70,32 @@ test("Back returns to the Settings list and preserves list scroll position", () 
   assert.match(SOURCE, /clearSettingsHashUrl/);
   assert.match(SOURCE, /setMobileDetailOpen\(false\)/);
   assert.match(SOURCE, /listScrollYRef/);
-  // Restore and detail open-to-top must target <main> (AppShell scroller).
+  // Restore and detail open-to-top must target the route scroller, not window.
   // Document scroll APIs are false-green under the overflow-hidden shell.
-  assert.match(SOURCE, /document\.querySelector\(["']main["']\)/);
+  assert.match(SOURCE, /getRouteScroller\(\)/);
   assert.match(SOURCE, /\.scrollTop\s*=\s*y/);
   assert.match(SOURCE, /\.scrollTop\s*=\s*0/);
   assert.doesNotMatch(SOURCE, /window\.scrollTo\s*\(/);
   assert.doesNotMatch(SOURCE, /window\.scrollY\b/);
   assert.match(SOURCE, /window\.addEventListener\("popstate", onLocation\)/);
+});
+
+test("route scroller prefers canvas/list scroll owners over main (#921)", () => {
+  // Fallback chain for integrated mobile shell: Canvas owns list scroll;
+  // pre-#921 shells still fall back to <main>.
+  assert.match(SOURCE, /function getRouteScroller\(\)/);
+  assert.match(SOURCE, /data-scroll-owner="canvas"/);
+  assert.match(SOURCE, /data-scroll-owner="list"/);
+  assert.match(SOURCE, /querySelector\("main"\)/);
+  // Order: canvas, then list, then main.
+  const canvasIdx = SOURCE.indexOf('data-scroll-owner="canvas"');
+  const listIdx = SOURCE.indexOf('data-scroll-owner="list"');
+  const mainInHelper = SOURCE.indexOf(
+    "document.querySelector(\"main\")",
+    SOURCE.indexOf("function getRouteScroller")
+  );
+  assert.ok(canvasIdx > 0 && listIdx > canvasIdx, "canvas before list");
+  assert.ok(mainInHelper > listIdx, "main fallback after list owner");
 });
 
 test("deep-linked Back clears hash via replaceState so system Back does not reopen category", () => {
