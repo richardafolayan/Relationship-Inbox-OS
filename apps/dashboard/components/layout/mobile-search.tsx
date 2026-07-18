@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { ChevronLeft, Search, X } from "lucide-react";
 import { apiGet, apiPost } from "@/lib/api";
 import type { HealthResponse, InboxResponse, PlatformCard } from "@/lib/types";
@@ -12,13 +12,17 @@ import { useVisiblePolling } from "@/lib/use-visible-polling";
 import { PersonAvatar } from "@/components/common/person-avatar";
 import {
   buildMobileSearchSections,
+  buildSearchHistoryHref,
   MOBILE_SEARCH_RECENT_QUERIES_KEY,
   MOBILE_SEARCH_RECENT_THREADS_KEY,
   parseRecentQueries,
   parseRecentThreads,
   readCssZoom,
+  readSearchQueryParam,
+  readSearchScroll,
   rememberRecentQuery,
   rememberRecentThread,
+  rememberSearchScroll,
   resolveSearchAttentionKind,
   resolveSearchCloseHref,
   resolveVisualViewportHeight,
@@ -39,8 +43,11 @@ const ATTENTION_POLL_MS = 5000;
 
 export function MobileSearchScreen() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const inputRef = useRef<HTMLInputElement>(null);
-  const [query, setQuery] = useState("");
+  const resultsRef = useRef<HTMLDivElement>(null);
+  // Query lives in /search?q= so result → browser Back restores prior results.
+  const [query, setQuery] = useState(() => readSearchQueryParam(searchParams));
   const [threads, setThreads] = useState<InboxResponse["rows"]>([]);
   const [recentThreads, setRecentThreads] = useState<RecentSearchThread[]>([]);
   const [recentQueries, setRecentQueries] = useState<string[]>([]);
@@ -66,6 +73,25 @@ export function MobileSearchScreen() {
       // Privacy mode / blocked storage: recent history is optional.
     }
   }, []);
+
+  // Keep the Search history entry in sync with the field so Back after a
+  // result reopens the prior query instead of a blank Search.
+  useEffect(() => {
+    const href = buildSearchHistoryHref(query);
+    const current = `${window.location.pathname}${window.location.search}`;
+    if (current === href) return;
+    window.history.replaceState(window.history.state, "", href);
+  }, [query]);
+
+  // Restore list scroll after result → Back (query restored via URL above).
+  useEffect(() => {
+    const el = resultsRef.current;
+    if (!el) return;
+    const y = readSearchScroll();
+    if (y > 0) {
+      el.scrollTop = y;
+    }
+  }, [threads, query]);
 
   useEffect(() => {
     const focusTimer = window.setTimeout(() => {
@@ -213,6 +239,13 @@ export function MobileSearchScreen() {
   const onSelect = (item: MobileSearchItem) => {
     if (query.trim()) persistQuery(query);
     if (item.group === "conversations") persistThread(item);
+    rememberSearchScroll(resultsRef.current?.scrollTop ?? 0);
+    // Ensure the current history entry holds the query before we leave so
+    // browser Back lands on /search?q=… with prior results, not blank Search.
+    const searchHref = buildSearchHistoryHref(query);
+    if (`${window.location.pathname}${window.location.search}` !== searchHref) {
+      window.history.replaceState(window.history.state, "", searchHref);
+    }
     if (item.href) {
       router.push(item.href);
       return;
@@ -344,7 +377,11 @@ export function MobileSearchScreen() {
       </div>
 
       <div
+        ref={resultsRef}
         data-mobile-search-results
+        onScroll={(event) => {
+          rememberSearchScroll(event.currentTarget.scrollTop);
+        }}
         className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-2 pb-[max(16px,env(safe-area-inset-bottom))] pt-2"
       >
         {sections.conversations.length > 0 ? (

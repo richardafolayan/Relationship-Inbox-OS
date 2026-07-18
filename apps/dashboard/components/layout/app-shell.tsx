@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { usePathname, useRouter } from "next/navigation";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import type { CSSProperties, ReactNode } from "react";
 import { resolveAutoScanDisabled, resolveAutoScanInitialEnabled } from "@inbox-os/core/autoscan";
 import { Sidebar } from "@/components/layout/sidebar";
@@ -76,7 +76,7 @@ import {
   type OverdueDigestTickResult
 } from "@/lib/overdue-digest";
 import type { HealthResponse, InboxResponse, InboxRow, OperatorProfile } from "@/lib/types";
-import { recordSearchReturn } from "@/lib/mobile-search";
+import { buildInAppHref, recordSearchReturn } from "@/lib/mobile-search";
 import { recordThreadSource } from "@/lib/thread-source";
 import { isInTodayQueue } from "@/lib/today";
 import { recordClientError } from "@/lib/client-error-log";
@@ -138,16 +138,20 @@ const sidebarCollapsedStorageKey = "dashboard_sidebar_collapsed";
 
 export function AppShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
+  const searchParams = useSearchParams();
   const router = useRouter();
   // Issue #336. Remember the most recent non-thread route so that
   // archiving a thread can return the operator to wherever they came
   // from rather than always bouncing to /today. Lives in the shell so
   // every list page contributes without needing per-page wiring.
-  // Also record the last non-search route for mobile Search Close (#903).
+  // Also record the last non-search in-app href for mobile Search Close
+  // (#903), including query and hash (e.g. /settings#platforms).
+  const searchKey = searchParams?.toString() ?? "";
   useEffect(() => {
     recordThreadSource(pathname);
-    recordSearchReturn(pathname);
-  }, [pathname]);
+    const hash = typeof window !== "undefined" ? window.location.hash : "";
+    recordSearchReturn(buildInAppHref(pathname, searchKey ? `?${searchKey}` : "", hash));
+  }, [pathname, searchKey]);
   // Issue #435 (R-0057). Tri-state, not a binary. `undefined` means the
   // first /health fetch hasn't resolved yet (a cold mount / reload),
   // which the sidebar renders as a calm "Connecting…" rather than the
