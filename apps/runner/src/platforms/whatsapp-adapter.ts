@@ -543,12 +543,14 @@ export class WhatsAppAdapter implements PlatformAdapter {
                 if (serializedId && excluded.has(serializedId)) return false;
                 if (targetText !== undefined && message.body !== targetText) return false;
                 if (targetType !== undefined && message.type !== targetType) return false;
-                if (
-                  targetMimetype !== undefined &&
-                  message.mimetype &&
-                  normalizeMime(message.mimetype) !== normalizeMime(targetMimetype)
-                ) {
-                  return false;
+                // Fail closed: when we know the expected mimetype, reject
+                // candidates that omit it or differ. Missing comparison data
+                // must not count as a match for delivery confirmation.
+                if (targetMimetype !== undefined) {
+                  if (!message.mimetype) return false;
+                  if (normalizeMime(message.mimetype) !== normalizeMime(targetMimetype)) {
+                    return false;
+                  }
                 }
                 return true;
               })

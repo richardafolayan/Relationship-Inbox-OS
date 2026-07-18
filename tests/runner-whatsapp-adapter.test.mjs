@@ -613,13 +613,14 @@ test("multi-attachment recovery does not reuse an earlier attachment id (#882)",
         const match = store.find((message) => {
           if (excluded.has(message.id._serialized)) return false;
           if (expectedType !== undefined && message.type !== expectedType) return false;
-          if (
-            expectedMimetype !== undefined &&
-            message.mimetype &&
-            message.mimetype.split(";")[0].trim().toLowerCase() !==
+          if (expectedMimetype !== undefined) {
+            if (!message.mimetype) return false;
+            if (
+              message.mimetype.split(";")[0].trim().toLowerCase() !==
               String(expectedMimetype).split(";")[0].trim().toLowerCase()
-          ) {
-            return false;
+            ) {
+              return false;
+            }
           }
           return true;
         });
@@ -730,13 +731,14 @@ test("multi-attachment recovery can still identify a later message that is not c
           .filter((message) => {
             if (excluded.has(message.id._serialized)) return false;
             if (expectedType !== undefined && message.type !== expectedType) return false;
-            if (
-              expectedMimetype !== undefined &&
-              message.mimetype &&
-              message.mimetype.split(";")[0].trim().toLowerCase() !==
+            if (expectedMimetype !== undefined) {
+              if (!message.mimetype) return false;
+              if (
+                message.mimetype.split(";")[0].trim().toLowerCase() !==
                 String(expectedMimetype).split(";")[0].trim().toLowerCase()
-            ) {
-              return false;
+              ) {
+                return false;
+              }
             }
             return true;
           })
@@ -780,6 +782,121 @@ test("multi-attachment recovery can still identify a later message that is not c
     assert.equal(receipt.attachments?.length, 2);
     assert.equal(receipt.attachments?.[0]?.guid, "first-media-id");
     assert.equal(receipt.attachments?.[1]?.guid, "second-media-id");
+  } finally {
+    await rm(file1, { force: true });
+    await rm(file2, { force: true });
+  }
+});
+
+test("multi-attachment recovery rejects candidates missing mimetype when expected (#882)", async () => {
+  const stamp = Date.now();
+  const file1 = join(tmpdir(), `whatsapp-send-e-${stamp}.jpg`);
+  const file2 = join(tmpdir(), `whatsapp-send-f-${stamp}.jpg`);
+  await writeFile(file1, "photo-one");
+  await writeFile(file2, "photo-two");
+
+  let sendCount = 0;
+  const client = createFakeClient({
+    sendMessage: async () => {
+      sendCount += 1;
+      if (sendCount === 1) {
+        return {
+          timestamp: 1_700_000_100,
+          id: { _serialized: "first-media-id" },
+          ack: 1
+        };
+      }
+      // Second attachment: library returns no Message (recovery path).
+      return undefined;
+    },
+    pupPage: {
+      evaluate: async (
+        _fn,
+        _chatId,
+        _earliest,
+        _expectedText,
+        expectedType,
+        excludeMessageIds,
+        expectedMimetype
+      ) => {
+        const excluded = new Set(excludeMessageIds ?? []);
+        // Only candidate left is an unrelated recent message with NO mimetype.
+        // Fail closed: must not treat missing mimetype as a match when expected.
+        const store = [
+          {
+            id: { _serialized: "first-media-id", fromMe: true },
+            type: "image",
+            mimetype: "image/jpeg",
+            t: 1_700_000_100,
+            timestamp: 1_700_000_100,
+            ack: 1,
+            hasMedia: true
+          },
+          {
+            id: { _serialized: "unrelated-no-mime", fromMe: true },
+            type: "image",
+            // mimetype intentionally absent
+            t: 1_700_000_102,
+            timestamp: 1_700_000_102,
+            ack: 1,
+            hasMedia: true
+          }
+        ];
+        const match = store
+          .filter((message) => {
+            if (excluded.has(message.id._serialized)) return false;
+            if (expectedType !== undefined && message.type !== expectedType) return false;
+            if (expectedMimetype !== undefined) {
+              if (!message.mimetype) return false;
+              if (
+                message.mimetype.split(";")[0].trim().toLowerCase() !==
+                String(expectedMimetype).split(";")[0].trim().toLowerCase()
+              ) {
+                return false;
+              }
+            }
+            return true;
+          })
+          .sort((a, b) => b.t - a.t)[0];
+        return match ?? null;
+      }
+    }
+  });
+  const adapter = new WhatsAppAdapter({
+    ...baseDeps(),
+    createClient: () => client
+  });
+  const ready = adapter.ensureConnected();
+  setImmediate(() => client.emit("ready"));
+  await ready;
+
+  try {
+    await assert.rejects(
+      adapter.sendMessage(
+        {
+          platformThreadId: "friend@c.us",
+          displayName: "Friend",
+          lastMessagePreview: ""
+        },
+        "",
+        [
+          {
+            absolutePath: file1,
+            displayName: "one.jpg",
+            mimeType: "image/jpeg",
+            kind: "photo"
+          },
+          {
+            absolutePath: file2,
+            displayName: "two.jpg",
+            mimeType: "image/jpeg",
+            kind: "photo"
+          }
+        ]
+      ),
+      /delivery could not be confirmed.*no message result/i
+    );
+    assert.equal(sendCount, 2, "both attachments should be attempted");
   } finally {
     await rm(file1, { force: true });
     await rm(file2, { force: true });
