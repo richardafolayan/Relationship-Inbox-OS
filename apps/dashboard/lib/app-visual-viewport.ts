@@ -6,7 +6,13 @@
  * reliable. visualViewport.height tracks the usable area; we publish it as
  * --app-vv-height in pre-zoom CSS pixels so body { zoom } still paints to
  * the visible area on both Chrome and Safari.
+ *
+ * Because the published value is an explicit px length, it must be
+ * re-published whenever effective zoom changes (UI scale / Text Size), not
+ * only on window or visualViewport resize.
  */
+
+import { UI_SCALE_CHANGE_EVENT, UI_SCALE_STORAGE_KEY } from "./ui-scale";
 
 export const APP_VV_HEIGHT_VAR = "--app-vv-height";
 
@@ -68,7 +74,19 @@ export function installAppVisualViewport(
   publish();
 
   const onResize = () => publish();
+  // Text Size / UI scale updates body zoom via applyUiScale without a
+  // window resize. Re-read zoom and re-publish so --app-vv-height stays
+  // aligned (px path is not zoom-auto like the old calc(dvh / zoom)).
+  const onUiScale = () => publish();
+  const onStorage = (event: Event) => {
+    const storageEvent = event as StorageEvent;
+    if (storageEvent.key === null || storageEvent.key === UI_SCALE_STORAGE_KEY) {
+      publish();
+    }
+  };
   win.addEventListener("resize", onResize);
+  win.addEventListener(UI_SCALE_CHANGE_EVENT, onUiScale);
+  win.addEventListener("storage", onStorage);
   vv?.addEventListener("resize", onResize);
   vv?.addEventListener("scroll", onResize);
 
@@ -76,6 +94,8 @@ export function installAppVisualViewport(
     publish,
     disconnect: () => {
       win.removeEventListener("resize", onResize);
+      win.removeEventListener(UI_SCALE_CHANGE_EVENT, onUiScale);
+      win.removeEventListener("storage", onStorage);
       vv?.removeEventListener("resize", onResize);
       vv?.removeEventListener("scroll", onResize);
       root.style.removeProperty(APP_VV_HEIGHT_VAR);
