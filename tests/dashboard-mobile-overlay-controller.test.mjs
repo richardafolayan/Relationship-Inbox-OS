@@ -250,7 +250,9 @@ function createAsyncHistoryStack(initialState = null) {
 }
 
 function waitForMacrotask() {
-  return new Promise((resolve) => setTimeout(resolve, 30));
+  return new Promise((resolve) => {
+    setTimeout(() => setTimeout(resolve, 0), 30);
+  });
 }
 
 /**

@@ -126,7 +126,7 @@ test("only active category content is shown in the mobile detail viewport", () =
     SOURCE,
     /className=\{cn\(mobileDetailOpen && "hidden md:block"\)\}/
   );
-  assert.match(SOURCE, /\{activeTab === "setup" \? <SetupGuideSection/);
+  assert.match(SOURCE, /\{activeTab === "setup" \? \([\s\S]*?<SetupGuideSection/);
   assert.match(SOURCE, /\{activeTab === "platforms" \? \(/);
   assert.match(SOURCE, /\{activeTab === "pilot" \? \(/);
 });
@@ -144,16 +144,17 @@ test("desktop keeps multi-column in-page settings navigation", () => {
   assert.match(SOURCE, /window\.history\.replaceState\(null, "", url\)/);
 });
 
-test("Canvas bottom padding keeps final controls above the phone dock", () => {
+test("Canvas keeps a modest gap above the in-flow phone dock", () => {
   const canvas = readFileSync(
     join(ROOT, "apps/dashboard/components/common/canvas.tsx"),
     "utf8"
   );
   assert.match(
     canvas,
-    /pb-\[calc\(132px\+env\(safe-area-inset-bottom\)\)\]/
+    /pb-10/
   );
   assert.match(canvas, /md:pb-\[120px\]/);
+  assert.doesNotMatch(canvas, /safe-area-inset-bottom/);
 });
 
 test("UI copy avoids em and en dashes in the settings mobile header", () => {

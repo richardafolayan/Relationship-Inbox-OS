@@ -45,7 +45,7 @@ test("document scroll is locked and the shell uses a zoom-safe height chain (#89
 
   // Shell is clipped; mobile main is not the primary scroller.
   assert.match(shell, /grid h-app-screen[^"]*overflow-hidden/);
-  assert.match(shell, /overflow-y-hidden md:overflow-y-auto/);
+  assert.match(shell, /overflow-hidden md:overflow-y-auto/);
   assert.match(shell, /installAppVisualViewport/);
   // Bare overflow-y-auto on main (without a breakpoint prefix) must not return.
   assert.doesNotMatch(
@@ -54,9 +54,9 @@ test("document scroll is locked and the shell uses a zoom-safe height chain (#89
   );
 
   // List pages scroll via Canvas on mobile; desktop defers to shell main.
-  assert.match(canvas, /h-full min-h-0/);
-  assert.match(canvas, /overflow-y-auto overscroll-y-contain/);
-  assert.match(canvas, /md:h-auto md:overflow-visible/);
+  assert.match(canvas, /pb-10/);
+  assert.match(shell, /pathname === "\/inbox"/);
+  assert.match(shell, /pathname === "\/archived"/);
 });
 
 test("scroll-owner markers document the mobile model for #928 alignment (#895)", () => {
@@ -65,8 +65,9 @@ test("scroll-owner markers document the mobile model for #928 alignment (#895)",
   const thread = read("apps/dashboard/app/thread/[id]/page.tsx");
 
   assert.match(shell, /data-scroll-owner="shell"/);
-  assert.match(shell, /data-scroll-owner="shell-main"/);
-  assert.match(canvas, /data-scroll-owner="canvas"/);
+  assert.match(shell, /data-scroll-owner=\{/);
+  assert.match(shell, /\? "child"\s*:\s*"main"/);
+  assert.match(read("apps/dashboard/app/inbox/page.tsx"), /data-scroll-owner="list"/);
   assert.match(thread, /data-scroll-owner="thread-messages"/);
 });
 

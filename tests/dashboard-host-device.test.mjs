@@ -116,8 +116,8 @@ test("Settings wires the host-device banner and offline remote-action handling",
   assert.match(settings, /hideProcessPath=\{phoneLayout\}/);
   assert.match(settings, /Mac setup/);
   assert.match(settings, /deviceLabel=\{phoneLayout \? host\.actionLabel/);
-  assert.match(settings, /actionLabel\([\s\S]*openBrowser/);
-  assert.match(settings, /"openBrowser"/);
+  assert.match(settings, /host\.actionLabel\([\s\S]*"scan"/);
+  assert.match(settings, /host\.actionLabel\([\s\S]*"connect"/);
 
   assert.match(banner, /host\.runsOn/);
   assert.match(banner, /host\.statusLine/);

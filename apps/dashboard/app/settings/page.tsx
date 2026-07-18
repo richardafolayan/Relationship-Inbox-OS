@@ -1260,7 +1260,7 @@ function SetupGuideSection({
       ) : null}
       <OptionalComponents
         phoneLayout={phoneLayout}
-        hostPlatform={host.platform}
+        hostPlatform={host.platform ?? "mac"}
         remoteAvailable={host.remoteAvailable}
         offlineExplanation={host.offlineExplanation}
       />
@@ -1567,6 +1567,16 @@ function SettingRow({
             {desc}
           </p>
         ) : null}
+        {deviceLabel ? (
+          <p className="m-0 mt-[4px] max-w-[58ch] text-[12px] leading-[1.4] text-ink-3">
+            {deviceLabel}
+          </p>
+        ) : null}
+        {unavailableReason ? (
+          <p className="m-0 mt-[4px] max-w-[58ch] text-[12px] leading-[1.4] text-ink-2">
+            {unavailableReason}
+          </p>
+        ) : null}
       </div>
       <div onClick={(event) => event.stopPropagation()}>{trailing}</div>
     </div>
@@ -1676,16 +1686,6 @@ function MobileSwitchRow({
               style={{ textWrap: "pretty" }}
             >
               {desc}
-            </p>
-          ) : null}
-          {deviceLabel ? (
-            <p className="m-0 mt-[4px] max-w-[58ch] text-[12px] leading-[1.4] text-ink-3">
-              {deviceLabel}
-            </p>
-          ) : null}
-          {unavailableReason ? (
-            <p className="m-0 mt-[4px] max-w-[58ch] text-[12px] leading-[1.4] text-ink-2">
-              {unavailableReason}
             </p>
           ) : null}
         </div>

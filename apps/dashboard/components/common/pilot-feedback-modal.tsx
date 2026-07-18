@@ -266,12 +266,6 @@ export function PilotFeedbackModal() {
 
   if (!open) return null;
 
-  // Close is always allowed: submit itself closes the modal too (issue
-  // #383 / R-0030), so there is no in-flight state that needs locking.
-  const requestClose = () => {
-    setOpen(false);
-  };
-
   // Visual-viewport height is only applied below the sm breakpoint via the
   // CSS variable. Inline height would override sm:h-auto on desktop.
   const mobileShellStyle =

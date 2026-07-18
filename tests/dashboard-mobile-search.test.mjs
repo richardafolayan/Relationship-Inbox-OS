@@ -229,7 +229,7 @@ test("#903: phone search is a dedicated route, not the desktop palette", () => {
   // Desktop palette remains a floating dialog with keyboard enter glyph.
   assert.match(commandPaletteSrc, /export function CommandPalette/);
   assert.match(commandPaletteSrc, /↵/);
-  assert.match(commandPaletteSrc, /place-items-start justify-items-center/);
+  assert.match(commandPaletteSrc, /sm:place-items-start sm:justify-items-center/);
 });
 
 test("#903: mobile search focuses the field and wires result scroller", () => {

@@ -34,7 +34,7 @@ test("MobileDock is an in-flow shell row, not a fixed viewport overlay", () => {
 });
 
 test("AppShell places MobileDock inside the content column after main", () => {
-  const contentStart = shell.indexOf('className="flex h-app-screen min-h-0 flex-col overflow-hidden"');
+  const contentStart = shell.indexOf('className="flex h-full min-h-0 flex-col overflow-hidden"');
   assert.ok(contentStart > 0, "content column is a clipped full-height flex stack");
   const mainIdx = shell.indexOf("<main", contentStart);
   const dockIdx = shell.indexOf("<MobileDock", contentStart);

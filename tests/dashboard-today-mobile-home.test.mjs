@@ -121,7 +121,8 @@ test("layout does not introduce a nested vertical scroller on Today", () => {
     [],
     `Today must not declare overflow-y scroller classes, found: ${overflowY.join(", ")}`
   );
-  assert.match(TODAY, /pb-\[calc\(96px\+env\(safe-area-inset-bottom\)\)\]/);
+  assert.match(TODAY, /pb-8 md:pb-10/);
+  assert.doesNotMatch(TODAY, /safe-area-inset-bottom/);
 });
 
 test("mobile Tonight uses a compact summary rather than full category bars", () => {
