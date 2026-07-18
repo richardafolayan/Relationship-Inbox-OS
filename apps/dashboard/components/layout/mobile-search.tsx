@@ -16,6 +16,7 @@ import {
   MOBILE_SEARCH_RECENT_THREADS_KEY,
   parseRecentQueries,
   parseRecentThreads,
+  readCssZoom,
   rememberRecentQuery,
   rememberRecentThread,
   resolveSearchAttentionKind,
@@ -25,6 +26,7 @@ import {
   type MobileSearchItem,
   type RecentSearchThread
 } from "@/lib/mobile-search";
+import { onUiScaleChange } from "@/lib/ui-scale";
 
 // Full-screen Search for phone widths (#903). Not the desktop command palette:
 // fixed search field, grouped results (conversations primary), Back/Cancel,
@@ -73,25 +75,33 @@ export function MobileSearchScreen() {
   }, []);
 
   useEffect(() => {
+    // Pin fixed overlay height/top in pre-zoom CSS px. body { zoom } scales
+    // painted size, so raw visualViewport px would oversize at Text Size
+    // Extra / large-monitor --app-zoom. Divide by getComputedStyle(body).zoom
+    // and re-sync on inbox-ui-scale (same model as #921 shell vv height).
     const syncViewport = () => {
       const vv = window.visualViewport;
+      const zoom = readCssZoom(window.getComputedStyle(document.body).zoom);
       setViewportHeight(
         resolveVisualViewportHeight({
           visualHeight: vv?.height ?? null,
-          layoutHeight: window.innerHeight
+          layoutHeight: window.innerHeight,
+          effectiveZoom: zoom
         })
       );
-      setViewportOffset(resolveVisualViewportOffset(vv?.offsetTop ?? null));
+      setViewportOffset(resolveVisualViewportOffset(vv?.offsetTop ?? null, zoom));
     };
     syncViewport();
     const vv = window.visualViewport;
     vv?.addEventListener("resize", syncViewport);
     vv?.addEventListener("scroll", syncViewport);
     window.addEventListener("resize", syncViewport);
+    const stopUiScale = onUiScaleChange(syncViewport);
     return () => {
       vv?.removeEventListener("resize", syncViewport);
       vv?.removeEventListener("scroll", syncViewport);
       window.removeEventListener("resize", syncViewport);
+      stopUiScale();
     };
   }, []);
 
