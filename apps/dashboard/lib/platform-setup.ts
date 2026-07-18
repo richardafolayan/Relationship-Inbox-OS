@@ -49,18 +49,17 @@ export function isPlatformAuthOrSessionError(row?: PlatformCard | null): boolean
 
 /**
  * Resolve the one primary recovery action for a platform card from status and
- * stored error text. ERROR alone is not enough to choose Scan: auth/session
- * loss leads with Connect or Reconnect.
+ * stored error text. Auth/session loss is classified before the CONNECTED /
+ * DEGRADED scan shortcut so a DEGRADED row with an expired session leads with
+ * Reconnect rather than Scan. Selector or partial-data degradation stays
+ * scan-primary. Non-auth ERROR stays scan-primary.
  */
 export function resolvePlatformPrimaryAction(row: PlatformCard): PlatformPrimaryAction {
-  if (row.status === "CONNECTED" || row.status === "DEGRADED") {
-    return "scan";
+  if (isPlatformAuthOrSessionError(row)) {
+    return row.connectedAt || row.lastScanAt ? "reconnect" : "connect";
   }
 
-  if (row.status === "ERROR") {
-    if (isPlatformAuthOrSessionError(row)) {
-      return row.connectedAt || row.lastScanAt ? "reconnect" : "connect";
-    }
+  if (row.status === "CONNECTED" || row.status === "DEGRADED" || row.status === "ERROR") {
     return "scan";
   }
 

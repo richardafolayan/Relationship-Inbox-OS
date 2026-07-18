@@ -17,11 +17,35 @@ const row = (over = {}) => ({
   ...over
 });
 
-test("CONNECTED and DEGRADED stay scan-primary", () => {
+test("CONNECTED and non-auth DEGRADED stay scan-primary", () => {
   assert.equal(resolvePlatformPrimaryAction(row({ status: "CONNECTED" })), "scan");
   assert.equal(resolvePlatformPrimaryAction(row({ status: "DEGRADED" })), "scan");
   assert.equal(platformScanEligible(row({ status: "CONNECTED" })), true);
   assert.equal(platformScanEligible(row({ status: "DEGRADED" })), true);
+});
+
+test("DEGRADED + session expired leads with Reconnect, not Scan", () => {
+  const degradedSession = row({
+    status: "DEGRADED",
+    lastError: "session expired on LinkedIn",
+    connectedAt: "2026-06-01T10:00:00.000Z",
+    lastScanAt: "2026-06-02T10:00:00.000Z"
+  });
+  assert.equal(isPlatformAuthOrSessionError(degradedSession), true);
+  assert.equal(resolvePlatformPrimaryAction(degradedSession), "reconnect");
+  assert.equal(platformScanEligible(degradedSession), false);
+});
+
+test("DEGRADED + selector mismatch stays scan-primary", () => {
+  const degradedSelector = row({
+    status: "DEGRADED",
+    lastError: "selector mismatch on inbox list",
+    connectedAt: "2026-06-01T10:00:00.000Z",
+    lastScanAt: "2026-06-02T10:00:00.000Z"
+  });
+  assert.equal(isPlatformAuthOrSessionError(degradedSelector), false);
+  assert.equal(resolvePlatformPrimaryAction(degradedSelector), "scan");
+  assert.equal(platformScanEligible(degradedSelector), true);
 });
 
 test("NOT_CONNECTED leads with Connect", () => {
