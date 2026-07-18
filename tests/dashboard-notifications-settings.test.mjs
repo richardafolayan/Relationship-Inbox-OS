@@ -31,6 +31,13 @@ const {
   readQuietHoursWindow,
   writeQuietHoursWindow,
   isQuietHoursActive,
+  applyQuietHoursFromRunner,
+  setQuietHoursHostState,
+  getQuietHoursHostState,
+  shouldSkipAutoScanForQuietHours,
+  shouldMigrateLocalQuietHours,
+  quietHoursPayloadForRunner,
+  resetQuietHoursHostStateForTests,
   DEFAULT_QUIET_HOURS_WINDOW,
   QUIET_HOURS_KEY,
   QUIET_HOURS_WINDOW_KEY
@@ -185,6 +192,7 @@ test("quiet hours window parse, format, and overnight membership", () => {
 });
 
 test("quiet hours enable flag and custom window round-trip through storage", () => {
+  resetQuietHoursHostStateForTests();
   const storage = memoryStorage();
   assert.equal(isQuietHoursEnabled(storage), false);
   writeQuietHoursEnabled(true, storage);
@@ -209,8 +217,68 @@ test("quiet hours enable flag and custom window round-trip through storage", () 
   );
 });
 
+test("phone quiet hours change reaches Mac scan path via runner-shared host state", () => {
+  // Phone and Mac use different browser origins (Tailscale vs localhost).
+  // localStorage is NOT shared; runner AppSettings is.
+  resetQuietHoursHostStateForTests();
+  const phoneLocal = memoryStorage();
+  const macLocal = memoryStorage();
+
+  // Phone Settings writes through the runner payload shape.
+  const phoneWrite = setQuietHoursHostState(
+    { enabled: true, window: { start: "21:00", end: "07:00" } },
+    phoneLocal
+  );
+  assert.deepEqual(quietHoursPayloadForRunner(phoneWrite), {
+    quietHoursEnabled: true,
+    quietHoursWindow: { start: "21:00", end: "07:00" }
+  });
+
+  // Mac AppShell applies the runner response; its own localStorage stays empty.
+  resetQuietHoursHostStateForTests();
+  assert.equal(isQuietHoursEnabled(macLocal), false);
+  const macHost = applyQuietHoursFromRunner(
+    {
+      quietHoursEnabled: true,
+      quietHoursWindow: { start: "21:00", end: "07:00" }
+    },
+    macLocal
+  );
+  assert.equal(macHost.source, "runner");
+  assert.equal(macHost.enabled, true);
+  assert.deepEqual(macHost.window, { start: "21:00", end: "07:00" });
+
+  const inside = new Date(2026, 0, 1, 22, 30);
+  const outside = new Date(2026, 0, 1, 12, 0);
+  assert.equal(shouldSkipAutoScanForQuietHours(inside, macHost), true);
+  assert.equal(shouldSkipAutoScanForQuietHours(outside, macHost), false);
+  assert.equal(isQuietHoursActive(inside), true);
+  // Mac origin localStorage never received the phone write.
+  assert.equal(isQuietHoursEnabled(macLocal), false);
+  assert.equal(isQuietHoursActive(inside, macLocal), false);
+});
+
+test("runner-missing quiet hours dual-reads localStorage and migrates", () => {
+  resetQuietHoursHostStateForTests();
+  const storage = memoryStorage({
+    [QUIET_HOURS_KEY]: "1",
+    [QUIET_HOURS_WINDOW_KEY]: JSON.stringify({ start: "23:00", end: "05:00" })
+  });
+  assert.equal(shouldMigrateLocalQuietHours({}, storage), true);
+  assert.equal(
+    shouldMigrateLocalQuietHours({ quietHoursEnabled: false }, storage),
+    false
+  );
+  const applied = applyQuietHoursFromRunner({}, storage);
+  assert.equal(applied.source, "local");
+  assert.equal(applied.enabled, true);
+  assert.deepEqual(applied.window, { start: "23:00", end: "05:00" });
+  assert.equal(getQuietHoursHostState(storage).enabled, true);
+});
+
 test("settings page wires phone vs Mac sections, switches, and digest controls", () => {
   const page = read("apps/dashboard/app/settings/page.tsx");
+  const shell = read("apps/dashboard/components/layout/app-shell.tsx");
 
   assert.match(page, /data-testid="notifications-settings"/);
   assert.match(page, /phoneNotificationsGroupHead/);
@@ -224,6 +292,15 @@ test("settings page wires phone vs Mac sections, switches, and digest controls",
   assert.match(page, /data-testid="digest-preview"/);
   assert.match(page, /DIGEST_CADENCE_OPTIONS/);
   assert.match(page, /digestPreviewHint/);
+
+  // Quiet hours persist on the runner host, not browser-origin localStorage alone.
+  assert.match(page, /applyQuietHoursFromRunner/);
+  assert.match(page, /quietHoursPayloadForRunner/);
+  assert.match(page, /\/runner\/control\/settings/);
+  assert.match(page, /quietHoursEnabled/);
+  assert.match(shell, /applyQuietHoursFromRunner/);
+  assert.match(shell, /shouldSkipAutoScanForQuietHours/);
+  assert.match(shell, /\/runner\/data\/settings/);
 
   // Mobile switch rows: title-aligned toggle, 44px touch target.
   assert.match(page, /min-h-\[44px\]/);

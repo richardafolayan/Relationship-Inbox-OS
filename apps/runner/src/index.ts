@@ -2783,6 +2783,12 @@ const automaticUpdateScheduler = createAutomaticUpdateScheduler({
 });
 
 app.post("/control/settings", asyncRoute(async (req, res) => {
+  const quietHoursWindowSchema = z
+    .object({
+      start: z.string().regex(/^\d{1,2}:\d{2}$/),
+      end: z.string().regex(/^\d{1,2}:\d{2}$/)
+    })
+    .optional();
   const payload = z
     .object({
       scanIntervalSeconds: z.number().int().min(10).max(3600).optional(),
@@ -2802,7 +2808,10 @@ app.post("/control/settings", asyncRoute(async (req, res) => {
       // but accept either here defensively. Length cap matches typical model
       // ids while preventing accidental megabyte payloads.
       glmModel: z.string().max(100).optional(),
-      geminiModel: z.string().max(100).optional()
+      geminiModel: z.string().max(100).optional(),
+      // Shared host quiet hours: phone Settings and Mac AppShell scan path.
+      quietHoursEnabled: z.boolean().optional(),
+      quietHoursWindow: quietHoursWindowSchema
     })
     .parse(req.body);
 
