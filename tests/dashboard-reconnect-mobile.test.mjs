@@ -77,16 +77,30 @@ test("opening a thread preserves list scroll position on return", () => {
   assert.match(pageSource, /sessionStorage/);
   assert.match(pageSource, /writeScrollY/);
   assert.match(pageSource, /onNavigate/);
-  // AppShell scrolls <main>, not the document. Reading document scroll would
-  // always see 0 and fail the "preserves list position" acceptance criterion.
+  // Prefer explicit route scroll owners (Canvas on mobile #921); fall back to
+  // <main> for pre-#921 shells. Never use document/window scroll.
+  assert.match(pageSource, /getListScroller/);
+  assert.match(pageSource, /data-scroll-owner="canvas"/);
+  assert.match(pageSource, /data-scroll-owner="list"/);
   assert.match(pageSource, /querySelector\(["']main["']\)/);
   assert.match(pageSource, /scrollTop/);
-  assert.match(pageSource, /getListScroller/);
   assert.match(pageSource, /captureListScrollY/);
   assert.match(pageSource, /restoreListScrollY/);
   // Reject the previous window-only approach (must fail if someone reverts to it).
   assert.doesNotMatch(pageSource, /window\.scrollTo\s*\(/);
   assert.doesNotMatch(pageSource, /window\.scrollY\b/);
+});
+
+test("getListScroller prefers canvas/list scroll owners over main (#921)", () => {
+  const start = pageSource.indexOf("function getListScroller");
+  assert.ok(start >= 0, "getListScroller must exist");
+  const helper = pageSource.slice(start, start + 450);
+  const canvasIdx = helper.indexOf('data-scroll-owner="canvas"');
+  const listIdx = helper.indexOf('data-scroll-owner="list"');
+  const mainIdx = helper.indexOf('querySelector("main")');
+  assert.ok(canvasIdx >= 0, "prefers canvas owner");
+  assert.ok(listIdx > canvasIdx, "list owner after canvas");
+  assert.ok(mainIdx > listIdx, "main is last fallback");
 });
 
 test("first viewport keeps explanation concise so people stay visible", () => {

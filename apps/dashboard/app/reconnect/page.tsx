@@ -43,10 +43,15 @@ type RefreshState =
   | { kind: "done"; summary: string; tone: "ok" | "warn" }
   | { kind: "error"; message: string };
 
-// AppShell scrolls <main> (overflow-y-auto); document scroll is locked.
+// Route scroll owner: mobile #921 scrolls Canvas (data-scroll-owner=canvas)
+// while shell <main> is overflow-hidden. Desktop still scrolls <main>.
 function getListScroller(): HTMLElement | null {
   if (typeof document === "undefined") return null;
-  return document.querySelector("main");
+  return (
+    document.querySelector<HTMLElement>('[data-scroll-owner="canvas"]') ??
+    document.querySelector<HTMLElement>('[data-scroll-owner="list"]') ??
+    document.querySelector("main")
+  );
 }
 
 function readScrollY(): number {
