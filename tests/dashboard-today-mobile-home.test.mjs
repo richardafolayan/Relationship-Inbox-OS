@@ -43,24 +43,21 @@ test("primary hero actions meet mobile touch-target guidance", () => {
   assert.match(block, /col-span-2 min-h-\[44px\] w-full/);
 });
 
-test("mobile secondary content sits below the reply workflow", () => {
-  assert.match(TODAY, /data-testid="today-mobile-secondary"/);
+test("setup slot is a single stable instance repositioned by CSS order", () => {
+  assert.match(TODAY, /data-testid="today-setup-slot"/);
   assert.match(TODAY, /data-testid="today-secondary-rail"/);
-  // Tour/setup lead on desktop only; mobile copies live under the workflow.
-  assert.match(TODAY, /today-desktop-setup[\s\S]*?renderTourInvite\(\)/);
-  assert.match(TODAY, /today-mobile-secondary[\s\S]*?renderTourInvite\(\)/);
+  // Visual position only: mobile after workflow (order-10), desktop leads (order-first).
+  assert.match(TODAY, /order-10 col-span-full md:order-first/);
+  assert.match(TODAY, /order-20[\s\S]*?today-secondary-rail|today-secondary-rail[\s\S]*?order-20/);
 });
 
-test("stateful tour invite and voice setup mount only once (media-query branch)", () => {
-  // CSS dual-slot (hidden md:block + md:hidden) would keep two UserVoiceProfile
-  // instances mounted. Layout must branch on a media query / isMdUp so only one
-  // of the desktop or mobile slots is in the React tree at a time.
-  assert.match(TODAY, /useMdUp|isMdUp/);
-  assert.match(TODAY, /min-width:\s*768px/);
-  assert.match(TODAY, /isMdUp\s*\?/);
-  assert.match(TODAY, /!isMdUp\s*\?/);
+test("stateful tour invite and voice setup mount only once (stable, no breakpoint remount)", () => {
+  // No media-query branch that unmounts/remounts UserVoiceProfile across 768px
+  // (rotation and SSR→client hydration would lose partial voice draft).
+  assert.doesNotMatch(TODAY, /\buseMdUp\b|\bisMdUp\b/);
+  assert.doesNotMatch(TODAY, /min-width:\s*768px/);
 
-  // Each stateful surface is invoked at most once per branch, never both CSS slots.
+  // Not the old CSS dual-slot pattern (two trees both mounted, one hidden).
   assert.doesNotMatch(
     TODAY,
     /className="hidden md:block"[\s\S]{0,120}renderTourInvite\(\)[\s\S]{0,80}renderVoiceSetup\(\)/
@@ -70,7 +67,7 @@ test("stateful tour invite and voice setup mount only once (media-query branch)"
     /className="md:hidden"[\s\S]{0,80}renderTourInvite\(\)[\s\S]{0,80}renderVoiceSetup\(\)/
   );
 
-  // UserVoiceProfile appears only inside renderVoiceSetup (single component site).
+  // Exactly one UserVoiceProfile JSX site and one call site for each setup helper.
   const voiceMounts = [...TODAY.matchAll(/<UserVoiceProfile\b/g)];
   assert.equal(
     voiceMounts.length,
@@ -78,21 +75,32 @@ test("stateful tour invite and voice setup mount only once (media-query branch)"
     "exactly one <UserVoiceProfile> JSX site (renderVoiceSetup)"
   );
 
-  // renderTourInvite / renderVoiceSetup are each defined once and called from
-  // mutually exclusive isMdUp branches (two call sites total, one active).
   const tourCalls = [...TODAY.matchAll(/renderTourInvite\(\)/g)];
   const voiceCalls = [...TODAY.matchAll(/renderVoiceSetup\(\)/g)];
-  // Definition is `const renderTourInvite = () =>` - calls are the bare form.
-  const tourInvocations = tourCalls.filter((m) => {
-    const idx = m.index ?? 0;
-    const before = TODAY.slice(Math.max(0, idx - 30), idx);
-    return !/const\s+$/.test(before) && !/=\s*$/.test(before.trimEnd());
-  });
-  // Simpler: count call sites next to the branch wrappers.
-  assert.match(TODAY, /isMdUp \? \([\s\S]*?renderTourInvite\(\)[\s\S]*?renderVoiceSetup\(\)/);
-  assert.match(TODAY, /!isMdUp \? \([\s\S]*?renderTourInvite\(\)[\s\S]*?renderVoiceSetup\(\)/);
-  assert.ok(tourCalls.length >= 2);
-  assert.ok(voiceCalls.length >= 2);
+  // Definition is `const renderTourInvite = () =>` - only one invocation in JSX.
+  assert.equal(tourCalls.length, 1, "renderTourInvite called once");
+  assert.equal(voiceCalls.length, 1, "renderVoiceSetup called once");
+
+  // Single setup slot owns both surfaces (stable React identity across breakpoint).
+  assert.match(
+    TODAY,
+    /data-testid="today-setup-slot"[\s\S]{0,200}renderTourInvite\(\)[\s\S]{0,80}renderVoiceSetup\(\)/
+  );
+});
+
+test("partial voice setup draft is not tied to a breakpoint remount branch", () => {
+  // Contract: draft state lives inside one UserVoiceProfile instance; Today
+  // must not re-key or dual-branch that instance when the viewport crosses md.
+  assert.doesNotMatch(TODAY, /key=\{[^}]*isMdUp/);
+  assert.doesNotMatch(TODAY, /key=\{[^}]*mdUp/);
+  assert.match(TODAY, /variant="onboarding"/);
+  // Slot position is CSS-only (order), not a ternary that swaps trees.
+  const setupSlot = TODAY.match(
+    /data-testid="today-setup-slot"[\s\S]{0,400}<\/div>/
+  );
+  assert.ok(setupSlot, "setup slot present");
+  assert.doesNotMatch(setupSlot[0], /\?\s*\(/);
+  assert.doesNotMatch(setupSlot[0], /isMdUp|useMdUp|matchMedia/);
 });
 
 test("desktop Then these + full Tonight progress remain intact", () => {
