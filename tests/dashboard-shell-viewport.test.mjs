@@ -113,7 +113,13 @@ test("installAppVisualViewport publishes --app-vv-height and cleans up", () => {
     }
   };
   const body = {};
-  const listeners = { resize: [], scroll: [], winResize: [] };
+  const listeners = {
+    resize: [],
+    scroll: [],
+    winResize: [],
+    uiScale: [],
+    storage: []
+  };
   const vv = {
     height: 640,
     addEventListener(type, fn) {
@@ -126,21 +132,31 @@ test("installAppVisualViewport publishes --app-vv-height and cleans up", () => {
       if (idx >= 0) list.splice(idx, 1);
     }
   };
+  let zoom = "1.25";
   const win = {
     innerHeight: 800,
     document: { documentElement: root, body },
     visualViewport: vv,
     getComputedStyle() {
-      return { zoom: "1.25" };
+      return { zoom };
     },
     addEventListener(type, fn) {
       if (type === "resize") listeners.winResize.push(fn);
+      else if (type === "inbox-ui-scale") listeners.uiScale.push(fn);
+      else if (type === "storage") listeners.storage.push(fn);
     },
     removeEventListener(type, fn) {
-      if (type === "resize") {
-        const idx = listeners.winResize.indexOf(fn);
-        if (idx >= 0) listeners.winResize.splice(idx, 1);
-      }
+      const bucket =
+        type === "resize"
+          ? listeners.winResize
+          : type === "inbox-ui-scale"
+            ? listeners.uiScale
+            : type === "storage"
+              ? listeners.storage
+              : null;
+      if (!bucket) return;
+      const idx = bucket.indexOf(fn);
+      if (idx >= 0) bucket.splice(idx, 1);
     }
   };
 
@@ -155,14 +171,28 @@ test("installAppVisualViewport publishes --app-vv-height and cleans up", () => {
   assert.equal(listeners.resize.length, 1);
   assert.equal(listeners.scroll.length, 1);
   assert.equal(listeners.winResize.length, 1);
+  assert.equal(listeners.uiScale.length, 1);
+  assert.equal(listeners.storage.length, 1);
 
   vv.height = 400;
   publish();
   assert.equal(props.get(APP_VV_HEIGHT_VAR), `${400 / 1.25}px`);
+
+  // UI scale / Text Size changes body zoom without a window resize.
+  // The publisher must re-read zoom and re-publish on inbox-ui-scale.
+  zoom = "1.16";
+  for (const fn of listeners.uiScale) fn();
+  assert.equal(
+    props.get(APP_VV_HEIGHT_VAR),
+    `${400 / 1.16}px`,
+    "UI scale change must re-publish --app-vv-height with the new zoom"
+  );
 
   disconnect();
   assert.equal(props.has(APP_VV_HEIGHT_VAR), false);
   assert.equal(listeners.resize.length, 0);
   assert.equal(listeners.scroll.length, 0);
   assert.equal(listeners.winResize.length, 0);
+  assert.equal(listeners.uiScale.length, 0);
+  assert.equal(listeners.storage.length, 0);
 });
