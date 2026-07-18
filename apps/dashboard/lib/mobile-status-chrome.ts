@@ -17,8 +17,9 @@ export function resolveMobileStatusChrome(pathname: string | null | undefined): 
   if (pathname === "/today" || pathname.startsWith("/today/")) return "full";
   if (pathname === "/inbox" || pathname.startsWith("/inbox/")) return "compact";
 
-  // Secondary mobile screens listed in #914. Search is the command palette
-  // overlay (not a route), so it is not listed here.
+  // Secondary mobile screens listed in #914, plus the dedicated /search
+  // route from #903. Healthy idle state stays chrome-free; offline,
+  // degraded, or in-flight work still re-surfaces via shouldSurfaceHiddenStatus.
   if (
     pathname.startsWith("/thread/") ||
     pathname === "/archived" ||
@@ -26,7 +27,9 @@ export function resolveMobileStatusChrome(pathname: string | null | undefined): 
     pathname === "/reconnect" ||
     pathname.startsWith("/reconnect/") ||
     pathname === "/settings" ||
-    pathname.startsWith("/settings/")
+    pathname.startsWith("/settings/") ||
+    pathname === "/search" ||
+    pathname.startsWith("/search/")
   ) {
     return "hidden";
   }
