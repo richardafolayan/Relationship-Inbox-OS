@@ -46,6 +46,7 @@ jobs:
           P12_BASE64: ${{ secrets.RIOS_FREE_MACOS_P12_BASE64 }}
           CERT_BASE64: ${{ secrets.RIOS_FREE_MACOS_CERT_BASE64 }}
           P12_PASSWORD: ${{ secrets.RIOS_FREE_MACOS_P12_PASSWORD }}
+          SIGNING_IDENTITY: ${{ secrets.RIOS_FREE_MACOS_IDENTITY }}
         run: |
           KEYCHAIN="$RUNNER_TEMP/tovi-build.keychain-db"
           KEYCHAIN_PASSWORD="$(openssl rand -hex 24)"
@@ -54,10 +55,23 @@ jobs:
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
           security set-keychain-settings -lut 21600 "$KEYCHAIN"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
-          security import "$RUNNER_TEMP/tovi-signing.p12" -k "$KEYCHAIN" -P "$P12_PASSWORD" -T /usr/bin/codesign
+          security default-keychain -s "$KEYCHAIN"
+          # Keep login keychain on the search path; only listing the build keychain
+          # can break later steps and hide system identities.
+          security list-keychains -d user -s "$KEYCHAIN" login.keychain-db
+          security import "$RUNNER_TEMP/tovi-signing.p12" \
+            -k "$KEYCHAIN" \
+            -P "$P12_PASSWORD" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/security \
+            -T /usr/bin/productsign
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
-          security add-trusted-cert -r trustRoot -p codeSign -k "$KEYCHAIN" "$RUNNER_TEMP/tovi-signing.cer"
-          security list-keychains -d user -s "$KEYCHAIN"
+          # User-keychain trustRoot prompts on macOS runners and can hang forever.
+          # System keychain trust is non-interactive on GitHub-hosted runners.
+          sudo security add-trusted-cert -d -r trustRoot \
+            -k /Library/Keychains/System.keychain \
+            "$RUNNER_TEMP/tovi-signing.cer"
+          security find-identity -v -p codesigning | grep -F "$SIGNING_IDENTITY"
 
       - name: Install and verify
         run: |
