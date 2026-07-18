@@ -203,6 +203,54 @@ test("Search hidden chrome still re-surfaces offline, degraded, and in-flight", 
   );
 });
 
+test("Search forceSurface stays true; pilot-visible stacking lives with Search UI (#903)", () => {
+  // Helper contract: /search is hidden and forceSurface still fires for
+  // offline/degraded/in-flight. Dedicated Search is a full-viewport overlay
+  // above TopStatus, so the pilot-visible strip is the in-search attention
+  // banner owned by #903 (data-mobile-search-attention), not TopStatus alone.
+  assert.equal(resolveMobileStatusChrome("/search"), "hidden");
+  assert.equal(resolveMobileStatusChrome("/search/"), "hidden");
+  const forceOffline = shouldSurfaceHiddenStatus({
+    ready: true,
+    runnerOffline: true,
+    hasDegraded: false,
+    tickerKind: "idle"
+  });
+  const forceDegraded = shouldSurfaceHiddenStatus({
+    ready: true,
+    runnerOffline: false,
+    hasDegraded: true,
+    tickerKind: "idle"
+  });
+  const forceScanning = shouldSurfaceHiddenStatus({
+    ready: true,
+    runnerOffline: false,
+    hasDegraded: false,
+    tickerKind: "scanning"
+  });
+  assert.equal(forceOffline, true);
+  assert.equal(forceDegraded, true);
+  assert.equal(forceScanning, true);
+  assert.match(
+    shellSrc,
+    /resolveMobileStatusChrome/,
+    "shell still wires chrome resolution for forceSurface on all routes including /search"
+  );
+  assert.match(
+    topStatusSrc,
+    /shouldSurfaceHiddenStatus/,
+    "TopStatus still evaluates forceSurface; /search stacking fix is Search UI"
+  );
+  // Document the overlay z-order constraint in the chrome helper so future
+  // reviewers do not assume TopStatus alone is enough on /search.
+  const chromeHelperSrc = readFileSync(
+    join(__dirname, "..", "apps", "dashboard", "lib", "mobile-status-chrome.ts"),
+    "utf8"
+  );
+  assert.match(chromeHelperSrc, /in-search attention banner/);
+  assert.match(chromeHelperSrc, /z-90|z-\[90\]|overlay/);
+});
+
 test("app shell wires resolveMobileStatusChrome into TopStatus", () => {
   assert.match(shellSrc, /resolveMobileStatusChrome/);
   assert.match(shellSrc, /mobileChrome=\{mobileStatusChrome\}/);

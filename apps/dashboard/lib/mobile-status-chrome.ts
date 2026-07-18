@@ -20,6 +20,12 @@ export function resolveMobileStatusChrome(pathname: string | null | undefined): 
   // Secondary mobile screens listed in #914, plus the dedicated /search
   // route from #903. Healthy idle state stays chrome-free; offline,
   // degraded, or in-flight work still re-surfaces via shouldSurfaceHiddenStatus.
+  //
+  // /search note: dedicated Search paints a full-viewport overlay (z-90)
+  // above shell TopStatus (z-30). forceSurface still returns true here so
+  // the helper contract is correct, but the pilot-visible strip is owned
+  // by the Search UI in-search attention banner (#903), not TopStatus
+  // stacking. Do not rely on TopStatus alone for /search attention.
   if (
     pathname.startsWith("/thread/") ||
     pathname === "/archived" ||
