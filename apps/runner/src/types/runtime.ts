@@ -392,10 +392,6 @@ export interface AiService {
      */
     replyBrief?: ReplyBrief | null;
   }): Promise<SuggestedRepliesOutput>;
-  transformReply(input: {
-    mode: "SHORTEN" | "MAKE_WARMER";
-    text: string;
-  }): Promise<string>;
   formatDictationMessages(input: {
     transcript: string;
     contactName?: string | null;

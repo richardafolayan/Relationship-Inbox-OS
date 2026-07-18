@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { Moon } from "lucide-react";
+import { MessageSquareText, Moon } from "lucide-react";
 import { apiGet, apiPost } from "@/lib/api";
 import { formatUntil } from "@/lib/focus";
 import { openFocusReview, openFocusSetup, useFocusWindow } from "@/lib/use-focus-window";
@@ -27,6 +27,7 @@ import {
   shouldSurfaceHiddenStatus
 } from "@/lib/mobile-status-chrome";
 import { cn } from "@/lib/utils";
+import { openPilotFeedback } from "@/lib/pilot";
 
 // Single 44px status row. Mostly read-only in v1:
 //
@@ -649,8 +650,8 @@ export function TopStatus({
           href="/settings#platforms"
           className={cn(
             "inline-flex items-center gap-[6px] rounded-[6px] px-1 -mx-1 transition-colors duration-calm hover:bg-paper-2 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/35",
-            // Healthy connection is not the point of an attention re-entry.
-            attentionOnlyMobile && "hidden md:inline-flex"
+            // Healthy idle state can live in Settings on compact mobile.
+            (attentionOnlyMobile || compactMobile) && "hidden md:inline-flex"
           )}
           title={`${connected}/${total} platforms connected, open platform settings`}
         >
@@ -724,6 +725,18 @@ export function TopStatus({
         </span>
         <button
           type="button"
+          onClick={() => openPilotFeedback("feedback")}
+          title="Send feedback"
+          aria-label="Send feedback"
+          className={cn(
+            "inline-flex h-8 w-8 items-center justify-center rounded-full border border-hairline text-ink-2 transition-colors duration-calm hover:border-hairline-strong hover:bg-paper-2 hover:text-ink md:hidden",
+            attentionOnlyMobile && "hidden"
+          )}
+        >
+          <MessageSquareText className="h-[15px] w-[15px]" strokeWidth={1.7} />
+        </button>
+        <button
+          type="button"
           onClick={() => (focusActive ? openFocusReview() : openFocusSetup())}
           title={focusActive ? "Focus block active, review acknowledgements" : "Start a focus window"}
           className={cn(
@@ -774,8 +787,8 @@ export function TopStatus({
               title="Scan every connected platform now to check for new replies."
               className={cn(
                 "font-mono text-[11px] text-ink-2 underline-offset-2 hover:text-ink hover:underline disabled:opacity-50",
-                // Scan stays on Today + Inbox mobile; Settings also has scan.
-                attentionOnlyMobile && "hidden md:inline"
+                // Compact mobile keeps the global strip focused on attention.
+                (attentionOnlyMobile || compactMobile) && "hidden md:inline"
               )}
             >
               {scanTriggering ? "scanning…" : "Scan now"}

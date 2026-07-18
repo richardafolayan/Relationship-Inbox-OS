@@ -9,6 +9,7 @@ import { v4 as uuid } from "uuid";
 import {
   Archive,
   ArchiveRestore,
+  AudioLines,
   BarChart3,
   Bold,
   Check,
@@ -96,7 +97,12 @@ const ProfileDrawer = dynamic(
 import { DegradedBanner } from "@/components/common/degraded-banner";
 import { FocusThreadStrip } from "@/components/common/focus/focus-thread-strip";
 import { autocorrectAtCaret } from "@/lib/autocorrect";
-import { blobToWhisperWav } from "@/lib/dictation-audio";
+import {
+  prepareDictationAudio,
+  preferredDictationMimeType,
+  type DictationUploadMode,
+  type PreparedDictationAudio
+} from "@/lib/dictation-recording";
 import {
   classifyDictationResponse,
   DICTATION_LOST_CONNECTION_MESSAGE,
@@ -119,6 +125,7 @@ import {
 import { nextSendReconcileDelayMs } from "@/lib/send-reconcile";
 import { classifyConsumerFailure } from "@/lib/consumer-failure";
 import { resolveSendRecovery, type SendStatusResponse } from "@/lib/send-delivery";
+import { openPilotFeedback } from "@/lib/pilot";
 
 // Thread workspace - landscape layout.
 //
@@ -142,8 +149,6 @@ import { resolveSendRecovery, type SendStatusResponse } from "@/lib/send-deliver
 //   • Optimistic-UI bubbles with retry on failure.
 //   • [system event] markers collapse into a centred mono caption.
 //   • Compose-in-voice (intent → AI draft) lives in the right rail.
-//   • Shorten / Make warmer transforms stay inside the composer toolbar
-//     (they need direct access to the current draft).
 
 const FALLBACK_SUGGESTIONS: Array<{ intent: string; glyph: string; build: (firstName: string) => string }> = [
   { intent: "Warm yes", glyph: "↵", build: (n) => `Hey ${n}, yes - let's do it.` },
@@ -601,12 +606,9 @@ export default function ThreadPage() {
   const [reassessing, setReassessing] = useState(false);
   const [archiving, setArchiving] = useState(false);
   const [unarchiving, setUnarchiving] = useState(false);
-  const [transforming, setTransforming] = useState<"SHORTEN" | "MAKE_WARMER" | null>(null);
-  // Mirrors the live route thread id so an in-flight transform that resolves
-  // AFTER the operator navigates to another thread can detect the switch and
-  // refuse to write A's text into B's composer. Synced in the threadId reset
-  // effect (the one place that fires on navigation, before B loads).
-  const transformRouteIdRef = useRef<string>(threadId);
+  // Mirrors the live route thread id so async thread-scoped work cannot write
+  // results into a different conversation after navigation.
+  const routeThreadIdRef = useRef<string>(threadId);
   // Threads on which the operator has explicitly dismissed the AI predraft
   // (Discard / Delete draft). applyThread must not re-inject a predraft the
   // operator just cleared; keyed by route thread id, cleared on navigation.
@@ -688,6 +690,7 @@ export default function ThreadPage() {
   const [recording, setRecording] = useState(false);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const recordedChunksRef = useRef<BlobPart[]>([]);
+  const voiceNoteCaptureInputRef = useRef<HTMLInputElement | null>(null);
   // Held so the mic stream can be released on unmount even if onstop never
   // runs (e.g. navigating away mid-record).
   const recordingStreamRef = useRef<MediaStream | null>(null);
@@ -699,9 +702,11 @@ export default function ThreadPage() {
   // attachment; this one transcribes speech into editable text).
   const [dictationStatus, setDictationStatus] = useState<"idle" | "recording" | "transcribing">("idle");
   const [dictationAvailable, setDictationAvailable] = useState(false);
+  const [dictationUploadMode, setDictationUploadMode] = useState<DictationUploadMode>("wav");
   const [dictationTranscript, setDictationTranscript] = useState<string | null>(null);
   const dictationRecorderRef = useRef<MediaRecorder | null>(null);
   const dictationChunksRef = useRef<BlobPart[]>([]);
+  const dictationCaptureInputRef = useRef<HTMLInputElement | null>(null);
   // Held so the mic stream can be released on unmount even if onstop never
   // runs (e.g. navigating away mid-dictation).
   const dictationStreamRef = useRef<MediaStream | null>(null);
@@ -712,7 +717,7 @@ export default function ThreadPage() {
   // never persisted server-side — this lives only in this page's memory and
   // is dropped on success, on a fresh recording, or on dismiss. The message
   // (non-null) drives the inline retry banner above the composer.
-  const failedDictationWavRef = useRef<Blob | null>(null);
+  const failedDictationAudioRef = useRef<PreparedDictationAudio | null>(null);
   const [dictationRetry, setDictationRetry] = useState<string | null>(null);
   // Source of the current composer text: empty / explicit draft typed
   // by the operator / AI predraft (first suggested reply auto-filled
@@ -1274,13 +1279,13 @@ export default function ThreadPage() {
       // stays empty so they write it themselves.
       const aiPredraft = fresh.suggestedReplies?.replies?.[0]?.text?.trim();
       // Don't re-inject a predraft the operator explicitly dismissed on this
-      // thread (Discard / Delete draft). transformRouteIdRef.current is the
+      // thread (Discard / Delete draft). routeThreadIdRef.current is the
       // live route thread id (this callback is []-memoised so `threadId` would
       // be stale here).
       if (
         aiPredraft &&
         profileRef.current?.aiHelpLevel === "full_drafts" &&
-        !predraftDismissedRef.current.has(transformRouteIdRef.current)
+        !predraftDismissedRef.current.has(routeThreadIdRef.current)
       ) {
         setComposerSource("predraft");
         return aiPredraft;
@@ -1403,10 +1408,9 @@ export default function ThreadPage() {
   // would carry into B — risking A's draft being sent to B. Keyed on the
   // route param so it clears the instant navigation starts, before B loads.
   useEffect(() => {
-    // Point the guard ref at the thread we're now on. An in-flight transform
-    // started on the previous thread will see this changed value once it
-    // resolves and skip its setComposer.
-    transformRouteIdRef.current = threadId;
+    // Point the guard ref at the thread we're now on. In-flight thread work
+    // from the previous route will see this changed value and skip its write.
+    routeThreadIdRef.current = threadId;
     // A freshly-opened thread starts with its predraft un-dismissed.
     predraftDismissedRef.current.delete(threadId);
     setComposer("");
@@ -1416,9 +1420,6 @@ export default function ThreadPage() {
     setComposeDraft("");
     setComposeError(null);
     setAskAnswer(null);
-    // Clear the in-flight transform flag so the new thread's shorten/warmer
-    // buttons aren't stranded disabled by the previous thread's pending call.
-    setTransforming(null);
     setSnoozeSuggestions(null);
     setSnoozeMenuOpen(false);
     // The suggested-replies safety-timeout flag is thread-local: it means
@@ -2061,6 +2062,10 @@ export default function ThreadPage() {
 
   const startRecording = useCallback(async () => {
     if (recording) return;
+    if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
+      voiceNoteCaptureInputRef.current?.click();
+      return;
+    }
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       // Prefer mp4/aac if supported (Safari + iMessage friendly); fall back
@@ -2101,9 +2106,14 @@ export default function ThreadPage() {
   // control renders enabled vs. disabled-with-explanation.
   useEffect(() => {
     let cancelled = false;
-    apiGet<{ dictationAvailable: boolean }>("/runner/data/transcription-capabilities")
+    apiGet<{ dictationAvailable: boolean; dictationUploadMode?: DictationUploadMode }>(
+      "/runner/data/transcription-capabilities"
+    )
       .then((d) => {
-        if (!cancelled) setDictationAvailable(Boolean(d?.dictationAvailable));
+        if (!cancelled) {
+          setDictationAvailable(Boolean(d?.dictationAvailable));
+          setDictationUploadMode(d?.dictationUploadMode === "native-audio" ? "native-audio" : "wav");
+        }
       })
       .catch(() => {
         /* leave disabled — the button explains why on hover */
@@ -2113,18 +2123,18 @@ export default function ThreadPage() {
     };
   }, []);
 
-  // #462 follow-up: POST a prepared 16 kHz WAV to the runner and fold the
+  // #462 follow-up: POST prepared audio to the runner and fold the
   // returned transcript into the composer. Extracted so the initial
   // dictation and the inline "Try again" both submit through one path.
   // Nothing is persisted server-side; on a *transient* failure we keep the
-  // WAV in memory (failedDictationWavRef) and show a retry banner so the
+  // audio in memory and show a retry banner so the
   // operator never loses a recording to a dropped connection.
-  const submitDictationWav = useCallback(async (wav: Blob) => {
+  const submitDictationAudio = useCallback(async (audio: PreparedDictationAudio) => {
     setDictationRetry(null);
     setDictationStatus("transcribing");
     try {
       const form = new FormData();
-      form.append("audio", wav, "dictation.wav");
+      form.append("audio", audio.blob, audio.filename);
       let resp: Response;
       try {
         resp = await fetch("/runner/control/transcribe-dictation", {
@@ -2134,7 +2144,7 @@ export default function ThreadPage() {
       } catch {
         // The request never completed — network / dev-proxy drop. The clip
         // is fine; keep it for a one-tap retry rather than losing the audio.
-        failedDictationWavRef.current = wav;
+        failedDictationAudioRef.current = audio;
         setDictationRetry(DICTATION_LOST_CONNECTION_MESSAGE);
         return;
       }
@@ -2146,29 +2156,29 @@ export default function ThreadPage() {
       });
       switch (outcome.kind) {
         case "text": {
-          failedDictationWavRef.current = null;
+          failedDictationAudioRef.current = null;
           setDictationTranscript(outcome.text);
           break;
         }
         case "empty":
-          failedDictationWavRef.current = null;
+          failedDictationAudioRef.current = null;
           setError("Didn't catch any speech. Try again.");
           break;
         case "retry":
           // Transport / server hiccup — keep the clip and offer a retry.
-          failedDictationWavRef.current = wav;
+          failedDictationAudioRef.current = audio;
           setDictationRetry(outcome.message);
           break;
         case "error":
           // A specific reason that a retry of the same audio won't fix.
-          failedDictationWavRef.current = null;
+          failedDictationAudioRef.current = null;
           setError(outcome.message);
           break;
       }
     } catch (err) {
       // Defensive: anything unexpected after a completed request. Keep the
       // clip so the operator can still retry without re-recording.
-      failedDictationWavRef.current = wav;
+      failedDictationAudioRef.current = audio;
       setDictationRetry(
         err instanceof Error && err.message
           ? `${err.message}. Your recording is still here, try again.`
@@ -2179,22 +2189,41 @@ export default function ThreadPage() {
     }
   }, []);
 
-  // #462: record a short clip, prepare it as 16 kHz mono WAV, and hand it to
-  // submitDictationWav. No autosend; nothing is persisted server-side.
+  const prepareAndSubmitDictation = useCallback(async (blob: Blob, originalName?: string) => {
+    setDictationStatus("transcribing");
+    try {
+      const prepared = await prepareDictationAudio({
+        blob,
+        uploadMode: dictationUploadMode,
+        originalName
+      });
+      await submitDictationAudio(prepared);
+    } catch {
+      setError("Could not prepare the recording for transcription.");
+      setDictationStatus("idle");
+    }
+  }, [dictationUploadMode, submitDictationAudio]);
+
+  // #462: record a short clip and hand it to the runner. No autosend;
+  // nothing is persisted server-side.
   const startDictation = useCallback(async () => {
     if (dictationStatus !== "idle") return;
     // A fresh recording supersedes any earlier failed clip + retry banner.
-    failedDictationWavRef.current = null;
+    failedDictationAudioRef.current = null;
     setDictationRetry(null);
+    if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
+      dictationCaptureInputRef.current?.click();
+      return;
+    }
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      // webm/opus is the broadly-supported recording format (incl. Firefox);
-      // fall back to mp4/aac on Safari. The runner transcodes either way.
-      const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
-        ? "audio/webm;codecs=opus"
-        : MediaRecorder.isTypeSupported("audio/mp4")
-          ? "audio/mp4"
-          : "";
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          autoGainControl: true,
+          echoCancellation: true,
+          noiseSuppression: true
+        }
+      });
+      const mimeType = preferredDictationMimeType((candidate) => MediaRecorder.isTypeSupported(candidate));
       const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
       dictationChunksRef.current = [];
       recorder.ondataavailable = (e) => {
@@ -2205,25 +2234,13 @@ export default function ThreadPage() {
         dictationStreamRef.current = null;
         const raw = new Blob(dictationChunksRef.current, { type: recorder.mimeType });
         if (raw.size === 0) {
+          setError("The microphone did not capture any audio. Try again.");
           setDictationStatus("idle");
           return;
         }
-        setDictationStatus("transcribing");
-        // Convert the recording to 16 kHz mono WAV in the browser. The
-        // runner's local-whisper provider normalises audio with macOS
-        // afconvert, which can't read the webm/opus MediaRecorder emits
-        // (and ffmpeg isn't installed); WAV is afconvert-friendly. #462.
-        let wav: Blob;
-        try {
-          wav = await blobToWhisperWav(raw);
-        } catch {
-          setError("Could not prepare the recording for transcription.");
-          setDictationStatus("idle");
-          return;
-        }
-        await submitDictationWav(wav);
+        await prepareAndSubmitDictation(raw);
       };
-      recorder.start();
+      recorder.start(250);
       dictationRecorderRef.current = recorder;
       dictationStreamRef.current = stream;
       setDictationStatus("recording");
@@ -2231,7 +2248,16 @@ export default function ThreadPage() {
       setError(err instanceof Error ? err.message : "Microphone access denied");
       setDictationStatus("idle");
     }
-  }, [dictationStatus, submitDictationWav]);
+  }, [dictationStatus, prepareAndSubmitDictation]);
+
+  const captureDictationFile = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file || dictationStatus !== "idle") return;
+    failedDictationAudioRef.current = null;
+    setDictationRetry(null);
+    void prepareAndSubmitDictation(file, file.name);
+  }, [dictationStatus, prepareAndSubmitDictation]);
 
   const stopDictation = useCallback(() => {
     if (dictationStatus !== "recording" || !dictationRecorderRef.current) return;
@@ -2241,13 +2267,13 @@ export default function ThreadPage() {
 
   // #462 follow-up: re-submit the last failed clip without re-recording.
   const retryDictation = useCallback(() => {
-    const wav = failedDictationWavRef.current;
-    if (!wav || dictationStatus !== "idle") return;
-    void submitDictationWav(wav);
-  }, [dictationStatus, submitDictationWav]);
+    const audio = failedDictationAudioRef.current;
+    if (!audio || dictationStatus !== "idle") return;
+    void submitDictationAudio(audio);
+  }, [dictationStatus, submitDictationAudio]);
 
   const dismissDictationRetry = useCallback(() => {
-    failedDictationWavRef.current = null;
+    failedDictationAudioRef.current = null;
     setDictationRetry(null);
   }, []);
 
@@ -2598,11 +2624,6 @@ export default function ThreadPage() {
     }
   };
 
-  // `transform` and `composeFromIntent` are defined further down with
-  // loading-state tracking for the redesign's button labels - the older
-  // duplicate from #62 was dropped here on the post-merge sweep. The
-  // `toggleOpenLoop` helper still lives here because it's used by the
-  // right-rail open-loops checkboxes.
   const toggleOpenLoop = async (loop: string, dismissed: boolean) => {
     if (!thread) return;
     // Optimistic local update so the checkbox flips immediately. The
@@ -2667,38 +2688,8 @@ export default function ThreadPage() {
       });
   };
 
-  const transform = async (mode: "SHORTEN" | "MAKE_WARMER") => {
-    if (!thread || !composer.trim() || transforming) return;
-    // Snapshot the route thread id BEFORE the await. The page does not remount
-    // across /thread/A -> /thread/B, so a transform fired on A can resolve
-    // after navigation; without this guard its setComposer would overwrite B's
-    // composer with A's text -> wrong-recipient send.
-    const startThreadId = threadId;
-    setTransforming(mode);
-    setError(null);
-    try {
-      const output = await apiPost<{ text: string }>(`/runner/control/thread/${thread.id}/transform`, {
-        mode,
-        text: composer
-      });
-      if (!shouldApplyThreadScopedResult(startThreadId, transformRouteIdRef.current)) return;
-      setComposer(output.text);
-    } catch (transformError) {
-      if (!shouldApplyThreadScopedResult(startThreadId, transformRouteIdRef.current)) return;
-      const message = transformError instanceof Error ? transformError.message : "Transform failed";
-      setError(message);
-    } finally {
-      // Only clear if we're still on the thread that started this transform.
-      // After a switch the reset effect already cleared the flag for the new
-      // thread; clearing here would clobber a transform B may have started.
-      if (shouldApplyThreadScopedResult(startThreadId, transformRouteIdRef.current)) {
-        setTransforming(null);
-      }
-    }
-  };
-
-  // #408. Apply an operator reaction to a single LinkedIn message. Mirrors
-  // the transform / reassess handlers: a single in-flight id drives the
+  // #408. Apply an operator reaction to a single LinkedIn message. A single
+  // in-flight id drives the
   // pending state, the catch surfaces a calm per-message inline error, and
   // the finally clears the in-flight flag. The reaction is rendered
   // optimistically (OUT direction) the instant it is sent, then confirmed
@@ -2852,7 +2843,7 @@ export default function ThreadPage() {
       // Multi-second LLM call; the page does not remount across /thread/A ->
       // /thread/B, so bail if the operator navigated away rather than writing
       // A's draft into B's drawer (a wrong-recipient hazard).
-      if (!shouldApplyThreadScopedResult(startThreadId, transformRouteIdRef.current)) return;
+      if (!shouldApplyThreadScopedResult(startThreadId, routeThreadIdRef.current)) return;
       setComposeDraft(output.text);
     } catch (composeErr) {
       const message = composeErr instanceof Error ? composeErr.message : "Compose failed";
@@ -2875,7 +2866,7 @@ export default function ThreadPage() {
         `/runner/control/person/${thread.personId}/ask`,
         { question }
       );
-      if (!shouldApplyThreadScopedResult(startThreadId, transformRouteIdRef.current)) return;
+      if (!shouldApplyThreadScopedResult(startThreadId, routeThreadIdRef.current)) return;
       setAskAnswer(output.answer ?? "");
     } catch (askErr) {
       const message = askErr instanceof Error ? askErr.message : "Ask failed";
@@ -3435,7 +3426,7 @@ export default function ThreadPage() {
       .catch(() => {
         // favOverride is thread-local; don't revert it onto a different thread
         // if the operator navigated away before this request failed.
-        if (shouldApplyThreadScopedResult(startThreadId, transformRouteIdRef.current)) {
+        if (shouldApplyThreadScopedResult(startThreadId, routeThreadIdRef.current)) {
           setFavOverride(!next);
         }
       });
@@ -3512,13 +3503,12 @@ export default function ThreadPage() {
   // It NEVER hides the summary, "what they want", open loops, or memory —
   // those are the core support and stay on at every level.
   //   - full_drafts:     suggested replies + Compose-a-full-draft + rewrites
-  //   - writing_support: rewrites ("shorten" / "warmer") on the operator's
-  //                      own draft, but no complete AI-written drafts
+  //   - writing_support: rewrite-in-my-voice for the operator's own draft,
+  //                      but no complete AI-written drafts
   //   - memory_only:     no AI writing help at all (Ask is still allowed —
   //                      it answers from the thread, it doesn't draft)
   const aiHelpLevel = profile?.aiHelpLevel ?? "writing_support";
   const showFullDrafts = aiHelpLevel === "full_drafts";
-  const showWritingSupport = aiHelpLevel !== "memory_only";
   // When full drafts are off, the compose drawer offers "Ask" only.
   const effectiveComposeMode = showFullDrafts ? composeMode : "ask";
 
@@ -3697,6 +3687,14 @@ export default function ThreadPage() {
     label: "Receipts",
     onSelect: () => setReceiptsOpen(true)
   };
+  const feedbackOverflowAction = {
+    label: "Send feedback",
+    onSelect: () => openPilotFeedback("feedback")
+  };
+  const bugOverflowAction = {
+    label: "Report a bug",
+    onSelect: () => openPilotFeedback("bug")
+  };
 
   // Phone sheet groups (#901): Primary / Conversation tools / External.
   const overflowSheetGroups: ActionSheetGroup[] = [
@@ -3719,6 +3717,11 @@ export default function ThreadPage() {
       id: "external",
       label: "External",
       items: [openInPlatformAction, receiptsOverflowAction]
+    },
+    {
+      id: "pilot",
+      label: "Pilot",
+      items: [feedbackOverflowAction, bugOverflowAction]
     }
   ];
 
@@ -5427,11 +5430,12 @@ export default function ThreadPage() {
                         type="button"
                         onClick={() => setMemoryOpen((prev) => !prev)}
                         aria-expanded={memoryOpen}
-                        title={`Memory · ${thread.relationshipMemory.otherThreadCount} prior conversation${thread.relationshipMemory.otherThreadCount === 1 ? "" : "s"}`}
-                        className="relative grid h-[30px] w-[30px] place-items-center rounded-full border border-hairline bg-paper text-ink-2 transition-colors duration-calm hover:border-hairline-strong hover:bg-paper-2 hover:text-ink"
+                        title={`Past context, ${thread.relationshipMemory.otherThreadCount} prior conversation${thread.relationshipMemory.otherThreadCount === 1 ? "" : "s"}`}
+                        className="relative inline-flex min-h-10 items-center gap-2 rounded-pill border border-hairline bg-paper px-3 text-[12px] text-ink-2 transition-colors duration-calm hover:border-hairline-strong hover:bg-paper-2 hover:text-ink"
                       >
                         <Sparkles className="h-[13px] w-[13px]" strokeWidth={1.6} />
-                        <span className="absolute -right-[2px] -top-[2px] grid h-[14px] min-w-[14px] place-items-center rounded-full bg-ink px-[3px] font-mono text-[9px] font-medium text-paper">
+                        Past context
+                        <span className="grid h-[17px] min-w-[17px] place-items-center rounded-full bg-ink px-1 font-mono text-[9px] font-medium text-paper">
                           {thread.relationshipMemory.otherThreadCount}
                         </span>
                       </button>
@@ -5532,26 +5536,6 @@ export default function ThreadPage() {
                       ) : null}
                     </div>
                   ) : null}
-                  {showWritingSupport ? (
-                    <>
-                      <button
-                        type="button"
-                        disabled={!composer.trim() || transforming !== null}
-                        onClick={() => void transform("SHORTEN")}
-                        className="font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3 hover:text-ink disabled:opacity-40"
-                      >
-                        {transforming === "SHORTEN" ? "shortening…" : "shorten"}
-                      </button>
-                      <button
-                        type="button"
-                        disabled={!composer.trim() || transforming !== null}
-                        onClick={() => void transform("MAKE_WARMER")}
-                        className="font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3 hover:text-ink disabled:opacity-40"
-                      >
-                        {transforming === "MAKE_WARMER" ? "warming…" : "warmer"}
-                      </button>
-                    </>
-                  ) : null}
                   <div className="relative" ref={scheduleMenuMobileRef}>
                     <button
                       type="button"
@@ -5559,9 +5543,10 @@ export default function ThreadPage() {
                       disabled={!composer.trim() || sending || scheduling}
                       title="Schedule send"
                       aria-label="Schedule send"
-                      className="inline-flex h-[30px] w-[30px] items-center justify-center rounded-full border border-hairline text-ink-2 transition-colors duration-calm hover:border-hairline-strong hover:bg-paper-2 hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
+                      className="inline-flex min-h-10 items-center gap-2 rounded-pill border border-hairline bg-paper px-3 text-[12px] text-ink-2 transition-colors duration-calm hover:border-hairline-strong hover:bg-paper-2 hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
                     >
                       <Clock className="h-[13px] w-[13px]" strokeWidth={1.8} />
+                      Schedule
                     </button>
                     {scheduleMenuOpen ? (
                       <div className="absolute bottom-[calc(100%+8px)] right-0 z-20 w-[min(300px,calc(100vw-32px))] overflow-hidden rounded-row border border-hairline bg-paper p-[6px] shadow-pop">
@@ -5621,7 +5606,7 @@ export default function ThreadPage() {
                       <button
                         type="button"
                         onClick={() => document.getElementById("composer-file-input")?.click()}
-                        className="grid h-[30px] w-[30px] place-items-center rounded-full border border-hairline bg-paper text-ink-2 hover:text-ink"
+                        className="inline-flex min-h-10 items-center gap-2 rounded-pill border border-hairline bg-paper px-3 text-[12px] text-ink-2 hover:border-hairline-strong hover:text-ink"
                         title={
                           thread.platform === "WHATSAPP"
                             ? "Attach photos, GIFs, videos or files"
@@ -5629,12 +5614,13 @@ export default function ThreadPage() {
                         }
                         aria-label="Attach files"
                       >
-                        <Paperclip className="h-[13px] w-[13px]" strokeWidth={1.8} />
+                        <Paperclip className="h-[14px] w-[14px]" strokeWidth={1.8} />
+                        Attach
                       </button>
                       <button
                         type="button"
                         onClick={() => (recording ? stopRecording() : void startRecording())}
-                        className={`grid h-[30px] w-[30px] place-items-center rounded-full border ${
+                        className={`inline-flex min-h-10 items-center gap-2 rounded-pill border px-3 text-[12px] ${
                           recording
                             ? "border-risk-overdue bg-risk-overdue/10 text-risk-overdue animate-pulse"
                             : "border-hairline bg-paper text-ink-2 hover:text-ink"
@@ -5642,7 +5628,8 @@ export default function ThreadPage() {
                         title={recording ? "Stop recording" : "Record voice note"}
                         aria-label={recording ? "Stop recording" : "Record voice note"}
                       >
-                        <Mic className="h-[13px] w-[13px]" strokeWidth={1.8} />
+                        <AudioLines className="h-[14px] w-[14px]" strokeWidth={1.8} />
+                        {recording ? "Stop voice note" : "Voice note"}
                       </button>
                     </>
                   ) : null}
@@ -5761,26 +5748,6 @@ export default function ThreadPage() {
                   </div>
                 ) : null}
                 <div className="flex w-full flex-wrap items-center justify-end gap-2 sm:w-auto sm:flex-1">
-                  {showWritingSupport ? (
-                    <>
-                      <button
-                        type="button"
-                        disabled={!composer.trim() || transforming !== null}
-                        onClick={() => void transform("SHORTEN")}
-                        className="font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3 hover:text-ink disabled:opacity-40"
-                      >
-                        {transforming === "SHORTEN" ? "shortening…" : "shorten"}
-                      </button>
-                      <button
-                        type="button"
-                        disabled={!composer.trim() || transforming !== null}
-                        onClick={() => void transform("MAKE_WARMER")}
-                        className="font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3 hover:text-ink disabled:opacity-40"
-                      >
-                        {transforming === "MAKE_WARMER" ? "warming…" : "warmer"}
-                      </button>
-                    </>
-                  ) : null}
                   <button
                     type="button"
                     onClick={() =>
@@ -5975,7 +5942,7 @@ export default function ThreadPage() {
                   }
                   aria-label="Dictate"
                   className={cn(
-                    "grid h-[34px] w-[34px] shrink-0 place-items-center rounded-full border transition-colors duration-calm disabled:cursor-not-allowed disabled:opacity-50",
+                    "inline-flex h-[34px] shrink-0 items-center gap-1.5 rounded-pill border px-3 text-[12px] transition-colors duration-calm disabled:cursor-not-allowed disabled:opacity-50",
                     dictationStatus === "recording"
                       ? "border-risk-overdue bg-risk-overdue/10 text-risk-overdue"
                       : "border-hairline bg-paper text-ink-2 hover:border-hairline-strong hover:bg-paper-2 hover:text-ink"
@@ -5985,10 +5952,17 @@ export default function ThreadPage() {
                     <Loader2 className="h-[15px] w-[15px] animate-spin" strokeWidth={1.8} />
                   ) : (
                     <Mic
-                      className={`h-[15px] w-[15px] ${dictationStatus === "recording" ? "animate-pulse" : ""}`}
+                      className={`h-[14px] w-[14px] ${dictationStatus === "recording" ? "animate-pulse" : ""}`}
                       strokeWidth={1.8}
                     />
                   )}
+                  <span>
+                    {dictationStatus === "recording"
+                      ? "Stop"
+                      : dictationStatus === "transcribing"
+                        ? "Working"
+                        : "Dictate"}
+                  </span>
                 </button>
                 <div className="min-w-0 flex-1" />
                 <Button
@@ -6456,6 +6430,31 @@ export default function ThreadPage() {
           onClose={() => setProfileDrawerOpen(false)}
         />
       ) : null}
+
+      <input
+        ref={voiceNoteCaptureInputRef}
+        type="file"
+        accept="audio/*"
+        capture="user"
+        className="hidden"
+        tabIndex={-1}
+        aria-hidden="true"
+        onChange={(event) => {
+          if (event.target.files) addFiles(event.target.files);
+          event.target.value = "";
+        }}
+      />
+
+      <input
+        ref={dictationCaptureInputRef}
+        type="file"
+        accept="audio/*"
+        capture="user"
+        className="hidden"
+        tabIndex={-1}
+        aria-hidden="true"
+        onChange={captureDictationFile}
+      />
 
       {dictationTranscript ? (
         <DictationMessageReview
