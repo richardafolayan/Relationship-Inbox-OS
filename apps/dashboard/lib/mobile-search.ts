@@ -268,3 +268,84 @@ export function resolveVisualViewportOffset(offsetTop?: number | null): number {
 export function isPhoneSearchWidth(width: number): boolean {
   return width < 768;
 }
+
+// App-owned return path for /search (#903 review). history.length is not a
+// safe Back signal: direct opens, Home Screen launches, restored tabs and
+// external referrers can all report length > 1 while the previous entry is
+// outside the app. Record the last non-search in-app route; Close always
+// routes inside the app, falling back to /today.
+export const MOBILE_SEARCH_RETURN_KEY = "search:return";
+export const MOBILE_SEARCH_RETURN_FALLBACK = "/today";
+
+interface StorageLike {
+  getItem(key: string): string | null;
+  setItem(key: string, value: string): void;
+}
+
+function defaultSessionStorage(): StorageLike | null {
+  if (typeof window === "undefined") return null;
+  try {
+    return window.sessionStorage;
+  } catch {
+    return null;
+  }
+}
+
+function isSafeAppPath(path: string): boolean {
+  if (!path.startsWith("/")) return false;
+  const offOrigin = /^\/[\\/]/;
+  if (offOrigin.test(path)) return false;
+  let decoded = path;
+  try {
+    decoded = decodeURIComponent(path);
+  } catch {
+    return false;
+  }
+  if (offOrigin.test(decoded)) return false;
+  if (path === "/search" || path.startsWith("/search/")) return false;
+  return true;
+}
+
+/** Remember the latest non-search route so Close can return inside the app. */
+export function recordSearchReturn(
+  pathname: string | null | undefined,
+  storage: StorageLike | null = defaultSessionStorage()
+): void {
+  if (!storage || !pathname) return;
+  if (!isSafeAppPath(pathname)) return;
+  try {
+    storage.setItem(MOBILE_SEARCH_RETURN_KEY, pathname);
+  } catch {
+    // Optional polish; ignore quota / security errors.
+  }
+}
+
+/**
+ * Resolve where Close / Cancel should go. Always an in-app path.
+ * Defaults to /today when no app-owned predecessor was recorded
+ * (direct entry, external referrer, empty session).
+ */
+export function resolveSearchCloseTarget(
+  storage: StorageLike | null = defaultSessionStorage()
+): string {
+  if (!storage) return MOBILE_SEARCH_RETURN_FALLBACK;
+  let stored: string | null = null;
+  try {
+    stored = storage.getItem(MOBILE_SEARCH_RETURN_KEY);
+  } catch {
+    return MOBILE_SEARCH_RETURN_FALLBACK;
+  }
+  if (!stored || !isSafeAppPath(stored)) return MOBILE_SEARCH_RETURN_FALLBACK;
+  return stored;
+}
+
+/**
+ * Close target for Search. Always an in-app path from the recorded return
+ * route (or /today). Never consult history.length: that can leave the app
+ * on direct entry, Home Screen launch, restored tabs, or external referrers.
+ */
+export function resolveSearchCloseHref(
+  storage: StorageLike | null = defaultSessionStorage()
+): string {
+  return resolveSearchCloseTarget(storage);
+}

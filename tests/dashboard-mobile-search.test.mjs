@@ -14,7 +14,12 @@ const {
   resolveVisualViewportHeight,
   resolveVisualViewportOffset,
   isPhoneSearchWidth,
-  conversationFromRow
+  conversationFromRow,
+  recordSearchReturn,
+  resolveSearchCloseTarget,
+  resolveSearchCloseHref,
+  MOBILE_SEARCH_RETURN_KEY,
+  MOBILE_SEARCH_RETURN_FALLBACK
 } = await import("../apps/dashboard/lib/mobile-search.ts");
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -192,4 +197,62 @@ test("#903: mobile search focuses the field and wires result scroller", () => {
   assert.match(mobileSearchSrc, /data-mobile-search-screen/);
   assert.match(mobileSearchSrc, /overflow-y-auto/);
   assert.match(mobileSearchSrc, /flex-shrink-0/);
+});
+
+function makeStorage(seed = {}) {
+  const data = new Map(Object.entries(seed));
+  return {
+    raw: data,
+    getItem: (key) => (data.has(key) ? data.get(key) : null),
+    setItem: (key, value) => {
+      data.set(key, value);
+    }
+  };
+}
+
+test("#903: Close uses app-owned return route, not history.length", () => {
+  assert.doesNotMatch(mobileSearchSrc, /history\.length\s*>\s*1/);
+  assert.doesNotMatch(mobileSearchSrc, /router\.back\(/);
+  assert.match(mobileSearchSrc, /resolveSearchCloseHref/);
+  assert.match(mobileSearchSrc, /router\.push\(resolveSearchCloseHref\(\)\)/);
+  assert.match(appShellSrc, /recordSearchReturn\(pathname\)/);
+});
+
+test("#903: direct-entry Close falls back to /today", () => {
+  const empty = makeStorage();
+  assert.equal(resolveSearchCloseTarget(empty), MOBILE_SEARCH_RETURN_FALLBACK);
+  assert.equal(resolveSearchCloseHref(empty), "/today");
+  assert.equal(resolveSearchCloseTarget(null), "/today");
+});
+
+test("#903: external-referrer style empty session still stays in-app", () => {
+  // history.length would be > 1 after arriving from an external site, but we
+  // never consult it. With no recorded app predecessor, Close → /today.
+  const storage = makeStorage();
+  assert.equal(resolveSearchCloseHref(storage), "/today");
+  assert.notEqual(resolveSearchCloseHref(storage), "back");
+});
+
+test("#903: in-app predecessor is restored on Close", () => {
+  const storage = makeStorage();
+  recordSearchReturn("/inbox", storage);
+  assert.equal(storage.raw.get(MOBILE_SEARCH_RETURN_KEY), "/inbox");
+  assert.equal(resolveSearchCloseHref(storage), "/inbox");
+
+  recordSearchReturn("/search", storage);
+  assert.equal(
+    resolveSearchCloseHref(storage),
+    "/inbox",
+    "landing on /search must not overwrite the predecessor"
+  );
+
+  recordSearchReturn("/settings", storage);
+  assert.equal(resolveSearchCloseHref(storage), "/settings");
+});
+
+test("#903: unsafe return paths are rejected in favour of /today", () => {
+  for (const bad of ["//evil.example.com", "/\\evil.example.com", "/%2Fevil.example.com", "https://evil.example.com"]) {
+    const storage = makeStorage({ [MOBILE_SEARCH_RETURN_KEY]: bad });
+    assert.equal(resolveSearchCloseHref(storage), "/today", bad);
+  }
 });
