@@ -237,30 +237,55 @@ export function rememberRecentThread(
 }
 
 /**
+ * Parse body CSS zoom for pre-zoom px lengths. Explicit px under body { zoom }
+ * are pre-zoom; divide visualViewport measurements by this factor (#921 / #903).
+ */
+export function readCssZoom(value: string | number | null | undefined): number {
+  if (typeof value === "number") {
+    return Number.isFinite(value) && value > 0 ? value : 1;
+  }
+  if (!value) return 1;
+  const parsed = Number.parseFloat(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 1;
+}
+
+/**
  * Height available above the on-screen keyboard. Uses visualViewport when
  * present (iOS Safari shrinks it as the keyboard rises); falls back to the
  * layout viewport otherwise. Callers apply this as the screen container
  * height so the fixed field and result list stay above the keyboard.
+ *
+ * Under body { zoom: var(--effective-zoom) }, explicit px lengths are pre-zoom
+ * and must be divided by effective zoom (same class of fix as #921).
  */
 export function resolveVisualViewportHeight(input: {
   visualHeight?: number | null;
   layoutHeight?: number | null;
+  effectiveZoom?: number | string | null;
 }): number | null {
+  const zoom = readCssZoom(input.effectiveZoom ?? 1);
   const visual = input.visualHeight;
   if (typeof visual === "number" && Number.isFinite(visual) && visual > 0) {
-    return visual;
+    return visual / zoom;
   }
   const layout = input.layoutHeight;
   if (typeof layout === "number" && Number.isFinite(layout) && layout > 0) {
-    return layout;
+    return layout / zoom;
   }
   return null;
 }
 
-/** Offset the fixed screen so it tracks visualViewport.offsetTop while iOS pans. */
-export function resolveVisualViewportOffset(offsetTop?: number | null): number {
+/**
+ * Offset the fixed screen so it tracks visualViewport.offsetTop while iOS pans.
+ * Divides by effective zoom so top matches height under body { zoom }.
+ */
+export function resolveVisualViewportOffset(
+  offsetTop?: number | null,
+  effectiveZoom?: number | string | null
+): number {
+  const zoom = readCssZoom(effectiveZoom ?? 1);
   if (typeof offsetTop === "number" && Number.isFinite(offsetTop) && offsetTop > 0) {
-    return offsetTop;
+    return offsetTop / zoom;
   }
   return 0;
 }

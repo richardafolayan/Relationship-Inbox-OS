@@ -13,6 +13,7 @@ const {
   parseRecentThreads,
   resolveVisualViewportHeight,
   resolveVisualViewportOffset,
+  readCssZoom,
   isPhoneSearchWidth,
   conversationFromRow,
   recordSearchReturn,
@@ -164,6 +165,38 @@ test("#903: visual viewport height keeps results above the keyboard", () => {
   assert.equal(resolveVisualViewportOffset(null), 0);
   assert.equal(isPhoneSearchWidth(390), true);
   assert.equal(isPhoneSearchWidth(1024), false);
+});
+
+test("#903: visualViewport height and offset divide by body zoom (pre-zoom px)", () => {
+  // Same defect class as #921: fixed overlay applies explicit px under
+  // body { zoom: var(--effective-zoom) }. Raw vv px would paint ~zoom× tall.
+  assert.equal(resolveVisualViewportHeight({ visualHeight: 800, effectiveZoom: 1 }), 800);
+  assert.equal(
+    resolveVisualViewportHeight({ visualHeight: 800, effectiveZoom: 1.16 }),
+    800 / 1.16
+  );
+  assert.equal(
+    resolveVisualViewportHeight({ visualHeight: 640, layoutHeight: 900, effectiveZoom: 1.25 }),
+    640 / 1.25
+  );
+  assert.equal(
+    resolveVisualViewportHeight({ visualHeight: null, layoutHeight: 800, effectiveZoom: 1.3 }),
+    800 / 1.3
+  );
+  assert.equal(resolveVisualViewportOffset(64, 1.16), 64 / 1.16);
+  assert.equal(resolveVisualViewportOffset(0, 1.16), 0);
+  assert.equal(resolveVisualViewportOffset(null, 1.16), 0);
+  assert.equal(readCssZoom("1.16"), 1.16);
+  assert.equal(readCssZoom(1.25), 1.25);
+  assert.equal(readCssZoom("normal"), 1);
+  assert.equal(readCssZoom(0), 1);
+  assert.equal(readCssZoom(""), 1);
+
+  // Component must pass computed body zoom and re-sync on UI scale change.
+  assert.match(mobileSearchSrc, /readCssZoom/);
+  assert.match(mobileSearchSrc, /getComputedStyle\(document\.body\)\.zoom/);
+  assert.match(mobileSearchSrc, /effectiveZoom:\s*zoom/);
+  assert.match(mobileSearchSrc, /onUiScaleChange\(syncViewport\)/);
 });
 
 test("#903: conversation rows expose platform without desktop-only glyphs", () => {
