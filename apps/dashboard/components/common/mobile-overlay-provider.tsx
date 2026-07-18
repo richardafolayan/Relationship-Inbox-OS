@@ -32,7 +32,8 @@ import {
   type HistoryBinding
 } from "@/lib/mobile-overlay-effects";
 
-interface MobileOverlayContextValue {
+/** Stable actions + controller. Does not change when top/primaryActive updates. */
+export interface MobileOverlayActions {
   controller: MobileOverlayController;
   open: (input: OpenOverlayInput) => OpenOverlayResult;
   close: (id?: string, options?: { silent?: boolean }) => OverlayEntry | null;
@@ -41,11 +42,21 @@ interface MobileOverlayContextValue {
   getTop: () => OverlayEntry | null;
   isPrimaryActive: () => boolean;
   hasKind: (kind: PrimaryOverlayKind) => boolean;
+}
+
+/** Reactive snapshot. Updates whenever the primary stack changes. */
+export interface MobileOverlaySnapshot {
   top: OverlayEntry | null;
   primaryActive: boolean;
 }
 
-const MobileOverlayContext = createContext<MobileOverlayContextValue | null>(null);
+export type MobileOverlayContextValue = MobileOverlayActions & MobileOverlaySnapshot;
+
+const MobileOverlayActionsContext = createContext<MobileOverlayActions | null>(null);
+const MobileOverlaySnapshotContext = createContext<MobileOverlaySnapshot>({
+  top: null,
+  primaryActive: false
+});
 
 function useControllerSnapshot(controller: MobileOverlayController): readonly OverlayEntry[] {
   return useSyncExternalStore(
@@ -59,6 +70,9 @@ function useControllerSnapshot(controller: MobileOverlayController): readonly Ov
  * Owns the singleton primary-overlay controller for the app shell.
  * Installs scroll lock, focus restore, history Back, Escape, and
  * visualViewport tracking whenever a primary overlay is active.
+ *
+ * Actions and snapshot are separate contexts so hooks that only need to
+ * register (usePrimaryOverlay) do not re-run when top/primaryActive changes.
  */
 export function MobileOverlayProvider({ children }: { children: ReactNode }) {
   const controllerRef = useRef<MobileOverlayController | null>(null);
@@ -199,7 +213,8 @@ export function MobileOverlayProvider({ children }: { children: ReactNode }) {
     [controller]
   );
 
-  const value = useMemo<MobileOverlayContextValue>(
+  // Stable across stack changes: only controller identity and its bound actions.
+  const actions = useMemo<MobileOverlayActions>(
     () => ({
       controller,
       open,
@@ -208,39 +223,60 @@ export function MobileOverlayProvider({ children }: { children: ReactNode }) {
       handleDismiss,
       getTop,
       isPrimaryActive,
-      hasKind,
-      top,
-      primaryActive
+      hasKind
     }),
-    [
-      controller,
-      open,
-      close,
-      closeTop,
-      handleDismiss,
-      getTop,
-      isPrimaryActive,
-      hasKind,
-      top,
-      primaryActive
-    ]
+    [controller, open, close, closeTop, handleDismiss, getTop, isPrimaryActive, hasKind]
+  );
+
+  const snapshot = useMemo<MobileOverlaySnapshot>(
+    () => ({ top, primaryActive }),
+    [top, primaryActive]
   );
 
   return (
-    <MobileOverlayContext.Provider value={value}>{children}</MobileOverlayContext.Provider>
+    <MobileOverlayActionsContext.Provider value={actions}>
+      <MobileOverlaySnapshotContext.Provider value={snapshot}>
+        {children}
+      </MobileOverlaySnapshotContext.Provider>
+    </MobileOverlayActionsContext.Provider>
   );
 }
 
-export function useMobileOverlay(): MobileOverlayContextValue {
-  const ctx = useContext(MobileOverlayContext);
+export function useMobileOverlayActions(): MobileOverlayActions {
+  const ctx = useContext(MobileOverlayActionsContext);
   if (!ctx) {
-    throw new Error("useMobileOverlay must be used inside <MobileOverlayProvider>");
+    throw new Error("useMobileOverlayActions must be used inside <MobileOverlayProvider>");
   }
   return ctx;
 }
 
+export function useMobileOverlayActionsOptional(): MobileOverlayActions | null {
+  return useContext(MobileOverlayActionsContext);
+}
+
+export function useMobileOverlaySnapshot(): MobileOverlaySnapshot {
+  return useContext(MobileOverlaySnapshotContext);
+}
+
+export function useMobileOverlay(): MobileOverlayContextValue {
+  const actions = useMobileOverlayActions();
+  const snapshot = useMobileOverlaySnapshot();
+  return useMemo(
+    () => ({
+      ...actions,
+      ...snapshot
+    }),
+    [actions, snapshot]
+  );
+}
+
 export function useMobileOverlayOptional(): MobileOverlayContextValue | null {
-  return useContext(MobileOverlayContext);
+  const actions = useContext(MobileOverlayActionsContext);
+  const snapshot = useMobileOverlaySnapshot();
+  return useMemo(() => {
+    if (!actions) return null;
+    return { ...actions, ...snapshot };
+  }, [actions, snapshot]);
 }
 
 export interface UsePrimaryOverlayOptions {
@@ -256,12 +292,17 @@ export interface UsePrimaryOverlayOptions {
  * Register a primary overlay with the shared controller while `open` is true.
  * Owner-driven close uses silent unregister so onRequestClose is not re-entered.
  * Controller-driven dismiss (Back, Escape, replace) calls onRequestClose.
+ *
+ * Depends on the stable actions context (controller + open/close), never the
+ * reactive snapshot. Depending on the full context object re-ran this effect
+ * on every open (top change → cleanup close → reopen loop).
  */
 export function usePrimaryOverlay(options: UsePrimaryOverlayOptions): {
   isTop: boolean;
   entryId: string | null;
 } {
-  const overlay = useMobileOverlayOptional();
+  const actions = useMobileOverlayActionsOptional();
+  const snapshot = useMobileOverlaySnapshot();
   const entryIdRef = useRef<string | null>(null);
   const [entryId, setEntryId] = useState<string | null>(null);
   const onRequestCloseRef = useRef(options.onRequestClose);
@@ -271,20 +312,25 @@ export function usePrimaryOverlay(options: UsePrimaryOverlayOptions): {
     onRequestCloseRef.current();
   }, []);
 
+  // Stable primitives only: actions context identity is fixed for the
+  // provider lifetime; controller/open/close do not change when top updates.
+  const controller = actions?.controller;
+  const openOverlay = actions?.open;
+
   useEffect(() => {
-    if (!overlay) return;
+    if (!controller || !openOverlay) return;
 
     if (!options.open) {
       if (entryIdRef.current) {
         const id = entryIdRef.current;
         entryIdRef.current = null;
         setEntryId(null);
-        overlay.controller.close(id, { silent: true });
+        controller.close(id, { silent: true });
       }
       return;
     }
 
-    const result = overlay.open({
+    const result = openOverlay({
       kind: options.kind,
       id: options.id,
       policy: options.policy ?? "replace",
@@ -305,12 +351,21 @@ export function usePrimaryOverlay(options: UsePrimaryOverlayOptions): {
       if (entryIdRef.current) {
         const id = entryIdRef.current;
         entryIdRef.current = null;
-        overlay.controller.close(id, { silent: true });
+        controller.close(id, { silent: true });
       }
     };
-  }, [overlay, options.open, options.kind, options.id, options.policy, stableClose]);
+  }, [
+    controller,
+    openOverlay,
+    options.open,
+    options.kind,
+    options.id,
+    options.policy,
+    stableClose
+  ]);
 
-  const isTop = Boolean(overlay && entryId && overlay.top && overlay.top.id === entryId);
+  const isTop = Boolean(controller && entryId && snapshot.top && snapshot.top.id === entryId);
 
   return { isTop, entryId };
 }
+

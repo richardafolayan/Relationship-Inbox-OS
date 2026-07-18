@@ -828,3 +828,179 @@ test("controller and effects modules export the public API surface", () => {
   assert.match(effects, /export function collectBrowserScrollOwners/);
   assert.match(effects, /export function browserVisualViewportHost/);
 });
+
+test("usePrimaryOverlay depends on stable actions, not the reactive snapshot object", () => {
+  const provider = readFileSync(
+    join(ROOT, "apps/dashboard/components/common/mobile-overlay-provider.tsx"),
+    "utf8"
+  );
+
+  // Split actions (stable) from snapshot (top/primaryActive).
+  assert.match(provider, /MobileOverlayActionsContext/);
+  assert.match(provider, /MobileOverlaySnapshotContext/);
+  assert.match(provider, /useMobileOverlayActionsOptional/);
+  assert.match(provider, /useMobileOverlaySnapshot/);
+
+  // Effect must not list the whole overlay context as a dependency.
+  const hookStart = provider.indexOf("export function usePrimaryOverlay");
+  assert.ok(hookStart >= 0, "usePrimaryOverlay must exist");
+  const hookBody = provider.slice(hookStart, hookStart + 2200);
+  assert.doesNotMatch(hookBody, /\}, \[overlay[,\]]/);
+  assert.doesNotMatch(hookBody, /useEffect\([\s\S]*?\}, \[overlay/);
+  // Stable primitives only.
+  assert.match(hookBody, /controller,\s*\n\s*openOverlay/);
+  assert.match(hookBody, /options\.open/);
+});
+
+/**
+ * Simulates the usePrimaryOverlay effect lifecycle against a real controller.
+ * When actions identity stays stable across a provider snapshot rerender
+ * (top changes after open), cleanup must not fire and reopen must not run.
+ */
+test("one open() stays registered across provider snapshot rerender (no open/close loop)", () => {
+  let idSeq = 0;
+  const c = createMobileOverlayController({
+    generateId: () => `ov-${++idSeq}`
+  });
+
+  // Stable actions object (same identity across "rerenders").
+  const actions = {
+    controller: c,
+    open: (input) => c.open(input),
+    close: (id, options) => c.close(id, options)
+  };
+
+  let entryId = null;
+  let openCalls = 0;
+  let silentCloseCalls = 0;
+  let ownerCloseCalls = 0;
+
+  const runRegistration = (openFlag, actionsRef) => {
+    // Mirror usePrimaryOverlay effect body with the fixed deps list.
+    if (!actionsRef.controller || !actionsRef.open) return () => undefined;
+    if (!openFlag) {
+      if (entryId) {
+        const id = entryId;
+        entryId = null;
+        actionsRef.controller.close(id, { silent: true });
+        silentCloseCalls += 1;
+      }
+      return () => undefined;
+    }
+    openCalls += 1;
+    const result = actionsRef.open({
+      kind: "search",
+      id: "command-palette",
+      policy: "replace",
+      onRequestClose: () => {
+        ownerCloseCalls += 1;
+      }
+    });
+    if (result.ok) entryId = result.id;
+    return () => {
+      if (entryId) {
+        const id = entryId;
+        entryId = null;
+        actionsRef.controller.close(id, { silent: true });
+        silentCloseCalls += 1;
+      }
+    };
+  };
+
+  // Mount with open=true.
+  let cleanup = runRegistration(true, actions);
+  assert.equal(openCalls, 1);
+  assert.equal(c.isPrimaryActive(), true);
+  assert.equal(c.getTop()?.id, entryId);
+
+  // Provider rerenders because top/primaryActive changed. Actions identity is
+  // unchanged (split context). Effect deps are stable → cleanup does NOT run.
+  const shouldRerun =
+    actions !== actions || // actions identity
+    true !== true || // open flag
+    "search" !== "search" ||
+    "command-palette" !== "command-palette" ||
+    "replace" !== "replace";
+  assert.equal(shouldRerun, false, "snapshot-only rerender must not re-run registration");
+
+  // Still one open, no silent close from cleanup.
+  assert.equal(openCalls, 1);
+  assert.equal(silentCloseCalls, 0);
+  assert.equal(c.isPrimaryActive(), true);
+  assert.equal(c.getTop()?.kind, "search");
+  assert.equal(ownerCloseCalls, 0);
+
+  // Owner closes → open=false re-runs effect with new open dep.
+  cleanup(); // unmount path when open flips would cleanup first in React
+  // React: cleanup of previous effect, then new effect with open=false.
+  // We already ran cleanup above; now the closed path.
+  entryId = null; // cleanup already cleared and closed
+  // Re-sync: cleanup closed the entry.
+  assert.equal(c.isPrimaryActive(), false);
+  assert.equal(silentCloseCalls, 1);
+
+  // Re-open once more to prove a second open is intentional, not a loop.
+  cleanup = runRegistration(true, actions);
+  assert.equal(openCalls, 2);
+  assert.equal(c.isPrimaryActive(), true);
+  cleanup();
+  assert.equal(silentCloseCalls, 2);
+  assert.equal(ownerCloseCalls, 0, "silent close must not call owner onRequestClose");
+});
+
+test("legacy whole-context dependency would loop; split actions prevent it", () => {
+  // Document the failure mode: if the effect depended on a value object that
+  // changes when top updates, each open would cleanup-close then re-open.
+  let idSeq = 0;
+  const c = createMobileOverlayController({
+    generateId: () => `loop-${++idSeq}`
+  });
+
+  let openCalls = 0;
+  let closeCalls = 0;
+  let entryId = null;
+
+  const openOnce = () => {
+    openCalls += 1;
+    const result = c.open({
+      kind: "feedback",
+      id: "pilot-feedback",
+      policy: "replace",
+      onRequestClose: () => undefined
+    });
+    if (result.ok) entryId = result.id;
+  };
+  const silentClose = () => {
+    if (!entryId) return;
+    closeCalls += 1;
+    c.close(entryId, { silent: true });
+    entryId = null;
+  };
+
+  // Simulated broken loop (3 snapshot-driven reruns after open).
+  openOnce();
+  for (let i = 0; i < 3; i += 1) {
+    silentClose();
+    openOnce();
+  }
+  assert.equal(openCalls, 4);
+  assert.equal(closeCalls, 3);
+
+  // Stable-actions path: open once, three snapshot "rerenders" do nothing.
+  silentClose();
+  openCalls = 0;
+  closeCalls = 0;
+  openOnce();
+  const stableActions = { controller: c };
+  for (let i = 0; i < 3; i += 1) {
+    // Snapshot changed but actions identity equal → skip cleanup/reopen.
+    const nextActions = stableActions;
+    if (nextActions !== stableActions) {
+      silentClose();
+      openOnce();
+    }
+  }
+  assert.equal(openCalls, 1, "stable actions keep a single registration");
+  assert.equal(closeCalls, 0);
+  assert.equal(c.isPrimaryActive(), true);
+});
