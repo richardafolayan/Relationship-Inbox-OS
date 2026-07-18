@@ -170,6 +170,19 @@ function settingsHashForTab(tab: SettingsTabId): string {
   return tab;
 }
 
+
+// Route scroll owner: mobile #921 scrolls Canvas (data-scroll-owner=canvas)
+// while shell <main> is overflow-hidden. Desktop still scrolls <main>.
+// Prefer explicit owners; fall back to main for pre-#921 shells.
+function getRouteScroller(): HTMLElement | null {
+  if (typeof document === "undefined") return null;
+  return (
+    document.querySelector<HTMLElement>('[data-scroll-owner="canvas"]') ??
+    document.querySelector<HTMLElement>('[data-scroll-owner="list"]') ??
+    document.querySelector("main")
+  );
+}
+
 function clearSettingsHashUrl(): string {
   if (typeof window === "undefined") return "/settings";
   const url = new URL(window.location.href);
@@ -250,9 +263,9 @@ export default function SettingsPage() {
     };
   }, [syncFromLocation]);
 
-  // AppShell scrolls <main> (overflow-y-auto); document scroll is locked.
+  // Restore list place on the route scroller (Canvas on mobile #921, main otherwise).
   useEffect(() => {
-    const scroller = document.querySelector("main");
+    const scroller = getRouteScroller();
     if (mobileDetailOpen) {
       if (scroller) scroller.scrollTop = 0;
       return;
@@ -260,7 +273,7 @@ export default function SettingsPage() {
     const y = listScrollYRef.current;
     if (y <= 0) return;
     const id = window.requestAnimationFrame(() => {
-      const el = document.querySelector("main");
+      const el = getRouteScroller();
       if (el) el.scrollTop = y;
     });
     return () => window.cancelAnimationFrame(id);
@@ -387,7 +400,7 @@ export default function SettingsPage() {
   };
 
   const openMobileCategory = (tab: SettingsTabId) => {
-    listScrollYRef.current = document.querySelector("main")?.scrollTop ?? 0;
+    listScrollYRef.current = getRouteScroller()?.scrollTop ?? 0;
     setActiveTab(tab);
     setMobileDetailOpen(true);
     const url = new URL(window.location.href);
