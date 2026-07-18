@@ -510,7 +510,7 @@ export function AppUpdates({
       {showTechnical ? (
         <details
           className="mt-4 rounded-[10px] border border-hairline bg-paper/40 px-4 py-3"
-          defaultOpen={techOpenDefault}
+          open={techOpenDefault ? true : undefined}
         >
           <summary className="cursor-pointer text-[12.5px] font-medium text-ink">
             Technical details

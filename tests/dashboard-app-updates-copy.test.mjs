@@ -38,6 +38,9 @@ test("raw commit and branch metadata is behind Technical details, not the main v
   assert.match(SOURCE, /buildTechnicalDetails/);
   assert.match(SOURCE, /presentReleaseNotes/);
   assert.match(SOURCE, /technicalDetailsOpenByDefault/);
+  // Native <details> only accepts open (React DetailsHTMLAttributes); defaultOpen is invalid.
+  assert.match(SOURCE, /open=\{techOpenDefault \? true : undefined\}/);
+  assert.doesNotMatch(SOURCE, /defaultOpen=/);
   // Main "What's new" list must not render raw note strings directly.
   assert.doesNotMatch(SOURCE, /currentReleaseNotes\.slice\(0,\s*4\)\.map/);
   assert.doesNotMatch(SOURCE, /info\.releaseNotes\.slice\(0,\s*4\)\.map/);
