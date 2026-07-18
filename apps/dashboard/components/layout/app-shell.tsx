@@ -75,6 +75,7 @@ import {
   type OverdueDigestTickResult
 } from "@/lib/overdue-digest";
 import type { HealthResponse, InboxResponse, InboxRow, OperatorProfile } from "@/lib/types";
+import { recordSearchReturn } from "@/lib/mobile-search";
 import { recordThreadSource } from "@/lib/thread-source";
 import { isInTodayQueue } from "@/lib/today";
 import { recordClientError } from "@/lib/client-error-log";
@@ -139,8 +140,10 @@ export function AppShell({ children }: { children: ReactNode }) {
   // archiving a thread can return the operator to wherever they came
   // from rather than always bouncing to /today. Lives in the shell so
   // every list page contributes without needing per-page wiring.
+  // Also record the last non-search route for mobile Search Close (#903).
   useEffect(() => {
     recordThreadSource(pathname);
+    recordSearchReturn(pathname);
   }, [pathname]);
   // Issue #435 (R-0057). Tri-state, not a binary. `undefined` means the
   // first /health fetch hasn't resolved yet (a cold mount / reload),

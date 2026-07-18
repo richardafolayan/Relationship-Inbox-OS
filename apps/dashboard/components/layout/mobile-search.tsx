@@ -15,6 +15,7 @@ import {
   parseRecentThreads,
   rememberRecentQuery,
   rememberRecentThread,
+  resolveSearchCloseHref,
   resolveVisualViewportHeight,
   resolveVisualViewportOffset,
   type MobileSearchItem,
@@ -91,11 +92,7 @@ export function MobileSearchScreen() {
   );
 
   const closeSearch = () => {
-    if (typeof window !== "undefined" && window.history.length > 1) {
-      router.back();
-      return;
-    }
-    router.push("/today");
+    router.push(resolveSearchCloseHref());
   };
 
   const persistQuery = (value: string) => {
