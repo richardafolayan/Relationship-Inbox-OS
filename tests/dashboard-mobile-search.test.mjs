@@ -18,6 +18,7 @@ const {
   recordSearchReturn,
   resolveSearchCloseTarget,
   resolveSearchCloseHref,
+  resolveSearchAttentionKind,
   MOBILE_SEARCH_RETURN_KEY,
   MOBILE_SEARCH_RETURN_FALLBACK
 } = await import("../apps/dashboard/lib/mobile-search.ts");
@@ -210,12 +211,73 @@ function makeStorage(seed = {}) {
   };
 }
 
-test("#903: Close uses app-owned return route, not history.length", () => {
+test("#903: Close uses app-owned return route via replace, not history.length or push", () => {
   assert.doesNotMatch(mobileSearchSrc, /history\.length\s*>\s*1/);
   assert.doesNotMatch(mobileSearchSrc, /router\.back\(/);
   assert.match(mobileSearchSrc, /resolveSearchCloseHref/);
-  assert.match(mobileSearchSrc, /router\.push\(resolveSearchCloseHref\(\)\)/);
+  // replace avoids stacking a second predecessor and Search ↔ back bounce.
+  assert.match(mobileSearchSrc, /router\.replace\(resolveSearchCloseHref\(\)\)/);
+  assert.doesNotMatch(mobileSearchSrc, /router\.push\(resolveSearchCloseHref\(\)\)/);
   assert.match(appShellSrc, /recordSearchReturn\(pathname\)/);
+});
+
+test("#903: Search surfaces offline/degraded/scanning attention inside the overlay", () => {
+  // Full-screen Search is z-90 over TopStatus z-30. forceSurface alone is not
+  // visible; the stacking fix lives in Search UI as an in-screen banner.
+  assert.match(mobileSearchSrc, /data-mobile-search-attention/);
+  assert.match(mobileSearchSrc, /resolveSearchAttentionKind/);
+  assert.match(mobileSearchSrc, /App helper paused/);
+  assert.match(mobileSearchSrc, /Start runner/);
+  assert.match(mobileSearchSrc, /settings#platforms/);
+  assert.match(mobileSearchSrc, /Scanning…/);
+  assert.match(mobileSearchSrc, /z-\[90\]/);
+
+  assert.equal(
+    resolveSearchAttentionKind({
+      ready: true,
+      runnerOffline: true,
+      hasDegraded: false,
+      scanning: false
+    }),
+    "offline"
+  );
+  assert.equal(
+    resolveSearchAttentionKind({
+      ready: true,
+      runnerOffline: false,
+      hasDegraded: true,
+      scanning: false
+    }),
+    "degraded"
+  );
+  assert.equal(
+    resolveSearchAttentionKind({
+      ready: true,
+      runnerOffline: false,
+      hasDegraded: false,
+      scanning: true
+    }),
+    "scanning"
+  );
+  assert.equal(
+    resolveSearchAttentionKind({
+      ready: true,
+      runnerOffline: false,
+      hasDegraded: false,
+      scanning: false
+    }),
+    null
+  );
+  assert.equal(
+    resolveSearchAttentionKind({
+      ready: false,
+      runnerOffline: false,
+      hasDegraded: true,
+      scanning: true
+    }),
+    null,
+    "cold mount must not flash attention before first poll"
+  );
 });
 
 test("#903: direct-entry Close falls back to /today", () => {

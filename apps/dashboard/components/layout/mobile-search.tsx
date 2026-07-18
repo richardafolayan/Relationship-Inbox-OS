@@ -1,11 +1,14 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { ChevronLeft, Search, X } from "lucide-react";
 import { apiGet, apiPost } from "@/lib/api";
-import type { InboxResponse } from "@/lib/types";
+import type { HealthResponse, InboxResponse, PlatformCard } from "@/lib/types";
 import { openPilotFeedback } from "@/lib/pilot";
+import { visibleImplementedPlatforms } from "@/lib/risk";
+import { useVisiblePolling } from "@/lib/use-visible-polling";
 import { PersonAvatar } from "@/components/common/person-avatar";
 import {
   buildMobileSearchSections,
@@ -15,6 +18,7 @@ import {
   parseRecentThreads,
   rememberRecentQuery,
   rememberRecentThread,
+  resolveSearchAttentionKind,
   resolveSearchCloseHref,
   resolveVisualViewportHeight,
   resolveVisualViewportOffset,
@@ -25,6 +29,11 @@ import {
 // Full-screen Search for phone widths (#903). Not the desktop command palette:
 // fixed search field, grouped results (conversations primary), Back/Cancel,
 // visualViewport keyboard resize, and recent conversation history.
+//
+// Sits above shell TopStatus (z-90). Offline / degraded / scanning attention
+// is surfaced inside this screen so pilots still see host health on /search.
+
+const ATTENTION_POLL_MS = 5000;
 
 export function MobileSearchScreen() {
   const router = useRouter();
@@ -35,6 +44,11 @@ export function MobileSearchScreen() {
   const [recentQueries, setRecentQueries] = useState<string[]>([]);
   const [viewportHeight, setViewportHeight] = useState<number | null>(null);
   const [viewportOffset, setViewportOffset] = useState(0);
+  const [ready, setReady] = useState(false);
+  const [runnerReachable, setRunnerReachable] = useState(true);
+  const [health, setHealth] = useState<HealthResponse | null>(null);
+  const [platforms, setPlatforms] = useState<PlatformCard[] | null>(null);
+  const [runnerStartState, setRunnerStartState] = useState<"idle" | "starting" | "started">("idle");
 
   useEffect(() => {
     void apiGet<InboxResponse>("/runner/data/inbox")
@@ -81,6 +95,49 @@ export function MobileSearchScreen() {
     };
   }, []);
 
+  const refreshAttention = useCallback(async () => {
+    const [healthData, platformData] = await Promise.all([
+      apiGet<HealthResponse>("/runner/health", { ttlMs: 4000 }).catch(() => null),
+      apiGet<PlatformCard[]>("/runner/data/platforms", { ttlMs: 10000 }).catch(() => null)
+    ]);
+    setRunnerReachable(Boolean(healthData));
+    if (healthData) setHealth(healthData);
+    if (platformData) setPlatforms(platformData);
+    setReady(true);
+  }, []);
+
+  useVisiblePolling(() => {
+    void refreshAttention();
+  }, ATTENTION_POLL_MS);
+
+  const visiblePlatforms = visibleImplementedPlatforms(platforms, health?.availablePlatforms);
+  const implemented = platforms?.filter((p) => visiblePlatforms.includes(p.platform as never)) ?? null;
+  const connected =
+    implemented?.filter((p) => p.status === "CONNECTED").length ?? health?.connectedPlatforms ?? 0;
+  const total = implemented?.length ?? visiblePlatforms.length;
+  const hasDegraded = (implemented?.filter((p) => p.status !== "CONNECTED") ?? []).length > 0;
+  const runnerOffline = ready && runnerReachable === false;
+  const scanning = health?.runnerStatus === "SCANNING";
+  const attentionKind = resolveSearchAttentionKind({
+    ready,
+    runnerOffline,
+    hasDegraded,
+    scanning: Boolean(scanning)
+  });
+
+  const onStartRunner = useCallback(() => {
+    setRunnerStartState("starting");
+    void fetch("/api/local-runner/start", { method: "POST" })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`Request failed: ${response.status}`);
+        setRunnerStartState("started");
+        await refreshAttention();
+      })
+      .catch(() => {
+        setRunnerStartState("idle");
+      });
+  }, [refreshAttention]);
+
   const sections = useMemo(
     () =>
       buildMobileSearchSections({
@@ -91,8 +148,10 @@ export function MobileSearchScreen() {
     [threads, query, recentThreads]
   );
 
+  // replace (not push): Close must not stack a second predecessor. Dock open
+  // already pushed /search; replace returns without Search ↔ back bounce.
   const closeSearch = () => {
-    router.push(resolveSearchCloseHref());
+    router.replace(resolveSearchCloseHref());
   };
 
   const persistQuery = (value: string) => {
@@ -196,6 +255,54 @@ export function MobileSearchScreen() {
           Cancel
         </button>
       </header>
+
+      {attentionKind ? (
+        <div
+          data-mobile-search-attention={attentionKind}
+          role="status"
+          aria-live="polite"
+          className="flex flex-shrink-0 items-center gap-2 border-b border-hairline bg-paper-2 px-3 py-2 font-mono text-[11px] tracking-[0.02em] text-ink-2"
+        >
+          {attentionKind === "offline" ? (
+            <>
+              <span className="inline-flex items-center gap-[6px]">
+                <span className="h-[6px] w-[6px] rounded-full bg-ink-3" aria-hidden />
+                <span>App helper paused</span>
+              </span>
+              <button
+                type="button"
+                onClick={onStartRunner}
+                disabled={runnerStartState === "starting"}
+                className="ml-auto font-mono text-[11px] text-ink-2 underline-offset-2 hover:text-ink hover:underline disabled:opacity-50"
+              >
+                {runnerStartState === "starting"
+                  ? "starting…"
+                  : runnerStartState === "started"
+                    ? "runner starting"
+                    : "Start runner"}
+              </button>
+            </>
+          ) : null}
+          {attentionKind === "degraded" ? (
+            <Link
+              href="/settings#platforms"
+              className="inline-flex items-center gap-[6px] underline-offset-2 hover:underline"
+              title={`${connected}/${total} platforms connected, open platform settings`}
+            >
+              <span className="h-[6px] w-[6px] rounded-full bg-risk-waiting" aria-hidden />
+              <span>
+                {connected}/{total} connected
+              </span>
+            </Link>
+          ) : null}
+          {attentionKind === "scanning" ? (
+            <span className="inline-flex items-center gap-[6px]">
+              <span className="h-[6px] w-[6px] rounded-full bg-accent" aria-hidden />
+              <span>Scanning…</span>
+            </span>
+          ) : null}
+        </div>
+      ) : null}
 
       <div className="flex flex-shrink-0 items-center gap-2 border-b border-hairline px-3 py-2">
         <div className="flex min-h-[48px] min-w-0 flex-1 items-center gap-2 rounded-[14px] bg-paper-2 px-3">
