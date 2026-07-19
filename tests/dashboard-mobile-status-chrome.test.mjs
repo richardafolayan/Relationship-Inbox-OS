@@ -20,9 +20,9 @@ const topStatusSrc = readFileSync(
   "utf8"
 );
 
-test("Today keeps full mobile status chrome", () => {
-  assert.equal(resolveMobileStatusChrome("/today"), "full");
-  assert.equal(resolveMobileStatusChrome("/today/"), "full");
+test("Today uses compact mobile status chrome", () => {
+  assert.equal(resolveMobileStatusChrome("/today"), "compact");
+  assert.equal(resolveMobileStatusChrome("/today/"), "compact");
 });
 
 test("Inbox uses compact mobile status chrome", () => {
@@ -273,4 +273,11 @@ test("TopStatus still routes degraded platforms to settings", () => {
     /\) : hasDegraded \? \(\s*<Link\s+href="\/settings#platforms"/,
     "degraded platforms should keep the stripped v1 settings link"
   );
+});
+
+test("compact mobile chrome prioritises notifications and one-tap pilot feedback", () => {
+  assert.match(topStatusSrc, /openPilotFeedback\("feedback"\)/);
+  assert.match(topStatusSrc, /aria-label="Send feedback"/);
+  assert.match(topStatusSrc, /\(attentionOnlyMobile \|\| compactMobile\) && "hidden md:inline-flex"/);
+  assert.match(topStatusSrc, /\(attentionOnlyMobile \|\| compactMobile\) && "hidden md:inline"/);
 });

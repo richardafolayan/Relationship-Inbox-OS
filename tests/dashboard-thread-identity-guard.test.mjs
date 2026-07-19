@@ -7,14 +7,11 @@ const { shouldApplyThreadScopedResult } = await import(
   "../apps/dashboard/lib/thread-identity-guard.ts"
 );
 
-// Regression: the thread page's transform (shorten / warmer) handler awaited
-// /transform then unconditionally wrote output.text into the composer. Because
-// the page does NOT remount across /thread/A -> /thread/B, a transform fired on
-// A could resolve after the operator navigated to B and overwrite B's composer
-// with A's text -> wrong-recipient send. The fix snapshots the route thread id
-// before the await and only applies the result when it is still the live thread.
+// The thread page does not remount across /thread/A -> /thread/B. Async AI
+// helpers snapshot the route thread id and only apply their result while that
+// thread is still live, avoiding state from A appearing on B.
 
-test("applies the result when still on the thread that started the transform", () => {
+test("applies a result when still on the thread that started the request", () => {
   assert.equal(shouldApplyThreadScopedResult("thread-A", "thread-A"), true);
 });
 
@@ -23,13 +20,13 @@ test("skips the result when the operator has navigated to a different thread", (
   assert.equal(shouldApplyThreadScopedResult("thread-A", "thread-B"), false);
 });
 
-test("simulated transform race: A's late result never lands in B's composer", () => {
+test("simulated request race: A's late result never lands in B's state", () => {
   // Model the composer the way the page does: a single piece of route-scoped
   // state shared across navigation (no remount).
   let routeThreadId = "thread-A";
   let composer = "draft for A";
 
-  // Operator clicks shorten on A. The handler snapshots the route id first.
+  // An async helper starts on A and snapshots the route id first.
   const startThreadId = routeThreadId;
 
   // ...the await is in flight. Operator navigates to B; the reset effect both
@@ -37,8 +34,8 @@ test("simulated transform race: A's late result never lands in B's composer", ()
   routeThreadId = "thread-B";
   composer = "";
 
-  // A's /transform now resolves with A's shortened text.
-  const transformOutput = "shortened A text";
+  // A's request now resolves after navigation.
+  const transformOutput = "late result for A";
   if (shouldApplyThreadScopedResult(startThreadId, routeThreadId)) {
     composer = transformOutput;
   }
@@ -47,18 +44,18 @@ test("simulated transform race: A's late result never lands in B's composer", ()
   assert.equal(composer, "");
 });
 
-test("same-thread transform still applies its result", () => {
+test("same-thread request still applies its result", () => {
   let routeThreadId = "thread-A";
   let composer = "draft for A";
 
   const startThreadId = routeThreadId;
   // No navigation occurs.
-  const transformOutput = "shortened A text";
+  const transformOutput = "result for A";
   if (shouldApplyThreadScopedResult(startThreadId, routeThreadId)) {
     composer = transformOutput;
   }
 
-  assert.equal(composer, "shortened A text");
+  assert.equal(composer, "result for A");
 });
 
 test("guards are symmetric for null / undefined ids without false positives", () => {
