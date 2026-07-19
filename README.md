@@ -1,5 +1,11 @@
 # Tovi (formerly Relationship Inbox OS)
 
+<p align="center">
+  <img src="apps/desktop/assets/icon.svg" alt="Tovi app icon" width="120" />
+</p>
+
+<p align="center"><strong>A calm, local-first workspace for returning to conversations without opening another feed.</strong></p>
+
 I'm bad at replying. Someone messages me, I think *"I'll reply properly when
 I've got a moment"*, and then a week passes. By the time I come back the
 chat has gone cold and I've half-forgotten what we were talking about.
@@ -13,8 +19,31 @@ it, without ever opening a feed.
 It is **not** a dashboard, a CRM, or a tool that replies for you. It helps
 *you* reply, in your own words.
 
+## Product flow
+
+```mermaid
+flowchart LR
+    A[Messaging platforms] --> B[Local runner and platform adapters]
+    B --> C[(SQLite via Prisma)]
+    B -. Optional context .-> D[AI and transcription providers]
+    C --> E[Next.js dashboard]
+    D --> E
+    E --> F[User reviews, edits and writes]
+    F --> G[User-triggered send only]
+    G --> A
+```
+
+## My role
+
+I created and lead Tovi. I own the product direction, system behaviour,
+workflow design, testing, debugging and releases. I use AI-assisted
+development extensively during implementation, then review the output,
+validate the behaviour and decide what ships.
+
 ## Contents
 
+- [Product flow](#product-flow)
+- [My role](#my-role)
 - [For pilot testers](#for-pilot-testers)
 - [What it does](#what-it-does)
 - [What's shipped](#whats-shipped)
