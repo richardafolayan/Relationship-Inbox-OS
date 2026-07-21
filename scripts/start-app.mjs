@@ -149,7 +149,12 @@ function run(label, command, commandArgs, options = {}) {
 }
 
 function probeNativeModule(specifier) {
-  return spawnSync(process.execPath, ["-e", `require(${JSON.stringify(specifier)})`], {
+  const script = [
+    `const NativeModule = require(${JSON.stringify(specifier)});`,
+    "const database = new NativeModule(':memory:');",
+    "database.close();"
+  ].join("\n");
+  return spawnSync(process.execPath, ["-e", script], {
     cwd: APP_DIR,
     encoding: "utf8"
   });
