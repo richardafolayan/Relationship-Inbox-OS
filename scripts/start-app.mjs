@@ -11,7 +11,7 @@ import {
   writeFileSync
 } from "node:fs";
 import { createRequire } from "node:module";
-import { dirname, join, resolve } from "node:path";
+import { delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadAppEnv } from "./lib/env-file.mjs";
 import { packagedDashboardArgs } from "./lib/dashboard-command.mjs";
@@ -160,6 +160,13 @@ function nativeModuleNeedsRebuild(result) {
   return /NODE_MODULE_VERSION|ERR_DLOPEN_FAILED|was compiled against a different Node\.js version/i.test(text);
 }
 
+function runtimeCommandEnv() {
+  return {
+    ...process.env,
+    PATH: [dirname(process.execPath), process.env.PATH].filter(Boolean).join(delimiter)
+  };
+}
+
 function ensureNativeModules() {
   if (!canResolve("better-sqlite3")) return true;
   const probe = probeNativeModule("better-sqlite3");
@@ -169,7 +176,12 @@ function ensureNativeModules() {
     return false;
   }
   say(`  ${C.yellow}The local database driver needs to be rebuilt for Node.js.${C.reset}`);
-  return run("Rebuilding the local database driver...", NPM_COMMAND, ["rebuild", "better-sqlite3"])
+  return run(
+    "Rebuilding the local database driver...",
+    NPM_COMMAND,
+    ["rebuild", "better-sqlite3"],
+    { env: runtimeCommandEnv() }
+  )
     && probeNativeModule("better-sqlite3").status === 0;
 }
 
