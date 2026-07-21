@@ -436,6 +436,10 @@ function collectNestedCode(appPath) {
   return { binaries: binaries.sort(deepestFirst), bundles: bundles.sort(deepestFirst) };
 }
 
+export function requiresRuntimeEntitlements(path, appPath) {
+  return resolve(path) === resolve(join(appPath, "Contents", "Resources", "runtime", "node", "bin", "node"));
+}
+
 export async function signApp(appPath, identity, certificatePath = "") {
   const signIdentity = identity || "-";
   const entitlements = join(ROOT, "apps", "desktop", "entitlements.mac.plist");
@@ -446,7 +450,12 @@ export async function signApp(appPath, identity, certificatePath = "") {
       : undefined;
     const nested = collectNestedCode(appPath);
     const common = ["--force", "--options", "runtime", "--timestamp=none", "--sign", certificateHash || identity];
-    for (const binary of nested.binaries) run("codesign", [...common, binary]);
+    for (const binary of nested.binaries) {
+      const binaryArgs = requiresRuntimeEntitlements(binary, appPath)
+        ? [...common, "--entitlements", entitlements, binary]
+        : [...common, binary];
+      run("codesign", binaryArgs);
+    }
     for (const bundle of nested.bundles) {
       run("codesign", [...common, "--entitlements", entitlements, bundle]);
     }

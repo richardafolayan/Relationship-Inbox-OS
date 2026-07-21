@@ -24,6 +24,7 @@ import {
   parseArgs,
   planPaths,
   prunePackagedFootprint,
+  requiresRuntimeEntitlements,
   squirrelManifest,
   stableDesignatedRequirement
 } from "../scripts/build-macos-dmg.mjs";
@@ -42,6 +43,24 @@ test("packaged app looks for the bundled Node runtime in Resources/runtime", () 
   assert.equal(
     bundledNodeCandidate(appDir),
     "/Applications/Relationship Inbox OS.app/Contents/Resources/runtime/node/bin/node"
+  );
+});
+
+test("packaged Node receives the runtime entitlements required by V8", () => {
+  const appPath = "/tmp/Tovi.app";
+  assert.equal(
+    requiresRuntimeEntitlements(
+      "/tmp/Tovi.app/Contents/Resources/runtime/node/bin/node",
+      appPath
+    ),
+    true
+  );
+  assert.equal(
+    requiresRuntimeEntitlements(
+      "/tmp/Tovi.app/Contents/Resources/app/node_modules/better-sqlite3/build/Release/better_sqlite3.node",
+      appPath
+    ),
+    false
   );
 });
 
