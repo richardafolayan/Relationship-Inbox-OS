@@ -67,12 +67,14 @@ test("only the message timeline is the chat column scroller", () => {
   );
 });
 
-test("composer textarea caps height to min(160px, 28dvh) with internal scroll", () => {
-  assert.match(threadSrc, /maxHeight:\s*"min\(160px,\s*28dvh\)"/);
+test("composer textarea caps height against the live visual viewport with internal scroll", () => {
+  assert.match(threadSrc, /window\.visualViewport\?\.height \?\? window\.innerHeight/);
+  assert.match(threadSrc, /phone \? 120 : 160/);
+  assert.match(threadSrc, /viewportHeight \* \(phone \? 0\.22 : 0\.28\)/);
   assert.match(threadSrc, /data-testid="thread-composer-input"/);
   assert.match(
     threadSrc,
-    /className="block w-full resize-none overflow-y-auto border-0 bg-transparent/
+    /className="block max-h-\[120px\] w-full resize-none overflow-y-auto border-0 bg-transparent/
   );
 });
 

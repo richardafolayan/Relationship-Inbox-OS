@@ -82,7 +82,7 @@ export function buildInfoPlist({ bundleId = DEFAULT_BUNDLE_ID, version = "0.0.0"
   <key>LSMinimumSystemVersion</key>
   <string>13.0</string>
   <key>NSAppleEventsUsageDescription</key>
-  <string>${APP_NAME} asks before sending through Messages. Sending is always user-triggered.</string>
+  <string>${APP_NAME} sends through Messages when you press Send or enable a focus note for one focus window.</string>
   <key>NSContactsUsageDescription</key>
   <string>${APP_NAME} uses contacts stored on this Mac to show familiar names. Contact data stays on this Mac.</string>
 </dict>

@@ -29,8 +29,10 @@ flowchart LR
     C --> E[Next.js dashboard]
     D --> E
     E --> F[User reviews, edits and writes]
-    F --> G[User-triggered send only]
+    F --> G[User-triggered send]
+    F --> H[Explicit focus-note opt-in]
     G --> A
+    H --> A
 ```
 
 ## My role
@@ -80,7 +82,9 @@ waiting longest. For each one it tells you:
 
 You write the reply. AI help is optional and has three levels, from
 summaries only, through help polishing your own draft, up to full suggested
-drafts. Nothing is ever sent automatically.
+drafts. Suggested replies never send automatically. A saved focus note can
+send once per covered person only when you explicitly enable it for that
+focus window.
 
 ## What's shipped
 
@@ -168,8 +172,9 @@ A small monorepo:
   and talks to AI providers.
 - `packages/core`: shared types, risk logic, and the Prisma schema.
 
-Data is SQLite via Prisma. Sending is always user-triggered. There is no
-autonomous send loop.
+Data is SQLite via Prisma. Sending is user-triggered by default. The only
+automatic path is a user-written focus note, explicitly enabled for one focus
+window and guarded to one send per covered person.
 
 ## Docs
 

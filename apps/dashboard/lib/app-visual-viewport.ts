@@ -15,6 +15,7 @@
 import { UI_SCALE_CHANGE_EVENT, UI_SCALE_STORAGE_KEY } from "./ui-scale";
 
 export const APP_VV_HEIGHT_VAR = "--app-vv-height";
+export const APP_VV_OFFSET_TOP_VAR = "--app-vv-offset-top";
 
 export function readCssZoom(value: string | null | undefined): number {
   if (!value) return 1;
@@ -38,6 +39,17 @@ export function resolveAppVisualViewportHeight(
     return 0;
   }
   return visualHeight / zoom;
+}
+
+export function resolveAppVisualViewportOffset(
+  visualOffset: number,
+  effectiveZoom: number
+): number {
+  const zoom = readCssZoom(String(effectiveZoom));
+  if (!Number.isFinite(visualOffset) || visualOffset <= 0) {
+    return 0;
+  }
+  return visualOffset / zoom;
 }
 
 export type AppVisualViewportPublisher = {
@@ -64,10 +76,13 @@ export function installAppVisualViewport(
 
   const publish = () => {
     const visualHeight = vv?.height ?? win.innerHeight;
+    const visualOffsetTop = vv?.offsetTop ?? 0;
     const zoom = readCssZoom(win.getComputedStyle(body).zoom);
     const height = resolveAppVisualViewportHeight(visualHeight, zoom);
+    const offsetTop = resolveAppVisualViewportOffset(visualOffsetTop, zoom);
     if (height > 0) {
       root.style.setProperty(APP_VV_HEIGHT_VAR, `${height}px`);
+      root.style.setProperty(APP_VV_OFFSET_TOP_VAR, `${offsetTop}px`);
     }
   };
 
@@ -99,6 +114,7 @@ export function installAppVisualViewport(
       vv?.removeEventListener("resize", onResize);
       vv?.removeEventListener("scroll", onResize);
       root.style.removeProperty(APP_VV_HEIGHT_VAR);
+      root.style.removeProperty(APP_VV_OFFSET_TOP_VAR);
     }
   };
 }

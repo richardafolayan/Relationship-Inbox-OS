@@ -38,11 +38,11 @@ test("createMacosAppBundle writes a launchable .app structure", () => {
   }
 });
 
-test("Info.plist carries a stable bundle identity and user-triggered Messages copy", () => {
+test("Info.plist carries a stable bundle identity and truthful focus-note Messages copy", () => {
   const plist = buildInfoPlist({ version: "2.0.0" });
   assert.match(plist, /<string>com\.relationshipinboxos\.app<\/string>/);
   assert.match(plist, /<key>NSAppleEventsUsageDescription<\/key>/);
-  assert.match(plist, /Sending is always user-triggered\./);
+  assert.match(plist, /when you press Send or enable a focus note for one focus window\./);
 });
 
 test("launcher opens an already-running dashboard instead of spawning another app", () => {

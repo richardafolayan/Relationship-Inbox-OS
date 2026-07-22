@@ -1,6 +1,6 @@
 # Current Build Status
 
-_Volatile. Update this whenever branches, commits, or build state change. Last updated: 2026-07-21._
+_Volatile. Update this whenever branches, commits, or build state change. Last updated: 2026-07-22._
 
 This file holds fast-moving build state on purpose. Branch tips and commit
 hashes go stale quickly, so they live here and not in `AGENTS.md`.
@@ -8,6 +8,8 @@ hashes go stale quickly, so they live here and not in `AGENTS.md`.
 ## Baseline
 
 - Active baseline branch: `v1/strip-back-pr1`.
+- Mobile pilot reliability work: `fix/mobile-pilot-reliability`, based on
+  `f0c19e7` from `v1/strip-back-pr1`.
 - Main release target: `main`.
 - Pilot-ready release version: `0.1.15`.
 - Release base before the version bump: `2ff0623` (`Merge pull request #795 from richardafolayan/fix/launcher-native-runtime-guard`).
@@ -34,6 +36,15 @@ hashes go stale quickly, so they live here and not in `AGENTS.md`.
   including native phone audio capture and silent-recording rejection.
 - Dictation can turn a transcript into editable messages while preserving the
   user's wording and voice.
+- The mobile reliability branch replaces the crowded inline composer controls
+  with phone-sized action sheets, constrains the composer to the iOS visual
+  viewport, fixes Safari audio blob creation, and audits every unique dashboard
+  route at 390 by 844.
+- Focus windows can explicitly opt into one saved automatic note per covered
+  person. Unknown numbers, group chats, cold outreach, duplicate sends, and
+  people already replied to remain excluded.
+- Live platform events are promoted ahead of scheduled scan work so new messages
+  are persisted as soon as their platform watcher notices them.
 - Windows packaging, bundled Node 22 startup, isolated browser profiles,
   WhatsApp, and Windows-safe dictation are present.
 - Google Messages for Android is implemented on the Windows parity track with

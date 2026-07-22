@@ -74,7 +74,7 @@ const AI_HELP_LEVELS: Array<{ value: AiHelpLevel; label: string; desc: string }>
   {
     value: "full_drafts",
     label: "Full drafts",
-    desc: "Also suggest complete replies you can edit. Nothing ever sends automatically."
+    desc: "Also suggest complete replies you can edit. AI suggestions never send on their own."
   }
 ];
 

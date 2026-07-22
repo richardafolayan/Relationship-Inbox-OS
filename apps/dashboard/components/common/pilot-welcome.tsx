@@ -31,7 +31,8 @@ export function PilotWelcomeCard({
         </p>
         <p className="m-0 mt-1.5 text-[13.5px] leading-[1.45] text-ink-2">
           See who is waiting, what they said, and what still needs a reply. You write in your own
-          words. Nothing sends unless you choose to.
+          words. Replies send when you choose. Focus notes only send automatically when you turn
+          that on for one focus window.
         </p>
       </section>
     );
@@ -75,7 +76,8 @@ export function PilotWelcomeCard({
             {APP_NAME} shows who’s waiting, what they said, and what you still need to address.
           </p>
           <p className="m-0 mt-[10px] border-t border-hairline pt-[10px] text-[12px] leading-[1.55] text-ink-3">
-            You write the reply. AI help is optional, and nothing sends unless you choose to.
+            You write the reply. AI help is optional. Automatic focus notes require your explicit
+            choice for each window.
           </p>
         </div>
       </section>

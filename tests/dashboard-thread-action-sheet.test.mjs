@@ -80,7 +80,8 @@ test("action sheet has title, close, handle, safe area, and internal scroll (#90
   assert.match(actionSheet, /role="dialog"/);
   assert.match(actionSheet, /aria-modal="true"/);
   assert.match(actionSheet, /pb-\[env\(safe-area-inset-bottom\)\]/);
-  assert.match(actionSheet, /max-h-\[min\(78dvh,640px\)\]/);
+  assert.match(actionSheet, /maxHeight: "min\(calc\(var\(--app-vv-height, 100vh\) \* 0\.78\), 640px\)"/);
+  assert.match(actionSheet, /top: "var\(--app-vv-offset-top, 0px\)"/);
   assert.match(actionSheet, /min-h-0 flex-1 overflow-y-auto overscroll-contain/);
   assert.match(actionSheet, /sm:hidden/);
 });
