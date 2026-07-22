@@ -204,7 +204,6 @@ if (await dictateButton.isEnabled()) {
 await threadPage.getByTestId("thread-composer-input").focus();
 await threadPage.evaluate(() => {
   document.documentElement.style.setProperty("--app-vv-height", "400px");
-  document.documentElement.style.setProperty("--app-vv-offset-top", "260px");
 });
 const keyboardViewport = await threadPage.evaluate(() => {
   const shell = document.querySelector('[data-scroll-owner="shell"]')?.getBoundingClientRect();
@@ -215,7 +214,13 @@ const keyboardViewport = await threadPage.evaluate(() => {
         shellHeight: Math.round(shell.height),
         composerTop: Math.round(composer.top),
         composerBottom: Math.round(composer.bottom),
-        visibleBottom: 660
+        visibleBottom: 400,
+        documentScrollTop: Math.round(document.documentElement.scrollTop),
+        bodyScrollTop: Math.round(document.body.scrollTop),
+        documentOverflow: Math.max(
+          0,
+          Math.round(document.documentElement.scrollHeight - document.documentElement.clientHeight)
+        )
       }
     : null;
 });
@@ -294,6 +299,20 @@ if (!results.find((result) => result.name === "thread-interactions")?.dictationW
 }
 if (results.find((result) => result.name === "focus-auto-send")?.focusAutoAfter !== "true") {
   failures.push("focus: automatic-send switch did not toggle");
+}
+const auditedKeyboardViewport = results.find(
+  (result) => result.name === "thread-interactions"
+)?.keyboardViewport;
+if (
+  !auditedKeyboardViewport ||
+  auditedKeyboardViewport.shellTop !== 0 ||
+  auditedKeyboardViewport.shellHeight !== auditedKeyboardViewport.visibleBottom ||
+  auditedKeyboardViewport.composerBottom !== auditedKeyboardViewport.visibleBottom ||
+  auditedKeyboardViewport.documentScrollTop !== 0 ||
+  auditedKeyboardViewport.bodyScrollTop !== 0 ||
+  auditedKeyboardViewport.documentOverflow !== 0
+) {
+  failures.push("thread: composer did not stay pinned to the keyboard viewport");
 }
 
 console.log(JSON.stringify({ outputDir, routeCount: routes.length, failures }, null, 2));

@@ -3,11 +3,9 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
   APP_VV_HEIGHT_VAR,
-  APP_VV_OFFSET_TOP_VAR,
   installAppVisualViewport,
   readCssZoom,
-  resolveAppVisualViewportHeight,
-  resolveAppVisualViewportOffset
+  resolveAppVisualViewportHeight
 } from "../apps/dashboard/lib/app-visual-viewport.ts";
 
 const read = (path) => readFileSync(new URL(`../${path}`, import.meta.url), "utf8");
@@ -34,7 +32,8 @@ test("document scroll is locked and the shell uses a zoom-safe height chain (#89
   const screenRule = ruleBody(globals, ".h-app-screen");
   assert.match(screenRule, /height:\s*100%/);
   assert.match(screenRule, /var\(--app-vv-height/);
-  assert.match(screenRule, /top:\s*var\(--app-vv-offset-top/);
+  assert.doesNotMatch(screenRule, /app-vv-offset-top/);
+  assert.doesNotMatch(screenRule, /position:\s*relative/);
   assert.doesNotMatch(
     screenRule,
     /\b\d*(\.\d+)?(vh|dvh|svh|lvh)\b/,
@@ -102,13 +101,6 @@ test("resolveAppVisualViewportHeight divides by effective zoom (px path, both en
   assert.equal(readCssZoom("1.16"), 1.16);
   assert.equal(readCssZoom("normal"), 1);
   assert.equal(readCssZoom(""), 1);
-});
-
-test("resolveAppVisualViewportOffset follows the panned iOS visual viewport", () => {
-  assert.equal(resolveAppVisualViewportOffset(0, 1.3), 0);
-  assert.equal(resolveAppVisualViewportOffset(180, 1), 180);
-  assert.equal(resolveAppVisualViewportOffset(180, 1.25), 144);
-  assert.equal(resolveAppVisualViewportOffset(Number.NaN, 1), 0);
 });
 
 test("installAppVisualViewport publishes --app-vv-height and cleans up", () => {
@@ -180,7 +172,6 @@ test("installAppVisualViewport publishes --app-vv-height and cleans up", () => {
   });
 
   assert.equal(props.get(APP_VV_HEIGHT_VAR), `${640 / 1.25}px`);
-  assert.equal(props.get(APP_VV_OFFSET_TOP_VAR), `${24 / 1.25}px`);
   assert.equal(listeners.resize.length, 1);
   assert.equal(listeners.scroll.length, 1);
   assert.equal(listeners.winResize.length, 1);
@@ -191,7 +182,6 @@ test("installAppVisualViewport publishes --app-vv-height and cleans up", () => {
   vv.offsetTop = 180;
   publish();
   assert.equal(props.get(APP_VV_HEIGHT_VAR), `${400 / 1.25}px`);
-  assert.equal(props.get(APP_VV_OFFSET_TOP_VAR), `${180 / 1.25}px`);
 
   // UI scale / Text Size changes body zoom without a window resize.
   // The publisher must re-read zoom and re-publish on inbox-ui-scale.
@@ -202,11 +192,9 @@ test("installAppVisualViewport publishes --app-vv-height and cleans up", () => {
     `${400 / 1.16}px`,
     "UI scale change must re-publish --app-vv-height with the new zoom"
   );
-  assert.equal(props.get(APP_VV_OFFSET_TOP_VAR), `${180 / 1.16}px`);
 
   disconnect();
   assert.equal(props.has(APP_VV_HEIGHT_VAR), false);
-  assert.equal(props.has(APP_VV_OFFSET_TOP_VAR), false);
   assert.equal(listeners.resize.length, 0);
   assert.equal(listeners.scroll.length, 0);
   assert.equal(listeners.winResize.length, 0);
