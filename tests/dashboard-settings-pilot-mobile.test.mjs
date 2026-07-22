@@ -47,7 +47,8 @@ test("Settings Pilot welcome is concise for mobile", () => {
   assert.match(welcome, /settings\?: boolean/);
   assert.match(welcome, /if \(settings\)/);
   assert.match(welcome, /Welcome to \{APP_NAME\}/);
-  assert.match(welcome, /Nothing sends unless you choose to/);
+  assert.match(welcome, /Replies send when you choose/);
+  assert.match(welcome, /Focus notes only send automatically/);
   const settingsBlock = welcome.slice(
     welcome.indexOf("if (settings)"),
     welcome.indexOf("if (compact)")

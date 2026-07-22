@@ -156,6 +156,20 @@ const FALLBACK_SUGGESTIONS: Array<{ intent: string; glyph: string; build: (first
   { intent: "Ask for time", glyph: "⏱", build: (n) => `Hey ${n}, can I get back to you next week?` }
 ];
 
+function microphoneAccessMessage(error: unknown): string {
+  const name =
+    typeof error === "object" && error !== null && "name" in error
+      ? String(error.name)
+      : "";
+  if (name === "NotAllowedError" || name === "SecurityError") {
+    return "Microphone access is off. Allow it in your browser settings, then try again.";
+  }
+  if (name === "NotFoundError" || name === "DevicesNotFoundError") {
+    return "No microphone was found on this device.";
+  }
+  return "The microphone could not start. Try again, or use the phone recorder.";
+}
+
 // The runner paginates messages server-side and exposes `messagePage`
 // on every ThreadResponse. We only own the scroll-position thresholds:
 // crossing the top threshold triggers `loadOlderMessages`, and staying
@@ -1097,9 +1111,10 @@ export default function ThreadPage() {
   // enqueuing immediately. The picker also exposes a custom datetime-local
   // input for arbitrary times.
   const [scheduleMenuOpen, setScheduleMenuOpen] = useState(false);
-  // Mobile progressive disclosure (#900): secondary composer actions live
-  // behind a + sheet so the default phone chrome stays [text] [+] [mic] [Send].
   const [composerMoreOpen, setComposerMoreOpen] = useState(false);
+  const [mobileSuggestionsOpen, setMobileSuggestionsOpen] = useState(false);
+  const [mobileScheduleOpen, setMobileScheduleOpen] = useState(false);
+  const composerMoreTriggerRef = useRef<HTMLButtonElement>(null);
   const [customScheduleValue, setCustomScheduleValue] = useState("");
   const [scheduling, setScheduling] = useState(false);
   const [cancellingScheduledId, setCancellingScheduledId] = useState<string | null>(null);
@@ -1114,12 +1129,8 @@ export default function ThreadPage() {
   const [editingScheduledTime, setEditingScheduledTime] = useState("");
   const [originalScheduledTime, setOriginalScheduledTime] = useState("");
   const [savingScheduledId, setSavingScheduledId] = useState<string | null>(null);
-  // Desktop + mobile each mount their own schedule/chips menus (one is
-  // display:none at a time). Outside-click must check both wrappers.
   const scheduleMenuDesktopRef = useRef<HTMLDivElement>(null);
-  const scheduleMenuMobileRef = useRef<HTMLDivElement>(null);
   const chipsMenuDesktopRef = useRef<HTMLDivElement>(null);
-  const chipsMenuMobileRef = useRef<HTMLDivElement>(null);
 
   // Coarse once-a-minute clock. The late-night LinkedIn schedule nudge below
   // the composer keys off the local time, so this lets it appear/disappear
@@ -1439,6 +1450,8 @@ export default function ThreadPage() {
     setWhatsAppPollSent(false);
     setDictationTranscript(null);
     setComposerMoreOpen(false);
+    setMobileSuggestionsOpen(false);
+    setMobileScheduleOpen(false);
     setScheduleMenuOpen(false);
     setChipsMenuOpen(false);
     setMemoryOpen(false);
@@ -2091,7 +2104,7 @@ export default function ThreadPage() {
       recordingStreamRef.current = stream;
       setRecording(true);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Microphone access denied");
+      setError(microphoneAccessMessage(err));
     }
   }, [addFiles, recording]);
 
@@ -2240,12 +2253,14 @@ export default function ThreadPage() {
         }
         await prepareAndSubmitDictation(raw);
       };
-      recorder.start(250);
+      // Safari needs one complete MP4 recording. Timesliced MP4 fragments
+      // can be individually valid but unreadable after Blob concatenation.
+      recorder.start();
       dictationRecorderRef.current = recorder;
       dictationStreamRef.current = stream;
       setDictationStatus("recording");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Microphone access denied");
+      setError(microphoneAccessMessage(err));
       setDictationStatus("idle");
     }
   }, [dictationStatus, prepareAndSubmitDictation]);
@@ -2439,10 +2454,7 @@ export default function ThreadPage() {
     if (!scheduleMenuOpen) return undefined;
     const onClick = (event: MouseEvent) => {
       const target = event.target as Node;
-      if (
-        !scheduleMenuDesktopRef.current?.contains(target) &&
-        !scheduleMenuMobileRef.current?.contains(target)
-      ) {
+      if (!scheduleMenuDesktopRef.current?.contains(target)) {
         setScheduleMenuOpen(false);
       }
     };
@@ -2462,10 +2474,7 @@ export default function ThreadPage() {
     if (!chipsMenuOpen) return undefined;
     const onClick = (event: MouseEvent) => {
       const target = event.target as Node;
-      if (
-        !chipsMenuDesktopRef.current?.contains(target) &&
-        !chipsMenuMobileRef.current?.contains(target)
-      ) {
+      if (!chipsMenuDesktopRef.current?.contains(target)) {
         setChipsMenuOpen(false);
       }
     };
@@ -3485,6 +3494,105 @@ export default function ThreadPage() {
   const fallbackSource = thread.suggestedReplies.source?.fellBackFromProviderId
     ? thread.suggestedReplies.source
     : null;
+  const aiHelpLevel = profile?.aiHelpLevel ?? "writing_support";
+  const showFullDrafts = aiHelpLevel === "full_drafts";
+  const effectiveComposeMode = showFullDrafts ? composeMode : "ask";
+  const canAttach =
+    thread.platform === "IMESSAGE" ||
+    thread.platform === "WHATSAPP" ||
+    thread.platform === "GOOGLE_MESSAGES";
+  const mobileComposerGroups: ActionSheetGroup[] = [
+    {
+      id: "writing",
+      label: "Writing",
+      items: showFullDrafts
+        ? [
+            {
+              label: repliesGenerating ? "Preparing suggestions" : "Suggested replies",
+              description: "Choose one to edit in your own words.",
+              disabled: repliesGenerating,
+              onSelect: () => setMobileSuggestionsOpen(true)
+            }
+          ]
+        : []
+    },
+    {
+      id: "add",
+      label: "Add",
+      items: canAttach
+        ? [
+            {
+              label: "Photo or file",
+              description: "Attach something to this reply.",
+              preserveUserActivation: true,
+              onSelect: () => document.getElementById("composer-file-input")?.click()
+            },
+            {
+              label: recording ? "Stop voice note" : "Voice note",
+              description: recording
+                ? "Finish this recording and attach it."
+                : "Record audio to send as an attachment.",
+              preserveUserActivation: true,
+              onSelect: () => (recording ? stopRecording() : void startRecording())
+            }
+          ]
+        : []
+    },
+    {
+      id: "later",
+      label: "Later",
+      items: [
+        {
+          label: "Schedule send",
+          description: composer.trim() ? "Choose when this reply should be sent." : "Write a reply first.",
+          disabled: !composer.trim() || sending || scheduling,
+          onSelect: () => setMobileScheduleOpen(true)
+        }
+      ]
+    },
+    {
+      id: "whatsapp",
+      label: "WhatsApp",
+      items:
+        thread.platform === "WHATSAPP"
+          ? [
+              {
+                label: "Create poll",
+                description: "Ask a question with answer choices.",
+                onSelect: () => {
+                  setWhatsAppPollOpen(true);
+                  setWhatsAppPollSent(false);
+                }
+              }
+            ]
+          : []
+    }
+  ];
+  const mobileSuggestionGroups: ActionSheetGroup[] = [
+    {
+      id: "suggestions",
+      items: chips.map((chip) => ({
+        label: chip.intent,
+        description: chip.text,
+        onSelect: () => {
+          setComposer(chip.text);
+          setComposerSource("user");
+          window.requestAnimationFrame(() => composerInputRef.current?.focus());
+        }
+      }))
+    }
+  ];
+  const mobileScheduleGroups: ActionSheetGroup[] = [
+    {
+      id: "presets",
+      items: buildSchedulePresets(new Date()).map((preset) => ({
+        label: preset.label,
+        description: preset.sub,
+        disabled: scheduling,
+        onSelect: () => void scheduleSend(preset.at)
+      }))
+    }
+  ];
 
   // Right-rail framing splits on `needsReply`:
   // - active reply (contact's message is newest): rail surfaces what they're
@@ -3507,11 +3615,6 @@ export default function ThreadPage() {
   //                      but no complete AI-written drafts
   //   - memory_only:     no AI writing help at all (Ask is still allowed —
   //                      it answers from the thread, it doesn't draft)
-  const aiHelpLevel = profile?.aiHelpLevel ?? "writing_support";
-  const showFullDrafts = aiHelpLevel === "full_drafts";
-  // When full drafts are off, the compose drawer offers "Ask" only.
-  const effectiveComposeMode = showFullDrafts ? composeMode : "ask";
-
   const platformLabel = PLATFORM_LABEL[thread.platform];
 
   // Overflow actions shared by the phone action sheet (#901) and the desktop
@@ -4159,10 +4262,10 @@ export default function ThreadPage() {
                 aria-expanded={aiOpen}
                 aria-controls="ai-assist-panel"
                 data-testid="ai-assist-toggle"
-                className="px-3 py-1.5 text-[12px]"
+                className="h-9 w-9 px-0 py-0 text-[12px] sm:h-auto sm:w-auto sm:px-3 sm:py-1.5"
               >
                 <Sparkles className="h-[13px] w-[13px]" strokeWidth={1.6} />
-                AI
+                <span className="hidden sm:inline">AI</span>
               </Button>
               {compactActions ? (
                 <>
@@ -5104,7 +5207,7 @@ export default function ThreadPage() {
                 >
                   <span className="flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-[0.06em] text-accent-ink">
                     <Sparkles className="h-[12px] w-[12px]" />
-                    <span className="md:hidden">AI draft</span>
+                    <span className="md:hidden">Suggested draft</span>
                     <span className="hidden md:inline">
                       {isReopenMode
                         ? "AI opener · review before sending"
@@ -5112,15 +5215,6 @@ export default function ThreadPage() {
                     </span>
                   </span>
                   <div className="flex items-center gap-1">
-                    <button
-                      type="button"
-                      onClick={() => composerInputRef.current?.focus()}
-                      title="Edit the AI draft"
-                      className="flex items-center gap-1 rounded-[6px] px-2 py-1 text-[12px] text-ink-2 transition-colors duration-calm hover:bg-paper-2 hover:text-ink md:hidden"
-                    >
-                      <Pencil className="h-[12px] w-[12px]" strokeWidth={1.6} />
-                      Edit
-                    </button>
                     <button
                       type="button"
                       onClick={() => {
@@ -5138,12 +5232,7 @@ export default function ThreadPage() {
                 </div>
               ) : null}
               {thread.platform === "WHATSAPP" ? (
-                <div
-                  className={cn(
-                    "mb-2 flex flex-wrap items-center gap-1.5",
-                    composerMoreOpen ? "flex" : "hidden md:flex"
-                  )}
-                >
+                <div className="mb-2 hidden flex-wrap items-center gap-1.5 md:flex">
                   <span className="mr-1 font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3">
                     WhatsApp
                   </span>
@@ -5384,18 +5473,20 @@ export default function ThreadPage() {
                 ref={(el) => {
                   composerInputRef.current = el;
                   if (!el) return;
-                  // Autosize with a phone-safe cap (#900): min(160px, 28dvh)
-                  // so a long draft scrolls inside the field instead of
-                  // eating the message history.
+                  const viewportHeight =
+                    typeof window !== "undefined"
+                      ? window.visualViewport?.height ?? window.innerHeight
+                      : 640;
+                  const phone = typeof window !== "undefined" && window.innerWidth < 768;
                   const capPx = Math.min(
-                    160,
-                    Math.round((typeof window !== "undefined" ? window.innerHeight : 640) * 0.28)
+                    phone ? 120 : 160,
+                    Math.round(viewportHeight * (phone ? 0.22 : 0.28))
                   );
                   el.style.height = "auto";
                   el.style.height = `${Math.min(Math.max(el.scrollHeight, 44), capPx)}px`;
                 }}
-                className="block w-full resize-none overflow-y-auto border-0 bg-transparent text-[14px] leading-[1.45] text-ink outline-none placeholder:text-ink-4"
-                style={{ minHeight: 44, maxHeight: "min(160px, 28dvh)" }}
+                className="block max-h-[120px] w-full resize-none overflow-y-auto border-0 bg-transparent text-[14px] leading-[1.45] text-ink outline-none placeholder:text-ink-4 md:max-h-[160px]"
+                style={{ minHeight: 44 }}
               />
               {(thread.platform === "IMESSAGE" ||
                 thread.platform === "WHATSAPP" ||
@@ -5416,226 +5507,7 @@ export default function ThreadPage() {
                   }}
                 />
               )}
-              {/* Mobile secondary tools (#900): attachments, schedule, poll
-                  formatting (above), AI rewrite, suggestions. Hidden until
-                  the operator opens +. Desktop uses the full toolbar below. */}
-              {composerMoreOpen ? (
-                <div
-                  data-testid="composer-more-sheet"
-                  className="mt-1.5 flex flex-wrap items-center gap-2 border-t border-hairline pt-2 md:hidden"
-                >
-                  {thread.relationshipMemory && thread.relationshipMemory.otherThreadCount > 0 ? (
-                    <div data-testid="memory-chip-mobile" className="relative">
-                      <button
-                        type="button"
-                        onClick={() => setMemoryOpen((prev) => !prev)}
-                        aria-expanded={memoryOpen}
-                        title={`Past context, ${thread.relationshipMemory.otherThreadCount} prior conversation${thread.relationshipMemory.otherThreadCount === 1 ? "" : "s"}`}
-                        className="relative inline-flex min-h-10 items-center gap-2 rounded-pill border border-hairline bg-paper px-3 text-[12px] text-ink-2 transition-colors duration-calm hover:border-hairline-strong hover:bg-paper-2 hover:text-ink"
-                      >
-                        <Sparkles className="h-[13px] w-[13px]" strokeWidth={1.6} />
-                        Past context
-                        <span className="grid h-[17px] min-w-[17px] place-items-center rounded-full bg-ink px-1 font-mono text-[9px] font-medium text-paper">
-                          {thread.relationshipMemory.otherThreadCount}
-                        </span>
-                      </button>
-                      {memoryOpen ? (
-                        <div className="absolute bottom-[calc(100%+8px)] left-0 z-20 w-[min(480px,calc(100vw-32px))] rounded-card border border-hairline bg-paper p-3 text-[12px] leading-snug shadow-card">
-                          <div className="mb-2 font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3">
-                            What the AI can lean on
-                          </div>
-                          {thread.relationshipMemory.tags.length > 0 ? (
-                            <div className="mb-2 flex flex-wrap gap-1">
-                              {thread.relationshipMemory.tags.map((tag) => (
-                                <span
-                                  key={tag}
-                                  className="rounded-full border border-hairline-strong px-2 py-[1px] text-[11px] text-ink-2"
-                                >
-                                  {tag}
-                                </span>
-                              ))}
-                            </div>
-                          ) : null}
-                          {thread.relationshipMemory.notes ? (
-                            <p className="mb-2 text-ink-2">{thread.relationshipMemory.notes}</p>
-                          ) : null}
-                          <ul className="space-y-1">
-                            {thread.relationshipMemory.recentExchanges.map((ex) => (
-                              <li key={ex.threadId} className="text-ink-2">
-                                <span className="font-mono text-[10px] uppercase tracking-[0.04em] text-ink-3">
-                                  {ex.platform.toLowerCase()}
-                                  {ex.lastMessageAt ? ` · ${formatRelative(ex.lastMessageAt)}` : ""}
-                                </span>
-                                <br />
-                                <span className="text-ink-2">
-                                  {ex.preview ?? ex.whatTheyWant ?? "(no recent message)"}
-                                </span>
-                              </li>
-                            ))}
-                          </ul>
-                        </div>
-                      ) : null}
-                    </div>
-                  ) : null}
-                  {showFullDrafts ? (
-                    <div className="relative" ref={chipsMenuMobileRef}>
-                      <button
-                        type="button"
-                        onClick={() => setChipsMenuOpen((v) => !v)}
-                        disabled={repliesGenerating}
-                        className="inline-flex items-center gap-1.5 rounded-pill border border-hairline px-2.5 py-1 text-[11px] text-ink-2 transition-colors duration-calm hover:border-hairline-strong hover:bg-paper-2 hover:text-ink disabled:opacity-50"
-                      >
-                        {repliesGenerating ? (
-                          <Loader2 className="h-[13px] w-[13px] animate-spin" />
-                        ) : (
-                          <Sparkles className="h-[13px] w-[13px]" strokeWidth={1.6} />
-                        )}
-                        {repliesGenerating ? "Generating suggestions…" : "Suggested replies"}
-                        {repliesGenerating ? null : (
-                          <ChevronDown
-                            className={`h-[13px] w-[13px] transition-transform duration-calm ${chipsMenuOpen ? "rotate-180" : ""}`}
-                            strokeWidth={1.6}
-                          />
-                        )}
-                      </button>
-                      {chipsMenuOpen && !repliesGenerating ? (
-                        <div className="absolute bottom-[calc(100%+8px)] left-0 z-20 w-[min(360px,calc(100vw-32px))] overflow-hidden rounded-row border border-hairline bg-paper p-[6px] shadow-pop">
-                          {fallbackSource ? (
-                            <p
-                              className="m-0 mb-1 px-3 pb-2 pt-2 font-mono text-[10.5px] uppercase tracking-[0.06em] text-ink-3"
-                              title={fallbackSource.fellBackMessage ?? undefined}
-                            >
-                              generated with{" "}
-                              {fallbackSource.providerDisplayName ?? "fallback provider"} ·{" "}
-                              {fallbackSource.fellBackFromProviderDisplayName ??
-                                fallbackSource.fellBackFromProviderId}{" "}
-                              unavailable
-                              {fallbackSource.fellBackReason
-                                ? ` (${fallbackSource.fellBackReason.replace(/_/g, " ")})`
-                                : ""}
-                            </p>
-                          ) : null}
-                          {chips.map((chip) => (
-                            <button
-                              key={chip.intent}
-                              type="button"
-                              onClick={() => {
-                                setComposer(chip.text);
-                                setChipsMenuOpen(false);
-                                setComposerMoreOpen(false);
-                              }}
-                              className="block w-full rounded-[10px] px-3 py-[10px] text-left transition-colors duration-calm hover:bg-paper-2"
-                            >
-                              <p className="m-0 text-[13px] font-medium text-ink">{chip.intent}</p>
-                              <p className="m-0 mt-1 line-clamp-2 text-[12.5px] leading-[1.45] text-ink-3">
-                                {chip.text}
-                              </p>
-                            </button>
-                          ))}
-                        </div>
-                      ) : null}
-                    </div>
-                  ) : null}
-                  <div className="relative" ref={scheduleMenuMobileRef}>
-                    <button
-                      type="button"
-                      onClick={() => setScheduleMenuOpen((v) => !v)}
-                      disabled={!composer.trim() || sending || scheduling}
-                      title="Schedule send"
-                      aria-label="Schedule send"
-                      className="inline-flex min-h-10 items-center gap-2 rounded-pill border border-hairline bg-paper px-3 text-[12px] text-ink-2 transition-colors duration-calm hover:border-hairline-strong hover:bg-paper-2 hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
-                    >
-                      <Clock className="h-[13px] w-[13px]" strokeWidth={1.8} />
-                      Schedule
-                    </button>
-                    {scheduleMenuOpen ? (
-                      <div className="absolute bottom-[calc(100%+8px)] right-0 z-20 w-[min(300px,calc(100vw-32px))] overflow-hidden rounded-row border border-hairline bg-paper p-[6px] shadow-pop">
-                        <p className="m-0 px-3 pb-2 pt-2 font-mono text-[10.5px] uppercase tracking-[0.06em] text-ink-3">
-                          Schedule send
-                        </p>
-                        {buildSchedulePresets(new Date()).map((preset) => (
-                          <button
-                            key={preset.label}
-                            type="button"
-                            onClick={() => void scheduleSend(preset.at)}
-                            disabled={scheduling}
-                            className="flex w-full items-center justify-between rounded-[10px] px-3 py-[10px] text-left transition-colors duration-calm hover:bg-paper-2 disabled:opacity-50"
-                          >
-                            <span className="text-[13px] font-medium text-ink">{preset.label}</span>
-                            <span className="font-mono text-[11px] text-ink-3">{preset.sub}</span>
-                          </button>
-                        ))}
-                        <div className="mx-2 my-2 border-t border-hairline" />
-                        <div className="px-3 pb-2 pt-1">
-                          <p className="mb-1 font-mono text-[10.5px] uppercase tracking-[0.06em] text-ink-3">
-                            Custom
-                          </p>
-                          <input
-                            type="datetime-local"
-                            value={customScheduleValue}
-                            onChange={(e) => setCustomScheduleValue(e.target.value)}
-                            className="w-full rounded-row border border-hairline bg-paper px-3 py-[7px] text-[13px] text-ink outline-none transition-[border-color] duration-calm focus:border-hairline-strong"
-                          />
-                          <button
-                            type="button"
-                            disabled={!customScheduleValue || scheduling}
-                            onClick={() => {
-                              const at = new Date(customScheduleValue);
-                              if (Number.isNaN(at.getTime())) {
-                                setError("Pick a valid date and time.");
-                                return;
-                              }
-                              if (at.getTime() <= Date.now()) {
-                                setError("Pick a time in the future.");
-                                return;
-                              }
-                              void scheduleSend(at);
-                            }}
-                            className="mt-2 w-full rounded-pill bg-ink px-3 py-[7px] text-[12px] font-medium text-paper hover:bg-ink-2 disabled:cursor-not-allowed disabled:opacity-50"
-                          >
-                            {scheduling ? "Scheduling…" : "Schedule"}
-                          </button>
-                        </div>
-                      </div>
-                    ) : null}
-                  </div>
-                  {thread.platform === "IMESSAGE" ||
-                  thread.platform === "WHATSAPP" ||
-                  thread.platform === "GOOGLE_MESSAGES" ? (
-                    <>
-                      <button
-                        type="button"
-                        onClick={() => document.getElementById("composer-file-input")?.click()}
-                        className="inline-flex min-h-10 items-center gap-2 rounded-pill border border-hairline bg-paper px-3 text-[12px] text-ink-2 hover:border-hairline-strong hover:text-ink"
-                        title={
-                          thread.platform === "WHATSAPP"
-                            ? "Attach photos, GIFs, videos or files"
-                            : "Attach photos / files"
-                        }
-                        aria-label="Attach files"
-                      >
-                        <Paperclip className="h-[14px] w-[14px]" strokeWidth={1.8} />
-                        Attach
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => (recording ? stopRecording() : void startRecording())}
-                        className={`inline-flex min-h-10 items-center gap-2 rounded-pill border px-3 text-[12px] ${
-                          recording
-                            ? "border-risk-overdue bg-risk-overdue/10 text-risk-overdue animate-pulse"
-                            : "border-hairline bg-paper text-ink-2 hover:text-ink"
-                        }`}
-                        title={recording ? "Stop recording" : "Record voice note"}
-                        aria-label={recording ? "Stop recording" : "Record voice note"}
-                      >
-                        <AudioLines className="h-[14px] w-[14px]" strokeWidth={1.8} />
-                        {recording ? "Stop voice note" : "Voice note"}
-                      </button>
-                    </>
-                  ) : null}
-                </div>
-              ) : null}
-              {/* Desktop full toolbar (unchanged layout at md+). */}
+              {/* Desktop full toolbar. Phone actions live in viewport-bound sheets. */}
               <div className="mt-1.5 hidden flex-wrap items-center gap-2 md:flex">
                 {thread.relationshipMemory && thread.relationshipMemory.otherThreadCount > 0 ? (
                   <div data-testid="memory-chip" className="relative">
@@ -5893,39 +5765,35 @@ export default function ThreadPage() {
                   </Button>
                 </div>
               </div>
-              {/* Mobile primary actions: [+] [mic] ........ [Send] */}
+              {recording ? (
+                <div className="mt-1.5 flex items-center gap-2 rounded-[10px] bg-paper-2 px-2.5 py-2 text-[12px] text-ink-2 md:hidden">
+                  <AudioLines className="h-4 w-4 animate-pulse text-risk-overdue" strokeWidth={1.8} />
+                  <span className="min-w-0 flex-1">Voice note recording</span>
+                  <button
+                    type="button"
+                    onClick={stopRecording}
+                    className="rounded-pill border border-hairline-strong bg-paper px-3 py-1 font-medium text-ink"
+                  >
+                    Stop and attach
+                  </button>
+                </div>
+              ) : null}
               <div
                 data-testid="composer-mobile-actions"
                 className="mt-1.5 flex items-center gap-2 md:hidden"
               >
                 <button
+                  ref={composerMoreTriggerRef}
                   type="button"
                   data-testid="composer-more-toggle"
-                  onClick={() => {
-                    setComposerMoreOpen((prev) => {
-                      if (prev) {
-                        setScheduleMenuOpen(false);
-                        setChipsMenuOpen(false);
-                        setMemoryOpen(false);
-                      }
-                      return !prev;
-                    });
-                  }}
+                  onClick={() => setComposerMoreOpen(true)}
                   aria-expanded={composerMoreOpen}
-                  aria-label={composerMoreOpen ? "Hide more actions" : "More actions"}
-                  title={composerMoreOpen ? "Hide more actions" : "More actions"}
-                  className={cn(
-                    "grid h-[34px] w-[34px] shrink-0 place-items-center rounded-full border transition-colors duration-calm",
-                    composerMoreOpen
-                      ? "border-hairline-strong bg-paper-2 text-ink"
-                      : "border-hairline bg-paper text-ink-2 hover:border-hairline-strong hover:bg-paper-2 hover:text-ink"
-                  )}
+                  aria-haspopup="dialog"
+                  aria-label="More actions"
+                  title="More actions"
+                  className="grid h-[34px] w-[34px] shrink-0 place-items-center rounded-full border border-hairline bg-paper text-ink-2 transition-colors duration-calm hover:border-hairline-strong hover:bg-paper-2 hover:text-ink"
                 >
-                  {composerMoreOpen ? (
-                    <X className="h-[15px] w-[15px]" strokeWidth={1.8} />
-                  ) : (
-                    <Plus className="h-[15px] w-[15px]" strokeWidth={1.8} />
-                  )}
+                  <Plus className="h-[15px] w-[15px]" strokeWidth={1.8} />
                 </button>
                 <button
                   type="button"
@@ -5980,6 +5848,62 @@ export default function ThreadPage() {
                   Send
                 </Button>
               </div>
+              <ActionSheet
+                open={composerMoreOpen}
+                onClose={() => setComposerMoreOpen(false)}
+                title="Add to your reply"
+                groups={mobileComposerGroups}
+                returnFocusRef={composerMoreTriggerRef}
+                scrollLockTargetRef={timelineRef}
+                historyKey="composerMore"
+              />
+              <ActionSheet
+                open={mobileSuggestionsOpen}
+                onClose={() => setMobileSuggestionsOpen(false)}
+                title="Suggested replies"
+                groups={mobileSuggestionGroups}
+                returnFocusRef={composerMoreTriggerRef}
+                scrollLockTargetRef={timelineRef}
+                historyKey="composerSuggestions"
+              />
+              <ActionSheet
+                open={mobileScheduleOpen}
+                onClose={() => setMobileScheduleOpen(false)}
+                title="Schedule send"
+                groups={mobileScheduleGroups}
+                returnFocusRef={composerMoreTriggerRef}
+                scrollLockTargetRef={timelineRef}
+                historyKey="composerSchedule"
+                footer={
+                  <div className="border-t border-hairline pt-3">
+                    <label className="block font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3">
+                      Custom time
+                      <input
+                        type="datetime-local"
+                        value={customScheduleValue}
+                        onChange={(event) => setCustomScheduleValue(event.target.value)}
+                        className="mt-1.5 w-full rounded-row border border-hairline bg-paper px-3 py-2.5 font-sans text-[14px] normal-case tracking-normal text-ink outline-none focus:border-hairline-strong"
+                      />
+                    </label>
+                    <button
+                      type="button"
+                      disabled={!customScheduleValue || scheduling}
+                      onClick={() => {
+                        const at = new Date(customScheduleValue);
+                        if (Number.isNaN(at.getTime()) || at.getTime() <= Date.now()) {
+                          setError("Pick a future date and time.");
+                          return;
+                        }
+                        setMobileScheduleOpen(false);
+                        void scheduleSend(at);
+                      }}
+                      className="mt-2 w-full rounded-pill bg-ink px-3 py-2.5 text-[13px] font-medium text-paper disabled:opacity-50"
+                    >
+                      {scheduling ? "Scheduling..." : "Schedule"}
+                    </button>
+                  </div>
+                }
+              />
               {showLateNightNudge && lateNightSlot ? (
                 <button
                   type="button"

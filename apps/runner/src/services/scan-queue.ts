@@ -134,6 +134,17 @@ type ScanJob = {
   trigger?: ScanTrigger;
 };
 
+export function enqueueScanJobByPriority<T>(queue: T[], job: T, priority: boolean): void {
+  if (priority) queue.unshift(job);
+  else queue.push(job);
+}
+
+export function promoteQueuedJob<T>(queue: T[], index: number): void {
+  if (index <= 0 || index >= queue.length) return;
+  const [job] = queue.splice(index, 1);
+  if (job !== undefined) queue.unshift(job);
+}
+
 export interface ScanTrigger {
   kind: "filesystem" | "platform_event" | "browser_change";
   sourceChangedAt: string;
@@ -1096,11 +1107,14 @@ export function createScanQueue(deps: ScanQueueDeps) {
   ): EnqueueScanResult {
     const requestId = options?.requestId ?? uuid();
     if (options?.coalesceWithPending) {
-      const pending = queue.find((entry) =>
+      const pendingIndex = queue.findIndex((entry) =>
+        (!options.trigger || entry.platform === platform) &&
         jobCoversTriggeredScan(entry, platform, options.platformThreadId)
       );
+      const pending = pendingIndex >= 0 ? queue[pendingIndex] : undefined;
       if (pending) {
         pending.trigger = earlierTrigger(pending.trigger, options.trigger);
+        if (options.trigger) promoteQueuedJob(queue, pendingIndex);
         return {
           ok: true,
           jobId: pending.jobId,
@@ -1180,7 +1194,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
     // before its first await, so reading `processing` after the trigger would
     // always report "queued". See resolveEnqueueStatus.
     const processingBeforeEnqueue = processing;
-    queue.push(job);
+    enqueueScanJobByPriority(queue, job, Boolean(job.trigger));
     triggerProcessNext();
 
     return {
