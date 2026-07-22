@@ -110,8 +110,6 @@ body { zoom: var(--effective-zoom); }
  * derived from visualViewport (already compensated for body zoom). That
  * override is preferred when present. */
 .h-app-screen {
-  position: relative;
-  top: var(--app-vv-offset-top, 0px);
   height: 100%;
   height: var(--app-vv-height, 100%);
 }
