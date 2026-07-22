@@ -19,7 +19,10 @@ test("mobile default exposes only + / dictate / Send primary actions", () => {
     src.indexOf('data-testid="composer-mobile-send"') + 80
   );
   assert.match(mobileBlock, /Plus/);
-  assert.match(mobileBlock, /aria-label="Dictate"/);
+  assert.match(
+    mobileBlock,
+    /aria-label=\{browserAudioCaptureAvailable \? "Dictate" : "Use keyboard microphone"\}/
+  );
   assert.match(mobileBlock, /Send/);
   assert.doesNotMatch(
     mobileBlock,
@@ -35,7 +38,7 @@ test("secondary mobile tools live in a viewport-bound action sheet", () => {
   assert.match(src, /title="Suggested replies"/);
   assert.match(src, /title="Schedule send"/);
   assert.match(src, /label: "Photo or file"/);
-  assert.match(src, /label: recording \? "Stop voice note" : "Voice note"/);
+  assert.match(src, /browserAudioCaptureAvailable[\s\S]*?\? "Voice note"[\s\S]*?: "Add voice recording"/);
   assert.match(src, /label: "Schedule send"/);
   assert.doesNotMatch(src, /data-testid="composer-more-sheet"/);
   assert.doesNotMatch(src, /chipsMenuMobileRef|scheduleMenuMobileRef/);
@@ -59,8 +62,8 @@ test("suggested draft has one calm mobile control", () => {
 });
 
 test("desktop toolbar remains available at md+ and is not the mobile row", () => {
-  assert.match(src, /hidden flex-wrap items-center gap-2 md:flex/);
-  assert.match(src, /composer-mobile-actions"[\s\S]*?className="mt-1\.5 flex items-center gap-2 md:hidden"/);
+  assert.match(src, /className="desktop-ui-flex mt-1\.5 flex-wrap items-center gap-2"/);
+  assert.match(src, /composer-mobile-actions"[\s\S]*?className="phone-ui-flex mt-1\.5 items-center gap-2"/);
 });
 
 test("thread switch closes the mobile more sheet", () => {
