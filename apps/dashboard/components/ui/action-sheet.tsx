@@ -236,7 +236,7 @@ export function ActionSheet({
 
   const content = (
     <div
-      className="fixed inset-x-0 bottom-auto z-[110] flex items-end justify-center sm:hidden"
+      className="phone-ui-flex fixed inset-x-0 bottom-auto z-[110] items-end justify-center"
       style={{
         top: "var(--app-vv-offset-top, 0px)",
         height: "var(--app-vv-height, 100%)"

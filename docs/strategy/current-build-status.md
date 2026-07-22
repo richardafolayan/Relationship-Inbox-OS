@@ -8,10 +8,10 @@ hashes go stale quickly, so they live here and not in `AGENTS.md`.
 ## Baseline
 
 - Active baseline branch: `v1/strip-back-pr1`.
-- Mobile pilot reliability work: `fix/mobile-pilot-reliability`, based on
-  `f0c19e7` from `v1/strip-back-pr1`.
+- Mobile pilot release correction: `fix/ios-mobile-release`, based on the
+  PR #1009 merge at `09bebffc` from `v1/strip-back-pr1`.
 - Main release target: `main`.
-- Pilot-ready release version: `0.1.15`.
+- Pilot-ready release version: `0.1.16`.
 - Release base before the version bump: `2ff0623` (`Merge pull request #795 from richardafolayan/fix/launcher-native-runtime-guard`).
 - Mobile pilot integration, protected same-Wi-Fi phone access, and responsive
   phone layouts are merged into the baseline through `371718e1`.
@@ -32,14 +32,17 @@ hashes go stale quickly, so they live here and not in `AGENTS.md`.
 - iMessage Full Disk Access setup guidance is present.
 - Protected same-Wi-Fi phone access and the consolidated responsive mobile UI
   are present.
-- Mobile composer and recovery hardening is present through `39cf3c70`,
-  including native phone audio capture and silent-recording rejection.
+- Mobile composer and recovery hardening includes secure-context microphone
+  capture and silent-recording rejection. On the private HTTP iPhone link,
+  dictation uses the iPhone keyboard microphone and existing audio recordings
+  can be attached without invoking WebKit's video recorder.
 - Dictation can turn a transcript into editable messages while preserving the
   user's wording and voice.
 - The mobile reliability branch replaces the crowded inline composer controls
   with phone-sized action sheets, constrains the composer to the iOS visual
   viewport, fixes Safari audio blob creation, and audits every unique dashboard
-  route at 390 by 844.
+  route at 390 by 844. The release correction also audits a desktop-width,
+  coarse-touch viewport so iPhone never receives the desktop composer toolbar.
 - Focus windows can explicitly opt into one saved automatic note per covered
   person. Unknown numbers, group chats, cold outreach, duplicate sends, and
   people already replied to remain excluded.

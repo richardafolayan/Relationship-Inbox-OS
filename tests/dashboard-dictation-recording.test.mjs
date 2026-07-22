@@ -29,12 +29,13 @@ test("a Mac-hosted dictation keeps native MP4 audio instead of browser resamplin
   assert.equal(prepared.filename, "dictation.m4a");
 });
 
-test("the thread page offers native capture when secure getUserMedia is unavailable", () => {
+test("insecure iPhone access never invokes WebKit's video capture fallback", () => {
   assert.match(threadPage, /!window\.isSecureContext \|\| !navigator\.mediaDevices\?\.getUserMedia/);
-  assert.match(threadPage, /accept="audio\/\*"/);
-  assert.match(threadPage, /capture="user"/);
-  assert.match(threadPage, /onChange=\{captureDictationFile\}/);
-  assert.match(threadPage, /!window\.isSecureContext \|\| !navigator\.mediaDevices\?\.getUserMedia[\s\S]*?voiceNoteCaptureInputRef\.current\?\.click/);
+  assert.doesNotMatch(threadPage, /capture="user"/);
+  assert.doesNotMatch(threadPage, /accept="audio\/\*"/);
+  assert.match(threadPage, /accept="\.m4a,\.mp3,\.wav,\.aac,\.aif,\.aiff,\.caf"/);
+  assert.match(threadPage, /voiceNoteFileInputRef\.current\?\.click/);
+  assert.match(threadPage, /Use the microphone key on your iPhone keyboard/);
 });
 
 test("Safari dictation records one complete MP4 instead of timesliced fragments", () => {

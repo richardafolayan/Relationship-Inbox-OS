@@ -26,6 +26,10 @@ const button = readFileSync(
   fileURLToPath(new URL("../apps/dashboard/components/ui/button.tsx", import.meta.url)),
   "utf8"
 );
+const globals = readFileSync(
+  fileURLToPath(new URL("../apps/dashboard/app/globals.css", import.meta.url)),
+  "utf8"
+);
 
 test("swipe-down past the threshold dismisses the action sheet (#901)", () => {
   assert.equal(shouldDismissSheetSwipe(0), false);
@@ -49,6 +53,15 @@ test("phone uses ActionSheet; desktop/tablet keeps Menu popover (#901)", () => {
   // Desktop path still mounts the existing popover Menu.
   assert.match(threadPage, /<Menu[\s\S]*items=\{overflowMenuItems\}/);
   assert.match(threadPage, /overflowMenuItems = \[/);
+});
+
+test("touch-only iOS keeps phone composer controls even with a desktop-width viewport", () => {
+  assert.match(threadPage, /\(max-width: 767px\), \(hover: none\) and \(pointer: coarse\)/);
+  assert.match(threadPage, /desktop-ui-flex mt-1\.5 flex-wrap items-center gap-2/);
+  assert.match(threadPage, /phone-ui-flex mt-1\.5 items-center gap-2/);
+  assert.match(globals, /@media \(min-width: 768px\) and \(hover: hover\) and \(pointer: fine\)/);
+  assert.match(globals, /\.phone-ui-flex \{ display: flex; \}/);
+  assert.match(globals, /\.desktop-ui-flex \{ display: flex; \}/);
 });
 
 test("action sheet groups Primary, Conversation tools, and External (#901)", () => {
@@ -83,7 +96,7 @@ test("action sheet has title, close, handle, safe area, and internal scroll (#90
   assert.match(actionSheet, /maxHeight: "min\(calc\(var\(--app-vv-height, 100vh\) \* 0\.78\), 640px\)"/);
   assert.match(actionSheet, /top: "var\(--app-vv-offset-top, 0px\)"/);
   assert.match(actionSheet, /min-h-0 flex-1 overflow-y-auto overscroll-contain/);
-  assert.match(actionSheet, /sm:hidden/);
+  assert.match(actionSheet, /phone-ui-flex fixed/);
 });
 
 test("action sheet locks thread scroll and restores message position (#901)", () => {

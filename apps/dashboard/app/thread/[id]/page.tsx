@@ -181,6 +181,7 @@ const SCROLL_BOTTOM_THRESHOLD = 200;
 // SCROLL_BOTTOM_THRESHOLD so it appears only once you're genuinely reading
 // history, not on a small nudge away from the bottom.
 const JUMP_TO_LATEST_THRESHOLD = 600;
+const PHONE_LAYOUT_MEDIA_QUERY = "(max-width: 767px), (hover: none) and (pointer: coarse)";
 
 type ComposerAttachment = {
   id: string;
@@ -704,7 +705,8 @@ export default function ThreadPage() {
   const [recording, setRecording] = useState(false);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const recordedChunksRef = useRef<BlobPart[]>([]);
-  const voiceNoteCaptureInputRef = useRef<HTMLInputElement | null>(null);
+  const voiceNoteFileInputRef = useRef<HTMLInputElement | null>(null);
+  const [browserAudioCaptureAvailable, setBrowserAudioCaptureAvailable] = useState(false);
   // Held so the mic stream can be released on unmount even if onstop never
   // runs (e.g. navigating away mid-record).
   const recordingStreamRef = useRef<MediaStream | null>(null);
@@ -720,7 +722,6 @@ export default function ThreadPage() {
   const [dictationTranscript, setDictationTranscript] = useState<string | null>(null);
   const dictationRecorderRef = useRef<MediaRecorder | null>(null);
   const dictationChunksRef = useRef<BlobPart[]>([]);
-  const dictationCaptureInputRef = useRef<HTMLInputElement | null>(null);
   // Held so the mic stream can be released on unmount even if onstop never
   // runs (e.g. navigating away mid-dictation).
   const dictationStreamRef = useRef<MediaStream | null>(null);
@@ -830,7 +831,7 @@ export default function ThreadPage() {
   const [overflowOpen, setOverflowOpen] = useState(false);
   const overflowTriggerRef = useRef<HTMLButtonElement>(null);
   useEffect(() => {
-    const mq = window.matchMedia("(max-width: 639px)");
+    const mq = window.matchMedia(PHONE_LAYOUT_MEDIA_QUERY);
     const update = () => {
       const phone = mq.matches;
       setCompactActions(phone);
@@ -839,6 +840,13 @@ export default function ThreadPage() {
     update();
     mq.addEventListener("change", update);
     return () => mq.removeEventListener("change", update);
+  }, []);
+  useEffect(() => {
+    setBrowserAudioCaptureAvailable(
+      window.isSecureContext &&
+      Boolean(navigator.mediaDevices?.getUserMedia) &&
+      typeof MediaRecorder !== "undefined"
+    );
   }, []);
   useEffect(() => {
     const mq = window.matchMedia("(max-width: 1279px)");
@@ -2076,7 +2084,7 @@ export default function ThreadPage() {
   const startRecording = useCallback(async () => {
     if (recording) return;
     if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
-      voiceNoteCaptureInputRef.current?.click();
+      voiceNoteFileInputRef.current?.click();
       return;
     }
     try {
@@ -2225,7 +2233,8 @@ export default function ThreadPage() {
     failedDictationAudioRef.current = null;
     setDictationRetry(null);
     if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
-      dictationCaptureInputRef.current?.click();
+      composerInputRef.current?.focus();
+      setError("Use the microphone key on your iPhone keyboard to dictate into your reply.");
       return;
     }
     try {
@@ -2263,15 +2272,6 @@ export default function ThreadPage() {
       setError(microphoneAccessMessage(err));
       setDictationStatus("idle");
     }
-  }, [dictationStatus, prepareAndSubmitDictation]);
-
-  const captureDictationFile = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    event.target.value = "";
-    if (!file || dictationStatus !== "idle") return;
-    failedDictationAudioRef.current = null;
-    setDictationRetry(null);
-    void prepareAndSubmitDictation(file, file.name);
   }, [dictationStatus, prepareAndSubmitDictation]);
 
   const stopDictation = useCallback(() => {
@@ -3528,10 +3528,16 @@ export default function ThreadPage() {
               onSelect: () => document.getElementById("composer-file-input")?.click()
             },
             {
-              label: recording ? "Stop voice note" : "Voice note",
+              label: recording
+                ? "Stop voice note"
+                : browserAudioCaptureAvailable
+                  ? "Voice note"
+                  : "Add voice recording",
               description: recording
                 ? "Finish this recording and attach it."
-                : "Record audio to send as an attachment.",
+                : browserAudioCaptureAvailable
+                  ? "Record audio to send as an attachment."
+                  : "Choose an audio recording from Files. This never opens the camera.",
               preserveUserActivation: true,
               onSelect: () => (recording ? stopRecording() : void startRecording())
             }
@@ -4265,7 +4271,7 @@ export default function ThreadPage() {
                 className="h-9 w-9 px-0 py-0 text-[12px] sm:h-auto sm:w-auto sm:px-3 sm:py-1.5"
               >
                 <Sparkles className="h-[13px] w-[13px]" strokeWidth={1.6} />
-                <span className="hidden sm:inline">AI</span>
+                <span className="desktop-ui-inline">AI</span>
               </Button>
               {compactActions ? (
                 <>
@@ -5207,8 +5213,8 @@ export default function ThreadPage() {
                 >
                   <span className="flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-[0.06em] text-accent-ink">
                     <Sparkles className="h-[12px] w-[12px]" />
-                    <span className="md:hidden">Suggested draft</span>
-                    <span className="hidden md:inline">
+                    <span className="phone-ui-inline">Suggested draft</span>
+                    <span className="desktop-ui-inline">
                       {isReopenMode
                         ? "AI opener · review before sending"
                         : "AI predraft · review before sending"}
@@ -5477,7 +5483,9 @@ export default function ThreadPage() {
                     typeof window !== "undefined"
                       ? window.visualViewport?.height ?? window.innerHeight
                       : 640;
-                  const phone = typeof window !== "undefined" && window.innerWidth < 768;
+                  const phone =
+                    typeof window !== "undefined" &&
+                    window.matchMedia(PHONE_LAYOUT_MEDIA_QUERY).matches;
                   const capPx = Math.min(
                     phone ? 120 : 160,
                     Math.round(viewportHeight * (phone ? 0.22 : 0.28))
@@ -5508,7 +5516,10 @@ export default function ThreadPage() {
                 />
               )}
               {/* Desktop full toolbar. Phone actions live in viewport-bound sheets. */}
-              <div className="mt-1.5 hidden flex-wrap items-center gap-2 md:flex">
+              <div
+                className="desktop-ui-flex mt-1.5 flex-wrap items-center gap-2"
+                data-testid="composer-desktop-actions"
+              >
                 {thread.relationshipMemory && thread.relationshipMemory.otherThreadCount > 0 ? (
                   <div data-testid="memory-chip" className="relative">
                     <button
@@ -5766,7 +5777,7 @@ export default function ThreadPage() {
                 </div>
               </div>
               {recording ? (
-                <div className="mt-1.5 flex items-center gap-2 rounded-[10px] bg-paper-2 px-2.5 py-2 text-[12px] text-ink-2 md:hidden">
+                <div className="phone-ui-flex mt-1.5 items-center gap-2 rounded-[10px] bg-paper-2 px-2.5 py-2 text-[12px] text-ink-2">
                   <AudioLines className="h-4 w-4 animate-pulse text-risk-overdue" strokeWidth={1.8} />
                   <span className="min-w-0 flex-1">Voice note recording</span>
                   <button
@@ -5780,7 +5791,7 @@ export default function ThreadPage() {
               ) : null}
               <div
                 data-testid="composer-mobile-actions"
-                className="mt-1.5 flex items-center gap-2 md:hidden"
+                className="phone-ui-flex mt-1.5 items-center gap-2"
               >
                 <button
                   ref={composerMoreTriggerRef}
@@ -5800,15 +5811,20 @@ export default function ThreadPage() {
                   onClick={() =>
                     dictationStatus === "recording" ? stopDictation() : void startDictation()
                   }
-                  disabled={!dictationAvailable || dictationStatus === "transcribing"}
+                  disabled={
+                    browserAudioCaptureAvailable &&
+                    (!dictationAvailable || dictationStatus === "transcribing")
+                  }
                   title={
-                    dictationAvailable
+                    !browserAudioCaptureAvailable
+                      ? "Use the microphone on your iPhone keyboard"
+                      : dictationAvailable
                       ? dictationStatus === "recording"
                         ? "Stop and transcribe"
                         : "Dictate your reply"
                       : "Voice dictation needs transcription enabled on the runner"
                   }
-                  aria-label="Dictate"
+                  aria-label={browserAudioCaptureAvailable ? "Dictate" : "Use keyboard microphone"}
                   className={cn(
                     "inline-flex h-[34px] shrink-0 items-center gap-1.5 rounded-pill border px-3 text-[12px] transition-colors duration-calm disabled:cursor-not-allowed disabled:opacity-50",
                     dictationStatus === "recording"
@@ -5829,7 +5845,9 @@ export default function ThreadPage() {
                       ? "Stop"
                       : dictationStatus === "transcribing"
                         ? "Working"
-                        : "Dictate"}
+                        : browserAudioCaptureAvailable
+                          ? "Dictate"
+                          : "Keyboard mic"}
                   </span>
                 </button>
                 <div className="min-w-0 flex-1" />
@@ -6356,10 +6374,10 @@ export default function ThreadPage() {
       ) : null}
 
       <input
-        ref={voiceNoteCaptureInputRef}
+        ref={voiceNoteFileInputRef}
+        id="voice-note-file-input"
         type="file"
-        accept="audio/*"
-        capture="user"
+        accept=".m4a,.mp3,.wav,.aac,.aif,.aiff,.caf"
         className="hidden"
         tabIndex={-1}
         aria-hidden="true"
@@ -6367,17 +6385,6 @@ export default function ThreadPage() {
           if (event.target.files) addFiles(event.target.files);
           event.target.value = "";
         }}
-      />
-
-      <input
-        ref={dictationCaptureInputRef}
-        type="file"
-        accept="audio/*"
-        capture="user"
-        className="hidden"
-        tabIndex={-1}
-        aria-hidden="true"
-        onChange={captureDictationFile}
       />
 
       {dictationTranscript ? (

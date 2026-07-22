@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { chromium } from "patchright";
 
 const baseUrl = process.env.MOBILE_AUDIT_BASE_URL ?? "http://127.0.0.1:3110";
+const insecurePhoneBaseUrl = process.env.MOBILE_AUDIT_INSECURE_BASE_URL;
 const threadId = process.env.MOBILE_AUDIT_THREAD_ID;
 if (!threadId) throw new Error("MOBILE_AUDIT_THREAD_ID is required");
 
@@ -254,6 +255,95 @@ await focusPage.screenshot({ path: resolve(outputDir, "focus-auto-send.png"), fu
 results.push({ name: "focus-auto-send", focusAutoBefore, focusAutoAfter, layout: focusLayout });
 await focusPage.close();
 
+const desktopWidthPhoneContext = await browser.newContext({
+  viewport: { width: 980, height: 844 },
+  deviceScaleFactor: 1,
+  isMobile: true,
+  hasTouch: true,
+  colorScheme: "dark"
+});
+const desktopWidthPhonePage = await desktopWidthPhoneContext.newPage();
+await desktopWidthPhonePage.goto(`${baseUrl}/thread/${threadId}`, { waitUntil: "domcontentloaded" });
+await settle(desktopWidthPhonePage);
+await desktopWidthPhonePage.getByTestId("composer-mobile-actions").waitFor({ state: "attached" });
+await desktopWidthPhonePage.getByTestId("composer-desktop-actions").waitFor({ state: "attached" });
+const coarsePhoneControls = await desktopWidthPhonePage.evaluate(() => {
+  const mobile = document.querySelector('[data-testid="composer-mobile-actions"]');
+  const desktop = document.querySelector('[data-testid="composer-desktop-actions"]');
+  return {
+    phoneQuery: window.matchMedia("(hover: none) and (pointer: coarse)").matches,
+    mobileDisplay: mobile ? getComputedStyle(mobile).display : null,
+    desktopDisplay: desktop ? getComputedStyle(desktop).display : null
+  };
+});
+await desktopWidthPhonePage.getByTestId("composer-more-toggle").click();
+const desktopWidthSheet = desktopWidthPhonePage.getByRole("dialog", { name: "Add to your reply" });
+await desktopWidthSheet.waitFor({ state: "visible" });
+const desktopWidthLayout = await inspectLayout(desktopWidthPhonePage);
+await desktopWidthPhonePage.screenshot({
+  path: resolve(outputDir, "thread-coarse-desktop-width.png"),
+  fullPage: false
+});
+results.push({
+  name: "thread-coarse-desktop-width",
+  controls: coarsePhoneControls,
+  layout: desktopWidthLayout
+});
+await desktopWidthPhonePage.close();
+await desktopWidthPhoneContext.close();
+
+if (insecurePhoneBaseUrl) {
+  const insecureContext = await browser.newContext({
+    viewport: { width: 390, height: 844 },
+    deviceScaleFactor: 1,
+    isMobile: true,
+    hasTouch: true,
+    colorScheme: "dark"
+  });
+  const insecurePage = await insecureContext.newPage();
+  await insecurePage.goto(`${insecurePhoneBaseUrl}/thread/${threadId}`, {
+    waitUntil: "domcontentloaded"
+  });
+  await settle(insecurePage);
+  const composerInput = insecurePage.getByTestId("thread-composer-input");
+  await composerInput.waitFor({ state: "visible" });
+  const keyboardMic = insecurePage.getByRole("button", { name: "Use keyboard microphone" });
+  await keyboardMic.click();
+  const keyboardMicFocusedComposer = await composerInput.evaluate(
+    (element) => document.activeElement === element
+  );
+  await insecurePage.getByTestId("composer-more-toggle").click();
+  const insecureSheet = insecurePage.getByRole("dialog", { name: "Add to your reply" });
+  await insecureSheet.waitFor({ state: "visible" });
+  const addRecording = insecureSheet.getByRole("button", { name: /Add voice recording/ });
+  const fileChooserPromise = insecurePage.waitForEvent("filechooser");
+  await addRecording.click();
+  const recordingChooser = await fileChooserPromise;
+  const recordingInput = insecurePage.locator("#voice-note-file-input");
+  const recordingInputContract = await recordingInput.evaluate((element) => ({
+    accept: element.getAttribute("accept"),
+    capture: element.getAttribute("capture")
+  }));
+  await recordingChooser.setFiles({
+    name: "mobile-audit.m4a",
+    mimeType: "audio/mp4",
+    buffer: Buffer.from([0, 0, 0, 16, 102, 116, 121, 112, 77, 52, 65, 32, 0, 0, 0, 0])
+  });
+  await insecurePage.getByRole("button", { name: "Remove attachment" }).waitFor({ state: "visible" });
+  await insecurePage.screenshot({
+    path: resolve(outputDir, "thread-insecure-iphone-audio.png"),
+    fullPage: false
+  });
+  results.push({
+    name: "thread-insecure-iphone-audio",
+    secureContext: await insecurePage.evaluate(() => window.isSecureContext),
+    keyboardMicFocusedComposer,
+    recordingInput: recordingInputContract
+  });
+  await insecurePage.close();
+  await insecureContext.close();
+}
+
 await browser.close();
 await writeFile(resolve(outputDir, "report.json"), JSON.stringify(results, null, 2));
 
@@ -299,6 +389,30 @@ if (!results.find((result) => result.name === "thread-interactions")?.dictationW
 }
 if (results.find((result) => result.name === "focus-auto-send")?.focusAutoAfter !== "true") {
   failures.push("focus: automatic-send switch did not toggle");
+}
+const coarseDesktopWidth = results.find(
+  (result) => result.name === "thread-coarse-desktop-width"
+);
+if (
+  !coarseDesktopWidth?.controls?.phoneQuery ||
+  coarseDesktopWidth.controls.mobileDisplay !== "flex" ||
+  coarseDesktopWidth.controls.desktopDisplay !== "none" ||
+  coarseDesktopWidth.layout?.horizontalOverflow > 1
+) {
+  failures.push("thread: touch-only desktop-width viewport did not keep phone controls");
+}
+const insecurePhoneAudio = results.find(
+  (result) => result.name === "thread-insecure-iphone-audio"
+);
+if (
+  insecurePhoneBaseUrl &&
+  (!insecurePhoneAudio ||
+    insecurePhoneAudio.secureContext !== false ||
+    !insecurePhoneAudio.keyboardMicFocusedComposer ||
+    insecurePhoneAudio.recordingInput?.capture !== null ||
+    insecurePhoneAudio.recordingInput?.accept !== ".m4a,.mp3,.wav,.aac,.aif,.aiff,.caf")
+) {
+  failures.push("thread: insecure iPhone audio path could still invoke video capture");
 }
 const auditedKeyboardViewport = results.find(
   (result) => result.name === "thread-interactions"
