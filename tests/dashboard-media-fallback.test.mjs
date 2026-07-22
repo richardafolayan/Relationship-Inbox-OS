@@ -53,6 +53,11 @@ test("PlayableMedia covers video and audio with the same fallback", () => {
   assert.match(playable, /onError=\{\(\) => setFailed\(true\)\}/);
 });
 
+test("thread media waits for a user tap before requesting large or missing files", () => {
+  assert.doesNotMatch(playable, /preload="metadata"/);
+  assert.equal((playable.match(/preload="none"/g) ?? []).length, 2);
+});
+
 test("platform media components build attachment paths via attachmentMediaPath", () => {
   for (const source of [imessage, whatsapp, google]) {
     assert.match(source, /attachmentMediaPath/);

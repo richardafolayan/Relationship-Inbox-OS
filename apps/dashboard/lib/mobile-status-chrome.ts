@@ -6,15 +6,15 @@ export type MobileStatusChrome = "full" | "compact" | "hidden";
 
 /**
  * Decide how dense the global status row should be below the md breakpoint.
- * - full: Today operational home
- * - compact: Inbox (connection + scan without the full chrome)
+ * - full: transitional fallback before the route resolves
+ * - compact: Today and Inbox, with attention and pilot feedback only
  * - hidden: secondary screens (thread, archived, reconnect, settings, …)
  *   unless something needs attention (see shouldSurfaceHiddenStatus)
  */
 export function resolveMobileStatusChrome(pathname: string | null | undefined): MobileStatusChrome {
   if (!pathname) return "full";
 
-  if (pathname === "/today" || pathname.startsWith("/today/")) return "full";
+  if (pathname === "/today" || pathname.startsWith("/today/")) return "compact";
   if (pathname === "/inbox" || pathname.startsWith("/inbox/")) return "compact";
 
   // Secondary mobile screens listed in #914, plus the dedicated /search

@@ -1,6 +1,6 @@
 # Current Product Direction
 
-_Living document. Keep this updated as the direction changes. Last updated: 2026-07-15._
+_Living document. Keep this updated as the direction changes. Last updated: 2026-07-22._
 
 Tovi is being prepared for a small 3-5 student pilot. It should
 feel like a calm place to reply properly, not a dashboard, CRM, marketing tool,
@@ -16,7 +16,8 @@ requirement for Android phone users, overriding the earlier Phase 0 exclusion.
 - Show what the other person said and what still needs to be addressed.
 - Keep the user writing in their own words.
 - Full AI drafts stay optional, never the default.
-- Sending is always user-triggered.
+- Sending is user-triggered by default. The sole pilot exception is an explicit,
+  per-window opt-in for one saved focus note per covered person.
 - Never auto-include private message content in feedback or bug reports.
 - Keep the UI calm and low-surface-area.
 
@@ -47,8 +48,8 @@ example direct feedback submission, install/readme clarity, or setup hardening.
 Package and boot Tovi on Windows with Google Messages, LinkedIn, and WhatsApp.
 Google Messages supplies Android SMS, MMS, and RCS through a user-paired web
 session. iMessage and macOS Contacts birthday sync remain clearly unavailable
-because they depend on Apple-only local services. All sends remain
-user-triggered.
+because they depend on Apple-only local services. The focus-note exception uses
+the same per-window opt-in and safety rules on every supported platform.
 
 ---
 

@@ -51,7 +51,7 @@ export function ToastHost() {
     (toast: Toast) => {
       setToasts((prev) => {
         const filtered = prev.filter((t) => t.id !== toast.id);
-        return [...filtered, toast].slice(-5);
+        return [...filtered, toast].slice(-3);
       });
       const timers = timersRef.current;
       const existing = timers.get(toast.id);
@@ -97,11 +97,7 @@ export function ToastHost() {
   return (
     <div
       data-testid="toast-host"
-      // top-[56px]: just below the 44px TopStatus bar. Toasts used to start
-      // at top-4 and sat on top of the bar's right-hand controls - with the
-      // 30s new-message duration that parked a card over the notification
-      // bell (and Focus / Scan now) for half a minute per arrival.
-      className="pointer-events-none fixed right-4 top-[56px] z-50 flex w-[320px] flex-col gap-2"
+      className="pointer-events-none fixed left-3 right-3 top-[calc(env(safe-area-inset-top)+8px)] z-50 flex w-auto flex-col gap-1.5 sm:left-auto sm:right-4 sm:top-[56px] sm:w-[320px] sm:gap-2"
     >
       {toasts.map((toast) => (
         <ToastCard key={toast.id} toast={toast} onDismiss={dismiss} />
@@ -193,7 +189,7 @@ function ToastCard({
   return (
     <div
       data-toast-href={toast.href ?? undefined}
-      className={`pointer-events-auto select-none rounded-xl bg-paper p-3 shadow-sm transition-shadow ${style.ring} ${
+      className={`pointer-events-auto select-none rounded-xl bg-paper p-2.5 shadow-sm transition-shadow sm:p-3 ${style.ring} ${
         interactive ? "cursor-pointer hover:ring-hairline-strong focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent" : ""
       }`}
       role={interactive ? "button" : toast.kind === "error" ? "alert" : "status"}
@@ -241,7 +237,7 @@ function ToastCard({
             {toast.title}
           </div>
           {toast.description ? (
-            <div className="mt-1 break-words text-[12px] leading-snug text-ink-3">
+            <div className="mt-1 line-clamp-2 break-words text-[12px] leading-snug text-ink-3">
               {toast.description}
             </div>
           ) : null}

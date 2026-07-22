@@ -549,7 +549,7 @@ export function resolveRunnerConfig(env: NodeJS.ProcessEnv = process.env): Runne
     openAiApiKey: env.OPENAI_API_KEY,
     // Default to gpt-5-nano: cheapest GPT-5 family member, sufficient for the
     // dashboard's short generations (summary, 3 reply drafts, classifier,
-    // SHORTEN/MAKE_WARMER rewrites). Note nano accepts reasoning_effort
+    // lightweight formatting calls). Note nano accepts reasoning_effort
     // "minimal" (not "none" — that's gpt-5.4-only) and does NOT accept
     // top_p; ai.ts handles the param shape per model family. Override via
     // OPENAI_MODEL for accounts wanting more power: gpt-5.4-mini, gpt-5.4,

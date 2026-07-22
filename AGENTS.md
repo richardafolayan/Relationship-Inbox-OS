@@ -14,7 +14,8 @@ Product principles:
 - Show what the other person said and what still needs to be addressed.
 - Keep the user writing in their own words.
 - Full AI drafts stay optional, never the default.
-- Sending is always user-triggered.
+- Sending is user-triggered by default. The only automatic path is an explicit,
+  per-focus-window opt-in for one saved note per covered person.
 - Never auto-include private message content in feedback or bug reports.
 - Keep the UI calm and low-surface-area.
 

@@ -16,7 +16,9 @@ import { shouldDismissSheetSwipe } from "@/lib/action-sheet-gesture";
 
 export type ActionSheetItem = {
   label: string;
+  description?: string;
   onSelect: () => void;
+  preserveUserActivation?: boolean;
   danger?: boolean;
   disabled?: boolean;
 };
@@ -234,7 +236,11 @@ export function ActionSheet({
 
   const content = (
     <div
-      className="fixed inset-0 z-[110] flex items-end justify-center sm:hidden"
+      className="phone-ui-flex fixed inset-x-0 bottom-auto z-[110] items-end justify-center"
+      style={{
+        top: "var(--app-vv-offset-top, 0px)",
+        height: "var(--app-vv-height, 100%)"
+      }}
       data-testid="thread-action-sheet-root"
     >
       <button
@@ -252,9 +258,10 @@ export function ActionSheet({
         data-testid="thread-action-sheet"
         style={{
           transform: dragY > 0 ? `translateY(${dragY}px)` : undefined,
-          transition: dragging ? "none" : "transform 160ms ease-out"
+          transition: dragging ? "none" : "transform 160ms ease-out",
+          maxHeight: "min(calc(var(--app-vv-height, 100vh) * 0.78), 640px)"
         }}
-        className="relative z-[1] flex max-h-[min(78dvh,640px)] w-full max-w-[520px] flex-col overflow-hidden rounded-t-[18px] border border-b-0 border-hairline bg-paper shadow-pop pb-[env(safe-area-inset-bottom)]"
+        className="relative z-[1] flex w-full max-w-[520px] flex-col overflow-hidden rounded-t-[18px] border border-b-0 border-hairline bg-paper shadow-pop pb-[env(safe-area-inset-bottom)]"
         onClick={(event) => event.stopPropagation()}
       >
         <div
@@ -291,8 +298,7 @@ export function ActionSheet({
           className="app-main-scroll min-h-0 flex-1 overflow-y-auto overscroll-contain px-2 pb-3"
           data-testid="thread-action-sheet-body"
         >
-          {groups.map((group, groupIndex) => {
-            if (group.items.length === 0) return null;
+          {groups.filter((group) => group.items.length > 0).map((group, groupIndex) => {
             return (
               <section
                 key={group.id}
@@ -311,20 +317,27 @@ export function ActionSheet({
                         type="button"
                         disabled={item.disabled}
                         onClick={() => {
-                          // Close first so history cleanup + scroll unlock run,
-                          // then fire the action on the next tick.
                           onClose();
-                          window.setTimeout(() => item.onSelect(), 0);
+                          if (item.preserveUserActivation) {
+                            item.onSelect();
+                          } else {
+                            window.setTimeout(() => item.onSelect(), 0);
+                          }
                         }}
                         className={cn(
-                          "flex w-full items-center rounded-[10px] px-3 py-[12px] text-left text-[15px] transition-colors duration-calm",
+                          "flex w-full flex-col items-start rounded-[10px] px-3 py-[12px] text-left text-[15px] transition-colors duration-calm",
                           "hover:bg-paper-2 disabled:cursor-not-allowed disabled:opacity-45",
                           item.danger
                             ? "text-accent-ink hover:bg-accent-soft"
                             : "text-ink"
                         )}
                       >
-                        {item.label}
+                        <span>{item.label}</span>
+                        {item.description ? (
+                          <span className="mt-0.5 text-[12px] leading-snug text-ink-3">
+                            {item.description}
+                          </span>
+                        ) : null}
                       </button>
                     </li>
                   ))}

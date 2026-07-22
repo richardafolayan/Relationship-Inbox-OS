@@ -74,7 +74,14 @@ import { IMessageDb } from "./platforms/imessage-db";
 import { groupStubFields } from "./platforms/imessage-group-name";
 import { appendOutboundReaction } from "./platforms/linkedin-message-reactions";
 import { loadBestContactResolver } from "./services/contact-resolver";
-import { streamIMessageAttachment } from "./services/imessage-attachment-server";
+import {
+  convertAudioToWhisperWav,
+  streamIMessageAttachment
+} from "./services/imessage-attachment-server";
+import {
+  hasAudibleSpeechSignal,
+  readAudioSignalSummary
+} from "./services/transcription/audio-signal";
 import {
   imessageVoiceSnapshotMeta,
   imessageVoiceSnapshotPath,
@@ -95,6 +102,7 @@ import {
 } from "./services/message-sync-latency";
 import { createSendService } from "./services/send";
 import { createSendQueue } from "./services/send-queue";
+import { createFocusAutoAckService } from "./services/focus-auto-ack";
 import {
   classifySendFailureKind,
   consumerSendFailure,
@@ -1197,6 +1205,62 @@ const sendQueue = createSendQueue({
   sendService,
   eventBus
 });
+const focusAutoAck = createFocusAutoAckService({
+  settingsStore,
+  sendQueue,
+  auditLog: (input) => auditService.log(input),
+  loadThread: async (threadId) => {
+    const [thread, latestInbound, latestOutbound] = await Promise.all([
+      prisma.thread.findUnique({
+        where: { id: threadId },
+        select: {
+          id: true,
+          platform: true,
+          isGroup: true,
+          category: true,
+          person: {
+            select: {
+              id: true,
+              displayName: true,
+              birthday: true,
+              favouritedAt: true
+            }
+          }
+        }
+      }),
+      prisma.message.findFirst({
+        where: { threadId, direction: "IN" },
+        orderBy: [{ timestamp: "desc" }, { id: "desc" }],
+        select: { timestamp: true }
+      }),
+      prisma.message.findFirst({
+        where: { threadId, direction: "OUT" },
+        orderBy: [{ timestamp: "desc" }, { id: "desc" }],
+        select: { timestamp: true }
+      })
+    ]);
+    if (!thread) return null;
+    return {
+      threadId: thread.id,
+      platform: thread.platform,
+      isGroup: thread.isGroup,
+      category: thread.category,
+      person: thread.person,
+      latestInboundAt: latestInbound?.timestamp ?? null,
+      latestOutboundAt: latestOutbound?.timestamp ?? null
+    };
+  }
+});
+eventBus.subscribe((event) => {
+  if (event.type !== "MESSAGES_PERSISTED") return;
+  void focusAutoAck.handleThread(event.threadId).catch((error) => {
+    console.warn(
+      `[focus-auto-ack] failed for threadId=${event.threadId}: ${
+        error instanceof Error ? error.message : String(error)
+      }`
+    );
+  });
+});
 // Pick up any SendRequests left in PENDING from a previous runner process
 // (e.g. crashed mid-send, or restarted while a send was queued behind a
 // scan). The queue's `running` guard prevents duplicate processing.
@@ -1426,9 +1490,6 @@ function stageForControlPath(path: string): string {
   }
   if (path.startsWith("/platform/test-selectors")) {
     return "Scan";
-  }
-  if (path.startsWith("/thread/") && path.endsWith("/transform")) {
-    return "AI";
   }
   if (path.startsWith("/thread/") && (path.endsWith("/send") || path.endsWith("/mark-done"))) {
     return "Send";
@@ -1720,6 +1781,7 @@ const threadRowSelect = {
   platformThreadId: true,
   threadUrl: true,
   personId: true,
+  isGroup: true,
   unreadCount: true,
   needsReply: true,
   lastMessagePreview: true,
@@ -4691,23 +4753,6 @@ async function resolveCanonicalWriteTargetId(threadId: string): Promise<string> 
   );
 }
 
-app.post("/control/thread/:threadId/transform", asyncRoute(async (req, res) => {
-  // Validate the path param even though the handler doesn't currently
-  // need the thread row. Without this, any string in the path was
-  // accepted, which silently let bad URLs reach the AI service.
-  const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
-  if (await checkPresenterGuard(res, settingsStore, { threadId, action: "transform draft", kind: "thread-mutation" })) return;
-  const payload = z
-    .object({
-      mode: z.enum(["SHORTEN", "MAKE_WARMER"]),
-      text: z.string().min(1)
-    })
-    .parse(req.body);
-
-  const text = await aiService.transformReply(payload);
-  res.json({ text });
-}));
-
 // On-demand transcription for a single message. Used by the thread UI's
 // "Transcribe voice message" affordance under untranscribed voice notes:
 // the operator can spend a single OpenAI call without waiting for the
@@ -4793,7 +4838,10 @@ app.post("/control/message/:messageId/transcribe", asyncRoute(async (req, res) =
 // up? The composer reads this once to decide whether to enable the Dictate
 // control (vs. show it disabled with an explanation).
 app.get("/data/transcription-capabilities", asyncRoute(async (_req, res) => {
-  res.json({ dictationAvailable: pickDictationProvider() !== null });
+  res.json({
+    dictationAvailable: pickDictationProvider() !== null,
+    dictationUploadMode: process.platform === "darwin" ? "native-audio" : "wav"
+  });
 }));
 
 // #462 (pilot R-0061): transcribe a one-shot dictation clip into text. Posts
@@ -4839,6 +4887,26 @@ app.post(
       return;
     }
     try {
+      const wavPath = await convertAudioToWhisperWav(file.path);
+      if (wavPath) {
+        try {
+          if (!hasAudibleSpeechSignal(readAudioSignalSummary(wavPath))) {
+            res.status(422).json({
+              ok: false,
+              reason: "no_speech",
+              error: "The microphone did not capture clear speech. Check the selected microphone and try again."
+            });
+            return;
+          }
+        } catch {
+          res.status(422).json({
+            ok: false,
+            reason: "invalid_audio",
+            error: "The recording could not be read. Try recording it again."
+          });
+          return;
+        }
+      }
       const outcome = await provider.transcribe({
         filePath: file.path,
         mimeType: file.mimetype || "audio/webm",
@@ -7163,6 +7231,7 @@ app.post("/control/operator-profile", asyncRoute(async (req, res) => {
           audience: z.enum(["favourites", "all_personal"]),
           windowId: z.string().max(80),
           ackedPersonIds: z.array(z.string().max(120)).max(5000),
+          autoSendAcknowledgements: z.boolean().default(false),
           // Calendar auto-focus (#786). Older dashboard builds don't send
           // these; default so a hand-started window round-trips as "manual"
           // and a calendar window keeps its dismissal key through an edit/end.

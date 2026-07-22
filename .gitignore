@@ -53,3 +53,4 @@ apps/runner/scripts/_*.mjs
 
 # PM bridge runtime log (contains conversation content) - never commit
 pm_browser_log.jsonl
+/.mobile-audit/

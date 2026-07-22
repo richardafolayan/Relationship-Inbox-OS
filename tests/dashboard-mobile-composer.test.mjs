@@ -19,7 +19,10 @@ test("mobile default exposes only + / dictate / Send primary actions", () => {
     src.indexOf('data-testid="composer-mobile-send"') + 80
   );
   assert.match(mobileBlock, /Plus/);
-  assert.match(mobileBlock, /aria-label="Dictate"/);
+  assert.match(
+    mobileBlock,
+    /aria-label=\{browserAudioCaptureAvailable \? "Dictate" : "Use keyboard microphone"\}/
+  );
   assert.match(mobileBlock, /Send/);
   assert.doesNotMatch(
     mobileBlock,
@@ -28,42 +31,39 @@ test("mobile default exposes only + / dictate / Send primary actions", () => {
   );
 });
 
-test("secondary mobile tools live behind the + sheet", () => {
-  assert.match(src, /data-testid="composer-more-sheet"/);
+test("secondary mobile tools live in a viewport-bound action sheet", () => {
   assert.match(src, /composerMoreOpen/);
-  const sheetIdx = src.indexOf('data-testid="composer-more-sheet"');
-  assert.notEqual(sheetIdx, -1);
-  // Sheet runs until the desktop full toolbar comment.
-  const sheetEnd = src.indexOf("Desktop full toolbar", sheetIdx);
-  const sheetBlock = src.slice(sheetIdx, sheetEnd === -1 ? sheetIdx + 12000 : sheetEnd);
-  assert.match(sheetBlock, /aria-label="Schedule send"/);
-  assert.match(sheetBlock, /aria-label="Attach files"/);
-  assert.match(sheetBlock, /\{transforming === "SHORTEN" \? "shortening…" : "shorten"\}/);
-  assert.match(sheetBlock, /\{transforming === "MAKE_WARMER" \? "warming…" : "warmer"\}/);
-  assert.match(sheetBlock, /Suggested replies/);
-  assert.match(src, /composerMoreOpen \? "flex" : "hidden md:flex"/);
+  assert.match(src, /title="Add to your reply"/);
+  assert.match(src, /groups=\{mobileComposerGroups\}/);
+  assert.match(src, /title="Suggested replies"/);
+  assert.match(src, /title="Schedule send"/);
+  assert.match(src, /label: "Photo or file"/);
+  assert.match(src, /browserAudioCaptureAvailable[\s\S]*?\? "Voice note"[\s\S]*?: "Add voice recording"/);
+  assert.match(src, /label: "Schedule send"/);
+  assert.doesNotMatch(src, /data-testid="composer-more-sheet"/);
+  assert.doesNotMatch(src, /chipsMenuMobileRef|scheduleMenuMobileRef/);
 });
 
-test("draft textarea is capped at min(160px, 28dvh) with internal scroll", () => {
-  assert.match(src, /maxHeight:\s*["']min\(160px,\s*28dvh\)["']/);
+test("draft textarea uses the visual viewport and a smaller phone cap", () => {
+  assert.match(src, /window\.visualViewport\?\.height \?\? window\.innerHeight/);
+  assert.match(src, /phone \? 120 : 160/);
+  assert.match(src, /phone \? 0\.22 : 0\.28/);
+  assert.match(src, /max-h-\[120px\]/);
   assert.match(src, /overflow-y-auto/);
-  assert.match(src, /window\.innerHeight[\s\S]*?\*\s*0\.28/);
 });
 
-test("AI predraft compresses on mobile with Edit and Discard", () => {
+test("suggested draft has one calm mobile control", () => {
   const badgeIdx = src.indexOf('data-testid="ai-predraft-badge"');
   assert.notEqual(badgeIdx, -1);
   const badgeBlock = src.slice(badgeIdx, badgeIdx + 2000);
-  assert.match(badgeBlock, />AI draft</);
-  assert.match(badgeBlock, /\n\s*Edit\n/);
+  assert.match(badgeBlock, />Suggested draft</);
   assert.match(badgeBlock, /\n\s*Discard\n/);
-  assert.match(badgeBlock, /composerInputRef\.current\?\.focus\(\)/);
-  assert.match(badgeBlock, /md:hidden/);
+  assert.doesNotMatch(badgeBlock, /\n\s*Edit\n/);
 });
 
 test("desktop toolbar remains available at md+ and is not the mobile row", () => {
-  assert.match(src, /hidden flex-wrap items-center gap-2 md:flex/);
-  assert.match(src, /composer-mobile-actions"[\s\S]*?className="mt-1\.5 flex items-center gap-2 md:hidden"/);
+  assert.match(src, /className="desktop-ui-flex mt-1\.5 flex-wrap items-center gap-2"/);
+  assert.match(src, /composer-mobile-actions"[\s\S]*?className="phone-ui-flex mt-1\.5 items-center gap-2"/);
 });
 
 test("thread switch closes the mobile more sheet", () => {
@@ -74,4 +74,6 @@ test("thread switch closes the mobile more sheet", () => {
     (body) => body.includes('setComposer("")') && body.includes("setComposerMoreOpen(false)")
   );
   assert.ok(reset, "expected threadId reset to close composerMoreOpen");
+  assert.match(reset, /setMobileSuggestionsOpen\(false\)/);
+  assert.match(reset, /setMobileScheduleOpen\(false\)/);
 });

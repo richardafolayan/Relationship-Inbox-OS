@@ -829,6 +829,13 @@ test("controller and effects modules export the public API surface", () => {
   assert.match(effects, /export function captureFocus/);
   assert.match(effects, /export function collectBrowserScrollOwners/);
   assert.match(effects, /export function browserVisualViewportHost/);
+  assert.match(effects, /export function browserHistoryHost/);
+  // window.history is not an EventTarget; the adapter must listen on window.
+  assert.match(effects, /window\.addEventListener\(type,\s*listener as unknown as EventListener\)/);
+  assert.doesNotMatch(
+    effects,
+    /return window\.history as unknown as HistoryHost/
+  );
 });
 
 test("usePrimaryOverlay depends on stable actions, not the reactive snapshot object", () => {

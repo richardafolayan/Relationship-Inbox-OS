@@ -64,7 +64,7 @@ export function PlayableMedia({
         controls
         autoPlay={autoPlay}
         loop={loop}
-        preload="metadata"
+        preload="none"
         className={className}
         onError={() => setFailed(true)}
       />
@@ -76,7 +76,7 @@ export function PlayableMedia({
       key={attempt}
       src={safeSrc}
       controls
-      preload="metadata"
+      preload="none"
       className={className}
       onError={() => setFailed(true)}
     >

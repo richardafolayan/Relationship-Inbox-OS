@@ -23,6 +23,7 @@ function profile(input: Partial<OperatorProfile> & Pick<OperatorProfile, "displa
       audience: "favourites",
       windowId: "",
       ackedPersonIds: [],
+      autoSendAcknowledgements: false,
       source: "manual",
       sourceEventKey: ""
     },

@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Bell, Check, Moon, Send, X } from "lucide-react";
 import {
+  focusAckExclusion,
   isFocusAckCandidate,
   needsReplyAfterFocusReminder,
   noteForRow,
@@ -29,6 +30,7 @@ function focusRowFromThread(thread: ThreadResponse): FocusRow {
     personName: thread.personName,
     personFavourite: thread.personFavourite,
     personBirthday: thread.personBirthday,
+    isGroup: thread.isGroup,
     platform: thread.platform,
     category: null,
     needsReply: thread.needsReply,
@@ -56,6 +58,8 @@ export function FocusThreadStrip({
 
   const row = useMemo(() => focusRowFromThread(thread), [thread]);
   const candidate = active && isFocusAckCandidate(row, focusWindow, settings);
+  const automatic =
+    active && focusAckExclusion(row, focusWindow, settings) === "automatic";
   const postFocusReminder = needsReplyAfterFocusReminder(row, focusWindow);
   const reminderKey = postFocusReminder
     ? `focus-post-reply:${focusWindow.windowId || focusWindow.startedAt}:${thread.id}:${row.lastInboundAt ?? ""}`
@@ -119,6 +123,15 @@ export function FocusThreadStrip({
         >
           <X className="h-[13px] w-[13px]" strokeWidth={1.9} />
         </button>
+      </div>
+    );
+  }
+
+  if (automatic && !focusWindow.ackedPersonIds.includes(thread.personId)) {
+    return (
+      <div className="mb-2 flex items-center gap-2 rounded-[12px] border border-hairline bg-paper-2 px-3 py-[10px] text-[12.5px] text-ink-2">
+        <Moon className="h-[14px] w-[14px] shrink-0 text-accent" strokeWidth={1.8} />
+        <span>Automatic focus notes are on. Covered contacts get your saved note once.</span>
       </div>
     );
   }

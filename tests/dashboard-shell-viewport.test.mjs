@@ -32,6 +32,8 @@ test("document scroll is locked and the shell uses a zoom-safe height chain (#89
   const screenRule = ruleBody(globals, ".h-app-screen");
   assert.match(screenRule, /height:\s*100%/);
   assert.match(screenRule, /var\(--app-vv-height/);
+  assert.doesNotMatch(screenRule, /app-vv-offset-top/);
+  assert.doesNotMatch(screenRule, /position:\s*relative/);
   assert.doesNotMatch(
     screenRule,
     /\b\d*(\.\d+)?(vh|dvh|svh|lvh)\b/,
@@ -123,6 +125,7 @@ test("installAppVisualViewport publishes --app-vv-height and cleans up", () => {
   };
   const vv = {
     height: 640,
+    offsetTop: 24,
     addEventListener(type, fn) {
       listeners[type]?.push(fn);
     },
@@ -176,6 +179,7 @@ test("installAppVisualViewport publishes --app-vv-height and cleans up", () => {
   assert.equal(listeners.storage.length, 1);
 
   vv.height = 400;
+  vv.offsetTop = 180;
   publish();
   assert.equal(props.get(APP_VV_HEIGHT_VAR), `${400 / 1.25}px`);
 

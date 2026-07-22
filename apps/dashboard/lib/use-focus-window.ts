@@ -118,6 +118,7 @@ export interface UseFocusWindow {
     /** Professional-tier note for this window ("" = use the saved template). */
     professionalNote?: string;
     audience: FocusAudience;
+    autoSendAcknowledgements: boolean;
   }) => Promise<OperatorProfile>;
   /** Edit a live window's end/reason/notes/audience without clearing acks. */
   updateFocus: (opts: {
@@ -127,6 +128,7 @@ export interface UseFocusWindow {
     /** Omitted = keep the window's current professional note. */
     professionalNote?: string;
     audience: FocusAudience;
+    autoSendAcknowledgements: boolean;
   }) => Promise<OperatorProfile>;
   endFocus: () => Promise<OperatorProfile>;
   editNote: (note: string) => Promise<OperatorProfile>;
@@ -172,6 +174,12 @@ export function useFocusWindow(): UseFocusWindow {
   const templates = readAckTemplates(profile);
   const settings = readFocusSettings(profile);
   const calendarSync = readCalendarSync(profile);
+
+  useEffect(() => {
+    if (!focusWindow.active || !focusWindow.autoSendAcknowledgements) return undefined;
+    const timer = window.setInterval(load, 3000);
+    return () => window.clearInterval(timer);
+  }, [focusWindow.active, focusWindow.autoSendAcknowledgements, load]);
 
   // Flip the UI off the moment the live window's endsAt passes, without a
   // reload. isFocusActive() already derives liveness from the clock at every
@@ -227,6 +235,7 @@ export function useFocusWindow(): UseFocusWindow {
       note: string;
       professionalNote?: string;
       audience: FocusAudience;
+      autoSendAcknowledgements: boolean;
     }) =>
       update({
         focusWindow: {
@@ -239,6 +248,7 @@ export function useFocusWindow(): UseFocusWindow {
           audience: opts.audience,
           windowId: newWindowId(),
           ackedPersonIds: [],
+          autoSendAcknowledgements: opts.autoSendAcknowledgements,
           // A hand-started window; the calendar auto-focus service never
           // touches it (issue #786).
           source: "manual",
@@ -255,6 +265,7 @@ export function useFocusWindow(): UseFocusWindow {
       note: string;
       professionalNote?: string;
       audience: FocusAudience;
+      autoSendAcknowledgements: boolean;
     }) =>
       update({
         focusWindow: {
@@ -265,7 +276,8 @@ export function useFocusWindow(): UseFocusWindow {
           note: opts.note,
           professionalNote:
             opts.professionalNote ?? readFocusWindow(profile).professionalNote ?? "",
-          audience: opts.audience
+          audience: opts.audience,
+          autoSendAcknowledgements: opts.autoSendAcknowledgements
         }
       }),
     [update, profile]

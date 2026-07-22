@@ -1,7 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  enqueueScanJobByPriority,
   jobCoversTriggeredScan,
+  promoteQueuedJob,
   resolveEnqueueStatus
 } from "../apps/runner/dist/services/scan-queue.js";
 
@@ -17,6 +19,20 @@ import {
 test("resolveEnqueueStatus reports running when no job is in flight", () => {
   // processing was false before enqueue -> this job starts immediately.
   assert.equal(resolveEnqueueStatus(false), "running");
+});
+
+test("event-triggered scans jump ahead of scheduled backlog", () => {
+  const jobs = ["scheduled-linkedin", "scheduled-whatsapp"];
+  enqueueScanJobByPriority(jobs, "live-imessage", true);
+  assert.deepEqual(jobs, ["live-imessage", "scheduled-linkedin", "scheduled-whatsapp"]);
+  enqueueScanJobByPriority(jobs, "manual-rescan", false);
+  assert.equal(jobs.at(-1), "manual-rescan");
+});
+
+test("a coalesced live scan is promoted without duplicating it", () => {
+  const jobs = ["scheduled-linkedin", "live-imessage", "manual-rescan"];
+  promoteQueuedJob(jobs, 1);
+  assert.deepEqual(jobs, ["live-imessage", "scheduled-linkedin", "manual-rescan"]);
 });
 
 test("resolveEnqueueStatus reports queued when a job is already in flight", () => {

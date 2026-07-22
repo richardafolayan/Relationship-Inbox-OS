@@ -35,7 +35,6 @@ export const LIVE_INTERCEPTED_PATHS: Array<[RegExp, string]> = [
   [/\/control\/thread\/[^/]+\/predraft$/, "request an AI predraft"],
   [/\/control\/thread\/[^/]+\/check-draft$/, "check draft coverage"],
   [/\/control\/thread\/[^/]+\/voice-rewrite$/, "voice-rewrite a draft"],
-  [/\/control\/thread\/[^/]+\/transform$/, "transform a draft"],
   [/\/control\/thread\/[^/]+\/compose$/, "compose a reply"],
   [/\/control\/thread\/[^/]+\/reassess$/, "reassess the thread"],
   [/\/control\/thread\/[^/]+\/snooze$/, "snooze the thread"],

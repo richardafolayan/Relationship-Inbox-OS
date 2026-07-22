@@ -392,9 +392,36 @@ export function browserFocusHost(): FocusRestoreHost | null {
   return { activeElement: document.activeElement };
 }
 
+// window.history is not an EventTarget. popstate listeners must bind on
+// window. Cache one adapter so WeakMap keys in bindOverlayHistory stay stable.
+let browserHistoryHostCache: HistoryHost | null = null;
+
 export function browserHistoryHost(): HistoryHost | null {
   if (typeof window === "undefined") return null;
-  return window.history as unknown as HistoryHost;
+  if (browserHistoryHostCache) return browserHistoryHostCache;
+
+  browserHistoryHostCache = {
+    get state() {
+      return window.history.state;
+    },
+    pushState(data, unused, url) {
+      window.history.pushState(data, unused, url);
+    },
+    replaceState(data, unused, url) {
+      window.history.replaceState(data, unused, url);
+    },
+    back() {
+      window.history.back();
+    },
+    addEventListener(type, listener) {
+      window.addEventListener(type, listener as unknown as EventListener);
+    },
+    removeEventListener(type, listener) {
+      window.removeEventListener(type, listener as unknown as EventListener);
+    }
+  };
+
+  return browserHistoryHostCache;
 }
 
 /**
