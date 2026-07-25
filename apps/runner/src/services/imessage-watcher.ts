@@ -1,9 +1,11 @@
-import { type FSWatcher, watch } from "node:fs";
+import { type FSWatcher, type Stats, unwatchFile, watch, watchFile } from "node:fs";
 import { dirname, basename } from "node:path";
 
 export interface IMessageWatcherDeps {
   dbPath: string;
   debounceMs: number;
+  pollIntervalMs?: number;
+  directoryWatchEnabled?: boolean;
   /** Called once per debounced burst of chat.db / WAL / SHM writes. */
   onChange: (change: { reason: string; sourceChangedAt: string }) => void;
   /** Optional logger; falls back to console.log. */
@@ -44,6 +46,7 @@ export function createIMessageWatcher(deps: IMessageWatcherDeps): IMessageWatche
   let reattachTimer: ReturnType<typeof setTimeout> | null = null;
   let reattachAttempts = 0;
   let stopped = false;
+  const pollListeners = new Map<string, (current: Stats, previous: Stats) => void>();
 
   function fireDebounced(): void {
     const reason = pendingReason ?? "unknown";
@@ -101,11 +104,39 @@ export function createIMessageWatcher(deps: IMessageWatcherDeps): IMessageWatche
     }
   }
 
+  function startPolling(): void {
+    const interval = deps.pollIntervalMs ?? 500;
+    for (const path of [deps.dbPath, `${deps.dbPath}-wal`, `${deps.dbPath}-shm`]) {
+      const listener = (current: Stats, previous: Stats): void => {
+        if (
+          current.mtimeMs === previous.mtimeMs &&
+          current.ctimeMs === previous.ctimeMs &&
+          current.size === previous.size &&
+          current.ino === previous.ino
+        ) {
+          return;
+        }
+        if (current.nlink === 0 && previous.nlink === 0) return;
+        armDebounce(basename(path));
+      };
+      pollListeners.set(path, listener);
+      watchFile(path, { persistent: false, interval }, listener);
+    }
+  }
+
+  function stopPolling(): void {
+    for (const [path, listener] of pollListeners) {
+      unwatchFile(path, listener);
+    }
+    pollListeners.clear();
+  }
+
   return {
     start(): void {
-      if (watcher) return;
+      if (watcher || pollListeners.size > 0) return;
       stopped = false;
-      attach();
+      if (deps.directoryWatchEnabled !== false) attach();
+      startPolling();
     },
     stop(): void {
       stopped = true;
@@ -121,6 +152,7 @@ export function createIMessageWatcher(deps: IMessageWatcherDeps): IMessageWatche
       }
       watcher?.close();
       watcher = undefined;
+      stopPolling();
     },
     flushDebounceForTest(): void {
       if (debounceTimer) {

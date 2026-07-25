@@ -5,6 +5,7 @@ import Database, { type Database as Db } from "better-sqlite3";
 // used to be seconds pre-High Sierra; we only support modern). 978307200000
 // is the unix-ms offset.
 const APPLE_EPOCH_OFFSET_MS = 978_307_200_000;
+const POST_SEND_FUTURE_TOLERANCE_MS = 10_000;
 
 export interface IMessageReaction {
   /** Apple's emoji-equivalent for the tapback. */
@@ -909,7 +910,11 @@ export class IMessageDb {
    *   - error         non-zero on a failed delivery (25 = "send failed",
    *                   common for SMS-fallback when there's no SMS pathway)
    */
-  findOutboundDeliveryStatus(chatGuid: string, afterUnixMs: number):
+  findOutboundDeliveryStatus(
+    chatGuid: string,
+    afterUnixMs: number,
+    beforeUnixMs = Date.now() + POST_SEND_FUTURE_TOLERANCE_MS
+  ):
     | {
         rowId: number;
         guid: string;
@@ -925,6 +930,7 @@ export class IMessageDb {
       | undefined;
     if (!chat) return undefined;
     const afterAppleNs = (afterUnixMs - APPLE_EPOCH_OFFSET_MS) * 1e6;
+    const beforeAppleNs = (beforeUnixMs - APPLE_EPOCH_OFFSET_MS) * 1e6;
     const row = this.db
       .prepare(
         `SELECT m.ROWID AS rowId, m.guid AS guid, m.service AS service,
@@ -935,10 +941,11 @@ export class IMessageDb {
           WHERE cmj.chat_id = ?
             AND m.is_from_me = 1
             AND m.date >= ?
+            AND m.date <= ?
           ORDER BY m.date DESC
           LIMIT 1`
       )
-      .get(chat.chatId, afterAppleNs) as
+      .get(chat.chatId, afterAppleNs, beforeAppleNs) as
       | {
           rowId: number;
           guid: string;
@@ -1006,12 +1013,17 @@ export class IMessageDb {
    * Without this, OUT messages with attachments persist with empty
    * attachmentsJson and only the text bubble shows in the dashboard.
    */
-  findOutboundAttachments(chatGuid: string, afterUnixMs: number): IMessageAttachment[] {
+  findOutboundAttachments(
+    chatGuid: string,
+    afterUnixMs: number,
+    beforeUnixMs = Date.now() + POST_SEND_FUTURE_TOLERANCE_MS
+  ): IMessageAttachment[] {
     const chat = this.db.prepare("SELECT ROWID AS chatId FROM chat WHERE guid = ?").get(chatGuid) as
       | { chatId: number }
       | undefined;
     if (!chat) return [];
     const afterAppleNs = (afterUnixMs - APPLE_EPOCH_OFFSET_MS) * 1e6;
+    const beforeAppleNs = (beforeUnixMs - APPLE_EPOCH_OFFSET_MS) * 1e6;
     const row = this.db
       .prepare(
         `SELECT m.ROWID AS rowId
@@ -1020,10 +1032,11 @@ export class IMessageDb {
           WHERE cmj.chat_id = ?
             AND m.is_from_me = 1
             AND m.date >= ?
+            AND m.date <= ?
           ORDER BY m.date DESC
           LIMIT 1`
       )
-      .get(chat.chatId, afterAppleNs) as { rowId: number } | undefined;
+      .get(chat.chatId, afterAppleNs, beforeAppleNs) as { rowId: number } | undefined;
     if (!row) return [];
     return this.fetchAttachmentsByMessageRowIds([row.rowId]).get(row.rowId) ?? [];
   }
@@ -1033,13 +1046,18 @@ export class IMessageDb {
    * its guid for the SendReceipt. Looks for the most-recent outbound row
    * in the chat with a date strictly newer than `afterAppleNs`.
    */
-  findOutboundSince(chatGuid: string, afterUnixMs: number): IMessageMessageRow | undefined {
+  findOutboundSince(
+    chatGuid: string,
+    afterUnixMs: number,
+    beforeUnixMs = Date.now() + POST_SEND_FUTURE_TOLERANCE_MS
+  ): IMessageMessageRow | undefined {
     const chat = this.db.prepare("SELECT ROWID AS chatId FROM chat WHERE guid = ?").get(chatGuid) as
       | { chatId: number }
       | undefined;
     if (!chat) return undefined;
     // Convert unix ms back to apple-ns for the query.
     const afterAppleNs = (afterUnixMs - APPLE_EPOCH_OFFSET_MS) * 1e6;
+    const beforeAppleNs = (beforeUnixMs - APPLE_EPOCH_OFFSET_MS) * 1e6;
     const row = this.db
       .prepare(
         `SELECT m.ROWID AS rowId, m.guid AS guid, m.text AS text, m.attributedBody AS attributedBody,
@@ -1049,10 +1067,11 @@ export class IMessageDb {
           WHERE cmj.chat_id = ?
             AND m.is_from_me = 1
             AND m.date >= ?
+            AND m.date <= ?
           ORDER BY m.date DESC
           LIMIT 1`
       )
-      .get(chat.chatId, afterAppleNs) as
+      .get(chat.chatId, afterAppleNs, beforeAppleNs) as
       | { rowId: number; guid: string; text: string | null; attributedBody: Buffer | null; date: number | bigint; hasAttachments: number }
       | undefined;
     if (!row) return undefined;

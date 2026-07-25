@@ -22,6 +22,7 @@ test("watcher fires once per debounced burst of writes", async () => {
   const watcher = createIMessageWatcher({
     dbPath,
     debounceMs: 80,
+    pollIntervalMs: 30,
     onChange: (change) => fires.push(change),
     log: (line) => logs.push(line)
   });
@@ -35,7 +36,7 @@ test("watcher fires once per debounced burst of writes", async () => {
     appendFileSync(`${dbPath}-wal`, "b");
     appendFileSync(`${dbPath}-wal`, "c");
 
-    await delay(200);
+    await delay(250);
 
     assert.equal(fires.length, 1, `expected 1 debounced fire, got ${fires.length}`);
     assert.equal(fires[0].reason, "chat.db-wal");
@@ -66,6 +67,34 @@ test("stop cancels a pending debounced fire", async () => {
     await delay(300);
     assert.equal(fires.length, 0);
   } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("polling fallback catches WAL writes when directory events are unavailable", async () => {
+  const { dir, dbPath } = setupTempDb();
+  const fires = [];
+
+  const watcher = createIMessageWatcher({
+    dbPath,
+    debounceMs: 60,
+    pollIntervalMs: 30,
+    directoryWatchEnabled: false,
+    onChange: (change) => fires.push(change),
+    log: () => {}
+  });
+
+  try {
+    watcher.start();
+    await delay(60);
+    appendFileSync(`${dbPath}-wal`, "fallback");
+    await delay(220);
+
+    assert.equal(fires.length, 1);
+    assert.equal(fires[0].reason, "chat.db-wal");
+    assert.equal(Number.isFinite(Date.parse(fires[0].sourceChangedAt)), true);
+  } finally {
+    watcher.stop();
     rmSync(dir, { recursive: true, force: true });
   }
 });
