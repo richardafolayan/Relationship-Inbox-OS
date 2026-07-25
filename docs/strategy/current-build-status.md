@@ -7,8 +7,10 @@ hashes go stale quickly, so they live here and not in `AGENTS.md`.
 
 ## Baseline
 
-- Active baseline branch: `main` at the PR #1012 merge, `d6e92541`.
-- Signed updater correction: `fix/macos-updater-signing`, based on `d6e92541`.
+- Active baseline branch: `main` at the PR #1014 merge, `230df1c1`.
+- Installed signed macOS build: `0.1.17-dev.889`, built from the PR #1013
+  merge at `7fd8cb47`.
+- Verified rollback milestone: `v0.1.17-mobile-pilot-verified`.
 - Main release target: `main`.
 - Pilot-ready release version: `0.1.17`.
 - Release base before the version bump: `2ff0623` (`Merge pull request #795 from richardafolayan/fix/launcher-native-runtime-guard`).
