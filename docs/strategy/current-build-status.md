@@ -1,17 +1,16 @@
 # Current Build Status
 
-_Volatile. Update this whenever branches, commits, or build state change. Last updated: 2026-07-22._
+_Volatile. Update this whenever branches, commits, or build state change. Last updated: 2026-07-25._
 
 This file holds fast-moving build state on purpose. Branch tips and commit
 hashes go stale quickly, so they live here and not in `AGENTS.md`.
 
 ## Baseline
 
-- Active baseline branch: `v1/strip-back-pr1`.
-- Mobile pilot release correction: `fix/ios-mobile-release`, based on the
-  PR #1009 merge at `09bebffc` from `v1/strip-back-pr1`.
+- Active baseline branch: `main` at the PR #1012 merge, `d6e92541`.
+- Signed updater correction: `fix/macos-updater-signing`, based on `d6e92541`.
 - Main release target: `main`.
-- Pilot-ready release version: `0.1.16`.
+- Pilot-ready release version: `0.1.17`.
 - Release base before the version bump: `2ff0623` (`Merge pull request #795 from richardafolayan/fix/launcher-native-runtime-guard`).
 - Mobile pilot integration, protected same-Wi-Fi phone access, and responsive
   phone layouts are merged into the baseline through `371718e1`.
