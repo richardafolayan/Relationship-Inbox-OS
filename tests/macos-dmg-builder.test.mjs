@@ -46,11 +46,18 @@ test("packaged app looks for the bundled Node runtime in Resources/runtime", () 
   );
 });
 
-test("packaged Node receives the runtime entitlements required by V8", () => {
+test("packaged runtime executables receive their required entitlements", () => {
   const appPath = "/tmp/Tovi.app";
   assert.equal(
     requiresRuntimeEntitlements(
       "/tmp/Tovi.app/Contents/Resources/runtime/node/bin/node",
+      appPath
+    ),
+    true
+  );
+  assert.equal(
+    requiresRuntimeEntitlements(
+      "/tmp/Tovi.app/Contents/Frameworks/Squirrel.framework/Versions/A/Resources/ShipIt",
       appPath
     ),
     true

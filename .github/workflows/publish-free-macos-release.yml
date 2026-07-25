@@ -96,6 +96,9 @@ jobs:
           # -r- writes the designated requirement to stdout; display metadata goes to stderr.
           codesign -d -r- release-dist/macos/Tovi.app > "$RUNNER_TEMP/requirement.txt" 2>/dev/null
           grep -F 'certificate leaf = H' "$RUNNER_TEMP/requirement.txt"
+          SHIPIT="release-dist/macos/Tovi.app/Contents/Frameworks/Squirrel.framework/Versions/A/Resources/ShipIt"
+          codesign -d --entitlements :- "$SHIPIT" > "$RUNNER_TEMP/shipit-entitlements.plist" 2>/dev/null
+          test "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.cs.disable-library-validation' "$RUNNER_TEMP/shipit-entitlements.plist")" = "true"
           mv release-dist/macos/Tovi-*-mac.zip "release-dist/macos/$ZIP_NAME"
           mv release-dist/macos/Tovi-*.dmg "release-dist/macos/$DMG_NAME"
 

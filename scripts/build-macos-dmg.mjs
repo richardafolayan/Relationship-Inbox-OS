@@ -437,7 +437,20 @@ function collectNestedCode(appPath) {
 }
 
 export function requiresRuntimeEntitlements(path, appPath) {
-  return resolve(path) === resolve(join(appPath, "Contents", "Resources", "runtime", "node", "bin", "node"));
+  const resolvedPath = resolve(path);
+  return [
+    join(appPath, "Contents", "Resources", "runtime", "node", "bin", "node"),
+    join(
+      appPath,
+      "Contents",
+      "Frameworks",
+      "Squirrel.framework",
+      "Versions",
+      "A",
+      "Resources",
+      "ShipIt"
+    )
+  ].some((runtimePath) => resolvedPath === resolve(runtimePath));
 }
 
 export async function signApp(appPath, identity, certificatePath = "") {
