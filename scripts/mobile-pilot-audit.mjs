@@ -4,6 +4,7 @@ import { chromium } from "patchright";
 
 const baseUrl = process.env.MOBILE_AUDIT_BASE_URL ?? "http://127.0.0.1:3110";
 const insecurePhoneBaseUrl = process.env.MOBILE_AUDIT_INSECURE_BASE_URL;
+const insecurePhoneConnectUrl = process.env.MOBILE_AUDIT_INSECURE_CONNECT_URL;
 const threadId = process.env.MOBILE_AUDIT_THREAD_ID;
 if (!threadId) throw new Error("MOBILE_AUDIT_THREAD_ID is required");
 
@@ -301,6 +302,10 @@ if (insecurePhoneBaseUrl) {
     colorScheme: "dark"
   });
   const insecurePage = await insecureContext.newPage();
+  if (insecurePhoneConnectUrl) {
+    await insecurePage.goto(insecurePhoneConnectUrl, { waitUntil: "domcontentloaded" });
+    await settle(insecurePage);
+  }
   await insecurePage.goto(`${insecurePhoneBaseUrl}/thread/${threadId}`, {
     waitUntil: "domcontentloaded"
   });
@@ -360,6 +365,9 @@ const failures = results.flatMap((result) => {
         /^Failed to load resource: the server responded with a status of 5\d\d/.test(failure)
       )
   ) ?? [];
+  const actionableRequestFailures = result.requestFailures?.filter(
+    (failure) => !/\/thread\/[^?\s]+\?_rsc=\S+ net::ERR_ABORTED$/.test(failure)
+  ) ?? [];
   if (result.status && result.status >= 400 && result.name !== "not-found") {
     found.push(`${result.name}: HTTP ${result.status}`);
   }
@@ -370,7 +378,7 @@ const failures = results.flatMap((result) => {
     found.push(`${result.name}: console errors`);
   }
   if (result.pageErrors?.length) found.push(`${result.name}: page errors`);
-  if (result.requestFailures?.some((failure) => failure.includes(baseUrl))) {
+  if (actionableRequestFailures.some((failure) => failure.includes(baseUrl))) {
     found.push(`${result.name}: local request failures`);
   }
   if (actionableHttpErrors.some((failure) => !failure.startsWith("404 ") || result.name !== "not-found")) {
