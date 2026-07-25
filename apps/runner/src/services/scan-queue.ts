@@ -3513,6 +3513,32 @@ export function createScanQueue(deps: ScanQueueDeps) {
       }
     }
 
+    if (adapter.collectDeferredOutboundKeys) {
+      try {
+        const deferredKeys = await adapter.collectDeferredOutboundKeys(candidate);
+        if (deferredKeys.length > 0) {
+          const removed = await prisma.message.deleteMany({
+            where: {
+              threadId: thread.id,
+              direction: "OUT",
+              platformMessageKey: { in: deferredKeys }
+            }
+          });
+          if (removed.count > 0) {
+            console.log(
+              `[scan] removed ${removed.count} deferred outbound message(s) from thread ${thread.id}`
+            );
+          }
+        }
+      } catch (error) {
+        console.warn(
+          `[scan] deferred-key sweep failed for thread ${thread.id}: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
+      }
+    }
+
     const persistedAt = new Date().toISOString();
     const syncTiming = trigger
       ? {

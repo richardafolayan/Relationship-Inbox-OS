@@ -53,6 +53,7 @@ function buildFixtureDb(path) {
       error INTEGER,
       service TEXT,
       date INTEGER,
+      is_read INTEGER DEFAULT 0,
       cache_has_attachments INTEGER,
       handle_id INTEGER,
       associated_message_type INTEGER,
@@ -172,7 +173,7 @@ test("receipt lookup finds the sent row via the picked handle's chat, not the th
   }
 });
 
-test("post-send lookups ignore future scheduled messages in the same chat", () => {
+test("post-send lookups and normal scans ignore future scheduled messages", () => {
   const { dir, db } = makeFixture();
   try {
     const sendStartedAt = Date.now();
@@ -226,10 +227,17 @@ test("post-send lookups ignore future scheduled messages in the same chat", () =
       sendStartedAt - 1_000,
       beforeUnixMs
     );
+    const messages = idb.fetchMessages("EMAIL-CHAT-GUID", 100);
+    const [thread] = idb.listThreadsByGuids(["EMAIL-CHAT-GUID"]);
+    const deferred = idb.findFutureScheduledOutboundGuids("EMAIL-CHAT-GUID");
 
     assert.equal(delivery?.guid, "CURRENT-SEND-GUID");
     assert.equal(sent?.guid, "CURRENT-SEND-GUID");
     assert.deepEqual(attachments.map((attachment) => attachment.guid), ["CURRENT-ATTACHMENT-GUID"]);
+    assert.deepEqual(messages.map((message) => message.guid), ["CURRENT-SEND-GUID"]);
+    assert.equal(thread.lastMessagePreview, "sent now");
+    assert.equal(thread.lastDirection, "OUT");
+    assert.deepEqual(deferred, ["FUTURE-SCHEDULED-GUID"]);
     idb.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });

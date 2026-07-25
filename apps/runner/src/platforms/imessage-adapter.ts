@@ -302,6 +302,10 @@ export class IMessageAdapter implements PlatformAdapter {
     return this.getDb().findFailedOutboundGuids(thread.platformThreadId);
   }
 
+  async collectDeferredOutboundKeys(thread: ThreadStub): Promise<string[]> {
+    return this.getDb().findFutureScheduledOutboundGuids(thread.platformThreadId);
+  }
+
   async sendMessage(thread: ThreadStub, text: string, attachments?: OutboundAttachment[]): Promise<SendReceipt> {
     const db = this.getDb();
     // Look up the chat to recover handle + group flag. We re-list one row;
