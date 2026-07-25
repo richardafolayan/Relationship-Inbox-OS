@@ -7,14 +7,14 @@ hashes go stale quickly, so they live here and not in `AGENTS.md`.
 
 ## Baseline
 
-- Active baseline branch: `main` at the PR #1015 merge, `8f927394`.
-- iMessage live-arrival correction: `fix/imessage-live-arrival`, based on
-  `8f927394`.
-- Installed signed macOS build: `0.1.17-dev.889`, built from the PR #1013
-  merge at `7fd8cb47`.
+- Active baseline branch: `main` at the PR #1016 merge, `be147888`.
+- Future-scheduled iMessage scan correction: `fix/imessage-scheduled-scan`,
+  based on `be147888`.
+- Installed signed macOS build: `0.1.18-dev.895`, built from the PR #1016
+  merge at `be147888`.
 - Verified rollback milestone: `v0.1.17-mobile-pilot-verified`.
 - Main release target: `main`.
-- Pilot-ready release version: `0.1.18`.
+- Pilot-ready release version: `0.1.19`.
 - Release base before the version bump: `2ff0623` (`Merge pull request #795 from richardafolayan/fix/launcher-native-runtime-guard`).
 - Mobile pilot integration, protected same-Wi-Fi phone access, and responsive
   phone layouts are merged into the baseline through `371718e1`.

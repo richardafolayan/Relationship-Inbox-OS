@@ -6,6 +6,8 @@ import Database, { type Database as Db } from "better-sqlite3";
 // is the unix-ms offset.
 const APPLE_EPOCH_OFFSET_MS = 978_307_200_000;
 const POST_SEND_FUTURE_TOLERANCE_MS = 10_000;
+const CURRENT_MESSAGE_CUTOFF_SQL =
+  "(CAST(strftime('%s', 'now') AS INTEGER) - 978307200) * 1000000000 + 10000000000";
 
 export interface IMessageReaction {
   /** Apple's emoji-equivalent for the tapback. */
@@ -441,6 +443,7 @@ export class IMessageDb {
     const notTapback =
       "NOT (COALESCE(m.associated_message_type, 0) BETWEEN 2000 AND 2005 " +
       "OR COALESCE(m.associated_message_type, 0) BETWEEN 3000 AND 3005)";
+    const currentMessage = `m.date <= ${CURRENT_MESSAGE_CUTOFF_SQL}`;
     return `SELECT
            c.ROWID                           AS chatId,
            c.guid                            AS guid,
@@ -450,22 +453,22 @@ export class IMessageDb {
            c.style                           AS style,
            (SELECT COUNT(*) FROM message m
               JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
-              WHERE cmj.chat_id = c.ROWID AND m.is_read = 0 AND m.is_from_me = 0 AND ${notTapback}) AS unreadCount,
+              WHERE cmj.chat_id = c.ROWID AND m.is_read = 0 AND m.is_from_me = 0 AND ${notTapback} AND ${currentMessage}) AS unreadCount,
            (SELECT m.date FROM message m
               JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
-              WHERE cmj.chat_id = c.ROWID AND ${notTapback}
+              WHERE cmj.chat_id = c.ROWID AND ${notTapback} AND ${currentMessage}
               ORDER BY m.date DESC, m.ROWID DESC LIMIT 1) AS lastDate,
            (SELECT m.text FROM message m
               JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
-              WHERE cmj.chat_id = c.ROWID AND ${notTapback}
+              WHERE cmj.chat_id = c.ROWID AND ${notTapback} AND ${currentMessage}
               ORDER BY m.date DESC, m.ROWID DESC LIMIT 1) AS lastText,
            (SELECT m.attributedBody FROM message m
               JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
-              WHERE cmj.chat_id = c.ROWID AND ${notTapback}
+              WHERE cmj.chat_id = c.ROWID AND ${notTapback} AND ${currentMessage}
               ORDER BY m.date DESC, m.ROWID DESC LIMIT 1) AS lastBody,
            (SELECT m.is_from_me FROM message m
               JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
-              WHERE cmj.chat_id = c.ROWID AND ${notTapback}
+              WHERE cmj.chat_id = c.ROWID AND ${notTapback} AND ${currentMessage}
               ORDER BY m.date DESC, m.ROWID DESC LIMIT 1) AS lastIsFromMe
          FROM chat c`;
   }
@@ -780,10 +783,15 @@ export class IMessageDb {
          JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
          LEFT JOIN handle h ON h.ROWID = m.handle_id
          WHERE cmj.chat_id = ?
+           AND m.date <= ?
          ORDER BY m.date DESC
          LIMIT ?`
       )
-      .all(chat.chatId, limit) as Array<{
+      .all(
+        chat.chatId,
+        (Date.now() + POST_SEND_FUTURE_TOLERANCE_MS - APPLE_EPOCH_OFFSET_MS) * 1e6,
+        limit
+      ) as Array<{
         rowId: number;
         guid: string;
         text: string | null;
@@ -998,6 +1006,25 @@ export class IMessageDb {
             AND m.is_from_me = 1
             AND m.error IS NOT NULL
             AND m.error != 0
+            AND m.guid IS NOT NULL`
+      )
+      .all(chat.chatId) as Array<{ guid: string | null }>;
+    return rows.map((r) => r.guid).filter((g): g is string => typeof g === "string" && g.length > 0);
+  }
+
+  findFutureScheduledOutboundGuids(chatGuid: string): string[] {
+    const chat = this.db.prepare("SELECT ROWID AS chatId FROM chat WHERE guid = ?").get(chatGuid) as
+      | { chatId: number }
+      | undefined;
+    if (!chat) return [];
+    const rows = this.db
+      .prepare(
+        `SELECT m.guid AS guid
+           FROM message m
+           JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
+          WHERE cmj.chat_id = ?
+            AND m.is_from_me = 1
+            AND m.date > ${CURRENT_MESSAGE_CUTOFF_SQL}
             AND m.guid IS NOT NULL`
       )
       .all(chat.chatId) as Array<{ guid: string | null }>;

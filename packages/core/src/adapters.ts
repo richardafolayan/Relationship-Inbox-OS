@@ -59,6 +59,12 @@ export interface PlatformAdapter {
    */
   collectRetractedOutboundKeys?(thread: ThreadStub): Promise<string[]>;
   /**
+   * Optional. Returns persisted outbound message keys that exist upstream
+   * but are not visible yet, such as future scheduled iMessages. The scan
+   * loop removes stale local copies until the platform makes them current.
+   */
+  collectDeferredOutboundKeys?(thread: ThreadStub): Promise<string[]>;
+  /**
    * Optional. Adds an emoji reaction to a single message identified by its
    * `platformMessageKey`. Used by the dashboard's message-bubble reaction
    * affordance (issue #408). Resolves once the reaction is confirmed applied,
