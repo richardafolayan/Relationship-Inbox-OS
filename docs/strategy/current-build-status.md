@@ -7,10 +7,12 @@ hashes go stale quickly, so they live here and not in `AGENTS.md`.
 
 ## Baseline
 
-- Active baseline branch: `main` at the PR #1019 merge, `72b59ed1`.
+- Active baseline branch: `main` at the PR #1022 merge, `6b271e67`.
 - Installed signed macOS build: `0.1.20-dev.902`, built from the PR #1019
-  merge at `72b59ed1`.
+  merge at `72b59ed1`. This installed build predates the dictation audio fix.
 - Verified rollback milestone: `v0.1.20-mobile-whatsapp-live-verified`.
+- Dictation audio rollback milestone:
+  `milestone/dictation-audio-restored-2026-07-26`.
 - Main release target: `main`.
 - Pilot-ready release version: `0.1.20`.
 - Release base before the version bump: `2ff0623` (`Merge pull request #795 from richardafolayan/fix/launcher-native-runtime-guard`).
@@ -18,11 +20,16 @@ hashes go stale quickly, so they live here and not in `AGENTS.md`.
   phone layouts are merged into the baseline through `371718e1`.
 - Voice-preserving dictation formatting is merged into the baseline through
   `73165351`. Dictation remains editable and does not send automatically.
+- Reliable live dictation audio is merged into `v1/strip-back-pr1` through
+  PR #1021 at `6b48c3cf`, then into `main` through PR #1022 at `6b271e67`.
 - Active Windows parity track: `feat/google-messages-windows-parity`, based on
   `cb87a39` from `origin/v1/strip-back-pr1`.
 
 ## Live verification
 
+- The dictation hotfix passed all 8 focused dictation/audio-signal tests on the
+  merged `main` tip. A headless Chromium fake-microphone check recorded a
+  non-empty WebM/Opus clip and decoded it successfully through Web Audio.
 - PR #1019 restored WhatsApp readiness when an authenticated WhatsApp Web
   session reaches `CONNECTED` before `whatsapp-web.js` emits its one-time
   `ready` event.
