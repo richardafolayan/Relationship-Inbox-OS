@@ -18,7 +18,7 @@ const NATIVE_AUDIO_TYPES = new Set([
 export function preferredDictationMimeType(
   isTypeSupported: (mimeType: string) => boolean
 ): string {
-  for (const mimeType of ["audio/mp4;codecs=mp4a.40.2", "audio/mp4", "audio/webm;codecs=opus"]) {
+  for (const mimeType of ["audio/webm;codecs=opus", "audio/mp4;codecs=mp4a.40.2", "audio/mp4"]) {
     if (isTypeSupported(mimeType)) return mimeType;
   }
   return "";
@@ -38,7 +38,11 @@ export async function prepareDictationAudio(input: {
   originalName?: string;
 }): Promise<PreparedDictationAudio> {
   const mimeType = input.blob.type.toLowerCase().split(";", 1)[0] || "";
-  if (input.uploadMode === "native-audio" && NATIVE_AUDIO_TYPES.has(mimeType)) {
+  if (
+    input.originalName?.trim() &&
+    input.uploadMode === "native-audio" &&
+    NATIVE_AUDIO_TYPES.has(mimeType)
+  ) {
     return {
       blob: input.blob,
       filename: nativeFilename(input.blob, input.originalName)

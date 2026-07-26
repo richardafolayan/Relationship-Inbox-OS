@@ -6,23 +6,38 @@ const { prepareDictationAudio, preferredDictationMimeType } = await import(
   "../apps/dashboard/lib/dictation-recording.ts"
 );
 
-test("dictation prefers MP4/AAC before WebM when the browser supports both", () => {
+test("dictation prefers WebM/Opus when the browser supports it", () => {
   const supported = new Set(["audio/mp4", "audio/webm;codecs=opus"]);
-  assert.equal(preferredDictationMimeType((mimeType) => supported.has(mimeType)), "audio/mp4");
-});
-
-test("dictation falls back to WebM when MP4 recording is unavailable", () => {
   assert.equal(
-    preferredDictationMimeType((mimeType) => mimeType === "audio/webm;codecs=opus"),
+    preferredDictationMimeType((mimeType) => supported.has(mimeType)),
     "audio/webm;codecs=opus"
   );
 });
 
-test("a Mac-hosted dictation keeps native MP4 audio instead of browser resampling it", async () => {
+test("dictation falls back to MP4/AAC when WebM recording is unavailable", () => {
+  assert.equal(
+    preferredDictationMimeType((mimeType) => mimeType === "audio/mp4;codecs=mp4a.40.2"),
+    "audio/mp4;codecs=mp4a.40.2"
+  );
+});
+
+test("a live Mac-hosted recording is normalized to WAV before upload", async () => {
   const blob = new Blob([new Uint8Array([1, 2, 3])], { type: "audio/mp4" });
-  const prepared = await prepareDictationAudio({ blob, uploadMode: "native-audio" });
+  await assert.rejects(
+    prepareDictationAudio({ blob, uploadMode: "native-audio" }),
+    /Web Audio API is unavailable/
+  );
+});
+
+test("an explicitly selected native audio file can bypass browser resampling on Mac", async () => {
+  const blob = new Blob([new Uint8Array([1, 2, 3])], { type: "audio/mp4" });
+  const prepared = await prepareDictationAudio({
+    blob,
+    uploadMode: "native-audio",
+    originalName: "Recording.m4a"
+  });
   assert.equal(prepared.blob, blob);
-  assert.equal(prepared.filename, "dictation.m4a");
+  assert.equal(prepared.filename, "Recording.m4a");
 });
 
 test("the thread page offers native capture when secure getUserMedia is unavailable", async () => {
