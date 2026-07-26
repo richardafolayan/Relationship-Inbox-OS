@@ -7,12 +7,12 @@ hashes go stale quickly, so they live here and not in `AGENTS.md`.
 
 ## Baseline
 
-- Active baseline branch: `main` at the PR #1017 merge, `a676d081`.
-- Installed signed macOS build: `0.1.19-dev.897`, built from the PR #1017
-  merge at `a676d081`.
-- Verified rollback milestone: `v0.1.19-mobile-imessage-live-verified`.
+- Active baseline branch: `main` at the PR #1019 merge, `72b59ed1`.
+- Installed signed macOS build: `0.1.20-dev.902`, built from the PR #1019
+  merge at `72b59ed1`.
+- Verified rollback milestone: `v0.1.20-mobile-whatsapp-live-verified`.
 - Main release target: `main`.
-- Pilot-ready release version: `0.1.19`.
+- Pilot-ready release version: `0.1.20`.
 - Release base before the version bump: `2ff0623` (`Merge pull request #795 from richardafolayan/fix/launcher-native-runtime-guard`).
 - Mobile pilot integration, protected same-Wi-Fi phone access, and responsive
   phone layouts are merged into the baseline through `371718e1`.
@@ -20,6 +20,28 @@ hashes go stale quickly, so they live here and not in `AGENTS.md`.
   `73165351`. Dictation remains editable and does not send automatically.
 - Active Windows parity track: `feat/google-messages-windows-parity`, based on
   `cb87a39` from `origin/v1/strip-back-pr1`.
+
+## Live verification
+
+- PR #1019 restored WhatsApp readiness when an authenticated WhatsApp Web
+  session reaches `CONNECTED` before `whatsapp-web.js` emits its one-time
+  `ready` event.
+- The complete GitHub test suite, stable student release workflow, and signed
+  macOS dev release workflow passed for `72b59ed1`.
+- The installed updater moved Tovi from `0.1.19-dev.897` to
+  `0.1.20-dev.902`. The installed app reports no newer update available.
+- LinkedIn, iMessage, and WhatsApp all report `CONNECTED` in the installed
+  runner. WhatsApp retained its persisted session without showing a QR code.
+- A user-approved WhatsApp message to Lanre was sent through Tovi, reached
+  `SENT`, and was read back from WhatsApp by a targeted rescan with a genuine
+  platform message key.
+- The installed mobile audit passed all 14 unique routes at 390 by 844 with no
+  horizontal overflow or actionable browser errors. Suggested replies, the
+  simplified add sheet, file attachment, voice note, dictation, keyboard
+  viewport resizing, focus-window automatic note opt-in, coarse-touch controls,
+  and the private HTTP iPhone audio-only fallback all passed.
+- The private phone pairing handoff was verified after the update: the access
+  cookie was accepted, the thread returned HTTP 200, and the composer rendered.
 
 ## Landed
 
