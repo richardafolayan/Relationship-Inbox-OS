@@ -118,6 +118,7 @@ export class WhatsAppAdapter implements PlatformAdapter {
 
     this.readyPromise = new Promise<void>((resolve, reject) => {
       const onReady = () => {
+        if (this.ready) return;
         this.ready = true;
         this.deps.onStateChange?.("connected");
         resolve();
@@ -161,10 +162,18 @@ export class WhatsAppAdapter implements PlatformAdapter {
         });
       }
 
-      // initialize() drives the auth flow; it won't resolve on its own —
-      // we wait for the "ready" event above. Errors from initialize()
-      // itself (e.g. Puppeteer launch failure) bubble up via reject.
-      client.initialize().catch(reject);
+      client
+        .initialize()
+        .then(async () => {
+          if (this.ready) return;
+          // A restored session can finish syncing before whatsapp-web.js
+          // attaches its one-shot hasSynced listener, so recover from the
+          // missed ready event using the authoritative socket state.
+          if ((await client.getState()) === "CONNECTED") {
+            onReady();
+          }
+        })
+        .catch(reject);
     });
 
     return this.readyPromise;

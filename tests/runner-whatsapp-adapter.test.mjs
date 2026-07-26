@@ -16,6 +16,7 @@ function createFakeClient(overrides = {}) {
   const client = Object.assign(ee, {
     initialize: overrides.initialize ?? (async () => undefined),
     destroy: overrides.destroy ?? (async () => undefined),
+    getState: overrides.getState ?? (async () => "OPENING"),
     getChats: overrides.getChats ?? (async () => []),
     pupPage: overrides.pupPage,
     getChatById: overrides.getChatById ?? (async () => null),
@@ -71,6 +72,23 @@ test("ensureConnected resolves when the client emits 'ready'", async () => {
   // Library would fire "ready" after auth completes — simulate it.
   setImmediate(() => client.emit("ready"));
   await connecting;
+});
+
+test("ensureConnected recovers when an authenticated session misses the ready event", async () => {
+  const states = [];
+  const client = createFakeClient({
+    getState: async () => "CONNECTED"
+  });
+  const adapter = new WhatsAppAdapter({
+    ...baseDeps(),
+    createClient: () => client,
+    onStateChange: (state) => states.push(state)
+  });
+
+  await adapter.ensureConnected();
+
+  assert.deepEqual(states, ["connecting", "connected"]);
+  assert.deepEqual(await adapter.fetchRecentThreads(1), []);
 });
 
 test("ensureConnected rejects when the client emits 'auth_failure'", async () => {
