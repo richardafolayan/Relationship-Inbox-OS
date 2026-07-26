@@ -1,18 +1,16 @@
 # Current Build Status
 
-_Volatile. Update this whenever branches, commits, or build state change. Last updated: 2026-07-25._
+_Volatile. Update this whenever branches, commits, or build state change. Last updated: 2026-07-26._
 
 This file holds fast-moving build state on purpose. Branch tips and commit
 hashes go stale quickly, so they live here and not in `AGENTS.md`.
 
 ## Baseline
 
-- Active baseline branch: `main` at the PR #1016 merge, `be147888`.
-- Future-scheduled iMessage scan correction: `fix/imessage-scheduled-scan`,
-  based on `be147888`.
-- Installed signed macOS build: `0.1.18-dev.895`, built from the PR #1016
-  merge at `be147888`.
-- Verified rollback milestone: `v0.1.17-mobile-pilot-verified`.
+- Active baseline branch: `main` at the PR #1017 merge, `a676d081`.
+- Installed signed macOS build: `0.1.19-dev.897`, built from the PR #1017
+  merge at `a676d081`.
+- Verified rollback milestone: `v0.1.19-mobile-imessage-live-verified`.
 - Main release target: `main`.
 - Pilot-ready release version: `0.1.19`.
 - Release base before the version bump: `2ff0623` (`Merge pull request #795 from richardafolayan/fix/launcher-native-runtime-guard`).
@@ -51,6 +49,9 @@ hashes go stale quickly, so they live here and not in `AGENTS.md`.
   people already replied to remain excluded.
 - Live platform events are promoted ahead of scheduled scan work so new messages
   are persisted as soon as their platform watcher notices them.
+- Future scheduled iMessages are excluded from receipts, previews, unread counts,
+  and normal message scans. Targeted rescans also remove stale local copies while
+  leaving the Apple Messages schedule intact.
 - Windows packaging, bundled Node 22 startup, isolated browser profiles,
   WhatsApp, and Windows-safe dictation are present.
 - Google Messages for Android is implemented on the Windows parity track with
