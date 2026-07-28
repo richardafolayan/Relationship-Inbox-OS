@@ -3,7 +3,8 @@ import test from "node:test";
 import {
   buildPhoneAccessUrl,
   isPrivateIpv4,
-  privateAddresses
+  privateAddresses,
+  securePhoneAccessUrl
 } from "../apps/dashboard/lib/phone-access-server.ts";
 
 const interfaces = {
@@ -33,4 +34,24 @@ test("phone access builds a pairing link only from valid launcher state", () => 
   assert.equal(buildPhoneAccessUrl(interfaces, "0", token), null);
   assert.equal(buildPhoneAccessUrl(interfaces, "3110", "too-short"), null);
   assert.equal(buildPhoneAccessUrl({}, "3110", token), null);
+});
+
+test("secure phone access accepts only the launcher token on a Tailscale HTTPS origin", () => {
+  const token = "a".repeat(43);
+  assert.equal(
+    securePhoneAccessUrl(`https://tovi-mac.tail1234.ts.net:3111/connect/${token}`, token),
+    `https://tovi-mac.tail1234.ts.net:3111/connect/${token}`
+  );
+  assert.equal(
+    securePhoneAccessUrl(`http://tovi-mac.tail1234.ts.net:3111/connect/${token}`, token),
+    null
+  );
+  assert.equal(
+    securePhoneAccessUrl(`https://evil.example/connect/${token}`, token),
+    null
+  );
+  assert.equal(
+    securePhoneAccessUrl(`https://tovi-mac.tail1234.ts.net:3111/connect/${"b".repeat(43)}`, token),
+    null
+  );
 });

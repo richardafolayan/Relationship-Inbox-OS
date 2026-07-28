@@ -276,15 +276,34 @@ function maybeMultipart(req: express.Request, res: express.Response, next: expre
 // completes (success or failure) — nothing is persisted as a Message.
 const dictationUploadRoot = resolve(dataDir, "dictation-uploads");
 mkdirSync(dictationUploadRoot, { recursive: true });
+const dictationMimeTypes = new Set([
+  "audio/aac",
+  "audio/m4a",
+  "audio/mp4",
+  "audio/ogg",
+  "audio/wav",
+  "audio/webm",
+  "audio/x-m4a",
+  "audio/x-wav"
+]);
 const uploadDictation = multer({
   storage: multer.diskStorage({
-    destination: (_req, _file, cb) => {
+    destination: (req, _file, cb) => {
       const dir = resolve(dictationUploadRoot, uuid());
       mkdirSync(dir, { recursive: true });
+      (req as express.Request & { dictationUploadDir?: string }).dictationUploadDir = dir;
       cb(null, dir);
     },
     filename: (_req, file, cb) => cb(null, safeUploadFilename(file.originalname, "dictation.webm"))
   }),
+  fileFilter: (_req, file, cb) => {
+    const mimeType = file.mimetype.toLowerCase().split(";", 1)[0] || "";
+    if (!dictationMimeTypes.has(mimeType)) {
+      cb(new Error("Unsupported dictation audio type."));
+      return;
+    }
+    cb(null, true);
+  },
   limits: { fileSize: 25 * 1024 * 1024 } // ~ several minutes of speech
 }).single("audio");
 
@@ -4853,6 +4872,12 @@ app.post(
   (req, res, next) =>
     uploadDictation(req, res, (err: unknown) => {
       if (err) {
+        const uploadDir = (req as express.Request & { dictationUploadDir?: string }).dictationUploadDir;
+        if (uploadDir) {
+          try {
+            rmSync(uploadDir, { recursive: true, force: true });
+          } catch {}
+        }
         res
           .status(400)
           .json({ ok: false, error: err instanceof Error ? err.message : "Upload failed." });
@@ -4862,10 +4887,11 @@ app.post(
     }),
   asyncRoute(async (req, res) => {
     const file = req.file as Express.Multer.File | undefined;
+    const uploadDir = (req as express.Request & { dictationUploadDir?: string }).dictationUploadDir;
     const cleanup = () => {
-      if (file) {
+      if (uploadDir || file) {
         try {
-          rmSync(file.destination, { recursive: true, force: true });
+          rmSync(uploadDir || file!.destination, { recursive: true, force: true });
         } catch {
           /* best-effort temp cleanup */
         }

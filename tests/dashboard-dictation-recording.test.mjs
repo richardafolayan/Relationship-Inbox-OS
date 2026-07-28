@@ -9,6 +9,10 @@ const threadPage = await readFile(
   new URL("../apps/dashboard/app/thread/[id]/page.tsx", import.meta.url),
   "utf8"
 );
+const captureSource = await readFile(
+  new URL("../apps/dashboard/lib/dictation-capture.ts", import.meta.url),
+  "utf8"
+);
 
 test("dictation prefers WebM/Opus when the browser supports it", () => {
   const supported = new Set(["audio/mp4", "audio/webm;codecs=opus"]);
@@ -44,22 +48,23 @@ test("an explicitly selected native audio file can bypass browser resampling on 
   assert.equal(prepared.filename, "Recording.m4a");
 });
 
-test("insecure iPhone access never invokes WebKit's video capture fallback", () => {
-  assert.match(threadPage, /!window\.isSecureContext \|\| !navigator\.mediaDevices\?\.getUserMedia/);
+test("insecure iPhone access truthfully disables Tovi dictation", () => {
+  assert.match(threadPage, /Dictation unavailable/);
+  assert.match(threadPage, /dictationCaptureRecoveryMessage/);
+  assert.doesNotMatch(threadPage, /Use the microphone key on your iPhone keyboard/);
+  assert.doesNotMatch(threadPage, /Keyboard mic/);
   assert.doesNotMatch(threadPage, /capture="user"/);
-  assert.doesNotMatch(threadPage, /accept="audio\/\*"/);
   assert.match(threadPage, /accept="\.m4a,\.mp3,\.wav,\.aac,\.aif,\.aiff,\.caf"/);
   assert.match(threadPage, /voiceNoteFileInputRef\.current\?\.click/);
-  assert.match(threadPage, /Use the microphone key on your iPhone keyboard/);
 });
 
 test("Safari dictation records one complete MP4 instead of timesliced fragments", () => {
-  assert.match(threadPage, /Safari needs one complete MP4 recording/);
-  assert.match(threadPage, /recorder\.start\(\);/);
-  assert.doesNotMatch(threadPage, /recorder\.start\(250\)/);
+  assert.match(captureSource, /recorder\.start\(\);/);
+  assert.doesNotMatch(captureSource, /recorder\.start\(250\)/);
 });
 
 test("microphone permission failures explain how to recover", () => {
-  assert.match(threadPage, /Microphone access is off\. Allow it in your browser settings/);
-  assert.match(threadPage, /No microphone was found on this device/);
+  assert.match(captureSource, /Website Settings for this page/);
+  assert.match(captureSource, /find Tovi, allow Microphone/);
+  assert.match(captureSource, /No microphone was found on this iPhone/);
 });

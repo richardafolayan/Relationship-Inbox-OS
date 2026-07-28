@@ -1,16 +1,22 @@
 import { networkInterfaces } from "node:os";
 import QRCode from "qrcode";
-import { buildPhoneAccessUrl } from "@/lib/phone-access-server";
+import { buildPhoneAccessUrl, securePhoneAccessUrl } from "@/lib/phone-access-server";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 export async function GET() {
-  const url = buildPhoneAccessUrl(
+  const token = process.env.RIOS_PHONE_ACCESS_TOKEN || "";
+  const fallbackUrl = buildPhoneAccessUrl(
     networkInterfaces(),
     process.env.RIOS_PHONE_ACCESS_PORT || "",
-    process.env.RIOS_PHONE_ACCESS_TOKEN || ""
+    token
   );
+  const secureUrl = securePhoneAccessUrl(
+    process.env.RIOS_PHONE_ACCESS_SECURE_URL || "",
+    token
+  );
+  const url = secureUrl || fallbackUrl;
   if (!url) {
     return Response.json(
       { available: false },
@@ -19,7 +25,14 @@ export async function GET() {
   }
   const qrDataUrl = await QRCode.toDataURL(url, { margin: 2, width: 320 });
   return Response.json(
-    { available: true, url, qrDataUrl },
+    {
+      available: true,
+      dictationReady: Boolean(secureUrl),
+      fallbackUrl: secureUrl ? fallbackUrl : undefined,
+      secure: Boolean(secureUrl),
+      url,
+      qrDataUrl
+    },
     { headers: { "Cache-Control": "no-store" } }
   );
 }
