@@ -26,7 +26,7 @@ test("chat column owns overflow and is a fixed flex column", () => {
   );
   assert.match(
     threadSrc,
-    /className="relative grid h-full min-h-0 grid-cols-1 overflow-hidden/
+    /className="relative grid min-h-0 flex-1 grid-cols-1 overflow-hidden/
   );
 });
 
