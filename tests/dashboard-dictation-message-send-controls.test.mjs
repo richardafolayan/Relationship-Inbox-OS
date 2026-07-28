@@ -35,3 +35,20 @@ test("individual sends can run independently without the composer's global send 
   assert.doesNotMatch(block, /sendingRef/);
   assert.doesNotMatch(block, /setSending/);
 });
+
+test("a valid transcript is editable before Turn into messages", () => {
+  assert.match(reviewSource, /aria-label="Editable dictation transcript"/);
+  assert.match(reviewSource, /value=\{editableTranscript\}/);
+  assert.match(reviewSource, /onChange=\{\(event\) => setEditableTranscript\(event\.target\.value\)\}/);
+  assert.match(reviewSource, /\{ transcript: editableTranscript \}/);
+  assert.match(reviewSource, />\s*Turn into messages\s*</);
+});
+
+test("review and formatting do not send until a Send control is pressed", () => {
+  const formatStart = reviewSource.indexOf("const format = async");
+  const formatEnd = reviewSource.indexOf("const updateMessage", formatStart);
+  const formatBlock = reviewSource.slice(formatStart, formatEnd);
+  assert.doesNotMatch(formatBlock, /onSendMessage/);
+  assert.match(reviewSource, /onClick=\{\(\) => void sendOneMessage\(message\)\}/);
+  assert.match(reviewSource, /onClick=\{\(\) => void sendMessages\(\)\}/);
+});

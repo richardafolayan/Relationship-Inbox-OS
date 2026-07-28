@@ -2210,11 +2210,16 @@ export default function ThreadPage() {
     }
   }, []);
 
-  const prepareAndSubmitDictation = useCallback(async (blob: Blob, originalName?: string) => {
+  const prepareAndSubmitDictation = useCallback(async (
+    blob: Blob,
+    source: "live-recording" | "selected-file",
+    originalName?: string
+  ) => {
     setDictationStatus("transcribing");
     try {
       const prepared = await prepareDictationAudio({
         blob,
+        source,
         uploadMode: dictationUploadMode,
         originalName
       });
@@ -2260,7 +2265,7 @@ export default function ThreadPage() {
           setDictationStatus("idle");
           return;
         }
-        await prepareAndSubmitDictation(raw);
+        await prepareAndSubmitDictation(raw, "live-recording");
       };
       // Safari needs one complete MP4 recording. Timesliced MP4 fragments
       // can be individually valid but unreadable after Blob concatenation.
@@ -2292,15 +2297,16 @@ export default function ThreadPage() {
     setDictationRetry(null);
   }, []);
 
-  const keepDictationTranscript = useCallback(() => {
-    if (!dictationTranscript) return;
+  const keepDictationTranscript = useCallback((transcript: string) => {
+    const text = transcript.trim();
+    if (!text) return;
     setComposer((current) =>
-      current && !/\s$/.test(current) ? `${current} ${dictationTranscript}` : `${current}${dictationTranscript}`
+      current && !/\s$/.test(current) ? `${current} ${text}` : `${current}${text}`
     );
     setComposerSource("user");
     setDictationTranscript(null);
     window.requestAnimationFrame(() => composerInputRef.current?.focus());
-  }, [dictationTranscript]);
+  }, []);
 
   const sendDictationMessage = useCallback(async (text: string) => {
     if (!thread) throw new Error("This conversation is no longer available.");

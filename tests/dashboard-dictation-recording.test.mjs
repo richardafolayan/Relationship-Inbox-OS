@@ -25,10 +25,26 @@ test("dictation falls back to MP4/AAC when WebM recording is unavailable", () =>
   );
 });
 
+test("dictation falls back to MP4 without an explicit AAC codec", () => {
+  assert.equal(
+    preferredDictationMimeType((mimeType) => mimeType === "audio/mp4"),
+    "audio/mp4"
+  );
+});
+
+test("dictation lets the runtime choose when no preferred MIME type is supported", () => {
+  assert.equal(preferredDictationMimeType(() => false), "");
+});
+
 test("a live Mac-hosted recording is normalized to WAV before upload", async () => {
   const blob = new Blob([new Uint8Array([1, 2, 3])], { type: "audio/mp4" });
   await assert.rejects(
-    prepareDictationAudio({ blob, uploadMode: "native-audio" }),
+    prepareDictationAudio({
+      blob,
+      source: "live-recording",
+      uploadMode: "native-audio",
+      originalName: "misleading-live-name.m4a"
+    }),
     /Web Audio API is unavailable/
   );
 });
@@ -37,11 +53,24 @@ test("an explicitly selected native audio file can bypass browser resampling on 
   const blob = new Blob([new Uint8Array([1, 2, 3])], { type: "audio/mp4" });
   const prepared = await prepareDictationAudio({
     blob,
+    source: "selected-file",
     uploadMode: "native-audio",
     originalName: "Recording.m4a"
   });
   assert.equal(prepared.blob, blob);
   assert.equal(prepared.filename, "Recording.m4a");
+});
+
+test("a selected file cannot take the native bypass without an explicit name", async () => {
+  const blob = new Blob([new Uint8Array([1, 2, 3])], { type: "audio/mp4" });
+  await assert.rejects(
+    prepareDictationAudio({
+      blob,
+      source: "selected-file",
+      uploadMode: "native-audio"
+    }),
+    /Web Audio API is unavailable/
+  );
 });
 
 test("insecure iPhone access never invokes WebKit's video capture fallback", () => {
