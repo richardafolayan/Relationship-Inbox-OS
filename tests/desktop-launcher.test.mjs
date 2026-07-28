@@ -56,6 +56,7 @@ test("startAppEnvironment carries packaged storage locations to the launcher", (
   assert.equal(env.RIOS_CONFIG_DIR, "/tmp/config");
   assert.equal(env.RIOS_DATA_DIR, "/tmp/config/data");
   assert.equal(env.RIOS_STATE_DIR, "/tmp/config/state");
+  assert.equal(env.RUN_TRACE_DIR, "/tmp/config/data/logs/runs");
   assert.equal(env.RIOS_PACKAGED_APP, "1");
 });
 
