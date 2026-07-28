@@ -194,6 +194,13 @@ if ((await voiceAction.count()) > 0) {
 const dictateButton = threadPage.getByRole("button", { name: "Dictate", exact: true });
 let dictationWorked = false;
 if (await dictateButton.isEnabled()) {
+  const captureContext = await threadPage.evaluate(() => ({
+    isSecureContext: window.isSecureContext,
+    origin: window.location.origin
+  }));
+  if (!captureContext.isSecureContext) {
+    throw new Error(`Dictate was enabled on an insecure origin: ${captureContext.origin}`);
+  }
   await dictateButton.click();
   await dictateButton.getByText("Stop", { exact: true }).waitFor({ state: "visible" });
   await threadPage.waitForTimeout(700);
@@ -312,11 +319,12 @@ if (insecurePhoneBaseUrl) {
   await settle(insecurePage);
   const composerInput = insecurePage.getByTestId("thread-composer-input");
   await composerInput.waitFor({ state: "visible" });
-  const keyboardMic = insecurePage.getByRole("button", { name: "Use keyboard microphone" });
-  await keyboardMic.click();
-  const keyboardMicFocusedComposer = await composerInput.evaluate(
-    (element) => document.activeElement === element
-  );
+  const unavailable = insecurePage.getByRole("button", { name: "Dictation unavailable" });
+  await unavailable.waitFor({ state: "visible" });
+  const insecureDictationDisabled = await unavailable.isDisabled();
+  const dictationRecovery = await insecurePage
+    .getByTestId("dictation-secure-recovery")
+    .textContent();
   await insecurePage.getByTestId("composer-more-toggle").click();
   const insecureSheet = insecurePage.getByRole("dialog", { name: "Add to your reply" });
   await insecureSheet.waitFor({ state: "visible" });
@@ -342,7 +350,8 @@ if (insecurePhoneBaseUrl) {
   results.push({
     name: "thread-insecure-iphone-audio",
     secureContext: await insecurePage.evaluate(() => window.isSecureContext),
-    keyboardMicFocusedComposer,
+    dictationRecovery,
+    insecureDictationDisabled,
     recordingInput: recordingInputContract
   });
   await insecurePage.close();

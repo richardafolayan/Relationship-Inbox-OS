@@ -140,17 +140,34 @@ same ports.
 
 ## Use Tovi on your phone
 
-1. Open Tovi from Applications or Launchpad on the computer.
-2. In Tovi, open **Settings > App > Phone access**.
-3. Scan the QR code with the phone camera, or copy the private address into
-   Safari. The phone and computer must be on the same private Wi-Fi network.
-4. Keep Tovi open and keep the computer awake while using it on the phone.
+Full iPhone dictation needs Tovi's private HTTPS link:
+
+1. Install Tailscale on the Mac and iPhone.
+2. Sign both devices into the same private Tailscale network and connect them.
+3. In the Tailscale admin DNS settings, enable MagicDNS and HTTPS certificates.
+4. Quit and reopen Tovi.
+5. In Tovi, open **Settings > App > Phone access**.
+6. Scan the HTTPS QR code with the iPhone camera, or copy the private address
+   into Safari.
+7. Keep Tovi open and keep the computer awake while using it on the phone.
+
+To install the Home Screen app, open the HTTPS link in Safari, use Share, then
+choose **Add to Home Screen**. If an older Tovi Home Screen icon was installed
+from the HTTP Wi-Fi link, remove it and add it again from HTTPS. Safari treats
+those as different origins, so the old icon cannot gain microphone access.
 
 Phone access does not require Terminal. Tovi creates a private access key on
 the computer and requires it before forwarding any dashboard request. The
 normal dashboard and local message service remain bound to the computer only.
-Do not share the private address, and do not use phone access on a public or
-untrusted Wi-Fi network. Quitting Tovi closes phone access.
+Tailscale Serve is private to the connected Tailscale network and forwards to
+Tovi's authenticated launcher proxy, not directly to the runner. Do not share
+the private address or QR code. Quitting Tovi removes its private HTTPS mapping
+and closes phone access.
+
+If Tailscale HTTPS is not ready, Settings shows the existing HTTP Wi-Fi link.
+Reading and typing still work there, but the composer truthfully shows
+**Dictation unavailable**. It never substitutes the iPhone keyboard microphone
+for Tovi dictation.
 
 ## Update
 

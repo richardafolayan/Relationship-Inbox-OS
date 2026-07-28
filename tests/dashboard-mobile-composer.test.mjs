@@ -21,8 +21,9 @@ test("mobile default exposes only + / dictate / Send primary actions", () => {
   assert.match(mobileBlock, /Plus/);
   assert.match(
     mobileBlock,
-    /aria-label=\{browserAudioCaptureAvailable \? "Dictate" : "Use keyboard microphone"\}/
+    /aria-label=\{browserAudioCaptureAvailable \? "Dictate" : "Dictation unavailable"\}/
   );
+  assert.doesNotMatch(mobileBlock, /Use keyboard microphone/);
   assert.match(mobileBlock, /Send/);
   assert.doesNotMatch(
     mobileBlock,

@@ -98,8 +98,15 @@ import { DegradedBanner } from "@/components/common/degraded-banner";
 import { FocusThreadStrip } from "@/components/common/focus/focus-thread-strip";
 import { autocorrectAtCaret } from "@/lib/autocorrect";
 import {
+  dictationCaptureAvailability,
+  dictationCaptureRecoveryMessage,
+  microphoneAccessMessage,
+  startDictationCapture,
+  type DictationCaptureSession,
+  type DictationCaptureUnavailableReason
+} from "@/lib/dictation-capture";
+import {
   prepareDictationAudio,
-  preferredDictationMimeType,
   type DictationUploadMode,
   type PreparedDictationAudio
 } from "@/lib/dictation-recording";
@@ -155,20 +162,6 @@ const FALLBACK_SUGGESTIONS: Array<{ intent: string; glyph: string; build: (first
   { intent: "Polite pass", glyph: "·", build: (n) => `Hi ${n}, appreciate it but I'll pass for now.` },
   { intent: "Ask for time", glyph: "⏱", build: (n) => `Hey ${n}, can I get back to you next week?` }
 ];
-
-function microphoneAccessMessage(error: unknown): string {
-  const name =
-    typeof error === "object" && error !== null && "name" in error
-      ? String(error.name)
-      : "";
-  if (name === "NotAllowedError" || name === "SecurityError") {
-    return "Microphone access is off. Allow it in your browser settings, then try again.";
-  }
-  if (name === "NotFoundError" || name === "DevicesNotFoundError") {
-    return "No microphone was found on this device.";
-  }
-  return "The microphone could not start. Try again, or use the phone recorder.";
-}
 
 // The runner paginates messages server-side and exposes `messagePage`
 // on every ThreadResponse. We only own the scroll-position thresholds:
@@ -707,6 +700,8 @@ export default function ThreadPage() {
   const recordedChunksRef = useRef<BlobPart[]>([]);
   const voiceNoteFileInputRef = useRef<HTMLInputElement | null>(null);
   const [browserAudioCaptureAvailable, setBrowserAudioCaptureAvailable] = useState(false);
+  const [dictationCaptureUnavailableReason, setDictationCaptureUnavailableReason] =
+    useState<DictationCaptureUnavailableReason | null>(null);
   // Held so the mic stream can be released on unmount even if onstop never
   // runs (e.g. navigating away mid-record).
   const recordingStreamRef = useRef<MediaStream | null>(null);
@@ -720,11 +715,8 @@ export default function ThreadPage() {
   const [dictationAvailable, setDictationAvailable] = useState(false);
   const [dictationUploadMode, setDictationUploadMode] = useState<DictationUploadMode>("wav");
   const [dictationTranscript, setDictationTranscript] = useState<string | null>(null);
-  const dictationRecorderRef = useRef<MediaRecorder | null>(null);
-  const dictationChunksRef = useRef<BlobPart[]>([]);
-  // Held so the mic stream can be released on unmount even if onstop never
-  // runs (e.g. navigating away mid-dictation).
-  const dictationStreamRef = useRef<MediaStream | null>(null);
+  const dictationSessionRef = useRef<DictationCaptureSession | null>(null);
+  const dictationStartGenerationRef = useRef(0);
   // #462 follow-up: when a dictation transcription fails for a *transient*
   // reason (lost connection to the runner, a proxy hiccup, or a runner-side
   // timeout), keep the already-prepared WAV in memory so the operator can
@@ -842,11 +834,13 @@ export default function ThreadPage() {
     return () => mq.removeEventListener("change", update);
   }, []);
   useEffect(() => {
-    setBrowserAudioCaptureAvailable(
-      window.isSecureContext &&
-      Boolean(navigator.mediaDevices?.getUserMedia) &&
-      typeof MediaRecorder !== "undefined"
-    );
+    const availability = dictationCaptureAvailability({
+      isSecureContext: window.isSecureContext,
+      mediaDevices: navigator.mediaDevices,
+      MediaRecorderClass: typeof MediaRecorder === "undefined" ? undefined : MediaRecorder
+    });
+    setBrowserAudioCaptureAvailable(availability.available);
+    setDictationCaptureUnavailableReason(availability.reason);
   }, []);
   useEffect(() => {
     const mq = window.matchMedia("(max-width: 1279px)");
@@ -2071,15 +2065,24 @@ export default function ThreadPage() {
   // explicit stop* call that never runs on unmount.
   useEffect(
     () => () => {
+      dictationStartGenerationRef.current += 1;
       stopRecorderAndStream(recorderRef.current, recordingStreamRef.current);
       recorderRef.current = null;
       recordingStreamRef.current = null;
-      stopRecorderAndStream(dictationRecorderRef.current, dictationStreamRef.current);
-      dictationRecorderRef.current = null;
-      dictationStreamRef.current = null;
+      dictationSessionRef.current?.cancel();
+      dictationSessionRef.current = null;
     },
     []
   );
+  useEffect(() => {
+    const releaseForNavigation = () => {
+      dictationStartGenerationRef.current += 1;
+      dictationSessionRef.current?.cancel();
+      dictationSessionRef.current = null;
+    };
+    window.addEventListener("pagehide", releaseForNavigation);
+    return () => window.removeEventListener("pagehide", releaseForNavigation);
+  }, []);
 
   const startRecording = useCallback(async () => {
     if (recording) return;
@@ -2232,53 +2235,65 @@ export default function ThreadPage() {
     // A fresh recording supersedes any earlier failed clip + retry banner.
     failedDictationAudioRef.current = null;
     setDictationRetry(null);
-    if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
-      composerInputRef.current?.focus();
-      setError("Use the microphone key on your iPhone keyboard to dictate into your reply.");
+    const availability = dictationCaptureAvailability({
+      isSecureContext: window.isSecureContext,
+      mediaDevices: navigator.mediaDevices,
+      MediaRecorderClass: typeof MediaRecorder === "undefined" ? undefined : MediaRecorder
+    });
+    if (!availability.available) {
+      setBrowserAudioCaptureAvailable(false);
+      setDictationCaptureUnavailableReason(availability.reason);
+      setError(dictationCaptureRecoveryMessage(availability.reason));
       return;
     }
+    const generation = ++dictationStartGenerationRef.current;
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          autoGainControl: true,
-          echoCancellation: true,
-          noiseSuppression: true
+      const standalone = window.matchMedia("(display-mode: standalone)").matches;
+      const session = await startDictationCapture({
+        onCancel: () => {
+          if (dictationStartGenerationRef.current === generation) setDictationStatus("idle");
+        },
+        onError: (captureError) => {
+          dictationSessionRef.current = null;
+          setError(microphoneAccessMessage(captureError, standalone));
+          setDictationStatus("idle");
+        },
+        onRecorded: async (raw) => {
+          dictationSessionRef.current = null;
+          await prepareAndSubmitDictation(raw);
         }
       });
-      const mimeType = preferredDictationMimeType((candidate) => MediaRecorder.isTypeSupported(candidate));
-      const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
-      dictationChunksRef.current = [];
-      recorder.ondataavailable = (e) => {
-        if (e.data.size > 0) dictationChunksRef.current.push(e.data);
-      };
-      recorder.onstop = async () => {
-        stream.getTracks().forEach((t) => t.stop());
-        dictationStreamRef.current = null;
-        const raw = new Blob(dictationChunksRef.current, { type: recorder.mimeType });
-        if (raw.size === 0) {
-          setError("The microphone did not capture any audio. Try again.");
-          setDictationStatus("idle");
-          return;
-        }
-        await prepareAndSubmitDictation(raw);
-      };
-      // Safari needs one complete MP4 recording. Timesliced MP4 fragments
-      // can be individually valid but unreadable after Blob concatenation.
-      recorder.start();
-      dictationRecorderRef.current = recorder;
-      dictationStreamRef.current = stream;
+      if (dictationStartGenerationRef.current !== generation) {
+        session.cancel();
+        return;
+      }
+      dictationSessionRef.current = session;
       setDictationStatus("recording");
     } catch (err) {
-      setError(microphoneAccessMessage(err));
+      setError(
+        microphoneAccessMessage(
+          err,
+          window.matchMedia("(display-mode: standalone)").matches
+        )
+      );
       setDictationStatus("idle");
     }
   }, [dictationStatus, prepareAndSubmitDictation]);
 
   const stopDictation = useCallback(() => {
-    if (dictationStatus !== "recording" || !dictationRecorderRef.current) return;
-    dictationRecorderRef.current.stop();
-    dictationRecorderRef.current = null;
+    if (dictationStatus !== "recording" || !dictationSessionRef.current) return;
+    const session = dictationSessionRef.current;
+    dictationSessionRef.current = null;
+    setDictationStatus("transcribing");
+    session.stop();
   }, [dictationStatus]);
+
+  const cancelDictation = useCallback(() => {
+    dictationStartGenerationRef.current += 1;
+    dictationSessionRef.current?.cancel();
+    dictationSessionRef.current = null;
+    setDictationStatus("idle");
+  }, []);
 
   // #462 follow-up: re-submit the last failed clip without re-recording.
   const retryDictation = useCallback(() => {
@@ -2292,10 +2307,11 @@ export default function ThreadPage() {
     setDictationRetry(null);
   }, []);
 
-  const keepDictationTranscript = useCallback(() => {
-    if (!dictationTranscript) return;
+  const keepDictationTranscript = useCallback((reviewedTranscript?: string) => {
+    const transcript = reviewedTranscript?.trim() || dictationTranscript;
+    if (!transcript) return;
     setComposer((current) =>
-      current && !/\s$/.test(current) ? `${current} ${dictationTranscript}` : `${current}${dictationTranscript}`
+      current && !/\s$/.test(current) ? `${current} ${transcript}` : `${current}${transcript}`
     );
     setComposerSource("user");
     setDictationTranscript(null);
@@ -5636,15 +5652,21 @@ export default function ThreadPage() {
                     onClick={() =>
                       dictationStatus === "recording" ? stopDictation() : void startDictation()
                     }
-                    disabled={!dictationAvailable || dictationStatus === "transcribing"}
+                    disabled={
+                      !browserAudioCaptureAvailable ||
+                      !dictationAvailable ||
+                      dictationStatus === "transcribing"
+                    }
                     title={
-                      dictationAvailable
+                      !browserAudioCaptureAvailable
+                        ? dictationCaptureRecoveryMessage(dictationCaptureUnavailableReason)
+                        : dictationAvailable
                         ? dictationStatus === "recording"
                           ? "Stop and transcribe"
                           : "Dictate your reply"
                         : "Voice dictation needs transcription enabled on the runner"
                     }
-                    aria-label="Dictate"
+                    aria-label={browserAudioCaptureAvailable ? "Dictate" : "Dictation unavailable"}
                     className={`inline-flex items-center gap-1.5 rounded-pill border px-2.5 py-1 text-[11px] transition-colors duration-calm disabled:cursor-not-allowed disabled:opacity-50 ${
                       dictationStatus === "recording"
                         ? "border-risk-overdue bg-risk-overdue/10 text-risk-overdue"
@@ -5664,9 +5686,20 @@ export default function ThreadPage() {
                         ? "Stop"
                         : dictationStatus === "transcribing"
                           ? "Transcribing…"
-                          : "Dictate"}
+                          : browserAudioCaptureAvailable
+                            ? "Dictate"
+                            : "Unavailable"}
                     </span>
                   </button>
+                  {dictationStatus === "recording" ? (
+                    <button
+                      type="button"
+                      onClick={cancelDictation}
+                      className="rounded-pill px-2.5 py-1 text-[11px] text-ink-3 hover:bg-paper-2 hover:text-ink"
+                    >
+                      Cancel
+                    </button>
+                  ) : null}
                   <div className="relative" ref={scheduleMenuDesktopRef}>
                     <button
                       type="button"
@@ -5812,19 +5845,20 @@ export default function ThreadPage() {
                     dictationStatus === "recording" ? stopDictation() : void startDictation()
                   }
                   disabled={
-                    browserAudioCaptureAvailable &&
-                    (!dictationAvailable || dictationStatus === "transcribing")
+                    !browserAudioCaptureAvailable ||
+                    !dictationAvailable ||
+                    dictationStatus === "transcribing"
                   }
                   title={
                     !browserAudioCaptureAvailable
-                      ? "Use the microphone on your iPhone keyboard"
+                      ? dictationCaptureRecoveryMessage(dictationCaptureUnavailableReason)
                       : dictationAvailable
                       ? dictationStatus === "recording"
                         ? "Stop and transcribe"
                         : "Dictate your reply"
                       : "Voice dictation needs transcription enabled on the runner"
                   }
-                  aria-label={browserAudioCaptureAvailable ? "Dictate" : "Use keyboard microphone"}
+                  aria-label={browserAudioCaptureAvailable ? "Dictate" : "Dictation unavailable"}
                   className={cn(
                     "inline-flex h-[34px] shrink-0 items-center gap-1.5 rounded-pill border px-3 text-[12px] transition-colors duration-calm disabled:cursor-not-allowed disabled:opacity-50",
                     dictationStatus === "recording"
@@ -5847,9 +5881,18 @@ export default function ThreadPage() {
                         ? "Working"
                         : browserAudioCaptureAvailable
                           ? "Dictate"
-                          : "Keyboard mic"}
+                          : "Unavailable"}
                   </span>
                 </button>
+                {dictationStatus === "recording" ? (
+                  <button
+                    type="button"
+                    onClick={cancelDictation}
+                    className="h-[34px] shrink-0 rounded-pill px-2.5 text-[12px] text-ink-3 hover:bg-paper-2 hover:text-ink"
+                  >
+                    Cancel
+                  </button>
+                ) : null}
                 <div className="min-w-0 flex-1" />
                 <Button
                   variant="primary"
@@ -5866,6 +5909,14 @@ export default function ThreadPage() {
                   Send
                 </Button>
               </div>
+              {!browserAudioCaptureAvailable ? (
+                <p
+                  className="phone-ui-block mt-1.5 rounded-[10px] border border-hairline bg-paper-2 px-2.5 py-2 text-[11px] leading-4 text-ink-2"
+                  data-testid="dictation-secure-recovery"
+                >
+                  {dictationCaptureRecoveryMessage(dictationCaptureUnavailableReason)}
+                </p>
+              ) : null}
               <ActionSheet
                 open={composerMoreOpen}
                 onClose={() => setComposerMoreOpen(false)}

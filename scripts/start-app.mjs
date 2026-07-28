@@ -29,7 +29,9 @@ import {
 const require = createRequire(import.meta.url);
 const {
   readOrCreateAccessToken,
+  startSecurePhoneAccess,
   startPhoneAccessProxy,
+  stopSecurePhoneAccess,
   stopPhoneAccessProxy
 } = require("../apps/desktop/phone-access.cjs");
 
@@ -328,6 +330,7 @@ async function startApp(prod) {
   const children = [];
   let shuttingDown = false;
   let phoneProxy = null;
+  let securePhoneAccess = null;
   const state = {
     version: 1,
     appDir: APP_DIR,
@@ -347,7 +350,8 @@ async function startApp(prod) {
     shuttingDown = true;
     await Promise.all([
       stopChildGroups(children.map(({ name, child }) => ({ name, pid: child.pid }))),
-      stopPhoneAccessProxy(phoneProxy?.server)
+      stopPhoneAccessProxy(phoneProxy?.server),
+      Promise.resolve(stopSecurePhoneAccess(securePhoneAccess))
     ]);
     removeRuntimeState(RUNTIME_STATE_PATH);
     process.exit(code);
@@ -394,9 +398,21 @@ async function startApp(prod) {
     });
     process.env.RIOS_PHONE_ACCESS_PORT = String(phoneProxy.port);
     process.env.RIOS_PHONE_ACCESS_TOKEN = token;
+    securePhoneAccess = startSecurePhoneAccess({
+      proxyPort: phoneProxy.port,
+      token
+    });
+    if (securePhoneAccess.available) {
+      process.env.RIOS_PHONE_ACCESS_SECURE_URL = securePhoneAccess.url;
+      say(`Secure phone access is ready at ${securePhoneAccess.url.replace(token, "[private-token]")}`);
+    } else {
+      delete process.env.RIOS_PHONE_ACCESS_SECURE_URL;
+      say("Secure phone dictation needs Tailscale HTTPS. The private Wi-Fi link remains available for reading and typing.");
+    }
   } catch (error) {
     delete process.env.RIOS_PHONE_ACCESS_PORT;
     delete process.env.RIOS_PHONE_ACCESS_TOKEN;
+    delete process.env.RIOS_PHONE_ACCESS_SECURE_URL;
     say(`Phone access is unavailable: ${error.message}`);
   }
 

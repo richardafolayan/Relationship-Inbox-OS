@@ -29,7 +29,7 @@ import {
 interface DictationMessageReviewProps {
   threadId: string;
   transcript: string;
-  onKeepTranscript: () => void;
+  onKeepTranscript: (transcript: string) => void;
   onDone: () => void;
   onMessageSent: () => void;
   onSendMessage: (text: string) => Promise<void>;
@@ -46,6 +46,7 @@ export function DictationMessageReview({
   onSendMessage
 }: DictationMessageReviewProps) {
   const [view, setView] = useState<View>("choice");
+  const [rawTranscript, setRawTranscript] = useState(transcript);
   const [result, setResult] = useState<DictationFormattingResult | null>(null);
   const [messages, setMessages] = useState<FormattedDictationMessage[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -59,7 +60,7 @@ export function DictationMessageReview({
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape" && view !== "formatting" && view !== "sending") {
         event.preventDefault();
-        onKeepTranscript();
+        onKeepTranscript(rawTranscript);
       }
     };
     window.addEventListener("keydown", onKeyDown);
@@ -67,7 +68,7 @@ export function DictationMessageReview({
       window.removeEventListener("keydown", onKeyDown);
       if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
     };
-  }, [onKeepTranscript, view]);
+  }, [onKeepTranscript, rawTranscript, view]);
 
   const format = async () => {
     setView("formatting");
@@ -75,7 +76,7 @@ export function DictationMessageReview({
     try {
       const formatted = await apiPost<DictationFormattingResult>(
         `/runner/control/thread/${threadId}/format-dictation-messages`,
-        { transcript }
+        { transcript: rawTranscript }
       );
       if (!formatted.messages.length) throw new Error("No messages were returned.");
       setResult(formatted);
@@ -214,7 +215,7 @@ export function DictationMessageReview({
           </div>
           <button
             type="button"
-            onClick={onKeepTranscript}
+            onClick={() => onKeepTranscript(rawTranscript)}
             disabled={view === "formatting" || view === "sending"}
             className="grid h-11 w-11 shrink-0 place-items-center rounded-full text-ink-3 transition-colors duration-calm hover:bg-paper-2 hover:text-ink disabled:opacity-40"
             aria-label="Keep transcript and close"
@@ -226,11 +227,15 @@ export function DictationMessageReview({
         <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-4 sm:px-6 sm:py-5">
           {view === "choice" ? (
             <div className="space-y-4">
-              <div className="rounded-[16px] border border-hairline bg-paper-2 px-4 py-3 text-[14px] leading-relaxed text-ink-2">
-                {transcript}
-              </div>
+              <textarea
+                value={rawTranscript}
+                onChange={(event) => setRawTranscript(event.target.value)}
+                rows={Math.max(5, Math.min(12, Math.ceil(rawTranscript.length / 42)))}
+                className="w-full resize-y rounded-[16px] border border-hairline bg-paper-2 px-4 py-3 text-[15px] leading-relaxed text-ink outline-none transition-colors duration-calm focus:border-accent-ink/60 focus:ring-2 focus:ring-accent-ink/10"
+                aria-label="Raw transcript"
+              />
               <p className="text-[12px] leading-relaxed text-ink-3">
-                Your original transcript stays unchanged while messages are prepared.
+                Edit any words Tovi misheard before keeping or formatting this transcript.
               </p>
             </div>
           ) : null}
@@ -253,7 +258,7 @@ export function DictationMessageReview({
               </div>
               <details className="rounded-[16px] border border-hairline bg-paper-2 px-4 py-3 text-[13px] text-ink-2">
                 <summary className="cursor-pointer font-medium text-ink">Original transcript</summary>
-                <p className="mt-3 whitespace-pre-wrap leading-relaxed">{transcript}</p>
+                <p className="mt-3 whitespace-pre-wrap leading-relaxed">{rawTranscript}</p>
               </details>
             </div>
           ) : null}
@@ -394,7 +399,7 @@ export function DictationMessageReview({
 
               <details className="rounded-[16px] border border-hairline px-4 py-3 text-[12px] text-ink-2">
                 <summary className="cursor-pointer font-medium text-ink">Original transcript</summary>
-                <p className="mt-3 whitespace-pre-wrap leading-relaxed">{transcript}</p>
+                <p className="mt-3 whitespace-pre-wrap leading-relaxed">{rawTranscript}</p>
               </details>
 
               {error ? (
@@ -409,7 +414,7 @@ export function DictationMessageReview({
         <footer className="border-t border-hairline bg-paper px-4 pb-[max(16px,env(safe-area-inset-bottom))] pt-3 sm:px-6 sm:pb-5 sm:pt-4">
           {view === "choice" ? (
             <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
-              <Button variant="quiet" className="min-h-11 w-full sm:w-auto" onClick={onKeepTranscript}>
+              <Button variant="quiet" className="min-h-11 w-full sm:w-auto" onClick={() => onKeepTranscript(rawTranscript)}>
                 Keep as transcript
               </Button>
               <Button variant="primary" className="min-h-11 w-full sm:w-auto" onClick={() => void format()}>
@@ -419,7 +424,7 @@ export function DictationMessageReview({
           ) : null}
           {view === "error" ? (
             <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
-              <Button variant="quiet" className="min-h-11 w-full sm:w-auto" onClick={onKeepTranscript}>
+              <Button variant="quiet" className="min-h-11 w-full sm:w-auto" onClick={() => onKeepTranscript(rawTranscript)}>
                 Keep as transcript
               </Button>
               <Button variant="primary" className="min-h-11 w-full sm:w-auto" onClick={() => void format()}>
@@ -443,7 +448,7 @@ export function DictationMessageReview({
               <Button
                 variant="quiet"
                 className="min-h-11 w-full sm:ml-auto sm:w-auto"
-                onClick={onKeepTranscript}
+                onClick={() => onKeepTranscript(rawTranscript)}
                 disabled={view === "sending" || sendingMessageIds.size > 0}
               >
                 Keep transcript
