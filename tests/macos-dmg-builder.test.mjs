@@ -30,6 +30,14 @@ import {
 } from "../scripts/build-macos-dmg.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const macEntitlements = readFileSync(
+  join(ROOT, "apps", "desktop", "entitlements.mac.plist"),
+  "utf8"
+);
+const releaseWorkflow = readFileSync(
+  join(ROOT, ".github", "workflows", "publish-free-macos-release.yml"),
+  "utf8"
+);
 
 test("macOS DMG builder plans a branded app and DMG path", () => {
   const paths = planPaths({ out: "tmp-out", version: "1.2.3" });
@@ -69,6 +77,12 @@ test("packaged runtime executables receive their required entitlements", () => {
     ),
     false
   );
+});
+
+test("hardened macOS packages are entitled to capture microphone audio", () => {
+  assert.match(macEntitlements, /<key>com\.apple\.security\.device\.audio-input<\/key>\s*<true\/>/);
+  assert.match(releaseWorkflow, /Electron Helper \(Renderer\)\.app/);
+  assert.match(releaseWorkflow, /Print :com\.apple\.security\.device\.audio-input/);
 });
 
 test("DMG args expose release-safe switches", () => {

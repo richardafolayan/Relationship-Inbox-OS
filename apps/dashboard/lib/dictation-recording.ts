@@ -1,6 +1,7 @@
 import { blobToWhisperWav } from "./dictation-audio";
 
 export type DictationUploadMode = "native-audio" | "wav";
+export type DictationAudioSource = "live-recording" | "selected-file";
 
 export interface PreparedDictationAudio {
   blob: Blob;
@@ -34,11 +35,13 @@ function nativeFilename(blob: Blob, originalName?: string): string {
 
 export async function prepareDictationAudio(input: {
   blob: Blob;
+  source: DictationAudioSource;
   uploadMode: DictationUploadMode;
   originalName?: string;
 }): Promise<PreparedDictationAudio> {
   const mimeType = input.blob.type.toLowerCase().split(";", 1)[0] || "";
   if (
+    input.source === "selected-file" &&
     input.originalName?.trim() &&
     input.uploadMode === "native-audio" &&
     NATIVE_AUDIO_TYPES.has(mimeType)
