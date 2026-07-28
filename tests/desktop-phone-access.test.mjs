@@ -90,6 +90,7 @@ test("phone access requires the private link before proxying dashboard requests"
     assert.equal(connected.headers.location, "/");
     assert.match(connected.headers["set-cookie"][0], /HttpOnly/);
     assert.match(connected.headers["set-cookie"][0], /SameSite=Strict/);
+    assert.doesNotMatch(connected.headers["set-cookie"][0], /Secure/);
 
     const opened = await get(proxy.port, "/inbox?q=reply", {
       Cookie: `${phoneAccess.ACCESS_COOKIE}=${token}; session=student`
@@ -106,18 +107,142 @@ test("phone access requires the private link before proxying dashboard requests"
   }
 });
 
+test("secure phone access sets a secure cookie and keeps camera permission disabled", async () => {
+  const upstream = createServer((_incoming, outgoing) => {
+    outgoing.writeHead(200, { "Content-Type": "text/plain" });
+    outgoing.end("ready");
+  });
+  const dashboardPort = await listen(upstream);
+  const token = phoneAccess.createAccessToken();
+  const proxy = await phoneAccess.startPhoneAccessProxy({
+    dashboardPort,
+    host: "127.0.0.1",
+    preferredPort: 0,
+    token
+  });
+
+  try {
+    const connected = await get(proxy.port, `/connect/${token}`, {
+      "X-Forwarded-Proto": "https"
+    });
+    assert.match(connected.headers["set-cookie"][0], /; Secure/);
+    assert.equal(connected.headers["permissions-policy"], "camera=(), microphone=(self)");
+
+    const opened = await get(proxy.port, "/", {
+      Cookie: `${phoneAccess.ACCESS_COOKIE}=${token}`
+    });
+    assert.equal(opened.headers["permissions-policy"], "camera=(), microphone=(self)");
+  } finally {
+    await phoneAccess.stopPhoneAccessProxy(proxy.server);
+    await close(upstream);
+  }
+});
+
 test("phone access links contain the pairing path", () => {
   const token = "a".repeat(43);
   assert.equal(
     phoneAccess.phoneAccessUrl("192.168.1.4", 3110, token),
     `http://192.168.1.4:3110/connect/${token}`
   );
+  assert.equal(
+    phoneAccess.phoneAccessUrl("tovi.example.ts.net", 3111, token, "https"),
+    `https://tovi.example.ts.net:3111/connect/${token}`
+  );
+});
+
+test("Tailscale HTTPS is accepted only for an online MagicDNS node with HTTPS enabled", () => {
+  const ready = {
+    BackendState: "Running",
+    CurrentTailnet: { MagicDNSEnabled: true },
+    Self: {
+      Capabilities: ["https"],
+      DNSName: "tovi-mac.tail1234.ts.net.",
+      Online: true
+    }
+  };
+  assert.equal(phoneAccess.tailscalePhoneHost(ready), "tovi-mac.tail1234.ts.net");
+  assert.equal(phoneAccess.tailscalePhoneHost({ ...ready, BackendState: "Stopped" }), "");
+  assert.equal(
+    phoneAccess.tailscalePhoneHost({
+      ...ready,
+      Self: { ...ready.Self, Capabilities: [] }
+    }),
+    ""
+  );
+});
+
+test("secure phone access uses a dedicated free Serve port and never replaces an existing mapping", () => {
+  const configuration = {
+    TCP: { 443: { HTTPS: true }, 3111: { HTTPS: true } },
+    Web: {
+      "tovi-mac.tail1234.ts.net:443": {
+        Handlers: { "/": { Proxy: "http://127.0.0.1:3100" } }
+      },
+      "tovi-mac.tail1234.ts.net:3111": {
+        Handlers: { "/": { Proxy: "http://127.0.0.1:9999" } }
+      }
+    }
+  };
+  assert.equal(phoneAccess.availableServePort(configuration, 3111), 3112);
+  assert.equal(
+    phoneAccess.matchingServePort(configuration, "http://127.0.0.1:9999"),
+    3111
+  );
+});
+
+test("launcher configures private Tailscale HTTPS around the authenticated proxy", () => {
+  const calls = [];
+  const status = {
+    BackendState: "Running",
+    CurrentTailnet: { MagicDNSEnabled: true },
+    Self: {
+      Capabilities: ["https"],
+      DNSName: "tovi-mac.tail1234.ts.net.",
+      Online: true
+    }
+  };
+  const run = (command, args) => {
+    calls.push([command, args]);
+    if (args[0] === "status") {
+      return { status: 0, stdout: JSON.stringify(status), stderr: "" };
+    }
+    if (args[0] === "serve" && args[1] === "status") {
+      return { status: 0, stdout: JSON.stringify({ TCP: {}, Web: {} }), stderr: "" };
+    }
+    return { status: 0, stdout: "", stderr: "" };
+  };
+  const token = "a".repeat(43);
+  const secure = phoneAccess.startSecurePhoneAccess({
+    env: { RIOS_TAILSCALE_PATH: "/test/tailscale" },
+    platform: "darwin",
+    proxyPort: 3110,
+    run,
+    token
+  });
+  assert.equal(secure.available, true);
+  assert.equal(
+    secure.url,
+    `https://tovi-mac.tail1234.ts.net:3111/connect/${token}`
+  );
+  assert.deepEqual(calls.at(-1), [
+    "/test/tailscale",
+    ["serve", "--bg", "--yes", "--https=3111", "http://127.0.0.1:3110"]
+  ]);
+
+  phoneAccess.stopSecurePhoneAccess(secure, run);
+  assert.deepEqual(calls.at(-1), [
+    "/test/tailscale",
+    ["serve", "--https=3111", "off"]
+  ]);
 });
 
 test("the shared launcher owns phone access for source and packaged apps", () => {
   const source = readFileSync(new URL("../scripts/start-app.mjs", import.meta.url), "utf8");
   assert.match(source, /startPhoneAccessProxy/);
+  assert.match(source, /startSecurePhoneAccess/);
+  assert.match(source, /RIOS_PHONE_ACCESS_SECURE_URL/);
   assert.match(source, /RIOS_PHONE_ACCESS_PORT/);
   assert.match(source, /RIOS_PHONE_ACCESS_TOKEN/);
   assert.match(source, /stopPhoneAccessProxy\(phoneProxy\?\.server\)/);
+  assert.match(source, /stopSecurePhoneAccess\(securePhoneAccess\)/);
 });

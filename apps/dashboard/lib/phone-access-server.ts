@@ -44,3 +44,25 @@ export function buildPhoneAccessUrl(
   }
   return `http://${address}:${port}/connect/${token}`;
 }
+
+export function securePhoneAccessUrl(value: string, token: string): string | null {
+  if (!/^[A-Za-z0-9_-]{43}$/.test(token)) return null;
+  try {
+    const url = new URL(value);
+    const expectedPath = `/connect/${token}`;
+    if (
+      url.protocol !== "https:"
+      || !url.hostname.toLowerCase().endsWith(".ts.net")
+      || url.pathname !== expectedPath
+      || url.username
+      || url.password
+      || url.search
+      || url.hash
+    ) {
+      return null;
+    }
+    return url.toString();
+  } catch {
+    return null;
+  }
+}

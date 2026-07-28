@@ -35,3 +35,13 @@ test("individual sends can run independently without the composer's global send 
   assert.doesNotMatch(block, /sendingRef/);
   assert.doesNotMatch(block, /setSending/);
 });
+
+test("raw transcript and formatted messages stay editable without autosend", () => {
+  assert.match(reviewSource, /aria-label="Raw transcript"/);
+  assert.match(reviewSource, /value=\{rawTranscript\}/);
+  assert.match(reviewSource, /onChange=\{\(event\) => setRawTranscript\(event\.target\.value\)\}/);
+  assert.match(reviewSource, /\{ transcript: rawTranscript \}/);
+  assert.match(reviewSource, /aria-label=\{`Message \$\{index \+ 1\}`\}/);
+  assert.match(reviewSource, /onClick=\{\(\) => void sendMessages\(\)\}/);
+  assert.doesNotMatch(reviewSource, /useEffect\(\(\) => \{\s*void sendMessages/);
+});

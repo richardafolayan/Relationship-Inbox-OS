@@ -6,7 +6,10 @@ import { APP_NAME } from "@/lib/branding";
 
 interface PhoneAccessInfo {
   available: boolean;
+  dictationReady?: boolean;
+  fallbackUrl?: string;
   qrDataUrl?: string;
+  secure?: boolean;
   url?: string;
 }
 
@@ -58,7 +61,7 @@ export function PhoneAccess() {
         <div className="max-w-[58ch]">
           <p className="m-0 text-[16px] font-medium text-ink">Use {APP_NAME} on your phone</p>
           <p className="mt-1.5 text-[13.5px] leading-[1.55] text-ink-3">
-            Open {APP_NAME} from Applications, then use this private link on a phone connected to the same Wi-Fi. Keep {APP_NAME} open on this computer.
+            Open {APP_NAME} from Applications, then use this private link on your phone. Keep {APP_NAME} open on this computer.
           </p>
           {info === null ? (
             <p className="mt-3 font-mono text-[11px] text-ink-3" aria-live="polite">Finding your private address...</p>
@@ -67,6 +70,18 @@ export function PhoneAccess() {
               <p className="mt-3 break-all rounded-[8px] bg-paper-2 px-3 py-2 font-mono text-[11px] leading-5 text-ink-2">
                 {info.url}
               </p>
+              {info.dictationReady ? (
+                <p className="mt-3 rounded-[10px] border border-hairline bg-paper-2 px-3 py-2 text-[12px] leading-5 text-ink-2">
+                  Full dictation is ready. Connect Tailscale on this Mac and your iPhone, then open this HTTPS link in Safari or from your Home Screen.
+                </p>
+              ) : (
+                <div className="mt-3 rounded-[10px] border border-hairline bg-paper-2 px-3 py-2 text-[12px] leading-5 text-ink-2">
+                  <p className="m-0 font-medium text-ink">This Wi-Fi link cannot use the iPhone microphone.</p>
+                  <p className="m-0 mt-1">
+                    To enable full dictation, install and connect Tailscale on this Mac and your iPhone, sign both into the same private network, enable HTTPS in Tailscale, then quit and reopen {APP_NAME}.
+                  </p>
+                </div>
+              )}
               <div className="mt-3 flex flex-wrap items-center gap-3">
                 <button
                   type="button"
@@ -79,7 +94,9 @@ export function PhoneAccess() {
                 <span className="text-[11px] text-ink-3" aria-live="polite">
                   {status === "error"
                     ? "Couldn’t copy. Select the address above."
-                    : "The link contains your private access key. Do not share it."}
+                    : info.secure
+                      ? "The HTTPS link is private to your Tailscale network and contains your access key. Do not share it."
+                      : "Reading and typing work on this link, but full dictation needs the HTTPS setup above."}
                 </span>
               </div>
             </>

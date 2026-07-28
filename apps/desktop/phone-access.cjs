@@ -1,4 +1,5 @@
 const { randomBytes, timingSafeEqual } = require("node:crypto");
+const { spawnSync } = require("node:child_process");
 const { readFileSync, mkdirSync, writeFileSync } = require("node:fs");
 const { createServer, request } = require("node:http");
 const { join } = require("node:path");
@@ -6,6 +7,8 @@ const { join } = require("node:path");
 const ACCESS_COOKIE = "tovi_phone_access";
 const ACCESS_TOKEN_FILE = "phone-access-token";
 const DEFAULT_PHONE_PORT = 3110;
+const DEFAULT_SECURE_PHONE_PORT = 3111;
+const SECURE_PHONE_PORT_ATTEMPTS = 10;
 
 function isPrivateIpv4(address) {
   const parts = String(address).split(".").map(Number);
@@ -57,8 +60,8 @@ function readOrCreateAccessToken(stateDir) {
   return token;
 }
 
-function phoneAccessUrl(address, port, token) {
-  return `http://${address}:${port}/connect/${token}`;
+function phoneAccessUrl(address, port, token, protocol = "http") {
+  return `${protocol}://${address}:${port}/connect/${token}`;
 }
 
 function cookieValue(header, name) {
@@ -102,10 +105,16 @@ function proxyHandler({ appName, dashboardPort, token }) {
     } catch {}
 
     if (incoming.method === "GET" && pathname === `/connect/${token}`) {
+      const forwardedProtocol = String(incoming.headers["x-forwarded-proto"] || "")
+        .split(",", 1)[0]
+        .trim()
+        .toLowerCase();
+      const secureCookie = forwardedProtocol === "https" || Boolean(incoming.socket.encrypted);
       outgoing.writeHead(302, {
         "Cache-Control": "no-store",
         Location: "/",
-        "Set-Cookie": `${ACCESS_COOKIE}=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000`
+        "Permissions-Policy": "camera=(), microphone=(self)",
+        "Set-Cookie": `${ACCESS_COOKIE}=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000${secureCookie ? "; Secure" : ""}`
       });
       outgoing.end();
       return;
@@ -116,7 +125,8 @@ function proxyHandler({ appName, dashboardPort, token }) {
       outgoing.writeHead(401, {
         "Cache-Control": "no-store",
         "Content-Length": Buffer.byteLength(body),
-        "Content-Type": "text/html; charset=utf-8"
+        "Content-Type": "text/html; charset=utf-8",
+        "Permissions-Policy": "camera=(), microphone=()"
       });
       outgoing.end(body);
       return;
@@ -127,6 +137,10 @@ function proxyHandler({ appName, dashboardPort, token }) {
     if (forwardedCookie) headers.cookie = forwardedCookie;
     else delete headers.cookie;
     headers["x-forwarded-for"] = incoming.socket.remoteAddress || "";
+    delete headers["tailscale-user-login"];
+    delete headers["tailscale-user-name"];
+    delete headers["tailscale-user-profile-pic"];
+    delete headers["tailscale-app-capabilities"];
 
     const upstream = request({
       hostname: "127.0.0.1",
@@ -135,7 +149,10 @@ function proxyHandler({ appName, dashboardPort, token }) {
       path: incoming.url,
       headers
     }, (response) => {
-      outgoing.writeHead(response.statusCode || 502, response.headers);
+      outgoing.writeHead(response.statusCode || 502, {
+        ...response.headers,
+        "Permissions-Policy": "camera=(), microphone=(self)"
+      });
       response.pipe(outgoing);
     });
     upstream.on("error", () => {
@@ -148,6 +165,142 @@ function proxyHandler({ appName, dashboardPort, token }) {
     incoming.on("aborted", () => upstream.destroy());
     incoming.pipe(upstream);
   };
+}
+
+function tailscaleCandidates(env = process.env, platform = process.platform) {
+  const values = [
+    env.RIOS_TAILSCALE_PATH,
+    platform === "darwin" ? "/usr/local/bin/tailscale" : "",
+    platform === "darwin" ? "/opt/homebrew/bin/tailscale" : "",
+    platform === "win32" ? "tailscale.exe" : "tailscale"
+  ].filter(Boolean);
+  return values.filter((value, index) => values.indexOf(value) === index);
+}
+
+function runTailscale(command, args, run = spawnSync) {
+  const result = run(command, args, {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+    timeout: 15_000
+  });
+  return {
+    error: result.error,
+    status: result.status,
+    stderr: String(result.stderr || "").trim(),
+    stdout: String(result.stdout || "").trim()
+  };
+}
+
+function parseJsonOutput(result) {
+  if (result.error || result.status !== 0 || !result.stdout) return null;
+  try {
+    return JSON.parse(result.stdout);
+  } catch {
+    return null;
+  }
+}
+
+function tailscalePhoneHost(status) {
+  if (
+    status?.BackendState !== "Running"
+    || status?.Self?.Online !== true
+    || status?.CurrentTailnet?.MagicDNSEnabled !== true
+  ) {
+    return "";
+  }
+  const capabilities = Array.isArray(status.Self.Capabilities) ? status.Self.Capabilities : [];
+  if (!capabilities.includes("https")) return "";
+  const hostname = String(status.Self.DNSName || "").replace(/\.$/, "").toLowerCase();
+  return /^[a-z0-9-]+(?:\.[a-z0-9-]+)*\.ts\.net$/.test(hostname) ? hostname : "";
+}
+
+function occupiedServePorts(configuration) {
+  const ports = new Set();
+  for (const port of Object.keys(configuration?.TCP || {})) {
+    const parsed = Number.parseInt(port, 10);
+    if (Number.isInteger(parsed)) ports.add(parsed);
+  }
+  return ports;
+}
+
+function matchingServePort(configuration, target) {
+  for (const [origin, entry] of Object.entries(configuration?.Web || {})) {
+    const handlers = entry?.Handlers || {};
+    if (!Object.values(handlers).some((handler) => handler?.Proxy === target)) continue;
+    try {
+      const parsed = new URL(`https://${origin}`);
+      const port = Number.parseInt(parsed.port || "443", 10);
+      if (Number.isInteger(port)) return port;
+    } catch {}
+  }
+  return null;
+}
+
+function availableServePort(configuration, preferredPort = DEFAULT_SECURE_PHONE_PORT) {
+  const occupied = occupiedServePorts(configuration);
+  for (let port = preferredPort; port < preferredPort + SECURE_PHONE_PORT_ATTEMPTS; port += 1) {
+    if (!occupied.has(port)) return port;
+  }
+  return null;
+}
+
+function findTailscale(run = spawnSync, env = process.env, platform = process.platform) {
+  for (const command of tailscaleCandidates(env, platform)) {
+    const result = runTailscale(command, ["status", "--json"], run);
+    const status = parseJsonOutput(result);
+    if (status) return { command, status };
+  }
+  return null;
+}
+
+function startSecurePhoneAccess({
+  proxyPort,
+  token,
+  preferredPort = DEFAULT_SECURE_PHONE_PORT,
+  run = spawnSync,
+  env = process.env,
+  platform = process.platform
+}) {
+  const tailscale = findTailscale(run, env, platform);
+  if (!tailscale) return { available: false, reason: "tailscale-unavailable" };
+  const hostname = tailscalePhoneHost(tailscale.status);
+  if (!hostname) return { available: false, reason: "tailscale-https-unavailable" };
+
+  const target = `http://127.0.0.1:${proxyPort}`;
+  const serveResult = runTailscale(tailscale.command, ["serve", "status", "--json"], run);
+  const configuration = parseJsonOutput(serveResult) || {};
+  const existingPort = matchingServePort(configuration, target);
+  const port = existingPort ?? availableServePort(configuration, preferredPort);
+  if (!port) return { available: false, reason: "tailscale-ports-in-use" };
+
+  if (!existingPort) {
+    const configured = runTailscale(
+      tailscale.command,
+      ["serve", "--bg", "--yes", `--https=${port}`, target],
+      run
+    );
+    if (configured.error || configured.status !== 0) {
+      return {
+        available: false,
+        reason: "tailscale-serve-failed",
+        detail: configured.stderr || configured.stdout
+      };
+    }
+  }
+
+  return {
+    available: true,
+    command: tailscale.command,
+    hostname,
+    port,
+    target,
+    url: phoneAccessUrl(hostname, port, token, "https")
+  };
+}
+
+function stopSecurePhoneAccess(access, run = spawnSync) {
+  if (!access?.available || !access.command || !access.port) return;
+  runTailscale(access.command, ["serve", `--https=${access.port}`, "off"], run);
 }
 
 function listen(handler, port, host) {
@@ -190,13 +343,20 @@ function stopPhoneAccessProxy(server) {
 module.exports = {
   ACCESS_COOKIE,
   DEFAULT_PHONE_PORT,
+  DEFAULT_SECURE_PHONE_PORT,
+  availableServePort,
   createAccessToken,
+  findTailscale,
   isPrivateIpv4,
   isValidAccessToken,
   lanIpv4Addresses,
+  matchingServePort,
   phoneAccessUrl,
   readOrCreateAccessToken,
+  startSecurePhoneAccess,
   startPhoneAccessProxy,
+  stopSecurePhoneAccess,
   stopPhoneAccessProxy,
+  tailscalePhoneHost,
   tokensMatch
 };

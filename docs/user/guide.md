@@ -91,11 +91,18 @@ repeated suggestions in the same window.
 
 ## Dictation, voice notes, and transcription
 
-The microphone control is user-triggered. Depending on the action, recorded
-audio becomes composer dictation or an attachment. Captured platform audio and
-video can be transcribed by the configured local or OpenAI provider. A better
-transcript does not silently spend another summary call; use Reassess when the
-thread says AI context needs refreshing.
+The microphone control is user-triggered. On an iPhone, open Tovi from the
+private HTTPS phone link so Safari or the Home Screen app can use that iPhone's
+microphone. Tap Dictate, tap Stop, edit the raw transcript, then choose Keep as
+transcript or Turn into messages. Formatted messages remain editable and
+nothing sends until you choose a Send action.
+
+An HTTP phone link cannot access browser microphone capture. Tovi labels that
+state Dictation unavailable and points back to the HTTPS setup in Settings. It
+does not treat keyboard dictation as the Tovi recording and transcription
+flow. Depending on the action, recorded audio becomes composer dictation or an
+attachment. Captured platform audio and video can be transcribed by the
+configured local or OpenAI provider.
 
 ## Notifications and quiet hours
 
