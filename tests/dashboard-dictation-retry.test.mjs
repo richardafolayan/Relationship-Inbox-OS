@@ -81,6 +81,41 @@ test("422 skipped with a reason → plain error, drop clip", () => {
   assert.equal(out.message, "local_whisper_conversion_failed");
 });
 
+test("422 silent audio preserves the runner's microphone guidance", () => {
+  const message = "The microphone did not capture clear speech. Check the selected microphone and try again.";
+  assert.deepEqual(
+    classifyDictationResponse({
+      ok: false,
+      status: 422,
+      data: { ok: false, reason: "no_speech", error: message }
+    }),
+    { kind: "error", message }
+  );
+});
+
+test("422 unreadable audio preserves the distinct recording error", () => {
+  const message = "The recording could not be read. Try recording it again.";
+  assert.deepEqual(
+    classifyDictationResponse({
+      ok: false,
+      status: 422,
+      data: { ok: false, reason: "invalid_audio", error: message }
+    }),
+    { kind: "error", message }
+  );
+});
+
+test("400 upload errors are permanent user-facing errors", () => {
+  assert.deepEqual(
+    classifyDictationResponse({
+      ok: false,
+      status: 400,
+      data: { ok: false, error: "No audio uploaded." }
+    }),
+    { kind: "error", message: "No audio uploaded." }
+  );
+});
+
 test("4xx not-ok with no usable reason → generic error fallback", () => {
   // !data.error makes this transient by design (a non-JSON 4xx is a proxy
   // artifact), so it offers a retry rather than a dead-end generic error.
