@@ -6,12 +6,13 @@ const baseUrl = process.env.MOBILE_AUDIT_BASE_URL ?? "http://127.0.0.1:3110";
 const insecurePhoneBaseUrl = process.env.MOBILE_AUDIT_INSECURE_BASE_URL;
 const insecurePhoneConnectUrl = process.env.MOBILE_AUDIT_INSECURE_CONNECT_URL;
 const threadId = process.env.MOBILE_AUDIT_THREAD_ID;
+const viewportOnly = process.env.MOBILE_AUDIT_VIEWPORT_ONLY === "1";
 if (!threadId) throw new Error("MOBILE_AUDIT_THREAD_ID is required");
 
 const outputDir = resolve(process.cwd(), ".mobile-audit");
 await mkdir(outputDir, { recursive: true });
 
-const routes = [
+const routes = viewportOnly ? [] : [
   ["home", "/"],
   ["today", "/today"],
   ["inbox", "/inbox"],
@@ -64,7 +65,6 @@ async function inspectLayout(page) {
         return {
           tag: element.tagName.toLowerCase(),
           testId: element.getAttribute("data-testid"),
-          text: element.textContent?.trim().slice(0, 80) ?? "",
           left: Math.round(rect.left),
           right: Math.round(rect.right),
           width: Math.round(rect.width)
@@ -83,6 +83,67 @@ async function settle(page) {
   await page.waitForLoadState("domcontentloaded");
   await page.locator("body").waitFor({ state: "visible" });
   await page.waitForTimeout(900);
+}
+
+async function resizeViewport(page, width, height) {
+  await page.setViewportSize({ width, height });
+  await page.waitForTimeout(250);
+}
+
+async function inspectKeyboardViewport(page) {
+  return page.evaluate(() => {
+    const round = (value) => Math.round(value * 100) / 100;
+    const bounds = (selector) => {
+      const rect = document.querySelector(selector)?.getBoundingClientRect();
+      return rect
+        ? {
+            top: round(rect.top),
+            right: round(rect.right),
+            bottom: round(rect.bottom),
+            left: round(rect.left),
+            width: round(rect.width),
+            height: round(rect.height)
+          }
+        : null;
+    };
+    const timeline = document.querySelector('[data-testid="thread-message-timeline"]');
+    const viewport = window.visualViewport;
+    return {
+      shell: bounds('[data-scroll-owner="shell"]'),
+      main: bounds('main[data-scroll-owner="child"]'),
+      threadRoot: bounds('[data-testid="thread-root"]'),
+      chatColumn: bounds('[data-testid="thread-chat-column"]'),
+      timelineBounds: bounds('[data-testid="thread-message-timeline"]'),
+      composer: bounds('[data-testid="thread-composer-footer"]'),
+      actionSheet: bounds('[data-testid="thread-action-sheet-root"]'),
+      visibleTop: round(viewport?.offsetTop ?? 0),
+      visibleBottom: round((viewport?.offsetTop ?? 0) + (viewport?.height ?? window.innerHeight)),
+      viewportScale: viewport?.scale ?? 1,
+      bodyZoom: getComputedStyle(document.body).zoom,
+      documentScrollTop: round(document.documentElement.scrollTop),
+      bodyScrollTop: round(document.body.scrollTop),
+      documentVerticalOverflow: Math.max(
+        0,
+        round(document.documentElement.scrollHeight - document.documentElement.clientHeight)
+      ),
+      bodyVerticalOverflow: Math.max(
+        0,
+        round(document.body.scrollHeight - document.documentElement.clientHeight)
+      ),
+      horizontalOverflow: Math.max(
+        0,
+        round(document.documentElement.scrollWidth - document.documentElement.clientWidth)
+      ),
+      timeline: timeline
+        ? {
+            scrollTop: round(timeline.scrollTop),
+            distanceFromBottom: round(
+              timeline.scrollHeight - timeline.clientHeight - timeline.scrollTop
+            )
+          }
+        : null
+    };
+  });
 }
 
 for (const [name, route] of routes) {
@@ -124,6 +185,7 @@ for (const [name, route] of routes) {
   await page.close();
 }
 
+if (!viewportOnly) {
 const threadPage = await context.newPage();
 await threadPage.route("**/runner/control/transcribe-dictation", async (route) => {
   await route.fulfill({
@@ -134,6 +196,10 @@ await threadPage.route("**/runner/control/transcribe-dictation", async (route) =
 });
 await threadPage.goto(`${baseUrl}/thread/${threadId}`, { waitUntil: "domcontentloaded" });
 await settle(threadPage);
+await threadPage.getByTestId("thread-composer-input").waitFor({
+  state: "visible",
+  timeout: 60_000
+});
 
 await threadPage.getByTestId("composer-more-toggle").click();
 const moreSheet = threadPage.getByRole("dialog", { name: "Add to your reply" });
@@ -203,41 +269,114 @@ if (await dictateButton.isEnabled()) {
   await threadPage.getByRole("button", { name: "Keep transcript and close" }).click();
 }
 
-await threadPage.getByTestId("thread-composer-input").focus();
-await threadPage.evaluate(() => {
-  document.documentElement.style.setProperty("--app-vv-height", "400px");
-});
-const keyboardViewport = await threadPage.evaluate(() => {
-  const shell = document.querySelector('[data-scroll-owner="shell"]')?.getBoundingClientRect();
-  const composer = document.querySelector('[data-testid="thread-composer-footer"]')?.getBoundingClientRect();
-  return shell && composer
-    ? {
-        shellTop: Math.round(shell.top),
-        shellHeight: Math.round(shell.height),
-        composerTop: Math.round(composer.top),
-        composerBottom: Math.round(composer.bottom),
-        visibleBottom: 400,
-        documentScrollTop: Math.round(document.documentElement.scrollTop),
-        bodyScrollTop: Math.round(document.body.scrollTop),
-        documentOverflow: Math.max(
-          0,
-          Math.round(document.documentElement.scrollHeight - document.documentElement.clientHeight)
-        )
-      }
-    : null;
-});
-await threadPage.screenshot({ path: resolve(outputDir, "thread-keyboard-viewport.png"), fullPage: false });
 results.push({
   name: "thread-interactions",
   moreLayout,
   suggestionsLayout,
   fileAttachmentWorked,
   voiceNoteWorked,
-  dictationWorked,
-  keyboardViewport
+  dictationWorked
 });
 await threadPage.close();
+}
 
+const viewportContext = await browser.newContext({
+  viewport: { width: 390, height: 844 },
+  deviceScaleFactor: 1,
+  isMobile: true,
+  hasTouch: true,
+  colorScheme: "dark"
+});
+const viewportPage = await viewportContext.newPage();
+await viewportPage.goto(`${baseUrl}/thread/${threadId}`, { waitUntil: "domcontentloaded" });
+await settle(viewportPage);
+const viewportComposer = viewportPage.getByTestId("thread-composer-input");
+await viewportComposer.waitFor({ state: "visible", timeout: 60_000 });
+await viewportPage.evaluate(() => {
+  const timeline = document.querySelector('[data-testid="thread-message-timeline"]');
+  timeline.scrollTop = timeline.scrollHeight;
+  timeline.dispatchEvent(new Event("scroll", { bubbles: true }));
+});
+await viewportPage.waitForTimeout(80);
+await viewportComposer.focus();
+await viewportPage.evaluate(() => {
+  const timeline = document.querySelector('[data-testid="thread-message-timeline"]');
+  timeline.scrollTop = timeline.scrollHeight;
+  timeline.dispatchEvent(new Event("scroll", { bubbles: true }));
+});
+await viewportPage.waitForTimeout(80);
+
+await resizeViewport(viewportPage, 390, 400);
+const keyboardOffsetZero = await inspectKeyboardViewport(viewportPage);
+await viewportPage.screenshot({
+  path: resolve(outputDir, "thread-keyboard-portrait.png"),
+  fullPage: false,
+  mask: [
+    viewportPage.getByTestId("thread-header-band"),
+    viewportPage.getByTestId("thread-brief-row"),
+    viewportPage.getByTestId("thread-message-timeline"),
+    viewportPage.getByTestId("thread-composer-input")
+  ]
+});
+
+const viewportCdp = await viewportContext.newCDPSession(viewportPage);
+await viewportCdp.send("Emulation.setPageScaleFactor", { pageScaleFactor: 1.2 });
+await viewportPage.waitForTimeout(80);
+const keyboardScaled = await inspectKeyboardViewport(viewportPage);
+await viewportCdp.send("Emulation.setPageScaleFactor", { pageScaleFactor: 1 });
+await resizeViewport(viewportPage, 390, 400);
+
+const zoomModes = {};
+for (const mode of ["normal", "large", "extra"]) {
+  await viewportPage.evaluate((nextMode) => {
+    if (nextMode === "normal") delete document.documentElement.dataset.uiScale;
+    else document.documentElement.dataset.uiScale = nextMode;
+    window.dispatchEvent(new CustomEvent("inbox-ui-scale"));
+  }, mode);
+  await resizeViewport(viewportPage, 390, 400);
+  zoomModes[mode] = await inspectKeyboardViewport(viewportPage);
+}
+
+await viewportPage.getByTestId("composer-more-toggle").click();
+const keyboardSheet = viewportPage.getByRole("dialog", { name: "Add to your reply" });
+await keyboardSheet.waitFor({ state: "visible" });
+const keyboardActionSheet = await inspectKeyboardViewport(viewportPage);
+await keyboardSheet.getByRole("button", { name: "Close" }).click();
+
+await viewportComposer.blur();
+await resizeViewport(viewportPage, 390, 844);
+const keyboardDismissed = await inspectKeyboardViewport(viewportPage);
+
+await viewportPage.evaluate(() => {
+  const timeline = document.querySelector('[data-testid="thread-message-timeline"]');
+  timeline.scrollTop = Math.max(0, timeline.scrollHeight - timeline.clientHeight - 600);
+  timeline.dispatchEvent(new Event("scroll", { bubbles: true }));
+});
+const olderBefore = await inspectKeyboardViewport(viewportPage);
+await viewportComposer.focus();
+await resizeViewport(viewportPage, 390, 400);
+const olderDuring = await inspectKeyboardViewport(viewportPage);
+
+await resizeViewport(viewportPage, 844, 390);
+await viewportPage.evaluate(() => window.dispatchEvent(new Event("orientationchange")));
+await viewportPage.waitForTimeout(80);
+const keyboardOrientation = await inspectKeyboardViewport(viewportPage);
+
+results.push({
+  name: "thread-keyboard-viewport",
+  offsetZero: keyboardOffsetZero,
+  scaled: keyboardScaled,
+  zoomModes,
+  actionSheet: keyboardActionSheet,
+  dismissed: keyboardDismissed,
+  olderBefore,
+  olderDuring,
+  orientation: keyboardOrientation
+});
+await viewportPage.close();
+await viewportContext.close();
+
+if (!viewportOnly) {
 const focusPage = await context.newPage();
 await focusPage.goto(`${baseUrl}/settings`, { waitUntil: "domcontentloaded" });
 await settle(focusPage);
@@ -255,6 +394,7 @@ const focusLayout = await inspectLayout(focusPage);
 await focusPage.screenshot({ path: resolve(outputDir, "focus-auto-send.png"), fullPage: false });
 results.push({ name: "focus-auto-send", focusAutoBefore, focusAutoAfter, layout: focusLayout });
 await focusPage.close();
+await context.close();
 
 const desktopWidthPhoneContext = await browser.newContext({
   viewport: { width: 980, height: 844 },
@@ -348,6 +488,7 @@ if (insecurePhoneBaseUrl) {
   await insecurePage.close();
   await insecureContext.close();
 }
+}
 
 await browser.close();
 await writeFile(resolve(outputDir, "report.json"), JSON.stringify(results, null, 2));
@@ -386,26 +527,29 @@ const failures = results.flatMap((result) => {
   }
   return found;
 });
-if (!results.find((result) => result.name === "thread-interactions")?.voiceNoteWorked) {
+if (!viewportOnly && !results.find((result) => result.name === "thread-interactions")?.voiceNoteWorked) {
   failures.push("thread: voice-note interaction did not complete");
 }
-if (!results.find((result) => result.name === "thread-interactions")?.fileAttachmentWorked) {
+if (!viewportOnly && !results.find((result) => result.name === "thread-interactions")?.fileAttachmentWorked) {
   failures.push("thread: file attachment interaction did not complete");
 }
-if (!results.find((result) => result.name === "thread-interactions")?.dictationWorked) {
+if (!viewportOnly && !results.find((result) => result.name === "thread-interactions")?.dictationWorked) {
   failures.push("thread: dictation interaction did not complete");
 }
-if (results.find((result) => result.name === "focus-auto-send")?.focusAutoAfter !== "true") {
+if (!viewportOnly && results.find((result) => result.name === "focus-auto-send")?.focusAutoAfter !== "true") {
   failures.push("focus: automatic-send switch did not toggle");
 }
 const coarseDesktopWidth = results.find(
   (result) => result.name === "thread-coarse-desktop-width"
 );
 if (
-  !coarseDesktopWidth?.controls?.phoneQuery ||
-  coarseDesktopWidth.controls.mobileDisplay !== "flex" ||
-  coarseDesktopWidth.controls.desktopDisplay !== "none" ||
-  coarseDesktopWidth.layout?.horizontalOverflow > 1
+  !viewportOnly &&
+  (
+    !coarseDesktopWidth?.controls?.phoneQuery ||
+    coarseDesktopWidth.controls.mobileDisplay !== "flex" ||
+    coarseDesktopWidth.controls.desktopDisplay !== "none" ||
+    coarseDesktopWidth.layout?.horizontalOverflow > 1
+  )
 ) {
   failures.push("thread: touch-only desktop-width viewport did not keep phone controls");
 }
@@ -423,19 +567,68 @@ if (
   failures.push("thread: insecure iPhone audio path could still invoke video capture");
 }
 const auditedKeyboardViewport = results.find(
-  (result) => result.name === "thread-interactions"
-)?.keyboardViewport;
+  (result) => result.name === "thread-keyboard-viewport"
+);
+const closeTo = (left, right, tolerance = 1) =>
+  typeof left === "number" && typeof right === "number" && Math.abs(left - right) <= tolerance;
+const viewportAligned = (geometry) =>
+  geometry
+  && closeTo(geometry.shell?.top, geometry.visibleTop)
+  && closeTo(geometry.shell?.bottom, geometry.visibleBottom)
+  && closeTo(geometry.composer?.bottom, geometry.visibleBottom)
+  && geometry.documentScrollTop === 0
+  && geometry.bodyScrollTop === 0
+  && geometry.documentVerticalOverflow === 0
+  && geometry.bodyVerticalOverflow === 0
+  && geometry.horizontalOverflow === 0;
+
 if (
-  !auditedKeyboardViewport ||
-  auditedKeyboardViewport.shellTop !== 0 ||
-  auditedKeyboardViewport.shellHeight !== auditedKeyboardViewport.visibleBottom ||
-  auditedKeyboardViewport.composerBottom !== auditedKeyboardViewport.visibleBottom ||
-  auditedKeyboardViewport.documentScrollTop !== 0 ||
-  auditedKeyboardViewport.bodyScrollTop !== 0 ||
-  auditedKeyboardViewport.documentOverflow !== 0
+  !viewportAligned(auditedKeyboardViewport?.offsetZero)
+  || auditedKeyboardViewport.offsetZero.timeline?.distanceFromBottom > 1
 ) {
-  failures.push("thread: composer did not stay pinned to the keyboard viewport");
+  failures.push("thread: zero-offset keyboard viewport was not aligned or bottom-anchored");
+}
+if (
+  !viewportAligned(auditedKeyboardViewport?.scaled)
+  || auditedKeyboardViewport.scaled.viewportScale <= 1
+) {
+  failures.push("thread: scaled visual viewport was not aligned");
+}
+for (const [mode, expectedZoom] of [["normal", 1], ["large", 1.08], ["extra", 1.16]]) {
+  const geometry = auditedKeyboardViewport?.zoomModes?.[mode];
+  if (!viewportAligned(geometry) || !closeTo(Number(geometry?.bodyZoom), expectedZoom, 0.001)) {
+    failures.push(`thread: ${mode} text-size zoom broke keyboard viewport alignment`);
+  }
+}
+if (
+  !viewportAligned(auditedKeyboardViewport?.actionSheet)
+  || !closeTo(
+    auditedKeyboardViewport.actionSheet.actionSheet?.top,
+    auditedKeyboardViewport.actionSheet.visibleTop
+  )
+  || !closeTo(
+    auditedKeyboardViewport.actionSheet.actionSheet?.bottom,
+    auditedKeyboardViewport.actionSheet.visibleBottom
+  )
+) {
+  failures.push("thread: action sheet did not cover the visible keyboard viewport");
+}
+if (!viewportAligned(auditedKeyboardViewport?.dismissed)) {
+  failures.push("thread: full viewport did not restore after keyboard dismissal");
+}
+if (
+  !viewportAligned(auditedKeyboardViewport?.olderDuring)
+  || auditedKeyboardViewport.olderBefore.timeline?.distanceFromBottom < 500
+  || !closeTo(
+    auditedKeyboardViewport.olderBefore.timeline?.scrollTop,
+    auditedKeyboardViewport.olderDuring.timeline?.scrollTop
+  )
+) {
+  failures.push("thread: keyboard resize did not preserve an older timeline position");
+}
+if (!viewportAligned(auditedKeyboardViewport?.orientation)) {
+  failures.push("thread: orientation change did not restore visible viewport alignment");
 }
 
-console.log(JSON.stringify({ outputDir, routeCount: routes.length, failures }, null, 2));
+console.log(JSON.stringify({ outputDir, routeCount: viewportOnly ? 0 : routes.length, failures }, null, 2));
 if (failures.length > 0) process.exitCode = 1;

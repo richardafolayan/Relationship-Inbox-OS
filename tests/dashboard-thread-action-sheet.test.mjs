@@ -94,7 +94,11 @@ test("action sheet has title, close, handle, safe area, and internal scroll (#90
   assert.match(actionSheet, /aria-modal="true"/);
   assert.match(actionSheet, /pb-\[env\(safe-area-inset-bottom\)\]/);
   assert.match(actionSheet, /maxHeight: "min\(calc\(var\(--app-vv-height, 100vh\) \* 0\.78\), 640px\)"/);
-  assert.match(actionSheet, /top: "var\(--app-vv-offset-top, 0px\)"/);
+  assert.match(actionSheet, /width: "var\(--app-vv-width, 100%\)"/);
+  assert.match(
+    actionSheet,
+    /translate3d\(var\(--app-vv-offset-left, 0px\), var\(--app-vv-offset-top, 0px\), 0\)/
+  );
   assert.match(actionSheet, /min-h-0 flex-1 overflow-y-auto overscroll-contain/);
   assert.match(actionSheet, /phone-ui-flex fixed/);
 });

@@ -115,6 +115,7 @@ import { InAppBrowser, type InAppBrowserTarget } from "@/components/thread/in-ap
 import { extractUrls, splitTextSegments, urlOnlyMessage } from "@/lib/linkify";
 import { ReplyBriefPanel } from "@/components/thread/ReplyBriefPanel";
 import { ThreadBriefBand } from "@/components/thread/ThreadBriefBand";
+import { ViewportDiagnostics } from "@/components/thread/viewport-diagnostics";
 import { chooseDisplayBrief } from "@/lib/reply-brief";
 import { restoreFailedAttachments } from "@/lib/composer-attachments";
 import { nextMorningSendSlot, shouldOfferLateNightSchedule } from "@/lib/late-night-send";
@@ -126,6 +127,11 @@ import { nextSendReconcileDelayMs } from "@/lib/send-reconcile";
 import { classifyConsumerFailure } from "@/lib/consumer-failure";
 import { resolveSendRecovery, type SendStatusResponse } from "@/lib/send-delivery";
 import { openPilotFeedback } from "@/lib/pilot";
+import {
+  snapshotTimelineViewport,
+  timelineScrollTopAfterResize,
+  timelineSnapshotForResize
+} from "@/lib/timeline-viewport";
 
 // Thread workspace - landscape layout.
 //
@@ -1173,6 +1179,50 @@ export default function ThreadPage() {
   }, [thread?.siblingIds, threadId]);
 
   const timelineRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const timeline = timelineRef.current;
+    if (!timeline || typeof ResizeObserver === "undefined") return;
+    let previousHeight = timeline.clientHeight;
+    let snapshot = snapshotTimelineViewport(timeline);
+    const remember = () => {
+      snapshot = snapshotTimelineViewport(timeline);
+    };
+    const restore = () => {
+      if (timeline.clientHeight === previousHeight) return;
+      const preservedSnapshot = timelineSnapshotForResize(
+        snapshot,
+        stickToBottomRef.current,
+        SCROLL_BOTTOM_THRESHOLD
+      );
+      timeline.scrollTop = timelineScrollTopAfterResize(
+        preservedSnapshot,
+        timeline,
+        SCROLL_BOTTOM_THRESHOLD
+      );
+      previousHeight = timeline.clientHeight;
+      snapshot = snapshotTimelineViewport(timeline);
+    };
+    let restoreFrame = 0;
+    const scheduleRestore = () => {
+      if (restoreFrame) cancelAnimationFrame(restoreFrame);
+      restoreFrame = requestAnimationFrame(() => {
+        restoreFrame = 0;
+        restore();
+      });
+    };
+    const observer = new ResizeObserver(restore);
+    observer.observe(timeline);
+    timeline.addEventListener("scroll", remember, { passive: true });
+    window.addEventListener("resize", scheduleRestore);
+    window.visualViewport?.addEventListener("resize", scheduleRestore);
+    return () => {
+      if (restoreFrame) cancelAnimationFrame(restoreFrame);
+      observer.disconnect();
+      timeline.removeEventListener("scroll", remember);
+      window.removeEventListener("resize", scheduleRestore);
+      window.visualViewport?.removeEventListener("resize", scheduleRestore);
+    };
+  }, [thread?.id, threadId]);
   // Lock the thread timeline while the AI overlay is open; restore scrollTop
   // on close so the operator lands back on the same messages.
   useEffect(() => {
@@ -3863,12 +3913,13 @@ export default function ThreadPage() {
 
   return (
     <div
+      data-testid="thread-root"
       // Below lg the rails are hidden, so the grid must be a true single
       // column — the column plans therefore travel in CSS vars that only
       // apply from lg/xl up. Setting gridTemplateColumns as a plain inline
       // style kept the 240px/360px rail tracks reserved at every width,
       // which crushed the conversation into a thin centre strip on phones.
-      className="relative grid h-full min-h-0 grid-cols-1 overflow-hidden lg:[grid-template-columns:var(--thread-cols-lg)] xl:[grid-template-columns:var(--thread-cols-xl)]"
+      className="relative grid min-h-0 flex-1 grid-cols-1 overflow-hidden lg:[grid-template-columns:var(--thread-cols-lg)] xl:[grid-template-columns:var(--thread-cols-xl)]"
       style={
         {
           "--thread-cols-lg": gridColsLg,
@@ -3876,6 +3927,7 @@ export default function ThreadPage() {
         } as CSSProperties
       }
     >
+      <ViewportDiagnostics />
       {/* ───── Sibling-thread list ───── */}
       <aside
         className={`hidden h-full min-h-0 flex-col overflow-y-auto border-r border-hairline bg-paper-2/30 lg:flex ${
@@ -4016,7 +4068,7 @@ export default function ThreadPage() {
           an outer shell still scrolls. Desktop rails stay separate columns. */}
       <div
         data-testid="thread-chat-column"
-        className="relative flex h-full min-h-0 flex-col overflow-hidden border-r border-hairline"
+        className="thread-chat-column relative flex h-full min-h-0 flex-col overflow-hidden border-r border-hairline"
         onDragEnter={onComposerDragEnter}
         onDragOver={onComposerDragOver}
         onDragLeave={onComposerDragLeave}
@@ -5476,6 +5528,17 @@ export default function ThreadPage() {
                 }}
                 rows={2}
                 data-testid="thread-composer-input"
+                onFocus={() => {
+                  if (!stickToBottomRef.current) return;
+                  const pinLatest = () => {
+                    const timeline = timelineRef.current;
+                    if (timeline && stickToBottomRef.current) {
+                      timeline.scrollTop = timeline.scrollHeight;
+                    }
+                  };
+                  pinLatest();
+                  requestAnimationFrame(pinLatest);
+                }}
                 ref={(el) => {
                   composerInputRef.current = el;
                   if (!el) return;

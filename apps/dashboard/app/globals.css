@@ -112,6 +112,17 @@ body { zoom: var(--effective-zoom); }
 .h-app-screen {
   height: 100%;
   height: var(--app-vv-height, 100%);
+  transform: var(--app-vv-shell-transform, none);
+}
+
+.thread-chat-column {
+  container-type: size;
+}
+
+@container (max-height: 360px) {
+  [data-testid="thread-brief-row"] {
+    display: none;
+  }
 }
 
 .phone-ui-inline { display: inline; }
