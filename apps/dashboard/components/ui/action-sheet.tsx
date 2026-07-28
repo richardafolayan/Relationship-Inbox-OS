@@ -236,9 +236,11 @@ export function ActionSheet({
 
   const content = (
     <div
-      className="phone-ui-flex fixed inset-x-0 bottom-auto z-[110] items-end justify-center"
+      className="phone-ui-flex fixed bottom-auto left-0 top-0 z-[110] items-end justify-center"
       style={{
-        top: "var(--app-vv-offset-top, 0px)",
+        width: "var(--app-vv-width, 100%)",
+        transform:
+          "translate3d(var(--app-vv-offset-left, 0px), var(--app-vv-offset-top, 0px), 0)",
         height: "var(--app-vv-height, 100%)"
       }}
       data-testid="thread-action-sheet-root"

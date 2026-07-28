@@ -929,9 +929,10 @@ export function AppShell({ children }: { children: ReactNode }) {
           }
           className={cn(
             "min-h-0 flex-1",
-            pathname === "/inbox" ||
-              pathname === "/archived" ||
-              pathname.startsWith("/thread/")
+            pathname.startsWith("/thread/")
+              ? "flex flex-col overflow-hidden md:overflow-y-auto"
+              : pathname === "/inbox" ||
+                  pathname === "/archived"
               ? "overflow-hidden md:overflow-y-auto"
               : "overflow-y-auto"
           )}
