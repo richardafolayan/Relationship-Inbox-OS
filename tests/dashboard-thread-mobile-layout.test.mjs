@@ -22,11 +22,11 @@ const globals = readFileSync(
 test("chat column owns overflow and is a fixed flex column", () => {
   assert.match(
     threadSrc,
-    /data-testid="thread-chat-column"[\s\S]{0,120}className="relative flex h-full min-h-0 flex-col overflow-hidden/
+    /data-testid="thread-chat-column"[\s\S]{0,120}className="thread-chat-column relative flex h-full min-h-0 flex-col overflow-hidden/
   );
   assert.match(
     threadSrc,
-    /className="relative grid h-full min-h-0 grid-cols-1 overflow-hidden/
+    /className="relative grid min-h-0 flex-1 grid-cols-1 overflow-hidden/
   );
 });
 
