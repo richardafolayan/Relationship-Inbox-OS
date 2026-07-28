@@ -2263,11 +2263,16 @@ export default function ThreadPage() {
     }
   }, []);
 
-  const prepareAndSubmitDictation = useCallback(async (blob: Blob, originalName?: string) => {
+  const prepareAndSubmitDictation = useCallback(async (
+    blob: Blob,
+    source: "live-recording" | "selected-file",
+    originalName?: string
+  ) => {
     setDictationStatus("transcribing");
     try {
       const prepared = await prepareDictationAudio({
         blob,
+        source,
         uploadMode: dictationUploadMode,
         originalName
       });
@@ -2310,7 +2315,7 @@ export default function ThreadPage() {
         },
         onRecorded: async (raw) => {
           dictationSessionRef.current = null;
-          await prepareAndSubmitDictation(raw);
+          await prepareAndSubmitDictation(raw, "live-recording");
         }
       });
       if (dictationStartGenerationRef.current !== generation) {

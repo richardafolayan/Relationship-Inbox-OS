@@ -11,6 +11,7 @@
 export interface DictationResponseBody {
   ok?: boolean;
   text?: string;
+  reason?: "unavailable" | "no_speech" | "invalid_audio" | "skipped" | "failed" | string;
   error?: string;
 }
 
