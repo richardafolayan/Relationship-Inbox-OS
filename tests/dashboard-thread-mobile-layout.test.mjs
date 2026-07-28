@@ -14,6 +14,10 @@ const briefSrc = readFileSync(
   fileURLToPath(new URL("../apps/dashboard/components/thread/ThreadBriefBand.tsx", import.meta.url)),
   "utf8"
 );
+const globals = readFileSync(
+  fileURLToPath(new URL("../apps/dashboard/app/globals.css", import.meta.url)),
+  "utf8"
+);
 
 test("chat column owns overflow and is a fixed flex column", () => {
   assert.match(
@@ -67,12 +71,14 @@ test("only the message timeline is the chat column scroller", () => {
   );
 });
 
-test("composer textarea caps height to min(160px, 28dvh) with internal scroll", () => {
-  assert.match(threadSrc, /maxHeight:\s*"min\(160px,\s*28dvh\)"/);
+test("composer textarea caps height against the live visual viewport with internal scroll", () => {
+  assert.match(threadSrc, /window\.visualViewport\?\.height \?\? window\.innerHeight/);
+  assert.match(threadSrc, /phone \? 120 : 160/);
+  assert.match(threadSrc, /viewportHeight \* \(phone \? 0\.22 : 0\.28\)/);
   assert.match(threadSrc, /data-testid="thread-composer-input"/);
   assert.match(
     threadSrc,
-    /className="block w-full resize-none overflow-y-auto border-0 bg-transparent/
+    /className="block max-h-\[120px\] w-full resize-none overflow-y-auto border-0 bg-transparent/
   );
 });
 
@@ -106,29 +112,24 @@ test("scroll restoration probes the message viewport, not a sticky header band",
 test("mobile reply brief is compact with a disclosure for deeper context", () => {
   assert.match(briefSrc, /data-testid="thread-brief-expand"/);
   assert.match(briefSrc, /More context/);
-  assert.match(briefSrc, /hidden sm:block/);
-  assert.match(briefSrc, /sm:hidden/);
+  assert.match(briefSrc, /desktop-ui-block/);
+  assert.match(briefSrc, /phone-ui-flex/);
   assert.match(briefSrc, /To address/);
   assert.match(briefSrc, /Reply job/);
 });
 
-// F1: collapsed lead/loops clamp on mobile only. Expand is sm:hidden, so
-// clamp must clear at sm+ (line-clamp-2 sm:line-clamp-none). Never clamp
-// without a control at that breakpoint.
+// F1: collapsed lead/loops clamp on phone surfaces, including iOS coarse
+// pointers that expose a desktop-width viewport. The clamp clears only for a
+// wide viewport with a fine pointer, when the expand control is hidden.
 test("collapsed lead uses mobile-only clamp pattern", () => {
+  assert.match(briefSrc, /expanded \? "" : "phone-clamp-2"/);
+  assert.match(globals, /\.phone-clamp-2 \{[\s\S]*?-webkit-line-clamp: 2/);
   assert.match(
-    briefSrc,
-    /line-clamp-2 sm:line-clamp-none/,
-    "lead and loops must clear clamp at sm+ where expand is hidden"
-  );
-  // Lead span must not use unconditional line-clamp-2 (desktop hole).
-  assert.doesNotMatch(
-    briefSrc,
-    /expanded\s*\?\s*["'`]["'`]\s*:\s*["'`]line-clamp-2["'`]/,
-    "lead must not use bare line-clamp-2 without sm:line-clamp-none"
+    globals,
+    /@media \(min-width: 768px\) and \(hover: hover\) and \(pointer: fine\)[\s\S]*?\.phone-clamp-2 \{[\s\S]*?-webkit-line-clamp: unset/
   );
   assert.match(briefSrc, /data-testid="thread-brief-expand"/);
-  assert.match(briefSrc, /sm:hidden/, "expand control is mobile-only");
+  assert.match(briefSrc, /phone-ui-flex/, "expand control is phone-surface only");
 });
 
 // Disclosure when expand actually reveals something: hidden context, or

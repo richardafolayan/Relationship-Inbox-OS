@@ -42,6 +42,8 @@ export interface InboxRow {
    */
   personBirthday?: string | null;
   personBirthYear?: number | null;
+  /** Group chats never receive automatic focus acknowledgements. */
+  isGroup?: boolean;
   platform: PlatformName;
   preview: string;
   /**
@@ -280,6 +282,8 @@ export interface FocusWindowState {
   windowId: string;
   /** Person ids already acknowledged this window (one note per person). */
   ackedPersonIds: string[];
+  /** Explicit opt-in for sending the saved note once per covered person. */
+  autoSendAcknowledgements?: boolean;
   /**
    * What opened this window (issue #786): "manual" when the operator started
    * it, "calendar" when the calendar auto-focus service did. Optional on the
@@ -328,7 +332,8 @@ export interface FocusSettings {
  * Calendar auto-focus subscription (issue #786). Mirrors runner-side
  * `CalendarSyncSettings`. The operator pastes their calendar's read-only
  * "secret address in iCal format" URL and the runner auto-opens a Focus
- * window while an event is live. No OAuth; still never auto-sends.
+ * window while an event is live. No OAuth. Automatic notes still require the
+ * focus window's explicit opt-in.
  */
 export interface CalendarSyncSettings {
   /** First secret iCal feed URL, retained for compatibility with saved profiles. */

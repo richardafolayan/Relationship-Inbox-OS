@@ -6,8 +6,8 @@
 // React hook, the operator-profile writes and the acknowledgement send live
 // in lib/use-focus-window.ts — none of that belongs in this file.
 //
-// The feature is deliberately conservative (PM call): one-tap only, never
-// auto-send. The app decides whether a contact is COVERED and which note
+// The feature is deliberately conservative. The app decides whether a contact
+// is COVERED and which note
 // TIER fits, then fills [Name] / [until] / [reason] into the note. The words
 // are the operator's: their saved templates, their per-window edits, or — on
 // their explicit "Help me phrase this" request — an AI draft in their voice
@@ -60,6 +60,7 @@ export const EMPTY_FOCUS_WINDOW: FocusWindowState = {
   audience: "favourites",
   windowId: "",
   ackedPersonIds: [],
+  autoSendAcknowledgements: false,
   source: "manual",
   sourceEventKey: ""
 };
@@ -78,6 +79,7 @@ export interface FocusRow {
   personName: string;
   personFavourite?: boolean;
   personBirthday?: string | null;
+  isGroup?: boolean;
   platform: InboxRow["platform"];
   /** Phase-3 categorisation; "outreach" marks cold/business threads. */
   category?: string | null;
@@ -224,6 +226,7 @@ export function coverageForRow(
   audience: FocusAudience
 ): { covered: boolean; tier: FocusTier } {
   const tier = tierForRow(row);
+  if (row.isGroup) return { covered: false, tier };
   // Outreach / business threads are never acknowledged, in any audience.
   if (row.category === "outreach") return { covered: false, tier };
   if (row.personFavourite) return { covered: true, tier };
@@ -278,8 +281,8 @@ export function isAcked(row: FocusRow, window: FocusWindowState): boolean {
  *
  * Deliberately NOT a reason: quiet hours. An explicitly started focus
  * window IS the operator asking for these offers (a 2am "going to sleep"
- * window exists precisely to acknowledge night messages), and nothing
- * sends without a tap — so the window overrides quiet-hours silence here.
+ * window exists precisely to acknowledge night messages). A manual send or
+ * the window's explicit automatic-send opt-in overrides quiet-hours silence.
  * Quiet hours still governs the attention dot and background scans.
  */
 export type FocusAckExclusion =
@@ -288,6 +291,7 @@ export type FocusAckExclusion =
   | "handled" // needsReply === false: nothing is waiting on the operator
   | "already_heard" // operator's last reply is at/after their last message
   | "not_covered" // outside this window's audience (or outreach/business)
+  | "automatic" // the runner owns this note for the explicitly opted-in window
   | "already_acked"; // got their one note this window
 
 /**
@@ -311,6 +315,7 @@ export function focusAckExclusion(
   if (alreadyHeardSinceInbound(row)) return "already_heard";
   if (!coverageForRow(row, window.audience).covered) return "not_covered";
   if (settings.oneNotePerPerson && isAcked(row, window)) return "already_acked";
+  if (window.autoSendAcknowledgements) return "automatic";
   return "candidate";
 }
 

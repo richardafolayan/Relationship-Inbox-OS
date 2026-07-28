@@ -112,6 +112,47 @@ body { zoom: var(--effective-zoom); }
 .h-app-screen {
   height: 100%;
   height: var(--app-vv-height, 100%);
+  transform: var(--app-vv-shell-transform, none);
+}
+
+.thread-chat-column {
+  container-type: size;
+}
+
+@container (max-height: 360px) {
+  [data-testid="thread-brief-row"] {
+    display: none;
+  }
+}
+
+.phone-ui-inline { display: inline; }
+.phone-ui-block { display: block; }
+.phone-ui-flex { display: flex; }
+.phone-clamp-2 {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+.desktop-ui-block,
+.desktop-ui-inline,
+.desktop-ui-flex { display: none; }
+
+/* iOS can expose a desktop-width CSS viewport while still being a coarse,
+ * touch-only device. Keep phone controls active unless the viewport is wide
+ * and the device has a desktop-class pointer. */
+@media (min-width: 768px) and (hover: hover) and (pointer: fine) {
+  .phone-ui-inline,
+  .phone-ui-block,
+  .phone-ui-flex { display: none; }
+  .phone-clamp-2 {
+    display: block;
+    overflow: visible;
+    -webkit-line-clamp: unset;
+  }
+  .desktop-ui-block { display: block; }
+  .desktop-ui-inline { display: inline; }
+  .desktop-ui-flex { display: flex; }
 }
 body {
   font-family: var(--font-text);

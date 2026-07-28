@@ -99,7 +99,7 @@ export function ThreadBriefBand({
           <span
             ref={leadRef}
             className={`min-w-0 sm:text-balance ${
-              expanded ? "" : "line-clamp-2 sm:line-clamp-none"
+              expanded ? "" : "phone-clamp-2"
             }`}
           >
             {lead}
@@ -111,7 +111,7 @@ export function ThreadBriefBand({
         <p
           ref={loopsRef}
           className={`m-0 mt-1 flex flex-wrap items-baseline gap-x-2 gap-y-[3px] text-[12px] leading-[1.35] sm:mt-1.5 sm:text-[12.5px] sm:leading-[1.4] ${
-            expanded ? "" : "line-clamp-2 sm:line-clamp-none"
+            expanded ? "" : "phone-clamp-2"
           }`}
         >
           <span className="shrink-0 font-mono text-[9px] uppercase tracking-[0.08em] text-ink-3 sm:text-[10px]">
@@ -130,7 +130,7 @@ export function ThreadBriefBand({
       {showContext ? (
         <p
           className={`m-0 mt-1 text-[12px] leading-[1.4] text-ink-3 sm:text-[12.5px] sm:leading-[1.45] ${
-            expanded ? "block" : "hidden sm:block"
+            expanded ? "block" : "desktop-ui-block"
           }`}
         >
           {context}
@@ -143,7 +143,7 @@ export function ThreadBriefBand({
           data-testid="thread-brief-expand"
           aria-expanded={expanded}
           onClick={() => setExpanded((v) => !v)}
-          className="mt-1 inline-flex items-center gap-1 font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3 transition-colors duration-calm hover:text-ink sm:hidden"
+          className="phone-ui-flex mt-1 items-center gap-1 font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3 transition-colors duration-calm hover:text-ink"
         >
           <ChevronDown
             className={`h-3 w-3 transition-transform duration-calm ${expanded ? "rotate-180" : ""}`}

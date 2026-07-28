@@ -309,11 +309,11 @@ export default function AtRiskPage() {
       />
 
       {total > 0 ? (
-        <div className="mb-4 flex items-center gap-2 overflow-x-auto pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden sm:mb-6 sm:flex-wrap sm:gap-3">
+        <div className="mb-4 grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2 sm:mb-6 sm:flex sm:flex-wrap sm:gap-3">
           <select
             value={triageSort}
             onChange={(event) => setTriageSort(event.target.value as TriageSort)}
-            className="shrink-0 rounded-[10px] border border-hairline bg-paper px-2 py-[6px] text-[12px] text-ink-2 focus:border-ink-3 focus:outline-none"
+            className="min-w-0 rounded-[10px] border border-hairline bg-paper px-2 py-[8px] text-[12px] text-ink-2 focus:border-ink-3 focus:outline-none sm:shrink-0 sm:py-[6px]"
             aria-label="Triage order"
           >
             {SORT_OPTIONS.map((option) => (
@@ -328,7 +328,7 @@ export default function AtRiskPage() {
             onClick={() =>
               void runBatch("snooze", (id) => `/runner/control/thread/${id}/snooze`, { hours: 24 })
             }
-            className="px-[14px] py-[7px] text-[12px]"
+            className="hidden px-[14px] py-[7px] text-[12px] sm:inline-flex"
           >
             {batchPending === "snooze" ? "Snoozing…" : "Snooze visible 24h"}
           </Button>
@@ -338,12 +338,13 @@ export default function AtRiskPage() {
             onClick={() =>
               void runBatch("archive", (id) => `/runner/control/thread/${id}/archive`)
             }
-            className="px-[14px] py-[7px] text-[12px]"
+            className="hidden px-[14px] py-[7px] text-[12px] sm:inline-flex"
           >
             {batchPending === "archive" ? "Archiving…" : "Archive visible"}
           </Button>
-          <Button variant="quiet" onClick={openFocus} className="px-[14px] py-[7px] text-[12px]">
-            Reply focus mode
+          <Button variant="quiet" onClick={openFocus} className="px-3 py-[8px] text-[12px] sm:px-[14px] sm:py-[7px]">
+            <span className="sm:hidden">Reply one by one</span>
+            <span className="hidden sm:inline">Reply focus mode</span>
           </Button>
         </div>
       ) : null}
@@ -358,25 +359,25 @@ export default function AtRiskPage() {
         <CaughtUp title="You're caught up." body="Nothing is at risk right now." />
       ) : (
         <>
-          <div className="-mx-4 mb-5 flex snap-x gap-[10px] overflow-x-auto px-4 pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden sm:mx-0 sm:mb-[28px] sm:grid sm:grid-cols-3 sm:gap-[12px] sm:overflow-visible sm:px-0 sm:pb-0">
+          <div className="mb-5 grid grid-cols-3 gap-2 sm:mb-[28px] sm:gap-[12px]">
             {bucketCounts.map((bucket) => (
               <div
                 key={bucket.key}
-                className="min-w-[72vw] snap-start rounded-[14px] border border-hairline bg-paper px-4 py-4 sm:min-w-0 sm:px-[20px] sm:py-[18px]"
+                className="min-w-0 rounded-[14px] border border-hairline bg-paper px-2.5 py-3 sm:px-[20px] sm:py-[18px]"
               >
-                <p className="mb-[10px] flex items-center gap-2 font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">
+                <p className="mb-2 flex min-h-7 items-start gap-1.5 font-mono text-[9px] uppercase leading-[1.35] tracking-[0.05em] text-ink-3 sm:mb-[10px] sm:min-h-0 sm:items-center sm:gap-2 sm:text-[10px] sm:tracking-[0.08em]">
                   <span className={cn("inline-block h-[7px] w-[7px] rounded-full", decayDotClass(bucket.key))} />
                   {bucket.label}
                 </p>
                 <p
                   className={cn(
-                    "m-0 mb-[6px] font-display text-[32px] font-semibold leading-[1] tracking-[-0.022em]",
+                    "m-0 mb-[6px] font-display text-[26px] font-semibold leading-[1] tracking-[-0.022em] sm:text-[32px]",
                     decayNumClass(bucket.key)
                   )}
                 >
                   {bucket.count}
                 </p>
-                <p className="m-0 font-mono text-[11px] text-ink-3">{bucket.sub}</p>
+                <p className="m-0 hidden font-mono text-[11px] text-ink-3 sm:block">{bucket.sub}</p>
               </div>
             ))}
           </div>
@@ -395,9 +396,9 @@ export default function AtRiskPage() {
                     name={row.personName}
                     avatarUrl={row.personAvatarUrl}
                     size={36}
-                    className="text-[13px]"
+                    className="col-start-1 row-start-1 text-[13px] sm:col-start-auto sm:row-start-auto"
                   />
-                  <div className="min-w-0">
+                  <div className="col-start-2 row-start-1 min-w-0 sm:col-start-auto sm:row-start-auto">
                     <p className="m-0 text-[14px] font-medium tracking-[-0.005em] text-ink">
                       {row.personName}
                     </p>
@@ -406,7 +407,7 @@ export default function AtRiskPage() {
                       {row.preview ? ` · ${normalizePreview(row.preview)}` : ""}
                     </p>
                   </div>
-                  <div className="col-start-2 col-end-4 flex items-center gap-[8px] font-mono text-[10.5px] text-ink-3 sm:col-auto sm:gap-[10px] sm:text-[11px]">
+                  <div className="col-start-2 col-end-4 row-start-2 flex items-center gap-[8px] font-mono text-[10.5px] text-ink-3 sm:col-auto sm:row-start-auto sm:gap-[10px] sm:text-[11px]">
                     <span className="hidden shrink-0 sm:inline">last touch</span>
                     <span className="relative h-[3px] flex-1 overflow-hidden rounded-pill bg-hairline">
                       <span
@@ -416,7 +417,7 @@ export default function AtRiskPage() {
                     </span>
                     <span className="shrink-0 tabular-nums text-ink-2">{formatDecay(hours)}</span>
                   </div>
-                  <span className="row-start-1 inline-flex min-h-[36px] items-center gap-[6px] rounded-pill border border-hairline px-2.5 py-[7px] text-[0px] text-ink-2 transition-colors duration-calm group-hover:border-ink group-hover:text-ink sm:row-auto sm:px-3 sm:text-[12px]">
+                  <span className="col-start-3 row-start-1 inline-flex min-h-[36px] items-center justify-self-end gap-[6px] rounded-pill border border-hairline px-2.5 py-[7px] text-[0px] text-ink-2 transition-colors duration-calm group-hover:border-ink group-hover:text-ink sm:col-start-auto sm:row-auto sm:justify-self-auto sm:px-3 sm:text-[12px]">
                     <span className="text-[15px] sm:text-[12px]">↗</span><span className="hidden sm:inline">Warm up</span>
                   </span>
                 </Link>

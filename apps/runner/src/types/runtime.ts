@@ -131,10 +131,11 @@ export type FocusAudience = "favourites" | "all_personal";
  * Focus Reply Buffer state. A single "heads-down" window the operator opens
  * from Today / the top bar / Settings: while it's active, a covered contact
  * who messages can get a one-tap acknowledgement ("seen this, I'll reply
- * properly after") so silence doesn't read as being ignored. No auto-send,
- * ever — the operator taps every send. The note is the operator's own words
- * with plain token substitution; "Help me phrase this" can draft it in
- * their voice on explicit request, and it stays editable before use.
+ * properly after") so silence doesn't read as being ignored. A manually
+ * started window may explicitly opt into sending that saved note once per
+ * covered person. The note is the operator's own words with plain token
+ * substitution; "Help me phrase this" can draft it in their voice on
+ * explicit request, and it stays editable before use.
  * One window at a time; persisted in the operator profile JSON so every
  * dashboard surface (and a reload) reads the same state.
  */
@@ -162,6 +163,8 @@ export interface FocusWindowState {
   windowId: string;
   /** Person ids already acknowledged in this window (one note per person). */
   ackedPersonIds: string[];
+  /** True only when the operator opted in for this specific window. */
+  autoSendAcknowledgements: boolean;
   /** What opened this window. "manual" = the operator started it by hand;
    *  "calendar" = the calendar auto-focus service opened it for a live event
    *  (issue #786). Older profile rows have no field and coerce to "manual".
@@ -205,9 +208,9 @@ export interface FocusSettings {
  * read-only "secret address in iCal format" URL that Google / Apple / Outlook
  * calendars all expose; the runner subscribes to that feed and auto-opens a
  * Focus window while an event is live, so heads-down blocks start on their
- * own. Read-only, no OAuth, no cloud project. It still never auto-sends — an
- * auto-opened window only surfaces the same one-tap acknowledgements a manual
- * window does.
+ * own. Read-only, no OAuth, no cloud project. An auto-opened window uses the
+ * saved profile and keeps automatic acknowledgements off unless the active
+ * window explicitly enables them.
  */
 export interface CalendarSyncSettings {
   /** The first secret iCal (ICS) feed URL. "" = not configured. Kept as a

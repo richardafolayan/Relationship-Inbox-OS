@@ -33,7 +33,8 @@ test("phone list pages keep controls reachable without crushing row content", ()
   assert.match(today, /data-testid="today-up-next"/);
   assert.match(archived, /data-testid="archived-list-scroller"/);
   assert.match(people, /grid-cols-\[32px_minmax\(0,1fr\)\]/);
-  assert.match(atRisk, /snap-x/);
+  assert.match(atRisk, /grid grid-cols-3 gap-2/);
+  assert.match(atRisk, /hidden px-\[14px\].*sm:inline-flex/);
   assert.match(settings, /<nav aria-label="Settings sections" className="md:hidden">/);
   assert.match(logs, /sm:grid-cols-\[80px_1fr_auto\]/);
 });

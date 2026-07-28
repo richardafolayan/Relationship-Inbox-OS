@@ -38,6 +38,7 @@ const baseWindow = (over = {}) => ({
   audience: "favourites",
   windowId: "w1",
   ackedPersonIds: [],
+  autoSendAcknowledgements: false,
   ...over
 });
 
@@ -105,6 +106,10 @@ test("outreach / business threads are never covered, even when favourited", () =
   assert.equal(coverageForRow(r, "all_personal").covered, false);
 });
 
+test("group chats are never covered, even when favourited", () => {
+  assert.equal(coverageForRow(row({ isGroup: true }), "favourites").covered, false);
+});
+
 // ─────────────────────────── timing predicates ───────────────────────────
 
 test("arrivedDuringFocus is true only for inbound after the window start", () => {
@@ -147,12 +152,18 @@ test("a covered, freshly-arrived, unanswered thread is a candidate", () => {
 test("quiet hours never suppress an active window's offers", () => {
   // An explicitly started focus window IS the operator asking for these
   // offers (a 2am "going to sleep" window exists to acknowledge night
-  // messages), and nothing sends without a tap. The old quietHoursActive
+  // messages). The old quietHoursActive
   // flag is gone from the gate; passing it must change nothing.
   assert.equal(
     isFocusAckCandidate(row(), baseWindow(), settings(), { now: NOW, quietHoursActive: true }),
     true
   );
+});
+
+test("explicit automatic mode removes the duplicate manual-send candidate", () => {
+  const window = baseWindow({ autoSendAcknowledgements: true });
+  assert.equal(focusAckExclusion(row(), window, settings(), { now: NOW }), "automatic");
+  assert.equal(isFocusAckCandidate(row(), window, settings(), { now: NOW }), false);
 });
 
 test("one note per person: an already-acked person is not a candidate", () => {
@@ -259,14 +270,14 @@ test("readers fall back to defaults for a profile that predates the feature", ()
   assert.deepEqual(readFocusWindow(null), EMPTY_FOCUS_WINDOW);
 });
 
-// ─────────────────────────── no auto-send invariant ───────────────────────────
+// ─────────────────────────── pure decision invariant ───────────────────────────
 
 test("the pure focus module never sends — it only decides and formats", async () => {
   const focus = await import("../apps/dashboard/lib/focus.ts");
   const exportNames = Object.keys(focus);
   // No send/post/fetch machinery lives in the pure helpers; the only send
-  // path is the explicit sendAcknowledgement() in use-focus-window, fired by
-  // a user click. Guard against a future refactor smuggling a sender in here.
+  // paths live in the client hook and the runner service. Guard against a
+  // future refactor smuggling side effects into these helpers.
   for (const name of exportNames) {
     assert.ok(
       !/send|post|fetch|dispatch/i.test(name),

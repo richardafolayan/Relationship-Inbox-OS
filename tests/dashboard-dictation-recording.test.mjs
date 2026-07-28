@@ -5,6 +5,10 @@ import test from "node:test";
 const { prepareDictationAudio, preferredDictationMimeType } = await import(
   "../apps/dashboard/lib/dictation-recording.ts"
 );
+const threadPage = await readFile(
+  new URL("../apps/dashboard/app/thread/[id]/page.tsx", import.meta.url),
+  "utf8"
+);
 
 test("dictation prefers WebM/Opus when the browser supports it", () => {
   const supported = new Set(["audio/mp4", "audio/webm;codecs=opus"]);
@@ -40,14 +44,22 @@ test("an explicitly selected native audio file can bypass browser resampling on 
   assert.equal(prepared.filename, "Recording.m4a");
 });
 
-test("the thread page offers native capture when secure getUserMedia is unavailable", async () => {
-  const source = await readFile(
-    new URL("../apps/dashboard/app/thread/[id]/page.tsx", import.meta.url),
-    "utf8"
-  );
-  assert.match(source, /!window\.isSecureContext \|\| !navigator\.mediaDevices\?\.getUserMedia/);
-  assert.match(source, /accept="audio\/\*"/);
-  assert.match(source, /capture="user"/);
-  assert.match(source, /onChange=\{captureDictationFile\}/);
-  assert.match(source, /!window\.isSecureContext \|\| !navigator\.mediaDevices\?\.getUserMedia[\s\S]*?voiceNoteCaptureInputRef\.current\?\.click/);
+test("insecure iPhone access never invokes WebKit's video capture fallback", () => {
+  assert.match(threadPage, /!window\.isSecureContext \|\| !navigator\.mediaDevices\?\.getUserMedia/);
+  assert.doesNotMatch(threadPage, /capture="user"/);
+  assert.doesNotMatch(threadPage, /accept="audio\/\*"/);
+  assert.match(threadPage, /accept="\.m4a,\.mp3,\.wav,\.aac,\.aif,\.aiff,\.caf"/);
+  assert.match(threadPage, /voiceNoteFileInputRef\.current\?\.click/);
+  assert.match(threadPage, /Use the microphone key on your iPhone keyboard/);
+});
+
+test("Safari dictation records one complete MP4 instead of timesliced fragments", () => {
+  assert.match(threadPage, /Safari needs one complete MP4 recording/);
+  assert.match(threadPage, /recorder\.start\(\);/);
+  assert.doesNotMatch(threadPage, /recorder\.start\(250\)/);
+});
+
+test("microphone permission failures explain how to recover", () => {
+  assert.match(threadPage, /Microphone access is off\. Allow it in your browser settings/);
+  assert.match(threadPage, /No microphone was found on this device/);
 });

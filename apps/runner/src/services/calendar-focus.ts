@@ -85,6 +85,7 @@ function buildCalendarWindow(
     audience: settings.audience,
     windowId: occ.key,
     ackedPersonIds: [],
+    autoSendAcknowledgements: false,
     source: "calendar",
     sourceEventKey: occ.key
   };

@@ -15,6 +15,11 @@
 import { UI_SCALE_CHANGE_EVENT, UI_SCALE_STORAGE_KEY } from "./ui-scale";
 
 export const APP_VV_HEIGHT_VAR = "--app-vv-height";
+export const APP_VV_WIDTH_VAR = "--app-vv-width";
+export const APP_VV_OFFSET_TOP_VAR = "--app-vv-offset-top";
+export const APP_VV_OFFSET_LEFT_VAR = "--app-vv-offset-left";
+export const APP_VV_SCALE_VAR = "--app-vv-scale";
+export const APP_VV_SHELL_TRANSFORM_VAR = "--app-vv-shell-transform";
 
 export function readCssZoom(value: string | null | undefined): number {
   if (!value) return 1;
@@ -40,6 +45,17 @@ export function resolveAppVisualViewportHeight(
   return visualHeight / zoom;
 }
 
+export function resolveAppVisualViewportLength(
+  visualLength: number,
+  effectiveZoom: number
+): number {
+  const zoom = readCssZoom(String(effectiveZoom));
+  if (!Number.isFinite(visualLength) || visualLength < 0) {
+    return 0;
+  }
+  return visualLength / zoom;
+}
+
 export type AppVisualViewportPublisher = {
   publish: () => void;
   disconnect: () => void;
@@ -61,13 +77,56 @@ export function installAppVisualViewport(
   const root = options.root ?? win.document.documentElement;
   const body = options.body ?? win.document.body;
   const vv = options.visualViewport !== undefined ? options.visualViewport : win.visualViewport;
+  let republishFrame = 0;
 
-  const publish = () => {
+  const publishGeometry = () => {
     const visualHeight = vv?.height ?? win.innerHeight;
+    const visualWidth = vv?.width ?? win.innerWidth;
+    const visualOffsetTop = vv?.offsetTop ?? 0;
+    const visualOffsetLeft = vv?.offsetLeft ?? 0;
+    const visualScale = vv?.scale ?? 1;
     const zoom = readCssZoom(win.getComputedStyle(body).zoom);
     const height = resolveAppVisualViewportHeight(visualHeight, zoom);
+    const width = resolveAppVisualViewportLength(visualWidth, zoom);
+    const offsetTop = resolveAppVisualViewportLength(visualOffsetTop, zoom);
+    const offsetLeft = resolveAppVisualViewportLength(visualOffsetLeft, zoom);
     if (height > 0) {
       root.style.setProperty(APP_VV_HEIGHT_VAR, `${height}px`);
+      root.style.setProperty(APP_VV_WIDTH_VAR, `${width}px`);
+      root.style.setProperty(APP_VV_OFFSET_TOP_VAR, `${offsetTop}px`);
+      root.style.setProperty(APP_VV_OFFSET_LEFT_VAR, `${offsetLeft}px`);
+      root.style.setProperty(APP_VV_SCALE_VAR, String(visualScale));
+      if (offsetTop > 0) {
+        root.style.setProperty(
+          APP_VV_SHELL_TRANSFORM_VAR,
+          `translate3d(0, ${offsetTop}px, 0)`
+        );
+      } else {
+        root.style.removeProperty(APP_VV_SHELL_TRANSFORM_VAR);
+      }
+    }
+  };
+
+  const publish = () => {
+    publishGeometry();
+    const rootScrolled =
+      (root.scrollTop ?? 0) !== 0
+      || (body.scrollTop ?? 0) !== 0
+      || (win.scrollX ?? 0) !== 0
+      || (win.scrollY ?? 0) !== 0;
+    if (rootScrolled) {
+      root.scrollTop = 0;
+      body.scrollTop = 0;
+      win.scrollTo?.(0, 0);
+    }
+    if (typeof win.requestAnimationFrame === "function") {
+      if (republishFrame) win.cancelAnimationFrame(republishFrame);
+      republishFrame = win.requestAnimationFrame(() => {
+        republishFrame = 0;
+        publishGeometry();
+      });
+    } else if (rootScrolled) {
+      publishGeometry();
     }
   };
 
@@ -93,12 +152,20 @@ export function installAppVisualViewport(
   return {
     publish,
     disconnect: () => {
+      if (republishFrame && typeof win.cancelAnimationFrame === "function") {
+        win.cancelAnimationFrame(republishFrame);
+      }
       win.removeEventListener("resize", onResize);
       win.removeEventListener(UI_SCALE_CHANGE_EVENT, onUiScale);
       win.removeEventListener("storage", onStorage);
       vv?.removeEventListener("resize", onResize);
       vv?.removeEventListener("scroll", onResize);
       root.style.removeProperty(APP_VV_HEIGHT_VAR);
+      root.style.removeProperty(APP_VV_WIDTH_VAR);
+      root.style.removeProperty(APP_VV_OFFSET_TOP_VAR);
+      root.style.removeProperty(APP_VV_OFFSET_LEFT_VAR);
+      root.style.removeProperty(APP_VV_SCALE_VAR);
+      root.style.removeProperty(APP_VV_SHELL_TRANSFORM_VAR);
     }
   };
 }

@@ -30,7 +30,7 @@ function rowKey(row: InboxRow): string {
 // come in" (pilot report: messages arrived, sheet claimed none had).
 interface FilteredEntry {
   row: InboxRow;
-  reason: Extract<FocusAckExclusion, "not_covered" | "already_heard" | "already_acked">;
+  reason: Extract<FocusAckExclusion, "not_covered" | "already_heard" | "already_acked" | "automatic">;
 }
 
 function filteredReasonLine(reason: FilteredEntry["reason"], audience: string): string {
@@ -41,6 +41,8 @@ function filteredReasonLine(reason: FilteredEntry["reason"], audience: string): 
         : "Outside who this window covers.";
     case "already_heard":
       return "Already heard from you since their message.";
+    case "automatic":
+      return "Your automatic focus note is queued or already on its way.";
     default:
       return "Already got their one note this window.";
   }
@@ -90,7 +92,7 @@ export function FocusReviewSheet({
           // During-window contacts left alone for a reason worth saying.
           // "not_during"/"handled" rows stay hidden — nothing arrived, or
           // nothing is waiting on the operator.
-          else if (verdict === "not_covered" || verdict === "already_heard" || verdict === "already_acked") {
+          else if (verdict === "not_covered" || verdict === "already_heard" || verdict === "already_acked" || verdict === "automatic") {
             left.push({ row, reason: verdict });
           }
         }

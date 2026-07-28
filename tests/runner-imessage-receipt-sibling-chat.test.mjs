@@ -53,6 +53,7 @@ function buildFixtureDb(path) {
       error INTEGER,
       service TEXT,
       date INTEGER,
+      is_read INTEGER DEFAULT 0,
       cache_has_attachments INTEGER,
       handle_id INTEGER,
       associated_message_type INTEGER,
@@ -60,6 +61,15 @@ function buildFixtureDb(path) {
       thread_originator_guid TEXT
     );
     CREATE TABLE chat_message_join (chat_id INTEGER, message_id INTEGER);
+    CREATE TABLE attachment (
+      ROWID INTEGER PRIMARY KEY,
+      guid TEXT,
+      filename TEXT,
+      mime_type TEXT,
+      transfer_name TEXT,
+      total_bytes INTEGER
+    );
+    CREATE TABLE message_attachment_join (message_id INTEGER, attachment_id INTEGER);
   `);
   // IMessageDb opens read-only and runs `pragma journal_mode = WAL`, which is a
   // no-op on the real (already-WAL) chat.db but a write on a fresh delete-mode
@@ -157,6 +167,77 @@ test("receipt lookup finds the sent row via the picked handle's chat, not the th
     const missed = idb.findOutboundDeliveryStatus("PHONE-CHAT-GUID", sendStartedAt - 1000);
     assert.equal(missed, undefined, "the original thread guid must NOT find the sibling-chat send");
 
+    idb.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("post-send lookups and normal scans ignore future scheduled messages", () => {
+  const { dir, db } = makeFixture();
+  try {
+    const sendStartedAt = Date.now();
+    db.prepare(
+      `INSERT INTO message (ROWID, guid, text, is_from_me, is_sent, is_delivered, error, service, date, cache_has_attachments, handle_id, associated_message_type)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(201, "CURRENT-SEND-GUID", "sent now", 1, 1, 1, 0, "iMessage", unixMsToAppleNs(sendStartedAt + 50), 1, 2, 0);
+    db.prepare(
+      `INSERT INTO message (ROWID, guid, text, is_from_me, is_sent, is_delivered, error, service, date, cache_has_attachments, handle_id, associated_message_type)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      202,
+      "FUTURE-SCHEDULED-GUID",
+      "send next week",
+      1,
+      1,
+      1,
+      0,
+      "iMessage",
+      unixMsToAppleNs(sendStartedAt + 7 * 24 * 60 * 60 * 1000),
+      1,
+      2,
+      0
+    );
+    db.prepare("INSERT INTO chat_message_join (chat_id, message_id) VALUES (?, ?)").run(11, 201);
+    db.prepare("INSERT INTO chat_message_join (chat_id, message_id) VALUES (?, ?)").run(11, 202);
+    db.prepare(
+      "INSERT INTO attachment (ROWID, guid, filename, mime_type, transfer_name, total_bytes) VALUES (?, ?, ?, ?, ?, ?)"
+    ).run(301, "CURRENT-ATTACHMENT-GUID", "/tmp/current.m4a", "audio/mp4", "current.m4a", 100);
+    db.prepare(
+      "INSERT INTO attachment (ROWID, guid, filename, mime_type, transfer_name, total_bytes) VALUES (?, ?, ?, ?, ?, ?)"
+    ).run(302, "FUTURE-ATTACHMENT-GUID", "/tmp/future.m4a", "audio/mp4", "future.m4a", 100);
+    db.prepare("INSERT INTO message_attachment_join (message_id, attachment_id) VALUES (?, ?)").run(201, 301);
+    db.prepare("INSERT INTO message_attachment_join (message_id, attachment_id) VALUES (?, ?)").run(202, 302);
+    db.close();
+
+    const idb = new IMessageDb(join(dir, "chat.db"));
+    const beforeUnixMs = sendStartedAt + 10_000;
+    const delivery = idb.findOutboundDeliveryStatus(
+      "EMAIL-CHAT-GUID",
+      sendStartedAt - 1_000,
+      beforeUnixMs
+    );
+    const sent = idb.findOutboundSince(
+      "EMAIL-CHAT-GUID",
+      sendStartedAt - 1_000,
+      beforeUnixMs
+    );
+    const attachments = idb.findOutboundAttachments(
+      "EMAIL-CHAT-GUID",
+      sendStartedAt - 1_000,
+      beforeUnixMs
+    );
+    const messages = idb.fetchMessages("EMAIL-CHAT-GUID", 100);
+    const [thread] = idb.listThreadsByGuids(["EMAIL-CHAT-GUID"]);
+    const deferred = idb.findFutureScheduledOutboundGuids("EMAIL-CHAT-GUID");
+
+    assert.equal(delivery?.guid, "CURRENT-SEND-GUID");
+    assert.equal(sent?.guid, "CURRENT-SEND-GUID");
+    assert.deepEqual(attachments.map((attachment) => attachment.guid), ["CURRENT-ATTACHMENT-GUID"]);
+    assert.deepEqual(messages.map((message) => message.guid), ["CURRENT-SEND-GUID"]);
+    assert.equal(thread.lastMessagePreview, "sent now");
+    assert.equal(thread.lastDirection, "OUT");
+    assert.deepEqual(deferred, ["FUTURE-SCHEDULED-GUID"]);
     idb.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });

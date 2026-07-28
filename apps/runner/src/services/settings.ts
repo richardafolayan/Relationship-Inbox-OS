@@ -52,6 +52,7 @@ const emptyFocusWindow: FocusWindowState = {
   audience: "favourites",
   windowId: "",
   ackedPersonIds: [],
+  autoSendAcknowledgements: false,
   source: "manual",
   sourceEventKey: ""
 };
@@ -132,6 +133,7 @@ function asFocusWindow(value: unknown): FocusWindowState {
     audience: asFocusAudience(raw.audience),
     windowId: asString(raw.windowId),
     ackedPersonIds: asStringArray(raw.ackedPersonIds),
+    autoSendAcknowledgements: asBoolean(raw.autoSendAcknowledgements, false),
     source: asFocusWindowSource(raw.source),
     sourceEventKey: asString(raw.sourceEventKey)
   };

@@ -384,7 +384,7 @@ function rewriteInfoPlist(appPath, version) {
   plistSet(plist, "LSMinimumSystemVersion", "13.0");
   plistSetBoolean(plist, "LSMultipleInstancesProhibited", true);
   plistSetBoolean(plist, "NSHighResolutionCapable", true);
-  plistSet(plist, "NSAppleEventsUsageDescription", `${APP_NAME} asks before sending through Messages. Sending is always user-triggered.`);
+  plistSet(plist, "NSAppleEventsUsageDescription", `${APP_NAME} sends through Messages when you press Send or enable a focus note for one focus window.`);
   plistSet(plist, "NSContactsUsageDescription", `${APP_NAME} uses contacts stored on this Mac to show familiar names. Contact data stays on this Mac.`);
   plistSet(plist, "NSMicrophoneUsageDescription", `${APP_NAME} uses the microphone only when you choose dictation.`);
   plistSet(plist, "NSCameraUsageDescription", `${APP_NAME} uses the camera only if you choose a feature that asks for it.`);
@@ -437,7 +437,20 @@ function collectNestedCode(appPath) {
 }
 
 export function requiresRuntimeEntitlements(path, appPath) {
-  return resolve(path) === resolve(join(appPath, "Contents", "Resources", "runtime", "node", "bin", "node"));
+  const resolvedPath = resolve(path);
+  return [
+    join(appPath, "Contents", "Resources", "runtime", "node", "bin", "node"),
+    join(
+      appPath,
+      "Contents",
+      "Frameworks",
+      "Squirrel.framework",
+      "Versions",
+      "A",
+      "Resources",
+      "ShipIt"
+    )
+  ].some((runtimePath) => resolvedPath === resolve(runtimePath));
 }
 
 export async function signApp(appPath, identity, certificatePath = "") {

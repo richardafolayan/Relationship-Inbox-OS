@@ -45,7 +45,7 @@ const AUDIENCE_OPTIONS: Array<{ value: FocusAudience; name: string; desc: string
   {
     value: "all_personal",
     name: "All personal contacts",
-    desc: "Saved people on iMessage too. Unknown numbers and businesses are still left alone."
+    desc: "Saved people on iMessage too. Unknown numbers and cold outreach are still left alone."
   }
 ];
 
@@ -75,6 +75,7 @@ export function FocusSetupSheet({
   const [phraseError, setPhraseError] = useState<string | null>(null);
   const [professionalNote, setProfessionalNote] = useState("");
   const [suggestedTime, setSuggestedTime] = useState<string | null>(null);
+  const [autoSendAcknowledgements, setAutoSendAcknowledgements] = useState(false);
 
   // Seed the form whenever the sheet opens, from the live window (when
   // editing) or the operator's preferences (when starting fresh). A window
@@ -95,11 +96,14 @@ export function FocusSetupSheet({
     });
     setNoteEdited(active && !!focusWindow.note && focusWindow.note !== derivedNote);
     setProfessionalNote(active ? focusWindow.professionalNote ?? "" : "");
+    setAutoSendAcknowledgements(
+      active ? Boolean(focusWindow.autoSendAcknowledgements) : false
+    );
     setActivity("");
     setPhrasing(false);
     setPhraseError(null);
     setSuggestedTime(null);
-  }, [open, active, focusWindow.endsAt, focusWindow.reason, focusWindow.audience, focusWindow.note, focusWindow.professionalNote, settings.audience, settings.reasonLabel, templates.close]);
+  }, [open, active, focusWindow.endsAt, focusWindow.reason, focusWindow.audience, focusWindow.note, focusWindow.professionalNote, focusWindow.autoSendAcknowledgements, settings.audience, settings.reasonLabel, templates.close]);
 
   // Keep the note's [until] in step with the picker until the operator edits
   // the note themselves — then leave their words alone.
@@ -181,7 +185,8 @@ export function FocusSetupSheet({
       reason: settings.reasonLabel ? reason : "",
       note,
       professionalNote: professionalNote.trim() ? professionalNote : "",
-      audience
+      audience,
+      autoSendAcknowledgements
     };
     try {
       if (active) {
@@ -215,7 +220,7 @@ export function FocusSetupSheet({
       }
     >
       <div className="flex flex-col gap-[18px]">
-        <div className="flex gap-[14px]">
+        <div className="flex flex-col gap-[14px] sm:flex-row">
           <label className="flex-1">
             <span className="mb-1 block text-[13.5px] font-medium text-ink">Until</span>
             <span className="mb-2 block text-[12px] text-ink-3">When you'll resurface.</span>
@@ -318,8 +323,9 @@ export function FocusSetupSheet({
             In your own words.{" "}
             <span className="text-accent-ink">[Name]</span> fills in each person's first name and{" "}
             <span className="text-accent-ink">[until]</span> the time you're back; close contacts
-            get your casual note while professional ones get the calmer one. Nothing sends without
-            you tapping send.
+            get your casual note while professional ones get the calmer one. {autoSendAcknowledgements
+              ? "The app will send this note once to each covered person who messages during this window."
+              : "You will choose when to send it."}
           </span>
           <textarea
             value={note}
@@ -355,7 +361,7 @@ export function FocusSetupSheet({
             Who it covers
           </span>
           <span className="mb-2 block text-[12px] text-ink-3">
-            Unknown numbers and businesses are never acknowledged.
+            Unknown numbers and cold outreach are never acknowledged.
           </span>
           <div className="flex flex-col gap-2">
             {AUDIENCE_OPTIONS.map((option) => {
@@ -389,6 +395,43 @@ export function FocusSetupSheet({
             })}
           </div>
         </div>
+
+        <button
+          type="button"
+          role="switch"
+          aria-checked={autoSendAcknowledgements}
+          onClick={() => setAutoSendAcknowledgements((current) => !current)}
+          className={cn(
+            "grid grid-cols-[1fr_auto] items-center gap-4 rounded-[12px] border px-4 py-[14px] text-left transition-colors duration-calm",
+            autoSendAcknowledgements
+              ? "border-accent bg-accent-soft"
+              : "border-hairline bg-paper hover:border-hairline-strong"
+          )}
+        >
+          <span>
+            <span className="block text-[14px] font-medium text-ink">
+              Send this note automatically
+            </span>
+            <span className="mt-0.5 block text-[12.5px] leading-[1.45] text-ink-3">
+              Once per covered person in this window. Unknown numbers, group chats, and cold
+              outreach are always left alone.
+            </span>
+          </span>
+          <span
+            aria-hidden
+            className={cn(
+              "relative h-6 w-11 rounded-full transition-colors duration-calm",
+              autoSendAcknowledgements ? "bg-accent" : "bg-hairline-strong"
+            )}
+          >
+            <span
+              className={cn(
+                "absolute top-1 h-4 w-4 rounded-full bg-white shadow-sm transition-transform duration-calm",
+                autoSendAcknowledgements ? "translate-x-6" : "translate-x-1"
+              )}
+            />
+          </span>
+        </button>
       </div>
     </FocusSheet>
   );

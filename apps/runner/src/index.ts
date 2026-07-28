@@ -102,6 +102,7 @@ import {
 } from "./services/message-sync-latency";
 import { createSendService } from "./services/send";
 import { createSendQueue } from "./services/send-queue";
+import { createFocusAutoAckService } from "./services/focus-auto-ack";
 import {
   classifySendFailureKind,
   consumerSendFailure,
@@ -1204,6 +1205,62 @@ const sendQueue = createSendQueue({
   sendService,
   eventBus
 });
+const focusAutoAck = createFocusAutoAckService({
+  settingsStore,
+  sendQueue,
+  auditLog: (input) => auditService.log(input),
+  loadThread: async (threadId) => {
+    const [thread, latestInbound, latestOutbound] = await Promise.all([
+      prisma.thread.findUnique({
+        where: { id: threadId },
+        select: {
+          id: true,
+          platform: true,
+          isGroup: true,
+          category: true,
+          person: {
+            select: {
+              id: true,
+              displayName: true,
+              birthday: true,
+              favouritedAt: true
+            }
+          }
+        }
+      }),
+      prisma.message.findFirst({
+        where: { threadId, direction: "IN" },
+        orderBy: [{ timestamp: "desc" }, { id: "desc" }],
+        select: { timestamp: true }
+      }),
+      prisma.message.findFirst({
+        where: { threadId, direction: "OUT" },
+        orderBy: [{ timestamp: "desc" }, { id: "desc" }],
+        select: { timestamp: true }
+      })
+    ]);
+    if (!thread) return null;
+    return {
+      threadId: thread.id,
+      platform: thread.platform,
+      isGroup: thread.isGroup,
+      category: thread.category,
+      person: thread.person,
+      latestInboundAt: latestInbound?.timestamp ?? null,
+      latestOutboundAt: latestOutbound?.timestamp ?? null
+    };
+  }
+});
+eventBus.subscribe((event) => {
+  if (event.type !== "MESSAGES_PERSISTED") return;
+  void focusAutoAck.handleThread(event.threadId).catch((error) => {
+    console.warn(
+      `[focus-auto-ack] failed for threadId=${event.threadId}: ${
+        error instanceof Error ? error.message : String(error)
+      }`
+    );
+  });
+});
 // Pick up any SendRequests left in PENDING from a previous runner process
 // (e.g. crashed mid-send, or restarted while a send was queued behind a
 // scan). The queue's `running` guard prevents duplicate processing.
@@ -1724,6 +1781,7 @@ const threadRowSelect = {
   platformThreadId: true,
   threadUrl: true,
   personId: true,
+  isGroup: true,
   unreadCount: true,
   needsReply: true,
   lastMessagePreview: true,
@@ -7173,6 +7231,7 @@ app.post("/control/operator-profile", asyncRoute(async (req, res) => {
           audience: z.enum(["favourites", "all_personal"]),
           windowId: z.string().max(80),
           ackedPersonIds: z.array(z.string().max(120)).max(5000),
+          autoSendAcknowledgements: z.boolean().default(false),
           // Calendar auto-focus (#786). Older dashboard builds don't send
           // these; default so a hand-started window round-trips as "manual"
           // and a calendar window keeps its dismissal key through an edit/end.

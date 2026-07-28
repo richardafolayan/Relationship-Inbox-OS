@@ -1,7 +1,7 @@
 {
   "name": "relationship-inbox-os",
   "private": true,
-  "version": "0.1.15",
+  "version": "0.1.20",
   "main": "apps/desktop/main.cjs",
   "packageManager": "npm@10.8.2",
   "workspaces": [
@@ -33,6 +33,7 @@
     "lint": "npm run build --workspace @inbox-os/core && turbo run lint",
     "test": "npm run test:all",
     "test:all": "npm run build --workspace @inbox-os/core && npm run build --workspace @inbox-os/runner && node --import tsx --test tests/*.test.mjs",
+    "audit:mobile": "node scripts/mobile-pilot-audit.mjs",
     "move-on": "npm run test:all",
     "db:generate": "prisma generate --schema packages/core/prisma/schema.prisma",
     "db:push": "DATABASE_URL=file:$(pwd)/data/inbox-os.sqlite prisma db push --schema packages/core/prisma/schema.prisma",

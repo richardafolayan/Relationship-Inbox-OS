@@ -13,6 +13,7 @@ export interface ThreadRowSource {
   platformThreadId: string;
   threadUrl: string | null;
   personId: string;
+  isGroup: boolean;
   unreadCount: number;
   needsReply: boolean;
   lastMessagePreview: string | null;
@@ -99,6 +100,7 @@ export interface ShapedThreadRow {
    * across risk levels) and can filter the Inbox to favourites only.
    */
   personFavourite: boolean;
+  isGroup: boolean;
   personGroups: string[];
   platform: PlatformName;
   preview: string;
@@ -570,6 +572,7 @@ export function toInboxRow(
     personBirthday: source.person.birthday ?? null,
     personBirthYear: source.person.birthYear ?? null,
     personFavourite: source.person.favouritedAt != null,
+    isGroup: source.isGroup,
     personGroups: parseStringArray(source.person.tagsJson),
     platform: source.platform,
     preview: previewText,
