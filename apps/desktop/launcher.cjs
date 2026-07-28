@@ -154,6 +154,10 @@ function startAppEnvironment(env = process.env, nodeExecutable = "", options = {
     RIOS_CONFIG_DIR: options.configDir || env.RIOS_CONFIG_DIR,
     RIOS_DATA_DIR: options.dataDir || env.RIOS_DATA_DIR,
     RIOS_DESKTOP: "1",
+    RUN_TRACE_DIR:
+      options.packaged && options.dataDir
+        ? pathApi.join(options.dataDir, "logs", "runs")
+        : env.RUN_TRACE_DIR,
     RIOS_NATIVE_UPDATE_REQUEST: options.nativeUpdateRequest || env.RIOS_NATIVE_UPDATE_REQUEST,
     RIOS_PACKAGED_APP: options.packaged ? "1" : env.RIOS_PACKAGED_APP,
     RIOS_RECLAIM_EXISTING: "1",

@@ -18,7 +18,7 @@
 // `LocalAuth`) hang off it. Type-only imports read the .d.ts and are erased.
 import { createRequire } from "node:module";
 import { existsSync } from "node:fs";
-import { win32 } from "node:path";
+import { resolve, win32 } from "node:path";
 import type { Client as ClientType } from "whatsapp-web.js";
 
 const lazyRequire = createRequire(import.meta.url);
@@ -50,6 +50,10 @@ export function resolveWindowsChromeExecutable(
   return candidates.find(pathExists);
 }
 
+export function resolveWhatsAppWebCachePath(authDir: string): string {
+  return resolve(authDir, "web-cache");
+}
+
 export function createWhatsAppClient(opts: WhatsAppClientOptions): ClientType {
   const { Client, LocalAuth } = lazyRequire("whatsapp-web.js");
   const executablePath = resolveWindowsChromeExecutable();
@@ -58,6 +62,10 @@ export function createWhatsAppClient(opts: WhatsAppClientOptions): ClientType {
       clientId: opts.clientId ?? "inbox-os",
       dataPath: opts.authDir
     }),
+    webVersionCache: {
+      type: "local",
+      path: resolveWhatsAppWebCachePath(opts.authDir)
+    },
     // wweb.js spawns its own Puppeteer; the args mirror its docs for
     // headless server use. Packaged Windows builds reuse the Chrome install
     // already required by LinkedIn because Puppeteer's download cache is not
