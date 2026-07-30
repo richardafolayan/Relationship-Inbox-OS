@@ -4,7 +4,7 @@
 //
 // Produces a pilot-install source zip plus the latest.json the updater reads.
 // Run it from a checkout of the branch you want to release (normally
-// v1/strip-back-pr1):
+// develop):
 //
 //   npm run build:student-release
 //   npm run build:student-release -- --zip-url "https://www.dropbox.com/...?dl=1"

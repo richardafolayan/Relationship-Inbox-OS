@@ -9,7 +9,7 @@ English and uses no em or en dashes (the repo lints pilot docs for them).
 
 The model is deliberately simple:
 
-1. You merge new code into `v1/strip-back-pr1`.
+1. You merge verified development work into `develop`.
 2. You build a clean release zip plus a small `latest.json` file.
 3. You upload both to a Dropbox folder.
 4. Pilots already have a one update URL. Their app checks `latest.json`,
@@ -51,7 +51,7 @@ committed to the repo, and that is the real problem to fix.
 ## Option A: build a release locally
 
 From a clean checkout of the branch you are releasing (normally
-`v1/strip-back-pr1`):
+`develop`):
 
 ```bash
 npm run build:student-release

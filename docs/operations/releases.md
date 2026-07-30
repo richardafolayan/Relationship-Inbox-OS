@@ -129,8 +129,8 @@ upload, runs lint/tests first, uploads build artifacts, and verifies Dropbox.
 [`student-release.yml`](../../.github/workflows/student-release.yml) is a
 manual artifact builder. It does not upload to Dropbox.
 
-`develop`, `staging`, `v1/strip-back-pr1`, and feature branches do not
-automatically publish to pilots. Reaching `main` is the current release gate.
+`develop`, `staging`, and feature branches do not automatically publish
+to pilots. Reaching `main` is the current release gate.
 
 ## Version and release checklist
 

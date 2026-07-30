@@ -32,7 +32,7 @@ export interface AttachOptions {
   repo: string;
   /** PAT with `repo` scope. */
   token: string;
-  /** Branch to commit the screenshot file to. Default: "v1/strip-back-pr1". */
+  /** Branch to commit the screenshot file to. Default: "develop". */
   branch?: string;
   /**
    * Optional injectable fetch — lets tests stub HTTP without a real
@@ -205,7 +205,7 @@ export async function attachScreenshotsToIssue(opts: AttachOptions): Promise<Att
   if (!opts.repo) return { ok: false, reason: "no GITHUB_REPO configured" };
 
   const fetchImpl = opts.fetchImpl ?? fetch;
-  const branch = opts.branch ?? "v1/strip-back-pr1";
+  const branch = opts.branch ?? "develop";
 
   const issueNumber = await findIssueByReportId({
     reportId: opts.reportId,

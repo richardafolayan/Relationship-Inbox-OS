@@ -196,7 +196,7 @@ test("attachScreenshotsToIssue: end-to-end happy path posts comment with inline 
     // upload screenshot 1
     (_url, init) => {
       const body = JSON.parse(init.body);
-      assert.equal(body.branch, "v1/strip-back-pr1");
+      assert.equal(body.branch, "develop");
       assert.equal(body.sha, undefined);
       return { ok: true, json: { content: {} } };
     },

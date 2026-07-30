@@ -155,7 +155,7 @@ verified baseline.
 | `NEXT_PUBLIC_APP_VERSION` | package version in releases | Safe version stamped into reports. |
 | `GITHUB_TOKEN`, `GH_TOKEN` | empty | Optional screenshot attachment credential, checked in that order before local `gh` fallback. |
 | `GITHUB_REPO` | project repository | Attachment target `owner/name`. |
-| `GITHUB_ATTACHMENTS_BRANCH` | `v1/strip-back-pr1` | Attachment commit branch. |
+| `GITHUB_ATTACHMENTS_BRANCH` | `develop` | Attachment commit branch. |
 
 The feedback token ships to pilot machines and is not a high-value secret.
 AI, Dropbox, and GitHub credentials must never be baked into the release.
