@@ -1,101 +1,93 @@
 # Current Build Status
 
-_Volatile. Update this whenever branches, commits, or build state change. Last updated: 2026-07-26._
+_Volatile. Update this whenever branches, commits, or build state change. Last updated: 2026-07-30._
 
 This file holds fast-moving build state on purpose. Branch tips and commit
-hashes go stale quickly, so they live here and not in `AGENTS.md`.
+hashes go stale quickly, so verify live refs before starting work rather than
+trusting an old local remote-tracking branch.
 
-## Baseline
+## Branch baseline
 
-- Active baseline branch: `main` at the PR #1022 merge, `6b271e67`.
-- Installed signed macOS build: `0.1.20-dev.902`, built from the PR #1019
-  merge at `72b59ed1`. This installed build predates the dictation audio fix.
-- Verified rollback milestone: `v0.1.20-mobile-whatsapp-live-verified`.
-- Dictation audio rollback milestone:
-  `milestone/dictation-audio-restored-2026-07-26`.
-- Main release target: `main`.
-- Pilot-ready release version: `0.1.20`.
-- Release base before the version bump: `2ff0623` (`Merge pull request #795 from richardafolayan/fix/launcher-native-runtime-guard`).
-- Mobile pilot integration, protected same-Wi-Fi phone access, and responsive
-  phone layouts are merged into the baseline through `371718e1`.
-- Voice-preserving dictation formatting is merged into the baseline through
-  `73165351`. Dictation remains editable and does not send automatically.
-- Reliable live dictation audio is merged into `v1/strip-back-pr1` through
-  PR #1021 at `6b48c3cf`, then into `main` through PR #1022 at `6b271e67`.
-- Active Windows parity track: `feat/google-messages-windows-parity`, based on
-  `cb87a39` from `origin/v1/strip-back-pr1`.
+- Active development and integration branch: `develop`.
+- Stable production and release branch: `main`.
+- Create normal feature, fix, chore, refactor, and documentation branches from
+  the latest `origin/develop`.
+- Merge normal pull requests into `develop`.
+- Promote release-ready work from `develop` to `main` through a separate pull
+  request after the combined development state is verified.
+- `v1/strip-back-pr1` is retired and deleted. Its final commit history is already
+  contained in `main`; do not recreate or target it.
+- `develop` was aligned with the complete `main` history before becoming the
+  permanent development branch. It may now be ahead of `main` with newer work,
+  which is expected.
+- Do not force-push shared `develop` or `main` branches during normal work.
 
-## Live verification
+Refresh local state before making branch decisions:
 
-- The dictation hotfix passed all 8 focused dictation/audio-signal tests on the
-  merged `main` tip. A headless Chromium fake-microphone check recorded a
-  non-empty WebM/Opus clip and decoded it successfully through Web Audio.
-- PR #1019 restored WhatsApp readiness when an authenticated WhatsApp Web
-  session reaches `CONNECTED` before `whatsapp-web.js` emits its one-time
-  `ready` event.
-- The complete GitHub test suite, stable student release workflow, and signed
-  macOS dev release workflow passed for `72b59ed1`.
-- The installed updater moved Tovi from `0.1.19-dev.897` to
-  `0.1.20-dev.902`. The installed app reports no newer update available.
-- LinkedIn, iMessage, and WhatsApp all report `CONNECTED` in the installed
-  runner. WhatsApp retained its persisted session without showing a QR code.
-- A user-approved WhatsApp message to Lanre was sent through Tovi, reached
-  `SENT`, and was read back from WhatsApp by a targeted rescan with a genuine
-  platform message key.
-- The installed mobile audit passed all 14 unique routes at 390 by 844 with no
-  horizontal overflow or actionable browser errors. Suggested replies, the
-  simplified add sheet, file attachment, voice note, dictation, keyboard
-  viewport resizing, focus-window automatic note opt-in, coarse-touch controls,
-  and the private HTTP iPhone audio-only fallback all passed.
-- The private phone pairing handoff was verified after the update: the access
-  cookie was accepted, the thread returned HTTP 200, and the composer rendered.
+```bash
+git fetch origin --prune
+git rev-parse origin/develop
+git rev-parse origin/main
+git log --oneline --left-right origin/main...origin/develop
+```
 
-## Landed
+A stale local `origin/develop` value is not evidence that the remote branch is
+wrong. Fetch first, then compare the live refs.
 
-- Action-items-first thread workspace.
-- User voice / identity setup.
-- Student pilot feedback loop.
-- Bug-hunt hardening: live fixes cherry-picked onto v1.
-- Slimmed README, pilot guides, and the in-app feedback intake.
-- WhatsApp integration and rich-message handling are present in v1, guarded behind the pilot setup flow.
-- Student app update checks and launcher native-runtime rebuild guidance are present.
-- iMessage Full Disk Access setup guidance is present.
-- Protected same-Wi-Fi phone access and the consolidated responsive mobile UI
-  are present.
-- Mobile composer and recovery hardening includes secure-context microphone
-  capture and silent-recording rejection. On the private HTTP iPhone link,
-  dictation uses the iPhone keyboard microphone and existing audio recordings
-  can be attached without invoking WebKit's video recorder.
-- Dictation can turn a transcript into editable messages while preserving the
-  user's wording and voice.
-- The mobile reliability branch replaces the crowded inline composer controls
-  with phone-sized action sheets, constrains the composer to the iOS visual
-  viewport, fixes Safari audio blob creation, and audits every unique dashboard
-  route at 390 by 844. The release correction also audits a desktop-width,
-  coarse-touch viewport so iPhone never receives the desktop composer toolbar.
-- Focus windows can explicitly opt into one saved automatic note per covered
-  person. Unknown numbers, group chats, cold outreach, duplicate sends, and
-  people already replied to remain excluded.
-- Live platform events are promoted ahead of scheduled scan work so new messages
-  are persisted as soon as their platform watcher notices them.
-- Future scheduled iMessages are excluded from receipts, previews, unread counts,
-  and normal message scans. Targeted rescans also remove stale local copies while
-  leaving the Apple Messages schedule intact.
-- Windows packaging, bundled Node 22 startup, isolated browser profiles,
-  WhatsApp, and Windows-safe dictation are present.
-- Google Messages for Android is implemented on the Windows parity track with
-  account pairing, SMS/MMS/RCS conversation scanning, groups, user-triggered
-  text and attachment sends, reactions, and persistent browser sessions.
+## Build and release routing
+
+- Development builds publish from pushes to `develop` through
+  `.github/workflows/publish-dev-release.yml`.
+- Pull requests into `develop` receive the normal CI and Windows installer
+  checks.
+- Pilot and production publication remains gated by `main`.
+- A feature merged into `develop` is not automatically ready for `main`.
+- Promotion to `main` must account for every commit currently present on
+  `develop`, not only the newest feature.
+
+## Current product state
+
+- Tovi is being prepared for a small 3-5 student pilot.
+- Action-items-first thread workspace, user voice setup, feedback intake,
+  protected same-Wi-Fi phone access, responsive phone layouts, dictation,
+  WhatsApp, LinkedIn, iMessage, Windows packaging, and Google Messages work are
+  present in the repository history.
+- Sending remains user-triggered by default.
+- Private conversation content must not be placed in logs, feedback, commits,
+  pull requests, or test fixtures.
+- Current feature truth belongs in
+  [`docs/developer/features.md`](../developer/features.md); this page only tracks
+  the moving branch and verification state.
+
+## Last recorded live verification
+
+The following checks were recorded before the branch-policy migration and remain
+historical evidence rather than a guarantee about the newest `develop` tip:
+
+- The dictation hotfix passed its focused dictation and audio-signal tests.
+- The complete GitHub test suite and signed macOS dev release workflow passed
+  for the then-current verified build.
+- LinkedIn, iMessage, and WhatsApp reported connected in the installed runner.
+- A user-approved WhatsApp message was sent, reached `SENT`, and was read back
+  from WhatsApp by a targeted rescan.
+- The installed mobile audit passed its recorded phone routes without
+  horizontal overflow or actionable browser errors.
+- Protected phone pairing returned the thread successfully and rendered the
+  composer.
+
+Re-run relevant checks against the current feature branch and merged `develop`
+before claiming those guarantees still hold.
 
 ## Next
 
-- Prepare and run the 3-5 student pilot.
-- Only small operational improvements that reduce pilot friction (direct feedback submission, install/readme clarity, setup hardening).
-- Pilot-test same-Wi-Fi phone access and responsive phone layouts on the target
-  student devices.
-- Complete Windows x64 verification: NSIS install, first boot, Google Messages
-  pair/scan/send, LinkedIn connect/scan, WhatsApp QR/scan, quit/relaunch, and
-  clean iMessage-unavailable UI.
+- Keep feature work based on `develop` and PRs targeted to `develop`.
+- Complete the explicitly authorised Instagram implementation without reviving
+  the retired v1 branch.
+- Verify setup, connection, scanning, exact-thread opening, deduplication,
+  user-triggered sending, reconnect/reset, UI states, tests, and browser smoke
+  behaviour.
+- Promote `develop` to `main` only when the full combined branch is release-ready.
+- Continue preparing and running the 3-5 student pilot.
 
 ---
 

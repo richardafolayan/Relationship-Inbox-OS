@@ -1,8 +1,8 @@
 # Current feature inventory
 
-This page is the canonical inventory for behavior verified on
-`v1/strip-back-pr1` at `fcc4248ba5379b68b1a1f440edf95039d770e74f`.
-An unmerged workstream is not current behavior.
+This page is the canonical inventory for behaviour verified in the current
+`develop` integration baseline. An unmerged workstream is not current behaviour,
+and production release status remains governed by `main`.
 
 Status terms:
 

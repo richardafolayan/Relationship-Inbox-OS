@@ -37,6 +37,17 @@ Before implementing anything, state:
 
 If the task does not help the student pilot directly, pause and say so before building.
 
+## Branch workflow
+
+- `develop` is the permanent development and integration branch.
+- `main` is the stable production and release branch.
+- Run `git fetch origin --prune` before resolving branch state.
+- Create feature, fix, chore, refactor, and documentation branches from the latest `origin/develop`.
+- Open normal pull requests into `develop`.
+- Promote release-ready work from `develop` to `main` through a separate reviewed pull request.
+- Do not recreate or target the retired `v1/strip-back-pr1` branch.
+- Do not force-push shared `develop` or `main` branches.
+
 ## Git branch naming
 
 - Never create branches named `claude/<random-words>`.

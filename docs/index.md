@@ -1,9 +1,10 @@
 # Tovi documentation
 
-This is the documentation entry point for the student-pilot baseline. The
-behavior described here was verified against `v1/strip-back-pr1` at commit
-`fcc4248ba5379b68b1a1f440edf95039d770e74f`. The live branch and build state
-remain in [current build status](strategy/current-build-status.md).
+This is the documentation entry point for the student-pilot codebase. Active
+development is integrated on `develop`; stable production and release state is
+promoted separately to `main`. The retired `v1/strip-back-pr1` branch is not a
+current baseline. Live branch and build state remain in
+[current build status](strategy/current-build-status.md).
 
 The implementation is the final authority when this reference and code
 disagree. Run `npm run docs:check` after changing code or documentation.

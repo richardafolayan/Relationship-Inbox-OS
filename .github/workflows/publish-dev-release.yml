@@ -1,6 +1,6 @@
-# Publishes a DEV-channel build on every push to v1/strip-back-pr1, so
-# Richard's dev install of Tovi can one-click update to the latest v1 work
-# without a full DMG rebuild (issue #843).
+# Publishes a DEV-channel build on every push to develop, so
+# Richard's dev install of Tovi can one-click update to the latest integrated
+# development work without a full DMG rebuild (issue #843).
 #
 # Unlike the pilot channel (Dropbox, publish-student-release.yml), the dev
 # channel ships via a rolling GitHub prerelease tagged `dev` on this PUBLIC
@@ -21,7 +21,7 @@ name: Publish Dev Release
 
 on:
   push:
-    branches: ["v1/strip-back-pr1"]
+    branches: ["develop"]
   workflow_dispatch: {}
 
 permissions:
@@ -61,9 +61,8 @@ jobs:
       - name: Generate Prisma client
         run: npx prisma generate --schema packages/core/prisma/schema.prisma
 
-      # v1-targeted PRs skip lint+test in ci.yml, so this gate is the only CI
-      # safety net before a build lands on the dev feed (and on Richard's
-      # daily-driver install).
+      # Repeat the full safety gate here even though develop also runs normal
+      # CI, so a dev feed is never published from an unchecked commit.
       - name: Release-safety checks (typecheck + full suite)
         run: |
           npm run lint
@@ -80,7 +79,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           VERSION=$(node -p 'JSON.parse(require("fs").readFileSync("release-dist/latest.json","utf8")).version')
-          NOTES="Rolling dev-channel build from v1/strip-back-pr1. Current: ${VERSION} (${GITHUB_SHA})."
+          NOTES="Rolling dev-channel build from develop. Current: ${VERSION} (${GITHUB_SHA})."
           if ! gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
               --prerelease --target "$GITHUB_SHA" \

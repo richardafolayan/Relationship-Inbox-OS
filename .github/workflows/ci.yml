@@ -1,9 +1,9 @@
 name: CI
 on:
   pull_request:
-    branches: [develop, staging, main, v1/strip-back-pr1]
+    branches: [develop, staging, main]
   push:
-    branches: [develop, staging, main, v1/strip-back-pr1]
+    branches: [develop, staging, main]
 permissions:
   contents: read
 jobs:

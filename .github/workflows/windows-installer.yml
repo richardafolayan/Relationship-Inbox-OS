@@ -2,7 +2,7 @@ name: Windows installer
 
 on:
   pull_request:
-    branches: [v1/strip-back-pr1]
+    branches: [develop]
   workflow_dispatch:
 
 permissions:
