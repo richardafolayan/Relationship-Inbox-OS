@@ -1,4 +1,10 @@
 import { preferredDictationMimeType } from "./dictation-recording";
+import {
+  defaultDictationChunkStore,
+  type DictationChunkStore,
+  type DictationInterruptionReason,
+  type RecoveredDictationCapture
+} from "./dictation-chunk-store";
 
 export type DictationCaptureUnavailableReason = "insecure" | "unsupported";
 
@@ -9,24 +15,38 @@ export interface DictationCaptureAvailability {
 
 export interface DictationCaptureSession {
   cancel: () => void;
+  interrupt: (reason: DictationInterruptionReason) => void;
+  native: false;
   recorder: MediaRecorder;
+  resume: () => void;
   stop: () => void;
   stream: MediaStream;
 }
 
 interface StartDictationCaptureInput {
+  chunkStore?: DictationChunkStore;
   MediaRecorderClass?: typeof MediaRecorder;
   mediaDevices?: Pick<MediaDevices, "getUserMedia">;
   onCancel?: () => void;
   onError: (error: unknown) => void;
+  onInterrupted?: (capture: RecoveredDictationCapture) => void | Promise<void>;
   onRecorded: (blob: Blob) => void | Promise<void>;
+  wakeLock?: {
+    request: (type: "screen") => Promise<{ release: () => Promise<void> }>;
+  };
 }
+
+const DICTATION_TIMESLICE_MS = 1_000;
+const DICTATION_STALL_MS = 6_000;
+const DICTATION_MUTE_GRACE_MS = 1_500;
 
 export function dictationCaptureAvailability(input: {
   isSecureContext: boolean;
   mediaDevices?: Pick<MediaDevices, "getUserMedia"> | null;
   MediaRecorderClass?: typeof MediaRecorder;
+  nativeAvailable?: boolean;
 }): DictationCaptureAvailability {
+  if (input.nativeAvailable) return { available: true, reason: null };
   if (!input.isSecureContext) return { available: false, reason: "insecure" };
   if (!input.mediaDevices?.getUserMedia || !input.MediaRecorderClass) {
     return { available: false, reason: "unsupported" };
@@ -71,11 +91,21 @@ function stopTracks(stream: MediaStream): void {
 }
 
 export async function startDictationCapture({
+  chunkStore = defaultDictationChunkStore(),
   MediaRecorderClass = MediaRecorder,
   mediaDevices = navigator.mediaDevices,
   onCancel,
   onError,
-  onRecorded
+  onInterrupted,
+  onRecorded,
+  wakeLock =
+    typeof navigator !== "undefined" && "wakeLock" in navigator
+      ? (navigator as Navigator & {
+          wakeLock: {
+            request: (type: "screen") => Promise<{ release: () => Promise<void> }>;
+          };
+        }).wakeLock
+      : undefined
 }: StartDictationCaptureInput): Promise<DictationCaptureSession> {
   let stream: MediaStream | null = null;
   let recorder: MediaRecorder | null = null;
@@ -96,15 +126,40 @@ export async function startDictationCapture({
       MediaRecorderClass.isTypeSupported(candidate)
     );
     recorder = new MediaRecorderClass(stream, mimeType ? { mimeType } : undefined);
+    const sessionId =
+      typeof crypto !== "undefined" && "randomUUID" in crypto
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const startedAt = Date.now();
     const chunks: BlobPart[] = [];
     let cancelled = false;
     let finished = false;
     let cancelNotified = false;
     let unexpectedEndHandled = false;
+    let interruptionReason: DictationInterruptionReason | null = null;
+    let sequence = 0;
+    let lastDataAt = startedAt;
+    let persistenceAvailable = true;
+    let persistenceTail = chunkStore
+      .begin({
+        id: sessionId,
+        mimeType: recorder.mimeType || mimeType || "audio/webm",
+        startedAt,
+        status: "recording"
+      })
+      .catch(() => {
+        persistenceAvailable = false;
+      });
+    let muteTimer: ReturnType<typeof setTimeout> | null = null;
+    let stallTimer: ReturnType<typeof setInterval> | null = null;
+    let wakeLockSentinel: { release: () => Promise<void> } | null = null;
 
     const release = () => {
       if (finished) return;
       finished = true;
+      if (muteTimer) clearTimeout(muteTimer);
+      if (stallTimer) clearInterval(stallTimer);
+      void wakeLockSentinel?.release().catch(() => {});
       stopTracks(stream!);
     };
     const notifyCancel = () => {
@@ -112,45 +167,101 @@ export async function startDictationCapture({
       cancelNotified = true;
       onCancel?.();
     };
+    const interrupt = (reason: DictationInterruptionReason) => {
+      if (cancelled || finished || interruptionReason) return;
+      interruptionReason = reason;
+      try {
+        recorder!.requestData?.();
+      } catch {}
+      try {
+        if (recorder!.state !== "inactive") recorder!.stop();
+      } catch (error) {
+        release();
+        onError(error);
+      }
+    };
 
     recorder.ondataavailable = (event) => {
-      if (event.data.size > 0) chunks.push(event.data);
+      if (event.data.size === 0) return;
+      chunks.push(event.data);
+      lastDataAt = Date.now();
+      const chunkSequence = sequence++;
+      persistenceTail = persistenceTail
+        .then(() =>
+          persistenceAvailable
+            ? chunkStore.append(sessionId, chunkSequence, event.data)
+            : undefined
+        )
+        .catch(() => {
+          persistenceAvailable = false;
+        });
     };
-    recorder.onerror = (event) => {
-      cancelled = true;
-      release();
-      onError("error" in event ? event.error : new Error("The recording stopped unexpectedly."));
+    recorder.onerror = () => {
+      interrupt("recorder-error");
     };
-    recorder.onstop = () => {
+    recorder.onstop = async () => {
       release();
+      await persistenceTail;
       if (cancelled) {
+        await chunkStore.remove(sessionId).catch(() => {});
         notifyCancel();
         return;
       }
-      const blob = new Blob(chunks, { type: recorder!.mimeType || mimeType || "audio/webm" });
+      if (interruptionReason && persistenceAvailable) {
+        await chunkStore.interrupt(sessionId, interruptionReason, Date.now()).catch(() => {
+          persistenceAvailable = false;
+        });
+        const recovered = await chunkStore.read(sessionId).catch(() => null);
+        if (recovered) {
+          await Promise.resolve(onInterrupted?.(recovered)).catch(onError);
+          return;
+        }
+      }
+      const blob = new Blob(chunks, {
+        type: recorder!.mimeType || mimeType || "audio/webm"
+      });
       if (blob.size === 0) {
         onError(new DOMException("The microphone did not capture any audio.", "NotReadableError"));
         return;
       }
-      void Promise.resolve(onRecorded(blob)).catch(onError);
+      try {
+        await onRecorded(blob);
+        await chunkStore.remove(sessionId).catch(() => {});
+      } catch (error) {
+        onError(error);
+      }
     };
     for (const track of stream.getAudioTracks()) {
       track.addEventListener?.("ended", () => {
         if (finished || unexpectedEndHandled) return;
         unexpectedEndHandled = true;
-        cancelled = true;
-        try {
-          if (recorder!.state !== "inactive") recorder!.stop();
-        } catch {
-        } finally {
-          release();
-          onError(new DOMException("Microphone permission ended.", "NotAllowedError"));
-        }
+        interrupt("track-ended");
       }, { once: true });
+      track.addEventListener?.("mute", () => {
+        if (finished || interruptionReason || muteTimer) return;
+        muteTimer = setTimeout(() => interrupt("muted"), DICTATION_MUTE_GRACE_MS);
+      });
+      track.addEventListener?.("unmute", () => {
+        if (muteTimer) clearTimeout(muteTimer);
+        muteTimer = null;
+      });
     }
-    recorder.start();
+    recorder.start(DICTATION_TIMESLICE_MS);
+    stallTimer = setInterval(() => {
+      if (Date.now() - lastDataAt >= DICTATION_STALL_MS) interrupt("stalled");
+    }, DICTATION_TIMESLICE_MS);
+    if (wakeLock) {
+      void wakeLock
+        .request("screen")
+        .then((sentinel) => {
+          if (finished) void sentinel.release().catch(() => {});
+          else wakeLockSentinel = sentinel;
+        })
+        .catch(() => {});
+    }
 
     return {
+      native: false,
       recorder,
       stream,
       stop() {
@@ -160,9 +271,21 @@ export async function startDictationCapture({
         }
         try {
           recorder!.stop();
-        } finally {
+        } catch (error) {
           release();
+          throw error;
         }
+      },
+      interrupt,
+      resume() {
+        if (finished || interruptionReason || wakeLockSentinel || !wakeLock) return;
+        void wakeLock
+          .request("screen")
+          .then((sentinel) => {
+            if (finished) void sentinel.release().catch(() => {});
+            else wakeLockSentinel = sentinel;
+          })
+          .catch(() => {});
       },
       cancel() {
         cancelled = true;
