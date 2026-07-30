@@ -297,6 +297,8 @@ test("launchPersistentContextForPlatform uses mirrored target directory for pers
   assert.equal(calls[0]?.userDataDir, "/tmp/isolated/linkedin");
   assert.equal(calls[0]?.options.channel, "chrome");
   assert.ok(calls[0]?.options.args.includes("--profile-directory=Person 1"));
+  assert.ok(calls[0]?.options.ignoreDefaultArgs.includes("--password-store=basic"));
+  assert.ok(calls[0]?.options.ignoreDefaultArgs.includes("--use-mock-keychain"));
 });
 
 test("launchPersistentContextForPlatform falls back to isolated profile when personal launch fails", async () => {

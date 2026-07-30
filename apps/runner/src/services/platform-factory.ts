@@ -2,6 +2,7 @@ import { resolveSelectors } from "@inbox-os/core";
 import type { PlatformAdapter, PlatformName, SelectorRegistry } from "@inbox-os/core";
 import { basename, resolve, dirname } from "node:path";
 import { resolveConnectTimeoutMs, runnerConfig } from "../config";
+import type { BrowserProfileConfig } from "../config";
 import type { PlatformAvailability } from "../platform-availability";
 import type { SettingsStore } from "../types/runtime";
 import { LinkedInAdapter } from "../platforms/linkedin-adapter";
@@ -62,6 +63,7 @@ export function createAdapters(input: {
     sourceChangedAt: string;
   }) => void;
   platformAvailability?: PlatformAvailability;
+  instagramBrowserProfile?: BrowserProfileConfig;
 }): {
   // `Partial` because not every PlatformName has an adapter on main today.
   // IMESSAGE was added to PlatformName so prisma can read existing iMessage
@@ -80,6 +82,7 @@ export function createAdapters(input: {
   }
 
   const availability = input.platformAvailability ?? runnerConfig.platformAvailability;
+  const instagramBrowserProfile = input.instagramBrowserProfile ?? runnerConfig.browserProfile;
   const managedProfileRoot = resolve(dirname(runnerConfig.profileDirs.LINKEDIN), "__managed_person_profiles");
   const sessionManager = createSessionManager({
     profileRootDir: managedProfileRoot,
@@ -92,8 +95,7 @@ export function createAdapters(input: {
   const instagramSessionManager = createSessionManager({
     profileRootDir: dirname(runnerConfig.profileDirs.INSTAGRAM),
     browserProfile: {
-      ...runnerConfig.browserProfile,
-      mode: "isolated",
+      ...instagramBrowserProfile,
       fallbackBehavior: "error"
     },
     preferInstalledChrome: true,
@@ -161,7 +163,14 @@ export function createAdapters(input: {
       resolveSelectors: () => resolveSelectorsForPlatform("INSTAGRAM"),
       sessionManager: route.sessionManager,
       personKey: route.personKey,
-      connectTimeoutMs: resolveConnectTimeoutMs("personal")
+      connectTimeoutMs: resolveConnectTimeoutMs("personal"),
+      personalProfile:
+        instagramBrowserProfile.mode === "personal"
+          ? {
+              sourceUserDataDir: instagramBrowserProfile.personalChromeUserDataDir,
+              profileDirectory: instagramBrowserProfile.personalChromeProfileDirectory
+            }
+          : undefined
     });
   }
 

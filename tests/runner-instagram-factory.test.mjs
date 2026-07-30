@@ -31,10 +31,20 @@ test("factory registers Instagram only when the environment enables it", () => {
   assert.equal(disabled.adapters.INSTAGRAM, undefined);
 });
 
-test("Instagram receives an isolated persistent profile route", () => {
+test("Instagram receives a dedicated persistent profile route", () => {
   const factory = createAdapters({
     settingsStore,
-    platformAvailability: availability(true)
+    platformAvailability: availability(true),
+    instagramBrowserProfile: {
+      mode: "personal",
+      fallbackBehavior: "allow_isolated",
+      personalChromeUserDataDir: "/trusted/chrome",
+      personalChromeProfileDirectory: "Profile 7",
+      personalChromeProfileName: "Trusted",
+      personalChromeProfileResolutionStrategy: "name_exact",
+      personalProfileSyncMode: "smart",
+      personalProfileMirrorRoot: "/managed/mirrors"
+    }
   });
   const instagram = factory.resolvePlatformSession("INSTAGRAM");
   const reconnect = factory.resolvePlatformSession("INSTAGRAM");
@@ -47,7 +57,25 @@ test("Instagram receives an isolated persistent profile route", () => {
   assert.equal(reconnect.profileDir, instagram.profileDir);
   assert.notEqual(instagram.sessionManager, linkedin.sessionManager);
   assert.notEqual(instagram.profileDir, linkedin.profileDir);
-  assert.equal(instagram.sessionManager.deps.browserProfile.mode, "isolated");
+  assert.equal(instagram.sessionManager.deps.browserProfile.mode, "personal");
+  assert.equal(instagram.sessionManager.deps.browserProfile.personalChromeProfileDirectory, "Profile 7");
+  assert.equal(instagram.sessionManager.deps.browserProfile.personalChromeProfileName, "Trusted");
   assert.equal(instagram.sessionManager.deps.browserProfile.fallbackBehavior, "error");
   assert.equal(instagram.sessionManager.deps.preferInstalledChrome, true);
+  assert.deepEqual(factory.adapters.INSTAGRAM.instagramDeps.personalProfile, {
+    sourceUserDataDir: "/trusted/chrome",
+    profileDirectory: "Profile 7"
+  });
+});
+
+test("Instagram keeps isolated mode when personal profile mode is not configured", () => {
+  const factory = createAdapters({
+    settingsStore,
+    platformAvailability: availability(true)
+  });
+
+  assert.equal(
+    factory.resolvePlatformSession("INSTAGRAM").sessionManager.deps.browserProfile.mode,
+    "isolated"
+  );
 });

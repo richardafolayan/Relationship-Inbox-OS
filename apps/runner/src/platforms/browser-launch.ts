@@ -252,7 +252,12 @@ export async function launchPersistentContextForPlatform(input: {
   const personalOptions: LaunchPersistentContextOptions = {
     ...baseOptions,
     channel: "chrome",
-    args: buildPersonalChromeArgs(baseArgs, input.browserProfile.personalChromeProfileDirectory)
+    args: buildPersonalChromeArgs(baseArgs, input.browserProfile.personalChromeProfileDirectory),
+    ignoreDefaultArgs: [
+      ...(baseOptions.ignoreDefaultArgs ?? []),
+      "--password-store=basic",
+      "--use-mock-keychain"
+    ]
   };
 
   await input.onConnectStep?.({

@@ -77,7 +77,7 @@ fallback, racing, and voice controls.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `BROWSER_PROFILE_MODE` | `isolated` in code / `personal` in example | Browser mode for managed LinkedIn and Google Messages sessions. Instagram always uses its own profile. |
+| `BROWSER_PROFILE_MODE` | `isolated` in code / `personal` in example | Browser mode for managed LinkedIn, Google Messages, and Instagram sessions. Every platform still launches an app-owned profile. |
 | `PERSONAL_PROFILE_FALLBACK` | `error` in personal mode | `error` or `allow_isolated` when mirror launch cannot proceed. |
 | `PERSONAL_PROFILE_SYNC_MODE` | `smart` | `smart`, `always`, or `never` mirror refresh. |
 | `PERSONAL_PROFILE_MIRROR_ROOT` | `data/profiles` | Mirror storage root. |
@@ -101,12 +101,16 @@ WhatsApp's own Puppeteer is always headless in the verified adapter and does
 not read the persisted dashboard headless toggle.
 
 Instagram is opt-in and keeps its session in `data/profiles/instagram`. It
-always requests the installed stable Chrome channel with that dedicated
-profile, independently of `BROWSER_PROFILE_MODE`, and never falls back to
-Chrome for Testing.
+always requests the installed stable Chrome channel and never falls back to
+Chrome for Testing. In personal mode, the dedicated Instagram profile is
+seeded from the configured Chrome profile so its established cookies and
+device history can be reused. On macOS, the runner uses the same local
+Keychain-backed cookie bridge as LinkedIn because copied Chrome cookies remain
+encrypted. Cookie values stay in memory and are never logged. The runner never
+controls or deletes the live source profile.
 Missing, blank, false, or unrecognised `INSTAGRAM_ENABLED` values leave it
 disabled. Login and any Instagram security check happen manually in the
-runner-controlled browser. Resetting Instagram clears only that profile and
+runner-controlled browser. Resetting Instagram clears only the app-owned copy and
 does not sign LinkedIn or Google Messages out.
 
 ## LinkedIn scanning and enrichment

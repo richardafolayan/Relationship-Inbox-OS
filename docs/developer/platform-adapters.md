@@ -139,8 +139,11 @@ Source:
 - Reuses shared beta browser/auth primitives but owns a dedicated persistent
   profile so reconnect/reset cannot disturb another platform.
 - Requests standard installed Chrome with that dedicated profile, never Chrome
-  for Testing or the live LinkedIn profile. Login and Instagram security
-  checks stay manual.
+  for Testing. In personal mode, the app-owned profile is seeded from the
+  configured trusted Chrome profile and macOS cookies are injected through the
+  existing local Keychain bridge. Cookie values are never logged. The live
+  source profile is never controlled or deleted, and login or Instagram
+  security checks stay manual.
 - Thread identity comes only from a canonical `/direct/t/<id>/` URL or a
   verified stable attribute. Display names, previews, and row order never
   become identifiers.

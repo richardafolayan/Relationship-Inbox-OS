@@ -94,12 +94,16 @@ before claiming those guarantees still hold.
   deep-scroll timing cases; both pass when rerun together in isolation.
 - Setup, Settings, and Platforms were inspected at desktop and phone widths.
 - A live connection launch used installed standard Chrome with the dedicated
-  Instagram profile. Login and verification-required states, profile reset,
-  and the disconnected state were observed.
-- No authenticated inbox or approved safe conversation was available, so live
-  conversation discovery, extraction, rescan deduplication, session
-  persistence after a completed login, and sending remain unverified. No
-  message was sent.
+  Instagram profile. The dedicated profile can now be seeded from a trusted
+  personal Chrome profile without controlling or deleting the live source. On
+  macOS, the existing local Keychain cookie bridge injects the encrypted
+  Instagram session cookies without logging their values.
+- Manual login completed successfully and the runner reported the authenticated
+  Instagram inbox as connected. The earlier verification-required state,
+  profile reset, and disconnected state were also observed.
+- No approved safe conversation was provided, so live conversation discovery,
+  extraction, rescan deduplication, restart persistence, and sending remain
+  unverified. No message was sent.
 
 ## Next
 

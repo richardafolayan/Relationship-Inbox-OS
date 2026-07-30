@@ -8,6 +8,7 @@ import {
   type ThreadStub
 } from "@inbox-os/core";
 import { BetaAdapter, betaIdentityMatch, type BetaAdapterDependencies } from "./beta-adapter";
+import { ChromeCookieBridge } from "./chrome-cookie-bridge";
 import { AdapterFailure, cleanMessageText } from "./utils";
 import { humanClick, humanType, readingPause } from "./humanize";
 
@@ -17,6 +18,10 @@ const THREAD_PATH = /^\/direct\/t\/([^/?#]+)\/?$/i;
 export interface InstagramAdapterDependencies extends Omit<BetaAdapterDependencies, "platform"> {
   connectTimeoutMs: number;
   sendVerificationTimeoutMs?: number;
+  personalProfile?: {
+    sourceUserDataDir: string;
+    profileDirectory: string;
+  };
 }
 
 export interface InstagramThreadSnapshot {
@@ -308,10 +313,47 @@ function threadIdForStub(thread: ThreadStub): string {
 
 export class InstagramAdapter extends BetaAdapter {
   private readonly instagramDeps: InstagramAdapterDependencies;
+  private cookieBridge: ChromeCookieBridge | null = null;
+  private lastCookieSyncAt: number | null = null;
 
   constructor(deps: InstagramAdapterDependencies) {
     super({ ...deps, platform: "INSTAGRAM" });
     this.instagramDeps = deps;
+  }
+
+  protected override async getPage(): Promise<Page> {
+    const page = await super.getPage();
+    await this.ensureSessionCookies(page);
+    return page;
+  }
+
+  private async ensureSessionCookies(page: Page): Promise<void> {
+    const personal = this.instagramDeps.personalProfile;
+    if (!personal) {
+      return;
+    }
+
+    const now = Date.now();
+    if (this.lastCookieSyncAt !== null && now - this.lastCookieSyncAt < 10 * 60 * 1000) {
+      return;
+    }
+
+    this.cookieBridge ??= new ChromeCookieBridge({
+      sourceUserDataDir: personal.sourceUserDataDir,
+      profileDirectory: personal.profileDirectory
+    });
+
+    const result = await this.cookieBridge.syncIntoContext(
+      page.context(),
+      "%instagram.com%"
+    );
+    if (result.reason === "ok") {
+      this.lastCookieSyncAt = now;
+      console.log(`[instagram-cookie-bridge] injected ${result.injected} cookies`);
+      return;
+    }
+
+    console.warn(`[instagram-cookie-bridge] no cookies injected (${result.reason})`);
   }
 
   private safeFailure(
