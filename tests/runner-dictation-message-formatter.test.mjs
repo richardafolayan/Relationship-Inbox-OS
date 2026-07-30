@@ -3,7 +3,8 @@ import test from "node:test";
 import {
   buildDictationMessageFormatterPrompt,
   DICTATION_MESSAGE_FORMATTER_SYSTEM_PROMPT,
-  parseDictationMessageFormatting
+  parseDictationMessageFormatting,
+  resolveDictationFormatterTarget
 } from "../apps/runner/dist/services/dictation-message-formatter.js";
 
 const examples = [
@@ -87,17 +88,67 @@ test("invalid model output is rejected instead of being displayed", () => {
   );
 });
 
-test("the prompt pins voice preservation, natural splitting, uncertainty, and verified-name context", () => {
-  const prompt = buildDictationMessageFormatterPrompt({ transcript: "Toyvi is cooking", contactName: "Tobi" });
+test("the prompt pins final intent, meaning-safe compression, natural splitting, and verified-name context", () => {
+  const prompt = buildDictationMessageFormatterPrompt({
+    transcript: "Toyvi is cooking",
+    contactName: "Tobi",
+    operatorProfile: {
+      displayName: "Richard",
+      about: "Informal and direct",
+      preferredStyle: "casual",
+      commonPhrases: "icl\nbut yeah",
+      avoidedPhrases: "I hope this finds you well",
+      acceptedExamples: [
+        { messages: ["Icl I was quite stuck", "But yeah, your feedback helped a lot"] }
+      ]
+    },
+    recentInbound: {
+      messageCount: 2,
+      totalCharacters: 84,
+      averageCharacters: 42
+    }
+  });
   const rules = `${DICTATION_MESSAGE_FORMATTER_SYSTEM_PROMPT}\n${prompt}`;
   for (const phrase of [
-    "formatting, not rewriting",
-    "Prefer under-correction over polish",
-    "Split by natural thought",
+    "final intended meaning",
+    "Compress repetition without compressing meaning",
+    "earlier statements that the speaker clearly corrects or replaces",
+    "Prefer fewer, fuller bubbles",
+    "soft proportionality signal",
+    "Do not mechanically delete subjects",
     "Remove trailing full stops",
     "Do not add the name if the speaker did not say it",
     "warnings"
   ]) {
     assert.match(rules, new RegExp(phrase, "i"));
   }
+  assert.match(prompt, /"displayName":"Richard"/);
+  assert.match(prompt, /"preferredStyle":"casual"/);
+  assert.match(prompt, /"commonPhrases":"icl\\nbut yeah"/);
+  assert.match(prompt, /"priorAcceptedOutputs":\[\["Icl I was quite stuck"/);
+  assert.match(prompt, /"messageCount":2/);
+  assert.doesNotMatch(prompt, /nearby inbound message text/i);
+});
+
+test("the formatter target stays on the selected provider and model", () => {
+  const defaults = {
+    aiProvider: "openai",
+    openAiModel: "gpt-5-nano",
+    glmModel: "glm-4.7-flash",
+    geminiModel: "gemma-4-31b-it"
+  };
+  assert.deepEqual(
+    resolveDictationFormatterTarget({
+      settings: { aiProvider: "gemini", geminiModel: "gemma-3-27b-it" },
+      defaults
+    }),
+    { providerId: "gemini", model: "gemma-3-27b-it" }
+  );
+  assert.deepEqual(
+    resolveDictationFormatterTarget({
+      settings: { aiProvider: "glm", glmModel: "  " },
+      defaults
+    }),
+    { providerId: "glm", model: "glm-4.7-flash" }
+  );
 });
