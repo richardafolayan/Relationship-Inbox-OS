@@ -25,9 +25,11 @@ export function resolveMacosReleaseChannel({ branch, coreVersion, commitCount })
       releaseTrack: "dev",
       buildChannel: "dev",
       releaseTag: "macos-free-dev",
-      zipName: "Tovi-macos-arm64-dev-latest.zip",
-      dmgName: "Tovi-macos-arm64-dev-latest.dmg",
-      feedName: "latest-macos-dev.json",
+      // Preserve the existing public asset names. Installed dev builds already
+      // have this exact feed URL baked into release.json.
+      zipName: "Tovi-macos-arm64-latest.zip",
+      dmgName: "Tovi-macos-arm64-latest.dmg",
+      feedName: "latest-macos.json",
       releaseTitle: "Free signed macOS dev channel",
       releaseVersionOverride: "",
       prerelease: true
