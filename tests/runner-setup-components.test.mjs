@@ -16,13 +16,13 @@ const {
 
 test("setup preferences accept only supported pilot sources and explicit options", () => {
   assert.deepEqual(normalizeSetupPreferences({
-    selectedPlatforms: ["LINKEDIN", "TIKTOK", "WHATSAPP", "LINKEDIN", 7],
+    selectedPlatforms: ["LINKEDIN", "INSTAGRAM", "TIKTOK", "WHATSAPP", "LINKEDIN", 7],
     aiEnabled: true,
     transcriptionMode: "enhanced",
     startedAt: "start",
     completedAt: "done"
   }), {
-    selectedPlatforms: ["LINKEDIN", "WHATSAPP"],
+    selectedPlatforms: ["LINKEDIN", "INSTAGRAM", "WHATSAPP"],
     aiEnabled: true,
     transcriptionMode: "enhanced",
     startedAt: "start",
