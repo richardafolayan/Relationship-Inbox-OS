@@ -140,6 +140,23 @@ export interface ScheduleSendResult {
   replayed: boolean;
 }
 
+export function assertInstagramManualTextSend(input: {
+  platform: PlatformName;
+  scheduled?: boolean;
+  attachmentCount?: number;
+  source?: "manual" | "focus_auto_ack";
+}): void {
+  if (input.platform !== "INSTAGRAM") {
+    return;
+  }
+  if (input.scheduled || input.source === "focus_auto_ack") {
+    throw new Error("Instagram supports user-triggered sends only. Send this message now instead.");
+  }
+  if ((input.attachmentCount ?? 0) > 0) {
+    throw new Error("Instagram currently supports text messages only.");
+  }
+}
+
 export function createSendService(deps: SendServiceDeps) {
   // Default to the runner's singleton; tests inject a fake to exercise the
   // scheduled-send race guards without a real database.
@@ -160,6 +177,7 @@ export function createSendService(deps: SendServiceDeps) {
     text: string;
     clientSendId: string;
     attachments?: Array<{ absolutePath: string; displayName: string; mimeType?: string; kind?: string }>;
+    source?: "manual" | "focus_auto_ack";
     /**
      * App-level threading: when set, the resulting Message row links back
      * to the parent (a Message.id cuid in the same thread). The send still
@@ -174,6 +192,11 @@ export function createSendService(deps: SendServiceDeps) {
     if (!thread) {
       throw new Error("Thread not found");
     }
+    assertInstagramManualTextSend({
+      platform: thread.platform as PlatformName,
+      attachmentCount: input.attachments?.length ?? 0,
+      source: input.source ?? "manual"
+    });
 
     const existing = await prisma.sendRequest.findUnique({
       where: { clientSendId: input.clientSendId }
@@ -575,6 +598,11 @@ export function createSendService(deps: SendServiceDeps) {
     if (!thread) {
       throw new Error("Thread not found");
     }
+    assertInstagramManualTextSend({
+      platform: thread.platform as PlatformName,
+      scheduled: true,
+      attachmentCount: input.attachments?.length ?? 0
+    });
 
     if (Number.isNaN(input.scheduledFor.getTime())) {
       throw new Error("scheduledFor must be a valid date");

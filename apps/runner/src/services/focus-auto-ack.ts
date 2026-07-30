@@ -77,7 +77,13 @@ export function focusAutoAckCoverage(
   thread: FocusAutoAckThread,
   profile: OperatorProfile
 ): boolean {
-  if (thread.isGroup || thread.category === "outreach") return false;
+  if (
+    thread.platform === "INSTAGRAM" ||
+    thread.isGroup ||
+    thread.category === "outreach"
+  ) {
+    return false;
+  }
   if (thread.person.favouritedAt) return true;
   if (profile.focusWindow.audience !== "all_personal" || thread.platform !== "IMESSAGE") {
     return false;
@@ -152,7 +158,12 @@ export function createFocusAutoAckService(deps: FocusAutoAckDeps) {
       const text = focusAutoAckText(thread, latest);
       if (!text) return { type: "skipped", reason: "empty_note" };
       const clientSendId = uuidv5(key, uuidv5.URL);
-      await deps.sendQueue.enqueueAndKick({ threadId, text, clientSendId });
+      await deps.sendQueue.enqueueAndKick({
+        threadId,
+        text,
+        clientSendId,
+        source: "focus_auto_ack"
+      });
 
       const afterQueue = await deps.settingsStore.getOperatorProfile();
       if (afterQueue.focusWindow.windowId === latest.focusWindow.windowId) {

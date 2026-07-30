@@ -35,6 +35,7 @@ export interface SendQueueService {
     threadId: string;
     text: string;
     clientSendId: string;
+    source?: "manual" | "focus_auto_ack";
     attachments?: Array<{ absolutePath: string; displayName: string; mimeType?: string; kind?: string }>;
     /**
      * App-level threading. Forwarded to sendService.enqueueSend → persisted
@@ -153,6 +154,7 @@ export function createSendQueue(deps: SendQueueDeps): SendQueueService {
     threadId: string;
     text: string;
     clientSendId: string;
+    source?: "manual" | "focus_auto_ack";
     // attachments must mirror the public interface above so iMessage
     // voice notes / photos survive the type contract — without this the
     // field is silently dropped by any future refactor that relies on

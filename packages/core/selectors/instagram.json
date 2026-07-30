@@ -1,11 +1,21 @@
 {
   "inbox_url": "https://www.instagram.com/direct/inbox/",
-  "thread_list": "div[role='button'][tabindex='0']:has(span[title]):has(abbr[aria-label])",
-  "thread_item": "div[role='button'][tabindex='0']:has(span[title]):has(abbr[aria-label])",
+  "thread_list": "main:has(a[href^='/direct/t/'])",
+  "thread_item": "a[href^='/direct/t/']",
+  "thread_link": "a[href^='/direct/t/']",
+  "thread_identity": "img[alt], span[title]",
   "unread_badge": "span[data-visualcompletion='ignore'] div",
+  "conversation_header": "main header h1, main header h2, main header span[title]",
   "message_container": "main, div[role='main']",
   "message_item": "div[role='row'], div[role='listitem']",
   "message_text": "div[dir='auto']",
-  "composer_input": "div[contenteditable='true'][role='textbox'], div[contenteditable='true']",
-  "send_button": "button[type='submit'], button[aria-label*='Send'], div[role='button'][aria-label*='Send']"
+  "message_id": "[data-message-id], [data-id]",
+  "message_direction_in": "[data-direction='incoming'], [aria-label*='Received']",
+  "message_direction_out": "[data-direction='outgoing'], [aria-label*='Sent']",
+  "message_timestamp": "time[datetime]",
+  "message_sender": "[data-sender-name], h3, h4, strong",
+  "message_media": "video, audio, img[alt]:not([alt=''])",
+  "message_deleted": "[aria-label*='deleted'], [aria-label*='unavailable']",
+  "composer_input": "div[contenteditable='true'][role='textbox']",
+  "send_button": "button[type='submit']:not([disabled]), button[aria-label='Send']:not([disabled]), div[role='button'][aria-label='Send'][aria-disabled='false']"
 }

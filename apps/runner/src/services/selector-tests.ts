@@ -7,7 +7,11 @@ import type { SessionManager } from "./session-manager";
 
 interface SelectorTestServiceDeps {
   resolveSelectors: (platform: PlatformName) => Promise<SelectorRegistry>;
-  sessionManager: SessionManager;
+  sessionManager?: SessionManager;
+  resolvePlatformSession?: (platform: PlatformName) => {
+    sessionManager: SessionManager;
+    personKey: string;
+  };
   screenshotDir: string;
   domDumpDir: string;
 }
@@ -23,14 +27,37 @@ const baseSelectorKeys: Array<keyof SelectorRegistry> = [
   "send_button"
 ];
 const linkedInSelectorKeys: Array<keyof SelectorRegistry> = [...baseSelectorKeys, "thread_snippet"];
+const instagramSelectorKeys: Array<keyof SelectorRegistry> = [
+  ...baseSelectorKeys,
+  "thread_link",
+  "thread_identity",
+  "conversation_header",
+  "message_id",
+  "message_direction_in",
+  "message_direction_out",
+  "message_timestamp",
+  "message_sender",
+  "message_media",
+  "message_deleted"
+];
 const selectorMinCounts: Partial<Record<keyof SelectorRegistry, number>> = {
-  unread_badge: 0
+  unread_badge: 0,
+  message_media: 0,
+  message_deleted: 0
 };
 const defaultSelectorMinCount = 1;
 
 const conversationKeys = new Set<keyof SelectorRegistry>([
   "message_item",
   "message_text",
+  "message_id",
+  "message_direction_in",
+  "message_direction_out",
+  "message_timestamp",
+  "message_sender",
+  "message_media",
+  "message_deleted",
+  "conversation_header",
   "composer_input",
   "send_button"
 ]);
@@ -48,8 +75,18 @@ const linkedInShellProbeSelectors = [
 
 type SelectorTestStage = "connect" | "navigate" | "auth_check" | "open_thread" | "evaluate" | "screenshot" | "persist";
 
+export function shouldCaptureSelectorArtifacts(platform: PlatformName): boolean {
+  return platform !== "INSTAGRAM";
+}
+
+export function shouldProbeSelectorTestConversation(platform: PlatformName): boolean {
+  return platform !== "INSTAGRAM";
+}
+
 function selectorKeysForPlatform(platform: PlatformName): Array<keyof SelectorRegistry> {
-  return platform === "LINKEDIN" ? linkedInSelectorKeys : baseSelectorKeys;
+  if (platform === "LINKEDIN") return linkedInSelectorKeys;
+  if (platform === "INSTAGRAM") return instagramSelectorKeys;
+  return baseSelectorKeys;
 }
 
 function selectorMinCountForKey(key: keyof SelectorRegistry): number {
@@ -230,6 +267,9 @@ async function captureSelectorFailureArtifacts(input: {
   screenshotDir: string;
   domDumpDir: string;
 }): Promise<{ screenshot?: string; domDump?: string }> {
+  if (!shouldCaptureSelectorArtifacts(input.platform)) {
+    return {};
+  }
   const page = input.page;
   if (!page) {
     return {};
@@ -336,9 +376,13 @@ async function detectAuthRequired(page: Page, platform: PlatformName): Promise<{
       return { required: true, reason: "login_required" };
     }
 
-    const usernameCount = await page.locator("input[name='username']").count().catch(() => 0);
-    const passwordCount = await page.locator("input[name='password']").count().catch(() => 0);
-    if (usernameCount > 0 || passwordCount > 0) {
+    const loginFieldCount = await page
+      .locator(
+        "input[name='email'], input[name='pass'], input[name='username'], input[name='password']"
+      )
+      .count()
+      .catch(() => 0);
+    if (loginFieldCount > 0) {
       return { required: true, reason: "login_required" };
     }
   }
@@ -369,6 +413,22 @@ async function detectAuthRequired(page: Page, platform: PlatformName): Promise<{
 }
 
 export function createSelectorTestService(deps: SelectorTestServiceDeps) {
+  if (!deps.sessionManager && !deps.resolvePlatformSession) {
+    throw new Error("Selector test service requires a session manager");
+  }
+
+  function sessionRoute(platform: PlatformName): {
+    sessionManager: SessionManager;
+    personKey: string;
+  } {
+    return (
+      deps.resolvePlatformSession?.(platform) ?? {
+        sessionManager: deps.sessionManager!,
+        personKey: "default"
+      }
+    );
+  }
+
   async function run(input: {
     platform: PlatformName;
     key?: keyof SelectorRegistry;
@@ -448,9 +508,10 @@ export function createSelectorTestService(deps: SelectorTestServiceDeps) {
     };
 
     page = await runStage("connect", async () => {
-      return deps.sessionManager.getManagedPage({
+      const route = sessionRoute(input.platform);
+      return route.sessionManager.getManagedPage({
         platform: input.platform,
-        personKey: "default"
+        personKey: route.personKey
       });
     });
 
@@ -619,6 +680,10 @@ export function createSelectorTestService(deps: SelectorTestServiceDeps) {
         }
       }
 
+      if (!shouldProbeSelectorTestConversation(input.platform)) {
+        return;
+      }
+
       if (needsReplyCapableProbe && !replyCapableConversationFound && !adaptiveProbeAttempted) {
         adaptiveProbeAttempted = true;
         const foundReplyCapableConversation = await probeReplyCapableConversation();
@@ -738,36 +803,47 @@ export function createSelectorTestService(deps: SelectorTestServiceDeps) {
 
       const screenshotStarted = Date.now();
       const screenshotStartedAt = new Date(screenshotStarted).toISOString();
-      try {
-        screenshotFile = `${input.platform.toLowerCase()}-${key}-${Date.now()}.png`;
-        await page.screenshot({ path: join(deps.screenshotDir, screenshotFile), fullPage: true });
-
+      if (!shouldCaptureSelectorArtifacts(input.platform)) {
         receipts.push({
           stage: "screenshot",
           status: "OK",
           startedAt: screenshotStartedAt,
           completedAt: new Date().toISOString(),
           durationMs: Date.now() - screenshotStarted,
-          details: {
-            key,
-            selector,
-            screenshotFile
-          }
+          details: { key, omitted: "private_content_policy" }
         });
-      } catch (error) {
-        screenshotFile = undefined;
-        receipts.push({
-          stage: "screenshot",
-          status: "FAIL",
-          startedAt: screenshotStartedAt,
-          completedAt: new Date().toISOString(),
-          durationMs: Date.now() - screenshotStarted,
-          details: {
-            key,
-            selector,
-            ...summarizeError(error)
-          }
-        });
+      } else {
+        try {
+          screenshotFile = `${input.platform.toLowerCase()}-${key}-${Date.now()}.png`;
+          await page.screenshot({ path: join(deps.screenshotDir, screenshotFile), fullPage: true });
+
+          receipts.push({
+            stage: "screenshot",
+            status: "OK",
+            startedAt: screenshotStartedAt,
+            completedAt: new Date().toISOString(),
+            durationMs: Date.now() - screenshotStarted,
+            details: {
+              key,
+              selector,
+              screenshotFile
+            }
+          });
+        } catch (error) {
+          screenshotFile = undefined;
+          receipts.push({
+            stage: "screenshot",
+            status: "FAIL",
+            startedAt: screenshotStartedAt,
+            completedAt: new Date().toISOString(),
+            durationMs: Date.now() - screenshotStarted,
+            details: {
+              key,
+              selector,
+              ...summarizeError(error)
+            }
+          });
+        }
       }
 
       results.push({
