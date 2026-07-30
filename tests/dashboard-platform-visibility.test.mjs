@@ -14,8 +14,12 @@ test("settings and setup only render platforms returned by the runner", async ()
 
   assert.match(settings, /imessageRow \? \(/);
   assert.match(settings, /googleMessagesRow \? \(/);
+  assert.match(settings, /instagramRow \? \(/);
   assert.match(settings, /whatsappRow \? \(/);
   assert.match(settings, /available\.has\("IMESSAGE"\)/);
   assert.match(settings, /available\.has\("GOOGLE_MESSAGES"\)/);
+  assert.match(settings, /available\.has\("INSTAGRAM"\)/);
+  assert.match(setup, /\["INSTAGRAM", "Instagram"/);
+  assert.match(setup, /selected\.includes\("INSTAGRAM"\)/);
   assert.match(setup, /filter\(\(\[platform\]\) => available\.includes\(platform\)\)/);
 });

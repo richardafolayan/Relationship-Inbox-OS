@@ -158,6 +158,18 @@ test("all-personal covers a saved iMessage contact but not the same unstarred Li
   assert.equal(focusAutoAckCoverage({ ...saved, platform: "LINKEDIN" }, base), false);
 });
 
+test("Instagram is never covered by automatic focus acknowledgements", async () => {
+  const instagram = harness({
+    threadValue: thread({ platform: "INSTAGRAM" })
+  });
+
+  assert.deepEqual(await instagram.service.handleThread("thread-1"), {
+    type: "skipped",
+    reason: "not_covered"
+  });
+  assert.equal(instagram.queued.length, 0);
+});
+
 test("messages before the window and threads already replied to are skipped", async () => {
   const before = harness({
     threadValue: thread({ latestInboundAt: new Date("2026-07-22T11:00:00.000Z") })

@@ -232,6 +232,34 @@ test("launchPersistentContextForPlatform uses installed Chrome with an isolated 
   assert.equal(calls[0]?.options.channel, "chrome");
 });
 
+test("launchPersistentContextForPlatform uses installed Chrome for an isolated Instagram profile", async () => {
+  const calls = [];
+  await launchPersistentContextForPlatform({
+    platform: "INSTAGRAM",
+    launchPersistentContext: async (userDataDir, options) => {
+      calls.push({ userDataDir, options });
+      return { kind: "instagram-isolated-context" };
+    },
+    isolatedProfileDir: "/tmp/isolated/instagram",
+    headless: false,
+    hostPlatform: "darwin",
+    preferInstalledChrome: true,
+    browserProfile: {
+      mode: "isolated",
+      fallbackBehavior: "allow_isolated",
+      personalProfileSyncMode: "smart",
+      personalProfileMirrorRoot: "/tmp/mirror",
+      personalChromeUserDataDir: "/tmp/personal",
+      personalChromeProfileDirectory: "Default",
+      personalChromeProfileName: "Default",
+      personalChromeProfileResolutionStrategy: "directory_exact"
+    }
+  });
+
+  assert.equal(calls[0]?.options.channel, "chrome");
+  assert.equal(calls[0]?.userDataDir, "/tmp/isolated/instagram");
+});
+
 test("launchPersistentContextForPlatform uses mirrored target directory for personal launch", async () => {
   const calls = [];
   const context = { kind: "personal-context" };
