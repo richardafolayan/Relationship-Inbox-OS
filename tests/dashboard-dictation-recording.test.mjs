@@ -105,9 +105,10 @@ test("insecure iPhone access truthfully disables Tovi dictation", () => {
   assert.match(threadPage, /voiceNoteFileInputRef\.current\?\.click/);
 });
 
-test("Safari dictation records one complete MP4 instead of timesliced fragments", () => {
-  assert.match(captureSource, /recorder\.start\(\);/);
-  assert.doesNotMatch(captureSource, /recorder\.start\(250\)/);
+test("dictation persists short recorder slices and watches for capture stalls", () => {
+  assert.match(captureSource, /recorder\.start\(DICTATION_TIMESLICE_MS\)/);
+  assert.match(captureSource, /chunkStore\.append/);
+  assert.match(captureSource, /DICTATION_STALL_MS/);
 });
 
 test("microphone permission failures explain how to recover", () => {
