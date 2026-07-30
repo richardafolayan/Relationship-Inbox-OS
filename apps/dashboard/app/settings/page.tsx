@@ -186,7 +186,12 @@ const PLATFORM_DISPLAY: Record<PlatformCard["platform"], string> = {
   GOOGLE_MESSAGES: "Google Messages"
 };
 
-type PlatformActionEndpoint = "open-browser" | "connect" | "scan" | "full-disk-access";
+type PlatformActionEndpoint =
+  | "open-browser"
+  | "connect"
+  | "scan"
+  | "reset-session"
+  | "full-disk-access";
 
 interface FullDiskAccessResponse {
   message?: string;
@@ -266,6 +271,8 @@ export default function SettingsPage() {
   const [uiScale, setUiScale] = useState<UiScale>("normal");
   const [platformRows, setPlatformRows] = useState<PlatformCard[]>([]);
   const [platformBusy, setPlatformBusy] = useState<PlatformCard["platform"] | null>(null);
+  const [platformBusyEndpoint, setPlatformBusyEndpoint] =
+    useState<PlatformActionEndpoint | null>(null);
   const [platformError, setPlatformError] = useState("");
   const [platformNotice, setPlatformNotice] = useState("");
 
@@ -454,6 +461,7 @@ export default function SettingsPage() {
   ) => {
     if (platformBusy) return;
     setPlatformBusy(platform);
+    setPlatformBusyEndpoint(endpoint);
     setPlatformError("");
     setPlatformNotice("");
     try {
@@ -472,11 +480,28 @@ export default function SettingsPage() {
         await apiPost(path, { platform });
       }
       await refreshPlatforms();
+      if (endpoint !== "full-disk-access") {
+        const display = PLATFORM_DISPLAY[platform];
+        setPlatformNotice(
+          endpoint === "scan"
+            ? `${display} scan queued.`
+            : endpoint === "open-browser"
+              ? `${display} opened.`
+              : endpoint === "reset-session"
+                ? `${display} disconnected.`
+                : `${display} connected.`
+        );
+      }
       setSavedAt(Date.now());
     } catch {
-      setPlatformError(`Couldn't update ${PLATFORM_DISPLAY[platform]}. Is the runner online?`);
+      setPlatformError(
+        platform === "INSTAGRAM" && (endpoint === "connect" || endpoint === "open-browser")
+          ? "Finish signing in or any Instagram security check in Chrome, then try Connect again."
+          : `Couldn't update ${PLATFORM_DISPLAY[platform]}. Is the runner online?`
+      );
     } finally {
       setPlatformBusy(null);
+      setPlatformBusyEndpoint(null);
     }
   };
 
@@ -584,6 +609,7 @@ export default function SettingsPage() {
               busy={platformBusy}
               error={platformError}
               notice={platformNotice}
+              busyEndpoint={platformBusyEndpoint}
               onAction={platformAction}
               host={host}
               phoneLayout={phoneLayout}
@@ -895,6 +921,7 @@ function SettingsTabs({
 function PlatformSettingsSection({
   rows,
   busy,
+  busyEndpoint,
   error,
   notice,
   onAction,
@@ -903,6 +930,7 @@ function PlatformSettingsSection({
 }: {
   rows: PlatformCard[];
   busy: PlatformCard["platform"] | null;
+  busyEndpoint: PlatformActionEndpoint | null;
   error: string;
   notice: string;
   onAction: (platform: PlatformCard["platform"], endpoint: PlatformActionEndpoint) => void;
@@ -914,13 +942,23 @@ function PlatformSettingsSection({
   const imessageRow = findRow("IMESSAGE");
   const googleMessagesRow = findRow("GOOGLE_MESSAGES");
   const linkedinRow = findRow("LINKEDIN");
+  const instagramRow = findRow("INSTAGRAM");
   const whatsappRow = findRow("WHATSAPP");
   const imessageNeedsFullDiskAccess = isIMessageFullDiskAccessProblem(imessageRow);
   const googleMessagesPrimary = googleMessagesRow
     ? resolvePlatformPrimaryAction(googleMessagesRow)
     : "connect";
   const linkedinPrimary = linkedinRow ? resolvePlatformPrimaryAction(linkedinRow) : "connect";
+  const instagramPrimary = instagramRow
+    ? resolvePlatformPrimaryAction(instagramRow)
+    : "connect";
   const remoteDisabled = phoneLayout && !host.remoteAvailable;
+  const resetInstagram = () => {
+    if (!window.confirm("Reset the Instagram session? You'll need to sign in again.")) {
+      return;
+    }
+    onAction("INSTAGRAM", "reset-session");
+  };
 
   return (
     <section className="mb-9">
@@ -1077,6 +1115,71 @@ function PlatformSettingsSection({
             }
           />
         ) : null}
+        {instagramRow ? (
+          <PlatformSetupCard
+            row={instagramRow}
+            title="Instagram"
+            body={`Uses standard Chrome with a dedicated profile. Sign in yourself and complete any security check when ${APP_NAME} opens it. Messages only send when you press Send.`}
+            primaryLabel={
+              instagramPrimary === "scan"
+                ? "Scan now"
+                : instagramPrimary === "reconnect"
+                  ? "Reconnect"
+                  : "Connect Instagram"
+            }
+            busyLabel={
+              busyEndpoint === "reset-session"
+                ? "Resetting..."
+                : instagramPrimary === "scan"
+                  ? "Scanning..."
+                  : "Connecting..."
+            }
+            deviceLabel={
+              phoneLayout
+                ? host.actionLabel(instagramPrimary === "scan" ? "scan" : "connect")
+                : undefined
+            }
+            remoteDisabled={remoteDisabled}
+            offlineExplanation={host.offlineExplanation}
+            busy={busy === "INSTAGRAM"}
+            onPrimary={() =>
+              onAction("INSTAGRAM", instagramPrimary === "scan" ? "scan" : "connect")
+            }
+            moreItems={
+              instagramPrimary === "scan"
+                ? [
+                    {
+                      label: "Open Instagram",
+                      onSelect: () => onAction("INSTAGRAM", "open-browser")
+                    },
+                    {
+                      label: "Reconnect",
+                      onSelect: () => onAction("INSTAGRAM", "connect")
+                    },
+                    {
+                      label: "Reset Instagram",
+                      danger: true,
+                      onSelect: resetInstagram
+                    }
+                  ]
+                : [
+                    {
+                      label: "Open Instagram",
+                      onSelect: () => onAction("INSTAGRAM", "open-browser")
+                    },
+                    {
+                      label: "Scan now",
+                      onSelect: () => onAction("INSTAGRAM", "scan")
+                    },
+                    {
+                      label: "Reset Instagram",
+                      danger: true,
+                      onSelect: resetInstagram
+                    }
+                  ]
+            }
+          />
+        ) : null}
         {whatsappRow ? (
           <div className="rounded-[8px] bg-paper-2/45 px-4 py-4">
             <WhatsAppConnect
@@ -1099,6 +1202,7 @@ function PlatformSetupCard({
   title,
   body,
   primaryLabel,
+  busyLabel = "Working...",
   deviceLabel,
   hideProcessPath = false,
   remoteDisabled = false,
@@ -1111,6 +1215,7 @@ function PlatformSetupCard({
   title: string;
   body: string;
   primaryLabel: string;
+  busyLabel?: string;
   deviceLabel?: string;
   hideProcessPath?: boolean;
   remoteDisabled?: boolean;
@@ -1192,7 +1297,7 @@ function PlatformSetupCard({
           title={remoteDisabled ? offlineExplanation : undefined}
           className="inline-flex min-h-[40px] items-center rounded-pill bg-ink px-4 py-[8px] text-[12.5px] font-medium text-paper hover:bg-ink-2 disabled:cursor-not-allowed disabled:opacity-50"
         >
-          {busy ? "Working..." : primaryLabel}
+          {busy ? busyLabel : primaryLabel}
         </button>
         {secondaryItems.length > 0 && supported ? (
           <Menu
@@ -1327,6 +1432,17 @@ function SetupGuideSection({
               "Install Chrome if needed.",
               "Sign into LinkedIn in a normal Chrome window.",
               "Use Connect LinkedIn, complete security checks yourself, then run a scan."
+            ]}
+          />
+        ) : null}
+        {available.has("INSTAGRAM") ? (
+          <SetupGuideDrawer
+            name="Connect Instagram"
+            desc="Use standard Chrome with the dedicated Instagram profile. The app never asks for your password."
+            steps={[
+              "Open Platforms, then Connect Instagram.",
+              "Sign in yourself in the Chrome window and complete any security checks.",
+              "Leave the window open until the app says connected, then run a scan."
             ]}
           />
         ) : null}
