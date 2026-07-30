@@ -85,7 +85,7 @@ export function appVersion(root = ROOT) {
 // The DMG is the local/dev artifact (pilots install via the zip installer), so
 // it stamps channel "dev" by default: the installed app then checks the
 // rolling GitHub `dev` prerelease feed and can self-update in place on every
-// push to v1/strip-back-pr1 (issue #843). Pass --channel student to build a
+// push to develop (issue #843). Pass --channel student to build a
 // pilot-flavoured bundle with no baked feed.
 export const DMG_CHANNELS = ["dev", "student"];
 export const DEFAULT_DMG_CHANNEL = "dev";

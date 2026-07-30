@@ -7,8 +7,7 @@
 Publishing happens **automatically when code reaches `main`**: every push to
 `main` builds the student release, overwrites the two files in Dropbox (so the
 pilots' feed URL stays the same), verifies the live feed end to end, and fails
-loudly if anything is wrong. `develop`, `staging`, `v1/strip-back-pr1`, and
-feature branches **never** publish, so work can land there freely; reaching
+loudly if anything is wrong. `develop`, `staging`, and feature branches **never** publish, so work can land there freely; reaching
 `main` is the "ship to pilots" gate. The run publishes the **exact commit**
 that reached `main`.
 
@@ -162,8 +161,7 @@ good build over it straight away.)
 ## Why `main` is the publish gate
 
 Publishing to pilots is a deliberate "yes, ship this" decision, and that
-decision is "merge to `main`". Work flows freely through `develop`, `staging`,
-`v1/strip-back-pr1`, and feature branches without ever touching pilots; only
+decision is "merge to `main`". Work flows freely through `develop`, `staging`, and feature branches without ever touching pilots; only
 reaching `main` publishes. Manual `workflow_dispatch` stays as an escape hatch
 for re-publishing or custom notes. Because pilots only see a build when the
 version changes, a no-op re-publish (same version) is harmless.
@@ -201,7 +199,7 @@ publish a new build. Leave all three blank and in-app feedback is simply off
 
 ## The dev channel (Richard's own install)
 
-Separate from the pilot channel above, every push to `v1/strip-back-pr1`
+Separate from the pilot channel above, every push to `develop`
 publishes a **dev-channel** build via `.github/workflows/publish-dev-release.yml`.
 It needs no Dropbox setup and no secrets: the repo is public, so the build is
 uploaded to a rolling GitHub prerelease tagged `dev`, and the asset URLs are
