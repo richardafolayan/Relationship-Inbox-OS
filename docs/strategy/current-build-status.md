@@ -78,14 +78,35 @@ historical evidence rather than a guarantee about the newest `develop` tip:
 Re-run relevant checks against the current feature branch and merged `develop`
 before claiming those guarantees still hold.
 
+## Active Instagram feature verification
+
+- Branch: `feat/instagram-platform`.
+- Base: `origin/develop` at
+  `23f01593e921150acf8fe6d362d02b5942daac7d`.
+- Instagram targeted tests pass, including availability, factory/session
+  routing, auth and verification gates, stable identities, deduplication,
+  direction, timestamp fallback, placeholders, exact-thread opening, manual
+  send restrictions, verified submission, and privacy-safe diagnostics.
+- Lint, type checking, documentation checks, Prisma generation, and the
+  production build pass.
+- The complete local suite reached 2,763 passing tests out of 2,765. Its two
+  parallel-load failures were existing Electron dictation and LinkedIn
+  deep-scroll timing cases; both pass when rerun together in isolation.
+- Setup, Settings, and Platforms were inspected at desktop and phone widths.
+- A live connection launch used installed standard Chrome with the dedicated
+  Instagram profile. Login and verification-required states, profile reset,
+  and the disconnected state were observed.
+- No authenticated inbox or approved safe conversation was available, so live
+  conversation discovery, extraction, rescan deduplication, session
+  persistence after a completed login, and sending remain unverified. No
+  message was sent.
+
 ## Next
 
 - Keep feature work based on `develop` and PRs targeted to `develop`.
-- Complete the explicitly authorised Instagram implementation without reviving
-  the retired v1 branch.
-- Verify setup, connection, scanning, exact-thread opening, deduplication,
-  user-triggered sending, reconnect/reset, UI states, tests, and browser smoke
-  behaviour.
+- Review the Instagram feature pull request and its clean-machine checks.
+- Complete the remaining live Instagram checks only with an approved safe
+  account and conversation.
 - Promote `develop` to `main` only when the full combined branch is release-ready.
 - Continue preparing and running the 3-5 student pilot.
 

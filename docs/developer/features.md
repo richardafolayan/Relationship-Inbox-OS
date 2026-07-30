@@ -96,7 +96,8 @@ Status terms:
 | --- | --- | --- |
 | LinkedIn | Primary | Personal or isolated Chrome session, scan, verified send, reactions, outbound edit, open thread/profile, selector diagnostics. |
 | iMessage/SMS | Primary on macOS | Local database read, watcher, Contacts names, media read, text/file send through Messages automation, delivery/retraction reconciliation. |
-| Instagram and TikTok | Beta | Shared selector-driven browser adapter supports connect, scan, text send, and open. External UI changes can degrade it. |
+| Instagram | Pilot beta | Standard installed Chrome with a dedicated persistent profile, manual login and security checks, stable thread URLs, unread/recent scan, safe media placeholders, exact-thread open, and user-triggered text send confirmed by a new outgoing bubble. Selector changes fail closed without content-bearing diagnostics. |
+| TikTok | Scaffold only | Retains the generic shared beta adapter. This Instagram work does not expand or verify TikTok support. |
 | WhatsApp | Opt-in | QR-backed `whatsapp-web.js`, local session, inbound callback, groups, rich media, polls, voting, and outbound rate guard. Disabled by default. |
 | Health endpoint and doctor | Operator | `/health` provides live queue/platform status; `npm run doctor` checks host, runtime, paths, services, Messages, Chrome, AI, and transcription without mutation. |
 | Audit activity and receipts | Operator | SQLite audit log and hidden `/logs` page show control, scan, send, selector, and system outcomes. Optional run traces add file artifacts. |

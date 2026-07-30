@@ -77,7 +77,7 @@ fallback, racing, and voice controls.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `BROWSER_PROFILE_MODE` | `isolated` in code / `personal` in example | Shared browser mode for LinkedIn and beta adapters. |
+| `BROWSER_PROFILE_MODE` | `isolated` in code / `personal` in example | Browser mode for managed LinkedIn and Google Messages sessions. Instagram always uses its own profile. |
 | `PERSONAL_PROFILE_FALLBACK` | `error` in personal mode | `error` or `allow_isolated` when mirror launch cannot proceed. |
 | `PERSONAL_PROFILE_SYNC_MODE` | `smart` | `smart`, `always`, or `never` mirror refresh. |
 | `PERSONAL_PROFILE_MIRROR_ROOT` | `data/profiles` | Mirror storage root. |
@@ -85,8 +85,9 @@ fallback, racing, and voice controls.
 | `PERSONAL_CHROME_PROFILE_DIRECTORY` | `Person 1` | Directory or display name resolved through Chrome Local State. |
 | `PERSONAL_CHROME_PROFILE_NAME` | empty | Optional profile-name hint. |
 | `CONNECT_OPERATION_TIMEOUT_MS` | `25000` | Isolated connection timeout. |
-| `CONNECT_OPERATION_TIMEOUT_MS_PERSONAL` | `90000` | Personal mirror connection timeout. |
+| `CONNECT_OPERATION_TIMEOUT_MS_PERSONAL` | `90000` | Personal mirror and interactive Instagram connection timeout. |
 | `RIOS_VISIBLE_BROWSER_LAUNCH` | off | Debug option to bring a runner browser launch visibly onscreen. |
+| `INSTAGRAM_ENABLED` | `false` | Enables the dedicated Instagram profile, setup choice, scans, and manual text sending. |
 | `IMESSAGE_ENABLED` | off in code, true in pilot example on macOS | Gates iMessage boot probe, watcher, attachments, and related services. |
 | `IMESSAGE_DB_PATH` | `~/Library/Messages/chat.db` | Messages database override. |
 | `IMESSAGE_WATCH_DEBOUNCE_MS` | `500` | Filesystem event debounce. |
@@ -98,6 +99,15 @@ fallback, racing, and voice controls.
 
 WhatsApp's own Puppeteer is always headless in the verified adapter and does
 not read the persisted dashboard headless toggle.
+
+Instagram is opt-in and keeps its session in `data/profiles/instagram`. It
+always requests the installed stable Chrome channel with that dedicated
+profile, independently of `BROWSER_PROFILE_MODE`, and never falls back to
+Chrome for Testing.
+Missing, blank, false, or unrecognised `INSTAGRAM_ENABLED` values leave it
+disabled. Login and any Instagram security check happen manually in the
+runner-controlled browser. Resetting Instagram clears only that profile and
+does not sign LinkedIn or Google Messages out.
 
 ## LinkedIn scanning and enrichment
 
