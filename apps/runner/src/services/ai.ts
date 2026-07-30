@@ -24,6 +24,7 @@ import type {
   ConversationStartersOutput,
   ConversationStarterCitedField,
   DictationMessageFormatting,
+  DictationVoiceProfile,
   FriendshipSummaryOutput,
   InferredReplyStyle,
   MessageForPrompt,
@@ -59,7 +60,8 @@ import { preserveAmbiguousEvidence } from "./ai-ambiguity";
 import {
   buildDictationMessageFormatterPrompt,
   DICTATION_MESSAGE_FORMATTER_SYSTEM_PROMPT,
-  parseDictationMessageFormatting
+  parseDictationMessageFormatting,
+  resolveDictationFormatterTarget
 } from "./dictation-message-formatter";
 
 // Re-exported so existing tests + callers continue to import from ai.ts.
@@ -1924,7 +1926,7 @@ export function createAiService(
     fallback: T,
     parser: (value: unknown) => T,
     systemContent?: string,
-    opts?: { forceProviderId?: AiProvider }
+    opts?: { forceProviderId?: AiProvider; forceModel?: string }
   ): Promise<{ result: T; source: AiSource | null }> {
     const { provider: activeId, model: activeModel } = await resolveActive();
     const forcedProviderId = opts?.forceProviderId ?? options.forceProviderId;
@@ -1943,7 +1945,7 @@ export function createAiService(
       // race partner.
       const isActiveProvider = providerId === activeId;
       const isFirstInChain = i === 0;
-      const model = isActiveProvider ? activeModel : resolveProvider(providerId).model;
+      const model = opts?.forceModel ?? (isActiveProvider ? activeModel : resolveProvider(providerId).model);
       const outcome = await tryProvider(providerId, model, prompt, parser, systemContent);
       if (outcome.ok) {
         const entry = providerRegistry[providerId];
@@ -2849,14 +2851,51 @@ ${recentExchange || "(no recent messages)"}`;
   async function formatDictationMessages(input: {
     transcript: string;
     contactName?: string | null;
+    operatorProfile?: DictationVoiceProfile | null;
+    recentInbound?: {
+      messageCount: number;
+      totalCharacters: number;
+      averageCharacters: number;
+    } | null;
   }): Promise<DictationMessageFormatting | null> {
-    const { result } = await modelJson(
+    const settings = await settingsStore.getSettings();
+    if (settings.aiEnabled === false) return null;
+    const target = resolveDictationFormatterTarget({
+      settings,
+      defaults: {
+        aiProvider: runnerConfig.aiProvider,
+        openAiModel: runnerConfig.openAiModel,
+        glmModel: runnerConfig.glmModel,
+        geminiModel: runnerConfig.geminiModel
+      }
+    });
+    const { result, source } = await modelJson(
       buildDictationMessageFormatterPrompt(input),
       null,
       parseDictationMessageFormatting,
-      DICTATION_MESSAGE_FORMATTER_SYSTEM_PROMPT
+      DICTATION_MESSAGE_FORMATTER_SYSTEM_PROMPT,
+      {
+        forceProviderId: target.providerId,
+        forceModel: target.model
+      }
     );
-    return result;
+    if (!result || !source?.providerId || !source.providerDisplayName) {
+      console.warn(
+        `[dictation-format] provider=${target.providerId} model=${target.model} did not produce a usable result`
+      );
+      return null;
+    }
+    console.info(
+      `[dictation-format] provider=${source.providerId} model=${target.model} messages=${result.messages.length}`
+    );
+    return {
+      ...result,
+      source: {
+        providerId: source.providerId,
+        providerDisplayName: source.providerDisplayName,
+        model: target.model
+      }
+    };
   }
 
   /**

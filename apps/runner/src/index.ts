@@ -43,6 +43,10 @@ import {
   prismaMessageToPrompt
 } from "./services/ai";
 import {
+  loadDictationMessageExamples,
+  rememberDictationMessageExample
+} from "./services/dictation-message-examples";
+import {
   isInferredStyleEmpty,
   selectStyleSampleTexts,
   STYLE_ANALYSIS_MIN_SAMPLE
@@ -4968,23 +4972,81 @@ app.post("/control/thread/:threadId/format-dictation-messages", asyncRoute(async
     .object({ transcript: z.string().trim().min(1).max(12_000) })
     .strict()
     .parse(req.body);
-  const thread = await prisma.thread.findUnique({
-    where: { id: threadId },
-    select: { person: { select: { displayName: true } } }
-  });
+  const [thread, operatorProfile, acceptedExamples] = await Promise.all([
+    prisma.thread.findUnique({
+      where: { id: threadId },
+      select: {
+        person: { select: { displayName: true } },
+        messages: {
+          orderBy: { timestamp: "desc" },
+          take: 8,
+          select: { direction: true, text: true }
+        }
+      }
+    }),
+    settingsStore.getOperatorProfile(),
+    loadDictationMessageExamples()
+  ]);
   if (!thread) {
     res.status(404).json({ error: "Thread not found" });
     return;
   }
+  const nearbyInbound = thread.messages.filter((message) => message.direction === "IN");
+  const totalInboundCharacters = nearbyInbound.reduce(
+    (total, message) => total + message.text.trim().length,
+    0
+  );
   const result = await aiService.formatDictationMessages({
     transcript,
-    contactName: thread.person.displayName
+    contactName: thread.person.displayName,
+    operatorProfile: {
+      displayName: operatorProfile.displayName,
+      about: operatorProfile.about,
+      preferredStyle: operatorProfile.preferredStyle,
+      commonPhrases: operatorProfile.commonPhrases,
+      avoidedPhrases: operatorProfile.avoidedPhrases,
+      acceptedExamples
+    },
+    recentInbound: {
+      messageCount: nearbyInbound.length,
+      totalCharacters: totalInboundCharacters,
+      averageCharacters: nearbyInbound.length
+        ? Math.round(totalInboundCharacters / nearbyInbound.length)
+        : 0
+    }
   });
   if (!result) {
     res.status(502).json({ error: "Could not turn this transcript into messages. Your transcript is still safe." });
     return;
   }
   res.json(result);
+}));
+
+app.post("/control/thread/:threadId/dictation-message-example", asyncRoute(async (req, res) => {
+  const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
+  if (
+    await checkPresenterGuard(res, settingsStore, {
+      threadId,
+      action: "save a dictation voice example",
+      kind: "thread-mutation"
+    })
+  ) return;
+  const { messages } = z
+    .object({
+      messages: z.array(z.string().trim().min(1).max(4_000)).min(1).max(40)
+    })
+    .strict()
+    .parse(req.body);
+  const thread = await prisma.thread.findUnique({
+    where: { id: threadId },
+    select: { id: true }
+  });
+  if (!thread) {
+    res.status(404).json({ error: "Thread not found" });
+    return;
+  }
+  await rememberDictationMessageExample(messages);
+  res.json({ ok: true });
 }));
 
 // Issue #331. Reads the operator's in-flight draft against the thread's
