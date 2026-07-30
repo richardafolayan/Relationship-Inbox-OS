@@ -4,20 +4,15 @@ on:
   workflow_dispatch: {}
   push:
     branches:
+      - develop
       - main
 
 permissions:
   contents: write
 
 concurrency:
-  group: publish-free-macos-release
+  group: publish-free-macos-release-${{ github.ref_name }}
   cancel-in-progress: false
-
-env:
-  RELEASE_TAG: macos-free-dev
-  ZIP_NAME: Tovi-macos-arm64-latest.zip
-  DMG_NAME: Tovi-macos-arm64-latest.dmg
-  FEED_NAME: latest-macos.json
 
 jobs:
   publish:
@@ -25,12 +20,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ github.sha }}
           fetch-depth: 0
 
       - uses: actions/setup-node@v4
         with:
           node-version: 22.x
           cache: npm
+
+      - name: Resolve the branch release track
+        run: |
+          node scripts/resolve-macos-release-channel.mjs \
+            --branch "$GITHUB_REF_NAME" \
+            --github-env "$GITHUB_ENV"
 
       - name: Require the free signing secrets
         env:
@@ -88,17 +90,33 @@ jobs:
           RIOS_CODESIGN_IDENTITY: ${{ secrets.RIOS_FREE_MACOS_IDENTITY }}
           RIOS_CODESIGN_CERTIFICATE: ${{ runner.temp }}/tovi-signing.cer
         run: |
+          if [ -n "$RELEASE_VERSION_OVERRIDE" ]; then
+            RELEASE_VERSION_OVERRIDE="$RELEASE_VERSION_OVERRIDE" node --input-type=module <<'NODE'
+          import { readFileSync, writeFileSync } from "node:fs";
+          const path = "package.json";
+          const pkg = JSON.parse(readFileSync(path, "utf8"));
+          pkg.version = process.env.RELEASE_VERSION_OVERRIDE;
+          writeFileSync(path, JSON.stringify(pkg, null, 2) + "\n");
+          NODE
+          fi
+
           UPDATE_BASE="https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}"
           npm run build:macos-dmg -- \
-            --channel dev \
+            --channel "$BUILD_CHANNEL" \
             --update-feed-url "$UPDATE_BASE/$FEED_NAME" \
             --update-url "$UPDATE_BASE/$ZIP_NAME" \
-            --note "Free signed macOS dev build ${GITHUB_SHA}."
+            --note "Free signed macOS ${RELEASE_TRACK} build ${GITHUB_SHA}."
+
+          node scripts/finalize-macos-release-feed.mjs \
+            --path release-dist/macos/latest-macos.json \
+            --track "$RELEASE_TRACK"
+
           test "$(uname -m)" = "arm64"
           codesign --verify --deep --strict --verbose=2 release-dist/macos/Tovi.app
           # -r- writes the designated requirement to stdout; display metadata goes to stderr.
           codesign -d -r- release-dist/macos/Tovi.app > "$RUNNER_TEMP/requirement.txt" 2>/dev/null
           grep -F 'certificate leaf = H' "$RUNNER_TEMP/requirement.txt"
+          grep -F 'identifier "com.relationshipinboxos.desktop"' "$RUNNER_TEMP/requirement.txt"
           SHIPIT="release-dist/macos/Tovi.app/Contents/Frameworks/Squirrel.framework/Versions/A/Resources/ShipIt"
           codesign -d --entitlements :- "$SHIPIT" > "$RUNNER_TEMP/shipit-entitlements.plist" 2>/dev/null
           test "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.cs.disable-library-validation' "$RUNNER_TEMP/shipit-entitlements.plist")" = "true"
@@ -108,17 +126,25 @@ jobs:
           codesign -d --entitlements :- "release-dist/macos/Tovi.app/Contents/Frameworks/Electron Helper (Renderer).app" > "$RENDERER_ENTITLEMENTS" 2>/dev/null
           test "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.device.audio-input' "$APP_ENTITLEMENTS")" = "true"
           test "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.device.audio-input' "$RENDERER_ENTITLEMENTS")" = "true"
+
           mv release-dist/macos/Tovi-*-mac.zip "release-dist/macos/$ZIP_NAME"
           mv release-dist/macos/Tovi-*.dmg "release-dist/macos/$DMG_NAME"
+          mv release-dist/macos/latest-macos.json "release-dist/macos/$FEED_NAME"
 
       - name: Publish zip first and feed last
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release create "$RELEASE_TAG" --prerelease --target "$GITHUB_SHA" \
-              --title "Free signed macOS dev channel" \
-              --notes "Self-signed macOS build. Initial installation requires one trust step."
+            if [ "$RELEASE_IS_PRERELEASE" = "true" ]; then
+              gh release create "$RELEASE_TAG" --prerelease --target "$GITHUB_SHA" \
+                --title "$RELEASE_TITLE" \
+                --notes "Self-signed macOS build. Initial installation requires one trust step."
+            else
+              gh release create "$RELEASE_TAG" --target "$GITHUB_SHA" \
+                --title "$RELEASE_TITLE" \
+                --notes "Self-signed macOS pilot build. Initial installation requires one trust step."
+            fi
           fi
           gh release upload "$RELEASE_TAG" --clobber \
             "release-dist/macos/$ZIP_NAME" \
@@ -128,10 +154,10 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: free-signed-macos-release
+          name: free-signed-macos-${{ env.RELEASE_TRACK }}
           path: |
             release-dist/macos/*.dmg
             release-dist/macos/*.zip
-            release-dist/macos/latest-macos.json
+            release-dist/macos/*.json
           if-no-files-found: warn
           retention-days: 14
