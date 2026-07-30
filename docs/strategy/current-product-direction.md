@@ -1,14 +1,16 @@
 # Current Product Direction
 
-_Living document. Keep this updated as the direction changes. Last updated: 2026-07-22._
+_Living document. Keep this updated as the direction changes. Last updated: 2026-07-30._
 
 Tovi is being prepared for a small 3-5 student pilot. It should
 feel like a calm place to reply properly, not a dashboard, CRM, marketing tool,
 analytics console, or AI ghostwriter.
 
-The current pilot baseline is `v1/strip-back-pr1`. The Windows parity track is
-`feat/google-messages-windows-parity`. Google Messages is an explicit pilot
-requirement for Android phone users, overriding the earlier Phase 0 exclusion.
+The current development and integration baseline is `develop`. Normal feature
+work branches from `develop` and returns through a pull request. `main` is the
+stable production and release branch, promoted separately from `develop` only
+when the combined development state is ready to ship. The retired
+`v1/strip-back-pr1` branch must not be recreated or targeted.
 
 ## Product principles
 
@@ -38,7 +40,8 @@ Do not build any of these unless explicitly instructed:
 
 ## Build next
 
-Stop adding core product features. Prepare and run the 3-5 student pilot.
+Stop adding core product features unless Richard explicitly authorises an
+exception. Prepare and run the 3-5 student pilot.
 
 Only build small operational improvements that reduce pilot friction, for
 example direct feedback submission, install/readme clarity, or setup hardening.
