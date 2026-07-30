@@ -569,7 +569,7 @@ export default function ThreadPage() {
   );
   const [siblings, setSiblings] = useState<InboxRow[]>([]);
   const [siblingPlatform, setSiblingPlatform] = useState<
-    "all" | "LINKEDIN" | "IMESSAGE" | "WHATSAPP" | "GOOGLE_MESSAGES"
+    "all" | "LINKEDIN" | "INSTAGRAM" | "IMESSAGE" | "WHATSAPP" | "GOOGLE_MESSAGES"
   >("all");
   const [platforms, setPlatforms] = useState<PlatformCard[]>([]);
   const [logs, setLogs] = useState<AuditLogRow[]>([]);
@@ -4045,7 +4045,13 @@ export default function ThreadPage() {
                   value={siblingPlatform}
                   onChange={(e) =>
                     setSiblingPlatform(
-                      e.target.value as "all" | "LINKEDIN" | "IMESSAGE" | "WHATSAPP" | "GOOGLE_MESSAGES"
+                      e.target.value as
+                        | "all"
+                        | "LINKEDIN"
+                        | "INSTAGRAM"
+                        | "IMESSAGE"
+                        | "WHATSAPP"
+                        | "GOOGLE_MESSAGES"
                     )
                   }
                   className="rounded border border-hairline bg-paper px-1 py-[2px] font-mono text-[10px] uppercase tracking-[0.06em] text-ink-2 focus:border-ink-3 focus:outline-none"

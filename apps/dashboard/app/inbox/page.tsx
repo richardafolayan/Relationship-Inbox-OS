@@ -52,7 +52,13 @@ import {
 
 type RiskTab = "all" | "overdue" | "waiting" | "fresh" | "scheduled";
 type CategoryFilter = "any" | "genuine" | "outreach" | "needs_reply" | "waiting_on_them";
-type PlatformFilter = "all" | "LINKEDIN" | "IMESSAGE" | "WHATSAPP" | "GOOGLE_MESSAGES";
+type PlatformFilter =
+  | "all"
+  | "LINKEDIN"
+  | "INSTAGRAM"
+  | "IMESSAGE"
+  | "WHATSAPP"
+  | "GOOGLE_MESSAGES";
 type PriorityGroupFilter = "all" | string;
 type SortMode = "oldest" | "recent" | "name";
 

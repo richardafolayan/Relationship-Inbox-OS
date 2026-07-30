@@ -3,7 +3,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { Info, MoreVertical } from "lucide-react";
 import { apiGet, apiPost, runAction } from "@/lib/api";
-import { runActionWithFeedback } from "@/lib/feedback";
 import type { AuditLogRow, PlatformCard } from "@/lib/types";
 import { formatRelative } from "@/lib/time";
 import { Button } from "@/components/ui/button";
@@ -162,6 +161,10 @@ function PlatformCardView({
   setActionError,
   refresh
 }: PlatformCardViewProps) {
+  const [actionState, setActionState] = useState<{
+    phase: "running" | "success" | "error";
+    label: string;
+  } | null>(null);
   const display = PLATFORM_DISPLAY[row.platform];
   const glyph = PLATFORM_GLYPH[row.platform];
   const supported = row.supported !== false;
@@ -209,32 +212,49 @@ function PlatformCardView({
         ? "Reconnect"
         : "Connect";
 
+  const runInline = async (
+    work: Promise<unknown>,
+    pending: string,
+    success: string,
+    failure: string
+  ) => {
+    setActionError(null);
+    setActionState({ phase: "running", label: pending });
+    try {
+      await work;
+      await refresh();
+      setActionState({ phase: "success", label: success });
+    } catch {
+      setActionState({ phase: "error", label: failure });
+      setActionError(failure);
+    }
+  };
+
   const openBrowser = () =>
-    runActionWithFeedback(
+    void runInline(
       apiPost("/runner/control/platform/open-browser", { platform: row.platform }),
-      {
-        pending: `Opening ${display}…`,
-        success: `${display} opened`,
-        failure: `Couldn't open ${display}`,
-        setError: setActionError
-      }
+      `Opening ${display}...`,
+      `${display} opened`,
+      `Couldn't open ${display}`
     );
 
   const runConnect = () =>
-    runAction(
+    void runInline(
       apiPost("/runner/control/platform/connect", { platform: row.platform }),
-      setActionError,
-      refresh
+      `Connecting ${display}...`,
+      `${display} connected`,
+      row.platform === "INSTAGRAM"
+        ? "Finish signing in or any Instagram security check in Chrome, then try Connect again"
+        : `Couldn't connect ${display}`
     );
 
   const runScan = () =>
-    runActionWithFeedback(apiPost("/runner/control/scan", { platform: row.platform }), {
-      pending: `Scanning ${display}…`,
-      success: `${display} scan queued`,
-      failure: `${display} scan failed`,
-      setError: setActionError,
-      onDone: () => refresh()
-    });
+    void runInline(
+      apiPost("/runner/control/scan", { platform: row.platform }),
+      `Scanning ${display}...`,
+      `${display} scan queued`,
+      `${display} scan failed`
+    );
 
   const runPrimary = () => {
     if (!supported) return;
@@ -246,7 +266,7 @@ function PlatformCardView({
       runConnect();
       return;
     }
-    openBrowser();
+    runConnect();
   };
 
   const moreItems: MenuItem[] = [
@@ -291,10 +311,11 @@ function PlatformCardView({
         ) {
           return;
         }
-        runAction(
+        void runInline(
           apiPost("/runner/control/platform/reset-session", { platform: row.platform }),
-          setActionError,
-          refresh
+          `Resetting ${display}...`,
+          `${display} disconnected`,
+          `Couldn't reset ${display}`
         );
       }
     }
@@ -332,6 +353,17 @@ function PlatformCardView({
               selectors {passes}/{totalSelectors}
             </p>
           ) : null}
+          {actionState ? (
+            <p
+              className={cn(
+                "m-0 mt-1 font-mono text-[11px]",
+                actionState.phase === "error" ? "text-ink-2" : "text-risk-fresh"
+              )}
+              aria-live="polite"
+            >
+              {actionState.label}
+            </p>
+          ) : null}
         </div>
         <div className="col-span-2 flex items-center justify-end gap-2 sm:col-auto sm:justify-start">
           <button
@@ -349,8 +381,9 @@ function PlatformCardView({
               variant="quiet"
               className="min-h-[40px] px-[14px] py-[8px] text-[12.5px]"
               onClick={runPrimary}
+              disabled={actionState?.phase === "running"}
             >
-              {primaryLabel}
+              {actionState?.phase === "running" ? actionState.label : primaryLabel}
             </Button>
           ) : (
             <Button variant="quiet" className="min-h-[40px] px-[14px] py-[8px] text-[12.5px]" disabled>
