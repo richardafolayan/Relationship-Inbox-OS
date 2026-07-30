@@ -43,6 +43,7 @@ interface SessionManagerDependencies {
   profileRootDir: string;
   browserProfile: BrowserProfileConfig;
   getSettings: () => Promise<AppSettings>;
+  preferInstalledChrome?: boolean;
   launchPersistentContext?: (userDataDir: string, options: {
     headless: boolean;
     viewport: null;
@@ -589,6 +590,7 @@ export class SessionManager {
       headless: settings.headless,
       browserProfile: this.deps.browserProfile,
       args: launchArgs,
+      preferInstalledChrome: this.deps.preferInstalledChrome,
       onConnectStep: this.deps.onConnectStep,
       onPersonalProfileFallback: this.deps.onPersonalProfileFallback
     });

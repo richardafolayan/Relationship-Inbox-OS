@@ -142,9 +142,19 @@ export interface SelectorRegistry {
   thread_item: string;
   unread_badge: string;
   thread_snippet?: string;
+  thread_link?: string;
+  thread_identity?: string;
+  conversation_header?: string;
   message_container: string;
   message_item: string;
   message_text: string;
+  message_id?: string;
+  message_direction_in?: string;
+  message_direction_out?: string;
+  message_timestamp?: string;
+  message_sender?: string;
+  message_media?: string;
+  message_deleted?: string;
   composer_input: string;
   send_button: string;
 }

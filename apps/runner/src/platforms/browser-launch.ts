@@ -72,6 +72,7 @@ export async function launchPersistentContextForPlatform(input: {
   browserProfile: BrowserProfileConfig;
   args?: string[];
   hostPlatform?: NodeJS.Platform;
+  preferInstalledChrome?: boolean;
   preparePersonalProfileMirror?: (input: PersonalProfileMirrorInput) => Promise<PersonalProfileMirrorResult>;
   onConnectStep?: (info: ConnectStepInfo) => Promise<void> | void;
   onPersonalProfileFallback?: (info: PersonalProfileFallbackInfo) => Promise<void> | void;
@@ -89,7 +90,9 @@ export async function launchPersistentContextForPlatform(input: {
       "--disable-blink-features=AutomationControlled",
       "--disable-infobars"
     ],
-    ...((input.hostPlatform ?? process.platform) === "win32" ? { channel: "chrome" } : {})
+    ...((input.hostPlatform ?? process.platform) === "win32" || input.preferInstalledChrome
+      ? { channel: "chrome" }
+      : {})
   };
 
   if (input.browserProfile.mode !== "personal") {

@@ -17,6 +17,13 @@ export interface PollVoteRecord {
 export interface PlatformAdapter {
   platform: PlatformName;
   ensureConnected(): Promise<void>;
+  /**
+   * Optional operator-initiated connection flow. Browser adapters can keep
+   * the visible session open while the operator completes login or 2FA.
+   * Background scans continue to use ensureConnected so they fail quickly
+   * when authentication is required.
+   */
+  connectInteractively?(): Promise<void>;
   scanUnreadThreads(): Promise<ThreadStub[]>;
   fetchRecentThreads(limit: number): Promise<ThreadStub[]>;
   /**
