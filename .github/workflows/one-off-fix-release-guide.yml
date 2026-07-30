@@ -1,0 +1,82 @@
+name: One-off fix release guide
+
+on:
+  push:
+    branches: ["fix/release-guide-main-promotion"]
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/release-guide-main-promotion
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Correct the release source branch
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          replacements = {
+              "docs/pilot/releasing-student-builds.md": [
+                  (
+                      '1. You merge verified development work into `develop`.\n'
+                      '2. You build a clean release zip plus a small `latest.json` file.\n'
+                      '3. You upload both to a Dropbox folder.\n'
+                      '4. Pilots already have a one update URL. Their app checks `latest.json`,\n'
+                      '   sees a newer version, and offers to update.',
+                      '1. You promote the release-ready `develop` state into `main` through a reviewed pull request.\n'
+                      '2. You check out the exact promoted `main` commit.\n'
+                      '3. You build a clean release zip plus a small `latest.json` file.\n'
+                      '4. You upload both to a Dropbox folder.\n'
+                      '5. Pilots already have one update URL. Their app checks `latest.json`,\n'
+                      '   sees a newer version, and offers to update.'
+                  ),
+                  (
+                      'From a clean checkout of the branch you are releasing (normally\n`develop`):',
+                      'From a clean checkout of the exact release commit promoted to `main`:'
+                  )
+              ],
+              "scripts/build-student-release.mjs": [
+                  (
+                      '// Run it from a checkout of the branch you want to release (normally\n'
+                      '// develop):',
+                      '// Run it from a checkout of the exact release commit promoted to main:'
+                  )
+              ]
+          }
+
+          for file_name, pairs in replacements.items():
+              path = Path(file_name)
+              text = path.read_text()
+              for old, new in pairs:
+                  count = text.count(old)
+                  if count != 1:
+                      raise SystemExit(f"Expected one match in {file_name}, found {count}: {old!r}")
+                  text = text.replace(old, new)
+              path.write_text(text)
+          PY
+
+      - name: Verify release guidance
+        run: |
+          grep -F 'promote the release-ready `develop` state into `main`' docs/pilot/releasing-student-builds.md
+          grep -F 'exact release commit promoted to `main`' docs/pilot/releasing-student-builds.md
+          grep -F 'exact release commit promoted to main' scripts/build-student-release.mjs
+          ! grep -F 'branch you are releasing (normally' docs/pilot/releasing-student-builds.md
+
+      - name: Commit correction
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/pilot/releasing-student-builds.md scripts/build-student-release.mjs
+          git diff --cached --check
+          git commit -m "fix: require main promotion before student release"
+          git push origin HEAD:fix/release-guide-main-promotion
