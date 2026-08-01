@@ -147,9 +147,12 @@ Source:
   Instagram security checks stay manual. A user-triggered Connect action may
   press the single saved-profile `Continue` button when the page also shows
   `Use another profile`; background scans never press login controls.
-- Thread identity comes only from a canonical `/direct/t/<id>/` URL or a
-  verified stable attribute. Display names, previews, and row order never
-  become identifiers.
+- Thread identity comes only from a canonical `/direct/t/<id>/` URL, a
+  verified stable attribute, or Instagram's URL-facing Direct thread record
+  ID captured from its own GraphQL response. The current control-only inbox
+  rows do not expose thread links, so response capture is the primary live
+  discovery path. Internal 39-digit message thread IDs, display names,
+  previews, and row order never become identifiers.
 - Browser-side parsing installs the same runtime compatibility shim used by
   LinkedIn before evaluating row or message normalizers.
 - Ambiguous message direction fails the fetch. Exact source datetimes are
@@ -158,6 +161,9 @@ Source:
 - Opening and sending navigate to the exact thread ID and verify the resulting
   URL. Sending is manual text only and succeeds only after a new matching
   outbound bubble appears.
+- Revealing Instagram foregrounds the installed stable Chrome bundle used by
+  its session. It does not launch Patchright's Chrome for Testing as a second
+  window.
 - Instagram selector tests report structural counts without screenshots or DOM
   dumps so private conversations do not enter diagnostic artifacts.
 

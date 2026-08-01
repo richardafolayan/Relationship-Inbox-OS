@@ -1,6 +1,6 @@
 # Current Build Status
 
-_Volatile. Update this whenever branches, commits, or build state change. Last updated: 2026-07-30._
+_Volatile. Update this whenever branches, commits, or build state change. Last updated: 2026-08-01._
 
 This file holds fast-moving build state on purpose. Branch tips and commit
 hashes go stale quickly, so verify live refs before starting work rather than
@@ -101,28 +101,31 @@ before claiming those guarantees still hold.
   existing local Keychain cookie bridge injects the encrypted Instagram
   session cookies without logging their values.
 - Manual login completed successfully and the runner reported the authenticated
-  Instagram inbox as connected. The earlier verification-required state,
-  profile reset, and disconnected state were also observed.
-- The approved safe conversation was opened by its canonical thread ID
-  and the runner verified the URL/header pair. The current Instagram inbox DOM
-  renders conversation rows as JavaScript controls without stable thread
-  links, so full live unread/recent discovery remains a controlled selector
-  failure rather than falling back to row position.
+  Instagram inbox as connected across runner restarts. The earlier
+  verification-required state, profile reset, and disconnected state were also
+  observed. Connect and reveal now foreground the installed Chrome session
+  without launching a second Chrome for Testing window.
+- The current Instagram inbox DOM renders conversation rows as JavaScript
+  controls without stable thread links. The adapter now captures Instagram's
+  URL-facing Direct thread IDs from its own GraphQL responses and rejects the
+  separate internal message thread IDs. A live full scan discovered 30 stable
+  conversations, opened one exact canonical thread, and completed with zero
+  thread failures. It did not use row position or a first-row fallback.
 - One approved harmless send reached the exact accessible Send control and the
   operator visually confirmed the outgoing message in the intended thread.
   The current message-row selector did not observe the bubble before timeout,
   so an exact-text, outgoing-layout verification fallback is implemented and
   covered by browser-adapter tests but has not been exercised by a second live
-  send. Live extraction and rescan deduplication remain unverified against the
-  current DOM.
+  send. A later read-only live scan extracted one outgoing message, and an
+  identical rescan kept the stored message count at one, verifying live
+  deduplication without sending another message.
 
 ## Next
 
 - Keep feature work based on `develop` and PRs targeted to `develop`.
 - Review the Instagram feature pull request and its clean-machine checks.
-- Resolve the current control-only inbox rows and message containers, then
-  repeat the remaining live Instagram checks without retrying an uncertain
-  send.
+- Review the live Instagram response-capture path and remaining inbound/media
+  extraction coverage without retrying an uncertain send.
 - Promote `develop` to `main` only when the full combined branch is release-ready.
 - Continue preparing and running the 3-5 student pilot.
 
