@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   canonicalInstagramThreadUrl,
   classifyInstagramAuthRequirement,
+  classifyInstagramThreadCollectionError,
   findNewVerifiedInstagramOutgoing,
   instagramAuthRequiredFromSignals,
   instagramThreadIdFromUrl,
@@ -18,6 +19,33 @@ import {
   shouldCaptureSelectorArtifacts,
   shouldProbeSelectorTestConversation
 } from "../apps/runner/dist/services/selector-tests.js";
+
+function withBrowserRuntime(page) {
+  const context = {
+    addInitScript: async () => {
+      if (page.failInitScript) {
+        throw new Error("init script unavailable");
+      }
+    }
+  };
+  const evaluate = page.evaluate;
+  const runtimePage = {
+    ...page,
+    context: () => context,
+    addScriptTag: async () => undefined,
+    evaluate: async (...args) => {
+      if (typeof args[0] === "string") {
+        page.onRuntimeShim?.();
+        return undefined;
+      }
+      return evaluate(...args);
+    }
+  };
+  runtimePage.$ = async () => ({
+    evaluate: runtimePage.evaluate
+  });
+  return runtimePage;
+}
 
 test("Instagram authentication detection covers current and legacy login forms", () => {
   assert.equal(
@@ -75,7 +103,7 @@ test("interactive login waits for an authenticated inbox while background checks
     send_button: "[aria-label='Send']"
   };
   let broughtToFront = 0;
-  const authenticatedPage = {
+  const authenticatedPage = withBrowserRuntime({
     goto: async () => undefined,
     bringToFront: async () => {
       broughtToFront += 1;
@@ -84,7 +112,7 @@ test("interactive login waits for an authenticated inbox while background checks
     waitForTimeout: async () => undefined,
     evaluate: async () => ({ fieldNames: [], bodyText: "" }),
     url: () => "https://www.instagram.com/direct/inbox/"
-  };
+  });
   const authenticated = new InstagramAdapter({
     screenshotDir: "/tmp",
     domDumpDir: "/tmp",
@@ -97,8 +125,34 @@ test("interactive login waits for an authenticated inbox while background checks
   await authenticated.connectInteractively();
   assert.equal(broughtToFront, 1);
 
+  let currentDocumentShimRuns = 0;
+  const runtimeProtectedPage = withBrowserRuntime({
+    ...authenticatedPage,
+    evaluate: authenticatedPage.evaluate,
+    failInitScript: true,
+    onRuntimeShim: () => {
+      currentDocumentShimRuns += 1;
+    }
+  });
+  const runtimeProtected = new InstagramAdapter({
+    screenshotDir: "/tmp",
+    domDumpDir: "/tmp",
+    resolveSelectors: async () => selectors,
+    sessionManager: { getManagedPage: async () => runtimeProtectedPage },
+    personKey: "instagram",
+    connectTimeoutMs: 50
+  });
+
+  await runtimeProtected.connectInteractively();
+  assert.equal(currentDocumentShimRuns, 1);
+
   const loginPage = {
     ...authenticatedPage,
+    getByText: () => ({
+      count: async () => 0,
+      first: () => ({ waitFor: async () => undefined }),
+      isEnabled: async () => false
+    }),
     waitForFunction: async () => {
       throw new Error("not ready");
     },
@@ -122,6 +176,38 @@ test("interactive login waits for an authenticated inbox while background checks
     () => unauthenticated.connectInteractively(),
     (error) => error?.kind === "AUTH_REQUIRED"
   );
+
+  let savedProfileUrl = "https://www.instagram.com/accounts/login/";
+  let continueClicks = 0;
+  const savedProfilePage = {
+    ...authenticatedPage,
+    url: () => savedProfileUrl,
+    getByText: (text) =>
+      text === "Continue"
+        ? {
+            count: async () => 1,
+            isEnabled: async () => true,
+            click: async () => {
+              continueClicks += 1;
+              savedProfileUrl = "https://www.instagram.com/direct/inbox/";
+            }
+          }
+        : {
+            count: async () => 1,
+            first: () => ({ waitFor: async () => undefined })
+          }
+  };
+  const savedProfile = new InstagramAdapter({
+    screenshotDir: "/tmp",
+    domDumpDir: "/tmp",
+    resolveSelectors: async () => selectors,
+    sessionManager: { getManagedPage: async () => savedProfilePage },
+    personKey: "instagram",
+    connectTimeoutMs: 50
+  });
+
+  await savedProfile.connectInteractively();
+  assert.equal(continueClicks, 1);
 
   const verificationPage = {
     ...authenticatedPage,
@@ -220,11 +306,27 @@ test("thread rows never fall back to mutable text or row position", () => {
   );
 });
 
+test("thread collection failures are classified without private page content", () => {
+  assert.equal(
+    classifyInstagramThreadCollectionError(new ReferenceError("__name is not defined")),
+    "browser_runtime_shim_missing"
+  );
+  assert.equal(
+    classifyInstagramThreadCollectionError(new Error("Execution context was destroyed")),
+    "browser_context_changed"
+  );
+  assert.equal(
+    classifyInstagramThreadCollectionError(new Error("Private conversation text")),
+    "thread_collection_failed"
+  );
+});
+
 test("selector parsing failures are classified without inventing thread identity", async () => {
   let evaluateCalls = 0;
-  const page = {
+  const page = withBrowserRuntime({
     goto: async () => undefined,
     waitForTimeout: async () => undefined,
+    waitForSelector: async () => undefined,
     waitForFunction: async () => undefined,
     url: () => "https://www.instagram.com/direct/inbox/",
     evaluate: async () => {
@@ -233,7 +335,7 @@ test("selector parsing failures are classified without inventing thread identity
         ? { fieldNames: [], bodyText: "" }
         : [{ displayName: "Mutable name", preview: "Private preview", unread: true }];
     }
-  };
+  });
   const adapter = new InstagramAdapter({
     screenshotDir: "/tmp",
     domDumpDir: "/tmp",
@@ -289,7 +391,7 @@ test("opening Instagram uses the exact thread URL and rejects identity mismatche
       getAttribute: async () => header,
       textContent: async () => header
     };
-    return {
+    return withBrowserRuntime({
       goto: async (url) => {
         navigatedTo = url;
       },
@@ -300,7 +402,7 @@ test("opening Instagram uses the exact thread URL and rejects identity mismatche
       url: () => openedUrl,
       locator: () => ({ first: () => headerLocator }),
       navigatedTo: () => navigatedTo
-    };
+    });
   };
 
   const exactPage = makePage({
@@ -484,10 +586,11 @@ test("Instagram refuses to send through a disabled composer", async () => {
   };
   const disabledComposer = {
     count: async () => 1,
+    isVisible: async () => true,
     isEnabled: async () => false,
     getAttribute: async () => null
   };
-  const page = {
+  const page = withBrowserRuntime({
     goto: async () => undefined,
     waitForTimeout: async () => undefined,
     waitForSelector: async () => undefined,
@@ -495,12 +598,13 @@ test("Instagram refuses to send through a disabled composer", async () => {
       evaluateCalls += 1;
       return evaluateCalls === 1 ? { fieldNames: [], bodyText: "" } : [];
     },
+    getByText: () => ({ count: async () => 0 }),
     url: () => "https://www.instagram.com/direct/t/safe-thread/",
     locator: (selector) =>
       selector === "header h1"
         ? { first: () => headerLocator }
         : disabledComposer
-  };
+  });
   const adapter = new InstagramAdapter({
     screenshotDir: "/tmp",
     domDumpDir: "/tmp",
@@ -533,7 +637,7 @@ test("Instagram refuses to send through a disabled composer", async () => {
   );
 });
 
-function sendTestHarness({ observeSubmittedBubble }) {
+function sendTestHarness({ observeSubmittedBubble, observeExactLayoutBubble = false }) {
   let currentUrl = "about:blank";
   let submitted = false;
   let typed = "";
@@ -544,19 +648,31 @@ function sendTestHarness({ observeSubmittedBubble }) {
   };
   const composer = {
     count: async () => 1,
+    isVisible: async () => true,
     isEnabled: async () => true,
     getAttribute: async () => null,
-    click: async () => undefined
+    click: async () => undefined,
+    first: () => composer,
+    boundingBox: async () => ({ x: 100, y: 900, width: 700, height: 40 }),
+    textContent: async () => typed,
+    fill: async (value) => {
+      typed = value;
+    }
   };
   const sendButton = {
     count: async () => 1,
+    isVisible: async () => true,
     isEnabled: async () => true,
     getAttribute: async () => null,
     click: async () => {
       submitted = true;
     }
   };
-  const page = {
+  const messageContainer = {
+    first: () => messageContainer,
+    boundingBox: async () => ({ x: 0, y: 100, width: 1_000, height: 800 })
+  };
+  const page = withBrowserRuntime({
     goto: async (url) => {
       currentUrl = url;
     },
@@ -572,9 +688,15 @@ function sendTestHarness({ observeSubmittedBubble }) {
         ? [{ nativeId: "new-out", direction: "OUT", text: typed }]
         : [];
     },
+    getByText: () => ({
+      count: async () => (submitted && observeExactLayoutBubble ? 1 : 0),
+      isVisible: async () => true,
+      boundingBox: async () => ({ x: 700, y: 700, width: 200, height: 40 })
+    }),
     url: () => currentUrl,
     locator: (selector) => {
       if (selector === "header h1") return { first: () => headerLocator };
+      if (selector === "main") return messageContainer;
       if (selector === "[contenteditable='true']") return composer;
       if (selector === "[aria-label='Send']") return sendButton;
       throw new Error(`Unexpected locator ${selector}`);
@@ -587,7 +709,7 @@ function sendTestHarness({ observeSubmittedBubble }) {
     mouse: {
       move: async () => undefined
     }
-  };
+  });
   const adapter = new InstagramAdapter({
     screenshotDir: "/tmp",
     domDumpDir: "/tmp",
@@ -637,6 +759,21 @@ test("Instagram adapter fails when submission produces no outgoing bubble", asyn
       error?.details?.reason === "submitted_message_not_observed"
   );
   assert.equal(harness.wasSubmitted(), true);
+});
+
+test("Instagram adapter verifies an exact new outgoing layout bubble", async () => {
+  const harness = sendTestHarness({
+    observeSubmittedBubble: false,
+    observeExactLayoutBubble: true
+  });
+  const receipt = await harness.adapter.sendMessage(
+    { platformThreadId: "safe-thread", displayName: "Safe thread" },
+    "x"
+  );
+
+  assert.equal(harness.wasSubmitted(), true);
+  assert.equal(receipt.verifiedBy, "bubble_detected");
+  assert.equal(receipt.raw?.verification, "exact_outgoing_layout_bubble");
 });
 
 test("Instagram selector diagnostics never capture content-bearing artifacts", () => {

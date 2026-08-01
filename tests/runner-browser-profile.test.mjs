@@ -96,6 +96,15 @@ test("resolveBrowserProfileConfig accepts explicit personal-profile env values",
   assert.equal(config.personalChromeProfileResolutionStrategy, "local_state_missing");
 });
 
+test("resolveBrowserProfileConfig accepts seed-once profile sync mode", () => {
+  const config = resolveBrowserProfileConfig({
+    HOME: "/Users/someone",
+    PERSONAL_PROFILE_SYNC_MODE: "once"
+  });
+
+  assert.equal(config.personalProfileSyncMode, "once");
+});
+
 test("resolveBrowserProfileConfig defaults to strict fallback in personal mode", () => {
   const config = resolveBrowserProfileConfig({
     HOME: "/Users/richard",
@@ -445,6 +454,27 @@ test("preparePersonalProfileMirror smart mode syncs when source marker is newer"
 
   assert.equal(second.syncPerformed, true);
   assert.equal(second.syncReason, "source_newer");
+});
+
+test("preparePersonalProfileMirror once mode preserves an existing app-owned profile", async () => {
+  const sourceUserDataDir = uniqueTempDir("profile-once-source");
+  const targetUserDataDir = uniqueTempDir("profile-once-target");
+  mkdirSync(join(sourceUserDataDir, "Default"), { recursive: true });
+  mkdirSync(join(targetUserDataDir, "Default"), { recursive: true });
+  writeFileSync(join(sourceUserDataDir, "Local State"), "{}");
+  writeFileSync(join(targetUserDataDir, "Local State"), "{}");
+  writeFileSync(join(sourceUserDataDir, "Default", "Preferences"), "source");
+  writeFileSync(join(targetUserDataDir, "Default", "Preferences"), "signed-in-app-copy");
+
+  const result = await preparePersonalProfileMirror({
+    sourceUserDataDir,
+    targetUserDataDir,
+    profileDirectory: "Default",
+    syncMode: "once"
+  });
+
+  assert.equal(result.syncPerformed, false);
+  assert.equal(result.syncReason, "sync_disabled");
 });
 
 test("preparePersonalProfileMirror excludes lock and cache artifacts", async () => {

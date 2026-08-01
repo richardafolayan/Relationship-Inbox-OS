@@ -1,4 +1,4 @@
-import type { Locator, Page } from "patchright";
+import type { BrowserContext, Locator, Page } from "patchright";
 import {
   stableHash,
   type NormalizedMessage,
@@ -14,6 +14,9 @@ import { humanClick, humanType, readingPause } from "./humanize";
 
 const INSTAGRAM_ORIGIN = "https://www.instagram.com";
 const THREAD_PATH = /^\/direct\/t\/([^/?#]+)\/?$/i;
+const INSTAGRAM_RUNTIME_SHIM_SOURCE =
+  "globalThis.__name=globalThis.__name||function(n){return n;};" +
+  "globalThis.__defProp=globalThis.__defProp||Object.defineProperty;";
 
 export interface InstagramAdapterDependencies extends Omit<BetaAdapterDependencies, "platform"> {
   connectTimeoutMs: number;
@@ -49,6 +52,26 @@ export class InstagramParsingError extends Error {
     super(`Instagram parsing failed: ${reason}`);
     this.name = "InstagramParsingError";
   }
+}
+
+export function classifyInstagramThreadCollectionError(error: unknown): string {
+  if (error instanceof InstagramParsingError) {
+    return error.reason;
+  }
+  const message = error instanceof Error ? error.message : "";
+  if (/__name is not defined/i.test(message)) {
+    return "browser_runtime_shim_missing";
+  }
+  if (/execution context was destroyed|target page, context or browser has been closed/i.test(message)) {
+    return "browser_context_changed";
+  }
+  if (/not a valid selector|failed to execute ['\"]querySelector/i.test(message)) {
+    return "thread_selector_invalid";
+  }
+  if (/could not serialize|unexpected value/i.test(message)) {
+    return "thread_snapshot_serialization_failed";
+  }
+  return "thread_collection_failed";
 }
 
 export type InstagramAuthRequirement = "login_required" | "verification_required";
@@ -315,6 +338,7 @@ export class InstagramAdapter extends BetaAdapter {
   private readonly instagramDeps: InstagramAdapterDependencies;
   private cookieBridge: ChromeCookieBridge | null = null;
   private lastCookieSyncAt: number | null = null;
+  private readonly shimmedContexts = new WeakSet<BrowserContext>();
 
   constructor(deps: InstagramAdapterDependencies) {
     super({ ...deps, platform: "INSTAGRAM" });
@@ -323,8 +347,30 @@ export class InstagramAdapter extends BetaAdapter {
 
   protected override async getPage(): Promise<Page> {
     const page = await super.getPage();
+    await this.ensurePageRuntimeShims(page);
     await this.ensureSessionCookies(page);
     return page;
+  }
+
+  private async ensurePageRuntimeShims(page: Page): Promise<void> {
+    const context = page.context();
+    if (!this.shimmedContexts.has(context)) {
+      try {
+        await context.addInitScript(INSTAGRAM_RUNTIME_SHIM_SOURCE);
+        this.shimmedContexts.add(context);
+      } catch {
+        // The current document is patched separately below.
+      }
+    }
+    try {
+      await page.evaluate(INSTAGRAM_RUNTIME_SHIM_SOURCE);
+    } catch {
+      try {
+        await page.addScriptTag({ content: INSTAGRAM_RUNTIME_SHIM_SOURCE });
+      } catch {
+        return;
+      }
+    }
   }
 
   private async ensureSessionCookies(page: Page): Promise<void> {
@@ -446,6 +492,30 @@ export class InstagramAdapter extends BetaAdapter {
     await this.waitForAuthenticatedInbox(page, selectors, timeoutMs);
   }
 
+  private async continueSavedProfileLogin(page: Page): Promise<boolean> {
+    if (!/\/accounts\/login/i.test(page.url())) {
+      return false;
+    }
+
+    const otherProfile = page.getByText("Use another profile", { exact: true });
+    await otherProfile
+      .first()
+      .waitFor({ state: "visible", timeout: 5_000 })
+      .catch(() => undefined);
+    const continueControl = page.getByText("Continue", { exact: true });
+    if (
+      (await otherProfile.count()) < 1 ||
+      (await continueControl.count()) !== 1 ||
+      !(await continueControl.isEnabled())
+    ) {
+      return false;
+    }
+
+    await continueControl.click({ timeout: 10_000 });
+    await page.waitForTimeout(500);
+    return true;
+  }
+
   async ensureConnected(): Promise<void> {
     const selectors = await this.deps.resolveSelectors();
     const page = await this.getPage();
@@ -477,6 +547,7 @@ export class InstagramAdapter extends BetaAdapter {
         timeout: navigationTimeoutMs
       });
       await page.bringToFront();
+      await this.continueSavedProfileLogin(page);
       const authWaitTimeoutMs = Math.max(
         1,
         this.instagramDeps.connectTimeoutMs - (Date.now() - startedAt) - reserveMs
@@ -497,8 +568,13 @@ export class InstagramAdapter extends BetaAdapter {
     selectors: SelectorRegistry,
     limit: number
   ): Promise<InstagramThreadSnapshot[]> {
-    return page.evaluate(
-      ({ selectors, limit }) => {
+    const documentRoot = await page.$("body");
+    if (!documentRoot) {
+      throw new InstagramParsingError("instagram_document_missing");
+    }
+    await documentRoot.evaluate(INSTAGRAM_RUNTIME_SHIM_SOURCE);
+    return documentRoot.evaluate(
+      (root, { selectors, limit }) => {
         const clean = (value: string | null | undefined): string =>
           (value ?? "").replace(/\s+/g, " ").trim();
         const query = (root: Element, selector: string | undefined): Element | null => {
@@ -509,7 +585,7 @@ export class InstagramAdapter extends BetaAdapter {
             return null;
           }
         };
-        const rows = Array.from(document.querySelectorAll(selectors.thread_item)).slice(0, limit);
+        const rows = Array.from(root.querySelectorAll(selectors.thread_item)).slice(0, limit);
         return rows.map((row) => {
           const link = query(row, selectors.thread_link ?? "a[href*='/direct/t/']") as
             | HTMLAnchorElement
@@ -544,11 +620,52 @@ export class InstagramAdapter extends BetaAdapter {
     );
   }
 
+  private async probeThreadDom(page: Page): Promise<Record<string, unknown>> {
+    const documentRoot = await page.$("body");
+    if (!documentRoot) {
+      return { documentRootPresent: false };
+    }
+    await documentRoot.evaluate(INSTAGRAM_RUNTIME_SHIM_SOURCE);
+    return documentRoot.evaluate((root) => {
+      const anchors = Array.from(root.querySelectorAll("a[href]"));
+      const directPathPatterns = new Set<string>();
+      for (const anchor of anchors) {
+        const rawHref = anchor.getAttribute("href") ?? "";
+        if (!rawHref.includes("/direct/")) continue;
+        try {
+          const pathname = new URL(rawHref, "https://www.instagram.com").pathname;
+          const segments = pathname.split("/").filter(Boolean);
+          if (segments[0] === "direct" && segments[1] === "t" && segments.length >= 3) {
+            directPathPatterns.add("/direct/t/:id/");
+          } else {
+            directPathPatterns.add(`/${segments.join("/")}/`);
+          }
+        } catch {
+          directPathPatterns.add("invalid_direct_url");
+        }
+      }
+      return {
+        documentRootPresent: true,
+        mainCount: root.querySelectorAll("main, div[role='main']").length,
+        anchorCount: anchors.length,
+        directAnchorCount: anchors.filter((anchor) =>
+          (anchor.getAttribute("href") ?? "").includes("/direct/")
+        ).length,
+        roleLinkCount: root.querySelectorAll("[role='link']").length,
+        roleButtonCount: root.querySelectorAll("[role='button']").length,
+        directPathPatterns: [...directPathPatterns].slice(0, 8)
+      };
+    });
+  }
+
   private async collectThreads(limit: number): Promise<ThreadStub[]> {
     const selectors = await this.deps.resolveSelectors();
     const page = await this.getPage();
     try {
       await this.navigateToInbox(page, selectors, 12_000);
+      await page
+        .waitForSelector(selectors.thread_item, { state: "attached", timeout: 8_000 })
+        .catch(() => undefined);
       const snapshots = await this.snapshotThreads(page, selectors, limit);
       if (snapshots.length === 0) {
         const emptyInbox = await page
@@ -558,7 +675,17 @@ export class InstagramAdapter extends BetaAdapter {
           })
           .catch(() => false);
         if (!emptyInbox) {
-          throw new InstagramParsingError("thread_selector_returned_no_rows");
+          const structuralDetails = await this.probeThreadDom(page).catch(() => ({
+            documentProbeFailed: true
+          }));
+          console.warn(`[instagram-thread-probe] ${JSON.stringify(structuralDetails)}`);
+          throw this.safeFailure(
+            "SELECTOR_MISMATCH",
+            "collect_threads",
+            "thread_selector_returned_no_rows",
+            undefined,
+            undefined
+          );
         }
       }
       return normalizeInstagramThreadSnapshots(snapshots);
@@ -566,8 +693,7 @@ export class InstagramAdapter extends BetaAdapter {
       if (error instanceof AdapterFailure) {
         throw error;
       }
-      const reason =
-        error instanceof InstagramParsingError ? error.reason : "thread_collection_failed";
+      const reason = classifyInstagramThreadCollectionError(error);
       throw this.safeFailure("SELECTOR_MISMATCH", "collect_threads", reason, undefined, error);
     }
   }
@@ -644,8 +770,13 @@ export class InstagramAdapter extends BetaAdapter {
     page: Page,
     selectors: SelectorRegistry
   ): Promise<InstagramMessageSnapshot[]> {
-    return page.evaluate(
-      ({ selectors }) => {
+    const documentRoot = await page.$("body");
+    if (!documentRoot) {
+      throw new InstagramParsingError("instagram_document_missing");
+    }
+    await documentRoot.evaluate(INSTAGRAM_RUNTIME_SHIM_SOURCE);
+    return documentRoot.evaluate(
+      (root, { selectors }) => {
         const clean = (value: string | null | undefined): string =>
           (value ?? "").replace(/\s+/g, " ").trim();
         const matches = (root: Element, selector: string | undefined): boolean => {
@@ -665,8 +796,8 @@ export class InstagramAdapter extends BetaAdapter {
           }
         };
         const container =
-          document.querySelector(selectors.message_container) ??
-          document.querySelector("main, div[role='main']");
+          root.querySelector(selectors.message_container) ??
+          root.querySelector("main, div[role='main']");
         if (!container) {
           return [];
         }
@@ -783,16 +914,118 @@ export class InstagramAdapter extends BetaAdapter {
     }
   }
 
-  private async requireEnabled(locator: Locator, reason: string): Promise<void> {
-    if ((await locator.count()) !== 1) {
-      throw new InstagramParsingError(`${reason}_not_unique`);
+  private async enabledCandidates(locator: Locator): Promise<Locator[]> {
+    const count = await locator.count();
+    const enabled: Locator[] = [];
+    for (let index = 0; index < count; index += 1) {
+      const candidate = count === 1 ? locator : locator.nth(index);
+      if (
+        (await candidate.isVisible().catch(() => false)) &&
+        (await candidate.isEnabled().catch(() => false)) &&
+        (await candidate.getAttribute("aria-disabled")) !== "true"
+      ) {
+        enabled.push(candidate);
+      }
     }
-    if (
-      !(await locator.isEnabled().catch(() => false)) ||
-      (await locator.getAttribute("aria-disabled")) === "true"
-    ) {
+    return enabled;
+  }
+
+  private async requireEnabled(locator: Locator, reason: string): Promise<Locator> {
+    const enabled = await this.enabledCandidates(locator);
+    if (enabled.length === 0) {
       throw new InstagramParsingError(`${reason}_disabled`);
     }
+    if (enabled.length !== 1) {
+      throw new InstagramParsingError(`${reason}_not_unique`);
+    }
+    return enabled[0]!;
+  }
+
+  private async requireComposerSendButton(
+    page: Page,
+    composer: Locator,
+    selector: string
+  ): Promise<Locator> {
+    let candidates = await this.enabledCandidates(page.locator(selector));
+    if (candidates.length === 0) {
+      candidates = await this.enabledCandidates(
+        page.getByRole("button", { name: "Send", exact: true })
+      );
+    }
+    if (candidates.length === 0) {
+      throw new InstagramParsingError("send_button_disabled");
+    }
+    if (candidates.length === 1) {
+      return candidates[0]!;
+    }
+
+    const composerBox = await composer.boundingBox();
+    if (!composerBox) {
+      throw new InstagramParsingError("composer_not_visible");
+    }
+    const composerCenterY = composerBox.y + composerBox.height / 2;
+    const nearby: Locator[] = [];
+    for (const candidate of candidates) {
+      const box = await candidate.boundingBox();
+      if (!box) continue;
+      const centerY = box.y + box.height / 2;
+      const sameRow = Math.abs(centerY - composerCenterY) <= Math.max(36, composerBox.height);
+      const atOrAfterComposer = box.x + box.width >= composerBox.x;
+      if (sameRow && atOrAfterComposer) {
+        nearby.push(candidate);
+      }
+    }
+    if (nearby.length !== 1) {
+      throw new InstagramParsingError("send_button_not_unique");
+    }
+    return nearby[0]!;
+  }
+
+  private async countExactOutgoingBubbles(
+    page: Page,
+    selectors: SelectorRegistry,
+    text: string
+  ): Promise<number> {
+    const exactText = page.getByText(text, { exact: true });
+    const count = await exactText.count();
+    if (count === 0) {
+      return 0;
+    }
+    const containerBox = await page
+      .locator(selectors.message_container)
+      .first()
+      .boundingBox();
+    if (!containerBox) {
+      return 0;
+    }
+    const composerBox = await page
+      .locator(selectors.composer_input)
+      .first()
+      .boundingBox()
+      .catch(() => null);
+    const containerCenterX = containerBox.x + containerBox.width / 2;
+    const boxes = new Set<string>();
+    for (let index = 0; index < count; index += 1) {
+      const candidate = count === 1 ? exactText : exactText.nth(index);
+      if (!(await candidate.isVisible().catch(() => false))) continue;
+      const box = await candidate.boundingBox();
+      if (!box) continue;
+      const centerX = box.x + box.width / 2;
+      if (centerX <= containerCenterX + Math.max(12, containerBox.width * 0.08)) continue;
+      if (
+        composerBox &&
+        box.y < composerBox.y + composerBox.height &&
+        box.y + box.height > composerBox.y
+      ) {
+        continue;
+      }
+      boxes.add(
+        [box.x, box.y, box.width, box.height]
+          .map((value) => Math.round(value))
+          .join(":")
+      );
+    }
+    return boxes.size;
   }
 
   async sendMessage(
@@ -827,14 +1060,33 @@ export class InstagramAdapter extends BetaAdapter {
         platformThreadId,
         await this.snapshotMessages(page, selectors)
       );
-      const composer = page.locator(selectors.composer_input);
-      await this.requireEnabled(composer, "composer");
+      const exactOutgoingBefore = await this.countExactOutgoingBubbles(
+        page,
+        selectors,
+        normalizedText
+      );
+      const composer = await this.requireEnabled(
+        page.locator(selectors.composer_input),
+        "composer"
+      );
+      const existingComposerText = cleanMessageText(
+        (await composer.textContent().catch(() => "")) ?? ""
+      );
+      if (existingComposerText && existingComposerText !== normalizedText) {
+        throw new InstagramParsingError("composer_contains_unsent_text");
+      }
+      if (existingComposerText === normalizedText) {
+        await composer.fill("");
+      }
       await humanClick(page, composer, { timeout: 10_000 });
       await humanType(page, composer, normalizedText, { alreadyFocused: true, reading: null });
       await readingPause(500, 1_100);
 
-      const sendButton = page.locator(selectors.send_button);
-      await this.requireEnabled(sendButton, "send_button");
+      const sendButton = await this.requireComposerSendButton(
+        page,
+        composer,
+        selectors.send_button
+      );
       await humanClick(page, sendButton, { timeout: 10_000, reading: null });
 
       const deadline =
@@ -855,6 +1107,27 @@ export class InstagramAdapter extends BetaAdapter {
             verifiedBy: "bubble_detected",
             platformMessageKey: sent?.platformMessageKey,
             raw: { verification: "new_outgoing_bubble" }
+          };
+        }
+        const exactOutgoingAfter = await this.countExactOutgoingBubbles(
+          page,
+          selectors,
+          normalizedText
+        );
+        if (exactOutgoingAfter > exactOutgoingBefore) {
+          return {
+            sentAt: new Date().toISOString(),
+            acknowledgedAt: new Date().toISOString(),
+            verifiedBy: "bubble_detected",
+            platformMessageKey: `instagram:${stableHash(
+              [
+                platformThreadId,
+                "OUT",
+                normalizedText,
+                String(exactOutgoingAfter)
+              ].join("\u001e")
+            )}`,
+            raw: { verification: "exact_outgoing_layout_bubble" }
           };
         }
         await page.waitForTimeout(500);

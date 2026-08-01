@@ -60,6 +60,7 @@ test("Instagram receives a dedicated persistent profile route", () => {
   assert.equal(instagram.sessionManager.deps.browserProfile.mode, "personal");
   assert.equal(instagram.sessionManager.deps.browserProfile.personalChromeProfileDirectory, "Profile 7");
   assert.equal(instagram.sessionManager.deps.browserProfile.personalChromeProfileName, "Trusted");
+  assert.equal(instagram.sessionManager.deps.browserProfile.personalProfileSyncMode, "once");
   assert.equal(instagram.sessionManager.deps.browserProfile.fallbackBehavior, "error");
   assert.equal(instagram.sessionManager.deps.preferInstalledChrome, true);
   assert.deepEqual(factory.adapters.INSTAGRAM.instagramDeps.personalProfile, {
