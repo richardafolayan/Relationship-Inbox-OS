@@ -44,7 +44,7 @@ Prefer fewer, fuller bubbles when adjacent clauses express one complete thought.
 
 Correct obvious transcription mistakes only when the intended wording is reasonably clear. Never invent information, silently guess an uncertain name or phrase, formalise informal English, or make the speaker more polished, confident, or professional than intended. Put genuinely uncertain wording in warnings.
 
-Use normal capitalisation. Remove trailing full stops from every message. Preserve genuine question marks and exclamation marks. Preserve names, numbers, links, technical terms, and personal abbreviations.
+Start every message and every sentence with a capital letter. Remove trailing full stops from every message. Preserve genuine question marks and exclamation marks. Preserve names, numbers, links, technical terms, and personal abbreviations.
 
 Return only one JSON object matching the requested shape. Do not include markdown or commentary.`;
 
@@ -81,10 +81,18 @@ function stripTrailingFullStops(text: string): string {
   return text.trim().replace(/\.+$/u, "").trimEnd();
 }
 
+function capitaliseSentenceStarts(text: string): string {
+  return text.replace(
+    /(^|[.?!](?:["'”’)\]}]+)?\s+)(["'“‘([{]*)(\p{Ll})/gu,
+    (_match, boundary: string, openingMarks: string, letter: string) =>
+      `${boundary}${openingMarks}${letter.toUpperCase()}`
+  );
+}
+
 export function parseDictationMessageFormatting(value: unknown): DictationMessageFormatting {
   const parsed = formatterResponseSchema.parse(value);
   const messages = parsed.messages.map((message, index) => {
-    const text = stripTrailingFullStops(message.text);
+    const text = capitaliseSentenceStarts(stripTrailingFullStops(message.text));
     if (!text) {
       throw new Error(`Formatted message ${index + 1} is empty after validation`);
     }
