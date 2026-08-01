@@ -4,6 +4,7 @@ import {
   canonicalInstagramThreadUrl,
   classifyInstagramAuthRequirement,
   classifyInstagramThreadCollectionError,
+  extractInstagramThreadSnapshotsFromPayload,
   findNewVerifiedInstagramOutgoing,
   instagramAuthRequiredFromSignals,
   instagramThreadIdFromUrl,
@@ -103,6 +104,7 @@ test("interactive login waits for an authenticated inbox while background checks
     send_button: "[aria-label='Send']"
   };
   let broughtToFront = 0;
+  let authenticatedCookieSyncs = 0;
   const authenticatedPage = withBrowserRuntime({
     goto: async () => undefined,
     bringToFront: async () => {
@@ -119,11 +121,16 @@ test("interactive login waits for an authenticated inbox while background checks
     resolveSelectors: async () => selectors,
     sessionManager: { getManagedPage: async () => authenticatedPage },
     personKey: "instagram",
-    connectTimeoutMs: 50
+    connectTimeoutMs: 50,
+    syncPersonalSessionCookies: async () => {
+      authenticatedCookieSyncs += 1;
+      return true;
+    }
   });
 
   await authenticated.connectInteractively();
   assert.equal(broughtToFront, 1);
+  assert.equal(authenticatedCookieSyncs, 0);
 
   let currentDocumentShimRuns = 0;
   const runtimeProtectedPage = withBrowserRuntime({
@@ -209,6 +216,38 @@ test("interactive login waits for an authenticated inbox while background checks
   await savedProfile.connectInteractively();
   assert.equal(continueClicks, 1);
 
+  let bridgedProfileUrl = "https://www.instagram.com/accounts/login/";
+  let cookieSyncs = 0;
+  const bridgedProfilePage = {
+    ...authenticatedPage,
+    url: () => bridgedProfileUrl,
+    getByText: () => ({
+      count: async () => 0,
+      first: () => ({ waitFor: async () => undefined }),
+      isEnabled: async () => false
+    }),
+    evaluate: async () =>
+      bridgedProfileUrl.includes("/accounts/login/")
+        ? { fieldNames: ["username", "password"], bodyText: "Log in to Instagram" }
+        : { fieldNames: [], bodyText: "" }
+  };
+  const bridgedProfile = new InstagramAdapter({
+    screenshotDir: "/tmp",
+    domDumpDir: "/tmp",
+    resolveSelectors: async () => selectors,
+    sessionManager: { getManagedPage: async () => bridgedProfilePage },
+    personKey: "instagram",
+    connectTimeoutMs: 50,
+    syncPersonalSessionCookies: async () => {
+      cookieSyncs += 1;
+      bridgedProfileUrl = "https://www.instagram.com/direct/inbox/";
+      return true;
+    }
+  });
+
+  await bridgedProfile.connectInteractively();
+  assert.equal(cookieSyncs, 1);
+
   const verificationPage = {
     ...authenticatedPage,
     evaluate: async () => ({
@@ -292,6 +331,74 @@ test("thread identity is stable across row order and duplicate rows", () => {
   );
   assert.equal(first.length, 2);
   assert.equal(first.find((thread) => thread.platformThreadId === "two")?.unreadCount, 1);
+});
+
+test("GraphQL thread payloads use stable IDs and ignore unrelated object IDs", () => {
+  const payload = {
+    data: {
+      inbox: {
+        threads: [
+          {
+            id: "thread-two-url",
+            thread_id: "thread-two-internal",
+            thread_fbid: "thread-two-fbid",
+            users: [{ username: "Person Two" }],
+            unread_count: 2
+          },
+          {
+            thread_id: "thread-one",
+            thread_key: "thread-one-key",
+            thread_title: "Person One",
+            marked_as_unread: true
+          },
+          {
+            id: "not-a-thread",
+            title: "Unrelated object"
+          },
+          {
+            __typename: "XDTDirectThread",
+            id: "typed-thread",
+            thread_v2_id: "typed-thread-internal",
+            participants: [{ full_name: "Typed Person" }],
+            has_unread: true
+          }
+        ]
+      },
+      duplicate: {
+        id: "thread-two-url",
+        threadId: "thread-two-internal",
+        thread_key: "thread-two-key",
+        readState: "UNREAD"
+      }
+    }
+  };
+
+  const first = normalizeInstagramThreadSnapshots(
+    extractInstagramThreadSnapshotsFromPayload(payload)
+  );
+  const reordered = normalizeInstagramThreadSnapshots(
+    extractInstagramThreadSnapshotsFromPayload({
+      data: {
+        duplicate: payload.data.duplicate,
+        inbox: { threads: [...payload.data.inbox.threads].reverse() }
+      }
+    })
+  );
+
+  assert.deepEqual(
+    first.map((thread) => thread.platformThreadId).sort(),
+    ["thread-one", "thread-two-url", "typed-thread"]
+  );
+  assert.deepEqual(
+    first.map((thread) => thread.platformThreadId).sort(),
+    reordered.map((thread) => thread.platformThreadId).sort()
+  );
+  assert.equal(
+    first.find((thread) => thread.platformThreadId === "thread-two-url")?.unreadCount,
+    1
+  );
+  assert.equal(first.find((thread) => thread.platformThreadId === "thread-one")?.unreadCount, 1);
+  assert.equal(first.find((thread) => thread.platformThreadId === "typed-thread")?.unreadCount, 1);
 });
 
 test("thread rows never fall back to mutable text or row position", () => {

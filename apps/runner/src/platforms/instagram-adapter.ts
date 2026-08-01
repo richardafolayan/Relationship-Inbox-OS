@@ -21,6 +21,7 @@ const INSTAGRAM_RUNTIME_SHIM_SOURCE =
 export interface InstagramAdapterDependencies extends Omit<BetaAdapterDependencies, "platform"> {
   connectTimeoutMs: number;
   sendVerificationTimeoutMs?: number;
+  syncPersonalSessionCookies?: (context: BrowserContext) => Promise<boolean>;
   personalProfile?: {
     sourceUserDataDir: string;
     profileDirectory: string;
@@ -177,6 +178,108 @@ export function normalizeInstagramThreadSnapshots(
   }
 
   return [...byId.values()];
+}
+
+function instagramRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function instagramString(record: Record<string, unknown>, keys: string[]): string | undefined {
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === "string" && value.trim()) {
+      return value.trim();
+    }
+  }
+  return undefined;
+}
+
+export function extractInstagramThreadSnapshotsFromPayload(
+  payload: unknown
+): InstagramThreadSnapshot[] {
+  const snapshots: InstagramThreadSnapshot[] = [];
+  const seen = new WeakSet<object>();
+  let visited = 0;
+
+  const visit = (value: unknown): void => {
+    if (!value || typeof value !== "object" || seen.has(value) || visited >= 25_000) {
+      return;
+    }
+    seen.add(value);
+    visited += 1;
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        visit(item);
+      }
+      return;
+    }
+
+    const record = value as Record<string, unknown>;
+    const typeName = instagramString(record, ["__typename", "type", "item_type"]);
+    const explicitThreadId = instagramString(record, [
+      "thread_v2_id",
+      "threadV2Id",
+      "thread_id",
+      "threadId"
+    ]);
+    const hasThreadStructure = [
+      "thread_fbid",
+      "thread_key",
+      "thread_title",
+      "usersWithoutViewer",
+      "slide_messages"
+    ].some((key) => key in record);
+    const isThreadRecord = /direct.*thread/i.test(typeName ?? "") || hasThreadStructure;
+    const typedThreadId = isThreadRecord
+      ? instagramString(record, ["id"])
+      : undefined;
+    const stableId = isThreadRecord ? typedThreadId ?? explicitThreadId : undefined;
+    if (isStableInstagramId(stableId)) {
+      const participants = [record.users, record.participants]
+        .flatMap((candidate) => (Array.isArray(candidate) ? candidate : []))
+        .map(instagramRecord)
+        .filter((candidate): candidate is Record<string, unknown> => Boolean(candidate))
+        .map((candidate) =>
+          instagramString(candidate, ["username", "full_name", "fullName", "name"])
+        )
+        .filter((candidate): candidate is string => Boolean(candidate));
+      const unreadCount = [record.unread_count, record.unreadCount].find(
+        (candidate) => typeof candidate === "number" && Number.isFinite(candidate)
+      ) as number | undefined;
+      const explicitUnread = [
+        record.unread,
+        record.has_unread,
+        record.hasUnread,
+        record.marked_as_unread,
+        record.markedAsUnread
+      ].find((candidate) => typeof candidate === "boolean") as boolean | undefined;
+      const readState = instagramString(record, ["read_state", "readState"]);
+      const unread =
+        typeof unreadCount === "number"
+          ? unreadCount > 0
+          : typeof explicitUnread === "boolean"
+            ? explicitUnread
+            : readState && /unread/i.test(readState)
+              ? true
+              : undefined;
+      snapshots.push({
+        stableId,
+        displayName:
+          instagramString(record, ["thread_title", "threadTitle", "title", "name"]) ??
+          (participants.slice(0, 3).join(", ") || undefined),
+        unread
+      });
+    }
+
+    for (const child of Object.values(record)) {
+      visit(child);
+    }
+  };
+
+  visit(payload);
+  return snapshots;
 }
 
 export function parseInstagramSourceTimestamp(value: string | undefined): string | undefined {
@@ -339,6 +442,11 @@ export class InstagramAdapter extends BetaAdapter {
   private cookieBridge: ChromeCookieBridge | null = null;
   private lastCookieSyncAt: number | null = null;
   private readonly shimmedContexts = new WeakSet<BrowserContext>();
+  private readonly networkCapturePages = new WeakSet<Page>();
+  private readonly networkThreadSnapshots = new WeakMap<
+    Page,
+    Map<string, InstagramThreadSnapshot>
+  >();
 
   constructor(deps: InstagramAdapterDependencies) {
     super({ ...deps, platform: "INSTAGRAM" });
@@ -348,8 +456,64 @@ export class InstagramAdapter extends BetaAdapter {
   protected override async getPage(): Promise<Page> {
     const page = await super.getPage();
     await this.ensurePageRuntimeShims(page);
-    await this.ensureSessionCookies(page);
+    this.ensureNetworkThreadCapture(page);
     return page;
+  }
+
+  private ensureNetworkThreadCapture(page: Page): void {
+    if (this.networkCapturePages.has(page)) {
+      return;
+    }
+    if (typeof (page as Page & { on?: unknown }).on !== "function") {
+      return;
+    }
+    this.networkCapturePages.add(page);
+    const byId = new Map<string, InstagramThreadSnapshot>();
+    this.networkThreadSnapshots.set(page, byId);
+    page.on("response", (response: any) => {
+      let url: URL;
+      try {
+        url = new URL(response.url());
+      } catch {
+        return;
+      }
+      if (
+        (url.hostname !== "www.instagram.com" && url.hostname !== "instagram.com") ||
+        !/\/api\/graphql$|\/graphql\/query$/i.test(url.pathname) ||
+        response.status() < 200 ||
+        response.status() >= 300
+      ) {
+        return;
+      }
+      void response
+        .json()
+        .then((payload: unknown) => {
+          for (const snapshot of extractInstagramThreadSnapshotsFromPayload(payload)) {
+            if (!snapshot.stableId) {
+              continue;
+            }
+            const existing = byId.get(snapshot.stableId);
+            byId.set(snapshot.stableId, {
+              ...existing,
+              ...snapshot,
+              displayName: snapshot.displayName ?? existing?.displayName,
+              unread: snapshot.unread ?? existing?.unread
+            });
+          }
+        })
+        .catch(() => undefined);
+    });
+  }
+
+  private capturedNetworkThreads(page: Page): InstagramThreadSnapshot[] {
+    return [...(this.networkThreadSnapshots.get(page)?.values() ?? [])];
+  }
+
+  private async waitForCapturedNetworkThreads(page: Page, timeoutMs: number): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline && this.capturedNetworkThreads(page).length === 0) {
+      await page.waitForTimeout(100);
+    }
   }
 
   private async ensurePageRuntimeShims(page: Page): Promise<void> {
@@ -373,15 +537,18 @@ export class InstagramAdapter extends BetaAdapter {
     }
   }
 
-  private async ensureSessionCookies(page: Page): Promise<void> {
+  private async syncSessionCookies(page: Page): Promise<boolean> {
+    if (this.instagramDeps.syncPersonalSessionCookies) {
+      return this.instagramDeps.syncPersonalSessionCookies(page.context());
+    }
     const personal = this.instagramDeps.personalProfile;
     if (!personal) {
-      return;
+      return false;
     }
 
     const now = Date.now();
     if (this.lastCookieSyncAt !== null && now - this.lastCookieSyncAt < 10 * 60 * 1000) {
-      return;
+      return true;
     }
 
     this.cookieBridge ??= new ChromeCookieBridge({
@@ -396,10 +563,11 @@ export class InstagramAdapter extends BetaAdapter {
     if (result.reason === "ok") {
       this.lastCookieSyncAt = now;
       console.log(`[instagram-cookie-bridge] injected ${result.injected} cookies`);
-      return;
+      return result.injected > 0;
     }
 
     console.warn(`[instagram-cookie-bridge] no cookies injected (${result.reason})`);
+    return false;
   }
 
   private safeFailure(
@@ -419,7 +587,7 @@ export class InstagramAdapter extends BetaAdapter {
     });
   }
 
-  private async throwIfInstagramAuthRequired(page: Page, context: string): Promise<void> {
+  private async authRequirementForPage(page: Page): Promise<InstagramAuthRequirement | null> {
     const signals = await page.evaluate(() => ({
       fieldNames: Array.from(document.querySelectorAll("input[name]"))
         .map((node) => node.getAttribute("name") ?? "")
@@ -429,12 +597,16 @@ export class InstagramAdapter extends BetaAdapter {
         document.querySelector("iframe[src*='recaptcha'], .g-recaptcha, [data-sitekey]")
       )
     }));
-    const requirement = classifyInstagramAuthRequirement({
+    return classifyInstagramAuthRequirement({
       url: page.url(),
       fieldNames: signals.fieldNames,
       bodyText: signals.bodyText,
       hasRecaptcha: signals.hasRecaptcha
     });
+  }
+
+  private async throwIfInstagramAuthRequired(page: Page, context: string): Promise<void> {
+    const requirement = await this.authRequirementForPage(page);
     if (requirement) {
       throw new AdapterFailure("Instagram auth required", {
         kind: "AUTH_REQUIRED",
@@ -450,8 +622,14 @@ export class InstagramAdapter extends BetaAdapter {
     selectors: SelectorRegistry,
     timeoutMs: number
   ): Promise<void> {
+    const selectorPayload = JSON.stringify({
+      threadList: selectors.thread_list,
+      threadItem: selectors.thread_item,
+      messageContainer: selectors.message_container
+    });
     await page.waitForFunction(
-      ({ threadList, threadItem, messageContainer }) => {
+      `() => {
+        const { threadList, threadItem, messageContainer } = ${selectorPayload};
         const pathname = window.location.pathname;
         if (
           pathname.startsWith("/auth_platform/recaptcha") ||
@@ -468,12 +646,8 @@ export class InstagramAdapter extends BetaAdapter {
             document.querySelector(messageContainer) ||
             document.querySelector("main")
         );
-      },
-      {
-        threadList: selectors.thread_list,
-        threadItem: selectors.thread_item,
-        messageContainer: selectors.message_container
-      },
+      }`,
+      undefined,
       { timeout: timeoutMs }
     );
   }
@@ -547,7 +721,23 @@ export class InstagramAdapter extends BetaAdapter {
         timeout: navigationTimeoutMs
       });
       await page.bringToFront();
-      await this.continueSavedProfileLogin(page);
+      if (await this.continueSavedProfileLogin(page)) {
+        await page
+          .waitForFunction(() => !window.location.pathname.startsWith("/accounts/login"), undefined, {
+            timeout: 5_000
+          })
+          .catch(() => undefined);
+      }
+      if ((await this.authRequirementForPage(page)) === "login_required") {
+        const synced = await this.syncSessionCookies(page);
+        if (synced) {
+          await page.goto(selectors.inbox_url, {
+            waitUntil: "domcontentloaded",
+            timeout: navigationTimeoutMs
+          });
+          await this.continueSavedProfileLogin(page);
+        }
+      }
       const authWaitTimeoutMs = Math.max(
         1,
         this.instagramDeps.connectTimeoutMs - (Date.now() - startedAt) - reserveMs
@@ -573,7 +763,7 @@ export class InstagramAdapter extends BetaAdapter {
       throw new InstagramParsingError("instagram_document_missing");
     }
     await documentRoot.evaluate(INSTAGRAM_RUNTIME_SHIM_SOURCE);
-    return documentRoot.evaluate(
+    const domSnapshots = await documentRoot.evaluate(
       (root, { selectors, limit }) => {
         const clean = (value: string | null | undefined): string =>
           (value ?? "").replace(/\s+/g, " ").trim();
@@ -618,6 +808,7 @@ export class InstagramAdapter extends BetaAdapter {
       },
       { selectors, limit }
     );
+    return [...domSnapshots, ...this.capturedNetworkThreads(page)].slice(0, limit);
   }
 
   private async probeThreadDom(page: Page): Promise<Record<string, unknown>> {
@@ -629,6 +820,43 @@ export class InstagramAdapter extends BetaAdapter {
     return documentRoot.evaluate((root) => {
       const anchors = Array.from(root.querySelectorAll("a[href]"));
       const directPathPatterns = new Set<string>();
+      const candidateShapes = new Map<string, number>();
+      const reactMetadataKeyPaths = new Set<string>();
+      const resourcePathPatterns = new Set<string>();
+      const seenMetadata = new WeakSet<object>();
+      const collectMetadataKeys = (
+        value: unknown,
+        prefix: string,
+        depth: number
+      ): void => {
+        if (!value || typeof value !== "object" || depth > 3 || seenMetadata.has(value)) {
+          return;
+        }
+        seenMetadata.add(value);
+        for (const key of Object.keys(value).slice(0, 60)) {
+          let child: unknown;
+          try {
+            child = (value as Record<string, unknown>)[key];
+          } catch {
+            continue;
+          }
+          const path = `${prefix}.${key}`;
+          if (/thread|conversation|href|route|url|id/i.test(key)) {
+            reactMetadataKeyPaths.add(`${path}:${typeof child}`);
+          }
+          if (
+            depth < 3 &&
+            (key === "props" ||
+              key === "memoizedProps" ||
+              key === "pendingProps" ||
+              key === "children" ||
+              key === "child" ||
+              key === "return")
+          ) {
+            collectMetadataKeys(child, path, depth + 1);
+          }
+        }
+      };
       for (const anchor of anchors) {
         const rawHref = anchor.getAttribute("href") ?? "";
         if (!rawHref.includes("/direct/")) continue;
@@ -644,6 +872,64 @@ export class InstagramAdapter extends BetaAdapter {
           directPathPatterns.add("invalid_direct_url");
         }
       }
+      for (const entry of performance.getEntriesByType("resource").slice(-300)) {
+        if (!("name" in entry) || typeof entry.name !== "string") {
+          continue;
+        }
+        try {
+          const url = new URL(entry.name);
+          if (url.hostname !== "www.instagram.com" && url.hostname !== "instagram.com") {
+            continue;
+          }
+          if (!/direct|inbox|graphql|ajax|api/i.test(url.pathname)) {
+            continue;
+          }
+          resourcePathPatterns.add(
+            `${url.pathname}?${[...url.searchParams.keys()].sort().join(",")}`
+          );
+        } catch {
+          continue;
+        }
+      }
+      const controls = Array.from(
+        root.querySelectorAll("button, [role='button'], [role='link'], [tabindex='0']")
+      ).slice(0, 160);
+      for (const control of controls) {
+        const rect = control.getBoundingClientRect();
+        if (
+          rect.width < 140 ||
+          rect.height < 36 ||
+          rect.height > 180 ||
+          !control.querySelector("img, [dir='auto']")
+        ) {
+          continue;
+        }
+        const shape = [
+          control.tagName.toLowerCase(),
+          control.getAttribute("role") ?? "none",
+          control.querySelectorAll("img").length > 0 ? "image" : "no-image",
+          control.querySelectorAll("[dir='auto']").length > 0 ? "auto-text" : "no-auto-text",
+          control.getAttribute("tabindex") ?? "no-tabindex"
+        ].join(":");
+        candidateShapes.set(shape, (candidateShapes.get(shape) ?? 0) + 1);
+
+        let current: Element | null = control;
+        for (let depth = 0; current && depth < 5; depth += 1) {
+          for (const key of Object.getOwnPropertyNames(current)) {
+            if (!key.startsWith("__reactProps$") && !key.startsWith("__reactFiber$")) {
+              continue;
+            }
+            let metadata: unknown;
+            try {
+              metadata = (current as unknown as Record<string, unknown>)[key];
+            } catch {
+              continue;
+            }
+            collectMetadataKeys(metadata, key.startsWith("__reactProps$") ? "props" : "fiber", 0);
+          }
+          current = current.parentElement;
+        }
+      }
       return {
         documentRootPresent: true,
         mainCount: root.querySelectorAll("main, div[role='main']").length,
@@ -653,7 +939,14 @@ export class InstagramAdapter extends BetaAdapter {
         ).length,
         roleLinkCount: root.querySelectorAll("[role='link']").length,
         roleButtonCount: root.querySelectorAll("[role='button']").length,
-        directPathPatterns: [...directPathPatterns].slice(0, 8)
+        directPathPatterns: [...directPathPatterns].slice(0, 8),
+        candidateControlCount: [...candidateShapes.values()].reduce(
+          (total, count) => total + count,
+          0
+        ),
+        candidateShapes: [...candidateShapes.entries()].slice(0, 12),
+        reactMetadataKeyPaths: [...reactMetadataKeyPaths].sort().slice(0, 80),
+        resourcePathPatterns: [...resourcePathPatterns].sort().slice(0, 30)
       };
     });
   }
@@ -663,9 +956,12 @@ export class InstagramAdapter extends BetaAdapter {
     const page = await this.getPage();
     try {
       await this.navigateToInbox(page, selectors, 12_000);
-      await page
-        .waitForSelector(selectors.thread_item, { state: "attached", timeout: 8_000 })
-        .catch(() => undefined);
+      await Promise.race([
+        page
+          .waitForSelector(selectors.thread_item, { state: "attached", timeout: 8_000 })
+          .catch(() => undefined),
+        this.waitForCapturedNetworkThreads(page, 8_000)
+      ]);
       const snapshots = await this.snapshotThreads(page, selectors, limit);
       if (snapshots.length === 0) {
         const emptyInbox = await page

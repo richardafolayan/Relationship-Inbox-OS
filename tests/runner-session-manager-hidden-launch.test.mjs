@@ -2,7 +2,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createSessionManager } from "../apps/runner/dist/services/session-manager.js";
+import {
+  createSessionManager,
+  resolveBrowserActivateAppBundlePath
+} from "../apps/runner/dist/services/session-manager.js";
 
 // The session manager hides every runner-initiated browser launch by default
 // (off-screen launch args + minimize), and only launches visibly when an
@@ -81,6 +84,19 @@ function makeManager() {
 
 const hasOffscreenArg = (options) =>
   Array.isArray(options.args) && options.args.some((a) => /^--window-position=\d{5},\d{5}$/.test(a));
+
+test("installed Chrome sessions reveal standard Chrome instead of Patchright Chrome", () => {
+  assert.equal(
+    resolveBrowserActivateAppBundlePath({
+      hostPlatform: "darwin",
+      browserProfileMode: "personal",
+      preferInstalledChrome: true,
+      patchrightExecutablePath:
+        "/tmp/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing"
+    }),
+    "/Applications/Google Chrome.app"
+  );
+});
 
 test("a default (background) launch is hidden: off-screen launch args are passed", async () => {
   const { manager, launches } = makeManager();
