@@ -71,6 +71,23 @@ test("question marks and exclamation marks survive while trailing full stops are
   ]);
 });
 
+test("every formatted message and sentence starts with a capital letter", () => {
+  const parsed = parseDictationMessageFormatting({
+    cleanedTranscript: "yeah that makes sense. i can do tomorrow. are you free after six? perfect!",
+    messages: [
+      { id: "a", text: "yeah that makes sense. i can do tomorrow." },
+      { id: "b", text: "are you free after six? perfect!" },
+      { id: "c", text: "“i'll confirm later.” then i'll let you know." }
+    ],
+    warnings: []
+  });
+  assert.deepEqual(parsed.messages.map((message) => message.text), [
+    "Yeah that makes sense. I can do tomorrow",
+    "Are you free after six? Perfect!",
+    "“I'll confirm later.” Then i'll let you know"
+  ]);
+});
+
 test("invalid model output is rejected instead of being displayed", () => {
   assert.throws(() =>
     parseDictationMessageFormatting({
@@ -116,6 +133,7 @@ test("the prompt pins final intent, meaning-safe compression, natural splitting,
     "Prefer fewer, fuller bubbles",
     "soft proportionality signal",
     "Do not mechanically delete subjects",
+    "Start every message and every sentence with a capital letter",
     "Remove trailing full stops",
     "Do not add the name if the speaker did not say it",
     "warnings"
