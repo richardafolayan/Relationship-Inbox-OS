@@ -18,7 +18,7 @@ export const dataDir = resolve(process.env.RIOS_DATA_DIR?.trim() || resolve(proj
 
 export type BrowserProfileMode = "isolated" | "personal";
 export type BrowserProfileFallbackBehavior = "allow_isolated" | "error";
-export type PersonalProfileSyncMode = "smart" | "always" | "never";
+export type PersonalProfileSyncMode = "smart" | "always" | "once" | "never";
 export type ChromeProfileResolutionStrategy =
   | "empty_configured"
   | "directory_exact"
@@ -424,6 +424,9 @@ function resolvePersonalProfileSyncMode(raw: string | undefined): PersonalProfil
   }
   if (normalized === "never") {
     return "never";
+  }
+  if (normalized === "once") {
+    return "once";
   }
   return "smart";
 }

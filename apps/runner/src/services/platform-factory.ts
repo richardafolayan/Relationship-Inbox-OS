@@ -96,6 +96,10 @@ export function createAdapters(input: {
     profileRootDir: dirname(runnerConfig.profileDirs.INSTAGRAM),
     browserProfile: {
       ...instagramBrowserProfile,
+      personalProfileSyncMode:
+        instagramBrowserProfile.mode === "personal"
+          ? "once"
+          : instagramBrowserProfile.personalProfileSyncMode,
       fallbackBehavior: "error"
     },
     preferInstalledChrome: true,
