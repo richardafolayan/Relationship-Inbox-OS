@@ -89,28 +89,40 @@ before claiming those guarantees still hold.
   send restrictions, verified submission, and privacy-safe diagnostics.
 - Lint, type checking, documentation checks, Prisma generation, and the
   production build pass.
-- The complete local suite reached 2,763 passing tests out of 2,765. Its two
-  parallel-load failures were existing Electron dictation and LinkedIn
-  deep-scroll timing cases; both pass when rerun together in isolation.
+- The complete local suite has one existing LinkedIn fallback-scroll timing
+  failure under full parallel load. That exact browser test passes when rerun
+  alone. The browser-dependent Electron dictation and LinkedIn deep-scroll
+  fixtures also pass when run with the macOS permissions they require.
 - Setup, Settings, and Platforms were inspected at desktop and phone widths.
 - A live connection launch used installed standard Chrome with the dedicated
   Instagram profile. The dedicated profile can now be seeded from a trusted
-  personal Chrome profile without controlling or deleting the live source. On
-  macOS, the existing local Keychain cookie bridge injects the encrypted
-  Instagram session cookies without logging their values.
+  personal Chrome profile once without controlling or deleting the live
+  source. Later runner restarts preserve the app-owned login. On macOS, the
+  existing local Keychain cookie bridge injects the encrypted Instagram
+  session cookies without logging their values.
 - Manual login completed successfully and the runner reported the authenticated
   Instagram inbox as connected. The earlier verification-required state,
   profile reset, and disconnected state were also observed.
-- No approved safe conversation was provided, so live conversation discovery,
-  extraction, rescan deduplication, restart persistence, and sending remain
-  unverified. No message was sent.
+- The approved safe conversation was opened by its canonical thread ID
+  and the runner verified the URL/header pair. The current Instagram inbox DOM
+  renders conversation rows as JavaScript controls without stable thread
+  links, so full live unread/recent discovery remains a controlled selector
+  failure rather than falling back to row position.
+- One approved harmless send reached the exact accessible Send control and the
+  operator visually confirmed the outgoing message in the intended thread.
+  The current message-row selector did not observe the bubble before timeout,
+  so an exact-text, outgoing-layout verification fallback is implemented and
+  covered by browser-adapter tests but has not been exercised by a second live
+  send. Live extraction and rescan deduplication remain unverified against the
+  current DOM.
 
 ## Next
 
 - Keep feature work based on `develop` and PRs targeted to `develop`.
 - Review the Instagram feature pull request and its clean-machine checks.
-- Complete the remaining live Instagram checks only with an approved safe
-  account and conversation.
+- Resolve the current control-only inbox rows and message containers, then
+  repeat the remaining live Instagram checks without retrying an uncertain
+  send.
 - Promote `develop` to `main` only when the full combined branch is release-ready.
 - Continue preparing and running the 3-5 student pilot.
 

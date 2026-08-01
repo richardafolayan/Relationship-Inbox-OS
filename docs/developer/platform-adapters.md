@@ -140,13 +140,18 @@ Source:
   profile so reconnect/reset cannot disturb another platform.
 - Requests standard installed Chrome with that dedicated profile, never Chrome
   for Testing. In personal mode, the app-owned profile is seeded from the
-  configured trusted Chrome profile and macOS cookies are injected through the
-  existing local Keychain bridge. Cookie values are never logged. The live
-  source profile is never controlled or deleted, and login or Instagram
-  security checks stay manual.
+  configured trusted Chrome profile once, then preserved so a later runner
+  restart cannot overwrite a completed manual login. macOS cookies are
+  injected through the existing local Keychain bridge. Cookie values are never
+  logged. The live source profile is never controlled or deleted, and login or
+  Instagram security checks stay manual. A user-triggered Connect action may
+  press the single saved-profile `Continue` button when the page also shows
+  `Use another profile`; background scans never press login controls.
 - Thread identity comes only from a canonical `/direct/t/<id>/` URL or a
   verified stable attribute. Display names, previews, and row order never
   become identifiers.
+- Browser-side parsing installs the same runtime compatibility shim used by
+  LinkedIn before evaluating row or message normalizers.
 - Ambiguous message direction fails the fetch. Exact source datetimes are
   stored when exposed; otherwise persistence retains first-seen time.
 - Unsupported or deleted content is represented by a safe placeholder.
