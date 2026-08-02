@@ -27,7 +27,7 @@ export interface AdminResetResult {
   deleted: AdminResetDeleteCounts;
 }
 
-interface AdminResetPrisma {
+interface AdminResetDataClient {
   thread: {
     findMany: (args: unknown) => Promise<Array<{ id: string }>>;
     deleteMany: (args: unknown) => Promise<{ count: number }>;
@@ -45,6 +45,10 @@ interface AdminResetPrisma {
     findMany: (args: unknown) => Promise<Array<{ id: string }>>;
     deleteMany: (args: unknown) => Promise<{ count: number }>;
   };
+}
+
+interface AdminResetPrisma extends AdminResetDataClient {
+  $transaction: <T>(work: (client: AdminResetDataClient) => Promise<T>) => Promise<T>;
 }
 
 let prismaRef: AdminResetPrisma | null = null;
@@ -101,6 +105,13 @@ export async function resetPlatformInboxGraph(
   prismaClient?: AdminResetPrisma
 ): Promise<AdminResetResult> {
   const client = prismaClient ?? (await resolvePrismaClient());
+  return client.$transaction((transaction) => resetPlatformInboxGraphTransaction(platform, transaction));
+}
+
+async function resetPlatformInboxGraphTransaction(
+  platform: PlatformName,
+  client: AdminResetDataClient
+): Promise<AdminResetResult> {
   const matchedThreadIds = await client.thread.findMany({
     where: { platform },
     select: { id: true }

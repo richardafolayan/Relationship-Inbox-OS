@@ -1,6 +1,6 @@
 const { randomBytes, timingSafeEqual } = require("node:crypto");
 const { spawnSync } = require("node:child_process");
-const { readFileSync, mkdirSync, writeFileSync } = require("node:fs");
+const { mkdirSync, writeFileSync } = require("node:fs");
 const { createServer, request } = require("node:http");
 const { join } = require("node:path");
 
@@ -48,19 +48,18 @@ function isValidAccessToken(token) {
   return typeof token === "string" && /^[A-Za-z0-9_-]{43}$/.test(token);
 }
 
-function readOrCreateAccessToken(stateDir) {
+function rotateAccessToken(stateDir) {
   const tokenPath = join(stateDir, ACCESS_TOKEN_FILE);
-  try {
-    const existing = readFileSync(tokenPath, "utf8").trim();
-    if (isValidAccessToken(existing)) return existing;
-  } catch {}
   mkdirSync(stateDir, { recursive: true });
   const token = createAccessToken();
   writeFileSync(tokenPath, `${token}\n`, { mode: 0o600 });
   return token;
 }
 
-function phoneAccessUrl(address, port, token, protocol = "http") {
+function phoneAccessUrl(address, port, token, protocol = "https") {
+  if (protocol !== "https") {
+    throw new Error("Phone access links require HTTPS.");
+  }
   return `${protocol}://${address}:${port}/connect/${token}`;
 }
 
@@ -98,29 +97,40 @@ function lockedPage(appName) {
 }
 
 function proxyHandler({ appName, dashboardPort, token }) {
+  let pairingAvailable = true;
+  const sessions = new Set();
   return (incoming, outgoing) => {
     let pathname = "/";
     try {
       pathname = new URL(incoming.url || "/", "http://phone.local").pathname;
     } catch {}
 
-    if (incoming.method === "GET" && pathname === `/connect/${token}`) {
+    if (incoming.method === "GET" && pathname === `/connect/${token}` && pairingAvailable) {
       const forwardedProtocol = String(incoming.headers["x-forwarded-proto"] || "")
         .split(",", 1)[0]
         .trim()
         .toLowerCase();
       const secureCookie = forwardedProtocol === "https" || Boolean(incoming.socket.encrypted);
+      if (!secureCookie) {
+        outgoing.writeHead(400, { "Cache-Control": "no-store" });
+        outgoing.end("Phone pairing requires the secure Tailscale address.");
+        return;
+      }
+      const session = createAccessToken();
+      sessions.add(session);
+      pairingAvailable = false;
       outgoing.writeHead(302, {
         "Cache-Control": "no-store",
         Location: "/",
         "Permissions-Policy": "camera=(), microphone=(self)",
-        "Set-Cookie": `${ACCESS_COOKIE}=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000${secureCookie ? "; Secure" : ""}`
+        "Set-Cookie": `${ACCESS_COOKIE}=${session}; HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000; Secure`
       });
       outgoing.end();
       return;
     }
 
-    if (!tokensMatch(cookieValue(incoming.headers.cookie, ACCESS_COOKIE), token)) {
+    const session = cookieValue(incoming.headers.cookie, ACCESS_COOKIE);
+    if (![...sessions].some((candidate) => tokensMatch(session, candidate))) {
       const body = lockedPage(appName);
       outgoing.writeHead(401, {
         "Cache-Control": "no-store",
@@ -318,7 +328,7 @@ function listen(handler, port, host) {
 async function startPhoneAccessProxy({
   appName = "Tovi",
   dashboardPort,
-  host = "0.0.0.0",
+  host = "127.0.0.1",
   preferredPort = DEFAULT_PHONE_PORT,
   token
 }) {
@@ -352,7 +362,7 @@ module.exports = {
   lanIpv4Addresses,
   matchingServePort,
   phoneAccessUrl,
-  readOrCreateAccessToken,
+  rotateAccessToken,
   startSecurePhoneAccess,
   startPhoneAccessProxy,
   stopSecurePhoneAccess,

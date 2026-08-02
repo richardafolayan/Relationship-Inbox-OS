@@ -83,6 +83,7 @@ export function SetupWizard() {
   const [aiConfigured, setAiConfigured] = useState(false);
   const [selected, setSelected] = useState<SetupPlatform[]>([]);
   const [aiEnabled, setAiEnabled] = useState(false);
+  const [finishState, setFinishState] = useState<"idle" | "saving" | "error">("idle");
 
   const load = useCallback(async () => {
     const [setup, ai] = await Promise.all([
@@ -144,10 +145,18 @@ export function SetupWizard() {
 
   const finish = useCallback(async () => {
     const now = new Date().toISOString();
-    await savePreferences({ completedAt: now }).catch(() => undefined);
-    await apiPost("/runner/control/operator-profile", { setupCompletedAt: now }).catch(() => undefined);
-    markSetupComplete(window.localStorage);
-    setOpen(false);
+    setFinishState("saving");
+    try {
+      await savePreferences({ completedAt: now });
+      await apiPost("/runner/control/operator-profile", { setupCompletedAt: now });
+      markSetupComplete(window.localStorage);
+      setFinishState("idle");
+      setOpen(false);
+      return true;
+    } catch {
+      setFinishState("error");
+      return false;
+    }
   }, [savePreferences]);
 
   if (!open) return null;
@@ -162,8 +171,8 @@ export function SetupWizard() {
             ))}
           </div>
           {step !== "done" ? (
-            <button type="button" onClick={() => void finish()} className="font-mono text-[11px] text-ink-3 underline underline-offset-2 hover:text-ink">
-              Finish later
+            <button type="button" disabled={finishState === "saving"} onClick={() => void finish()} className="font-mono text-[11px] text-ink-3 underline underline-offset-2 hover:text-ink disabled:opacity-60">
+              {finishState === "saving" ? "Saving…" : "Finish later"}
             </button>
           ) : null}
         </div>
@@ -208,9 +217,10 @@ export function SetupWizard() {
         {step === "done" ? (
           <Card icon={<Check />} eyebrow="Ready" title={`${APP_NAME} is ready when you are.`} body="New conversations appear after their first scan. You can rerun this assistant or manage optional parts from Settings at any time.">
             <Actions>
-              <Primary onClick={() => { void finish().then(() => router.push("/today")); }}>Go to Today</Primary>
-              <Quiet onClick={() => { void finish().then(() => { router.push("/today"); window.setTimeout(() => startPilotTour(), 350); }); }}>Show me with safe demo messages</Quiet>
+              <Primary onClick={() => { void finish().then((saved) => { if (saved) router.push("/today"); }); }}>{finishState === "saving" ? "Saving…" : "Go to Today"}</Primary>
+              <Quiet onClick={() => { void finish().then((saved) => { if (saved) { router.push("/today"); window.setTimeout(() => startPilotTour(), 350); } }); }}>Show me with safe demo messages</Quiet>
             </Actions>
+            {finishState === "error" ? <p role="alert" className="mt-3 text-[13px] text-risk-overdue">Could not save setup. Check the runner and try again.</p> : null}
           </Card>
         ) : null}
       </div>

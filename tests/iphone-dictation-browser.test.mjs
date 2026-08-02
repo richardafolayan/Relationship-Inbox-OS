@@ -214,6 +214,19 @@ test("phone-sized secure browser records, uploads through the token proxy, and n
   });
 
   try {
+    const insecureContext = await browser.newContext({
+      hasTouch: true,
+      isMobile: true,
+      viewport: { width: 390, height: 844 }
+    });
+    const insecurePage = await insecureContext.newPage();
+    const insecureResponse = await insecurePage.goto(
+      `http://tovi.test:${proxy.port}/connect/${token}`
+    );
+    assert.equal(insecureResponse?.status(), 400);
+    await insecurePage.getByText(/pairing requires the secure Tailscale address/).waitFor();
+    await insecureContext.close();
+
     const context = await browser.newContext({
       hasTouch: true,
       ignoreHTTPSErrors: true,
@@ -254,18 +267,6 @@ test("phone-sized secure browser records, uploads through the token proxy, and n
     assert.equal(await page.locator("body").getAttribute("data-track-states"), "ended");
     assert.equal(uploads.length, 1);
     await context.close();
-
-    const insecureContext = await browser.newContext({
-      hasTouch: true,
-      isMobile: true,
-      viewport: { width: 390, height: 844 }
-    });
-    const insecurePage = await insecureContext.newPage();
-    await insecurePage.goto(`http://tovi.test:${proxy.port}/connect/${token}`);
-    const unavailable = insecurePage.getByRole("button", { name: "Dictation unavailable" });
-    assert.equal(await unavailable.isDisabled(), true);
-    await insecurePage.getByText(/scan the HTTPS QR code/).waitFor();
-    await insecureContext.close();
   } finally {
     await browser.close();
     await close(tls);

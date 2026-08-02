@@ -44,6 +44,7 @@ function makeHarness(initialRows, opts = {}) {
   const rows = initialRows.map((r) => ({ ...r }));
   const sends = []; // every physical adapter.sendMessage call
   const messages = []; // every Message upsert (one per actual persisted send)
+  const events = [];
 
   const prisma = {
     sendRequest: {
@@ -97,6 +98,7 @@ function makeHarness(initialRows, opts = {}) {
     },
     message: {
       async upsert({ create }) {
+        if (opts.messagePersistFailure) throw new Error("message persistence unavailable");
         messages.push(create);
         return {};
       }
@@ -121,7 +123,7 @@ function makeHarness(initialRows, opts = {}) {
 
   const svc = createSendService({
     adapters: { LINKEDIN: adapter },
-    eventBus: { emit: () => {}, nextEventId: () => 1, subscribe: () => () => {} },
+    eventBus: { emit: (event) => events.push(event), nextEventId: () => 1, subscribe: () => () => {} },
     settingsStore: {
       getSettings: async () => ({
         presenterDemoMode: "off",
@@ -135,7 +137,7 @@ function makeHarness(initialRows, opts = {}) {
     prisma
   });
 
-  return { svc, rows, sends, messages };
+  return { svc, rows, sends, messages, events };
 }
 
 const pendingRow = (over = {}) => ({
@@ -171,6 +173,20 @@ test("re-dispatch of an already-SENT row does NOT re-send (resume after a comple
   // Simulate resume()/a re-kick re-reading the same row id.
   await svc.processSendRequest("sr1");
   assert.equal(sends.length, 1, "must not re-send an already-terminal row");
+});
+
+test("a post-send persistence failure keeps the delivered request SENT", async () => {
+  const { svc, rows, sends, events } = makeHarness([pendingRow()], {
+    messagePersistFailure: true
+  });
+  await svc.processSendRequest("sr1");
+  assert.equal(sends.length, 1);
+  assert.equal(rows[0].status, "SENT");
+  assert.equal(JSON.parse(rows[0].receiptJson).verifiedBy, "best_effort");
+  assert.equal(events.at(-1).type, "MESSAGE_SENT");
+
+  await svc.processSendRequest("sr1");
+  assert.equal(sends.length, 1, "persistence recovery must never retry the physical send");
 });
 
 test("REGRESSION: two concurrent workers on one PENDING row send exactly once", async () => {

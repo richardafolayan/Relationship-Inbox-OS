@@ -621,7 +621,7 @@ create_app_bundle() {
 wait_for_dashboard() {
   local waited=0
   while [ "$waited" -lt "$APP_START_TIMEOUT" ]; do
-    if curl -fsS --max-time 3 "$DASHBOARD_URL" >/dev/null 2>&1; then
+    if curl -fsS --max-time 3 "$DASHBOARD_URL/api/health" 2>/dev/null | grep -q '"application":"relationship-inbox-os"'; then
       return 0
     fi
     sleep 3; waited=$((waited + 3))

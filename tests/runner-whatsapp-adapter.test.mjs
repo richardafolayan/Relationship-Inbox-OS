@@ -35,7 +35,10 @@ function createFakePrisma(overrides = {}) {
   return {
     message: {
       findFirst: overrides.findFirst ?? (async () => null),
-      count: overrides.count ?? (async () => 0)
+      findMany: overrides.findMany ?? (async () => {
+        const count = overrides.count ? await overrides.count() : 0;
+        return Array.from({ length: count }, () => ({ attachmentsJson: null }));
+      })
     }
   };
 }

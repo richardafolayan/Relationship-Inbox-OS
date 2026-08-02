@@ -4096,7 +4096,7 @@ export class LinkedInAdapter implements PlatformAdapter {
   async deepScrollThreadList(
     page: Page,
     selectors: SelectorRegistry,
-    state: { bottomKey: string | null; visibleSetHash: string }
+    state: { bottomKey: string | null; visibleSetHash: string; threadItemCount: number }
   ): Promise<{ didScroll: boolean; reachedBottom: boolean; moved: boolean }> {
     const listTarget = page.locator(selectors.thread_list).first();
     const listTargetCount = await listTarget.count().catch(() => 0);
@@ -4136,40 +4136,25 @@ export class LinkedInAdapter implements PlatformAdapter {
       stage: "collect_threads",
       note: "primary_scroll"
     });
-    await this.runTracedPageAction({
-      page,
-      stage: "collect_threads",
-      action: "wait_for_timeout",
-      note: "after_primary_scroll",
-      details: {
-        delayMs: Math.max(80, this.deps.scanScrollWaitMs)
-      },
-      run: async () => {
-        await page.waitForTimeout(Math.max(80, this.deps.scanScrollWaitMs));
-      }
-    });
-
-    let after = await this.collectThreadCandidates(page, selectors).catch(() => null);
-    let moved = Boolean(after && after.bottomKey && after.bottomKey !== state.bottomKey);
+    let after = await this.waitForThreadListMovement(page, selectors, state);
+    let moved = Boolean(
+      after &&
+        (after.bottomKey !== state.bottomKey ||
+          after.visibleSetHash !== state.visibleSetHash ||
+          after.threadItemCount !== state.threadItemCount)
+    );
     if (!moved) {
       await this.tracedScrollContainer(page, selectors.thread_list, 840, {
         stage: "collect_threads",
         note: "secondary_scroll"
       });
-      await this.runTracedPageAction({
-        page,
-        stage: "collect_threads",
-        action: "wait_for_timeout",
-        note: "after_secondary_scroll",
-        details: {
-          delayMs: Math.max(80, this.deps.scanScrollWaitMs)
-        },
-        run: async () => {
-          await page.waitForTimeout(Math.max(80, this.deps.scanScrollWaitMs));
-        }
-      });
-      after = await this.collectThreadCandidates(page, selectors).catch(() => null);
-      moved = Boolean(after && after.bottomKey && after.bottomKey !== state.bottomKey);
+      after = await this.waitForThreadListMovement(page, selectors, state);
+      moved = Boolean(
+        after &&
+          (after.bottomKey !== state.bottomKey ||
+            after.visibleSetHash !== state.visibleSetHash ||
+            after.threadItemCount !== state.threadItemCount)
+      );
     }
 
     return {
@@ -4177,6 +4162,29 @@ export class LinkedInAdapter implements PlatformAdapter {
       reachedBottom: !moved,
       moved
     };
+  }
+
+  private async waitForThreadListMovement(
+    page: Page,
+    selectors: SelectorRegistry,
+    state: { bottomKey: string | null; visibleSetHash: string; threadItemCount: number }
+  ): Promise<Awaited<ReturnType<LinkedInAdapter["captureThreadRowsSnapshot"]>> | null> {
+    const deadline =
+      Date.now() + Math.max(500, Math.min(2_500, this.deps.scanScrollWaitMs * 3));
+    let latest: Awaited<ReturnType<LinkedInAdapter["captureThreadRowsSnapshot"]>> | null = null;
+    do {
+      await page.waitForTimeout(Math.max(80, Math.min(250, this.deps.scanScrollWaitMs)));
+      latest = await this.captureThreadRowsSnapshot(page, selectors).catch(() => null);
+      if (
+        latest &&
+        (latest.bottomKey !== state.bottomKey ||
+          latest.visibleSetHash !== state.visibleSetHash ||
+          latest.threadItemCount !== state.threadItemCount)
+      ) {
+        return latest;
+      }
+    } while (Date.now() < deadline);
+    return latest;
   }
 
   async collectThreadRowsWithScroll(
@@ -4237,7 +4245,7 @@ export class LinkedInAdapter implements PlatformAdapter {
     const cappedMaxThreads = Math.max(1, options?.maxThreads ?? maxThreads);
     const stableIterationsTarget = Math.max(1, this.deps.scanStableIterations);
     const maxIterations = Math.max(20, Math.min(60, this.deps.scanMaxThreads * 3));
-    const maxDurationMs = 45_000;
+    const maxDurationMs = 90_000;
     const merged = new Map<string, ThreadStub>();
     const startedAt = Date.now();
     let scrollIterations = 0;
@@ -4479,7 +4487,8 @@ export class LinkedInAdapter implements PlatformAdapter {
 
       const scrollOutcome = await this.deepScrollThreadList(page, selectors, {
         bottomKey: snapshot.bottomKey,
-        visibleSetHash: snapshot.visibleSetHash
+        visibleSetHash: snapshot.visibleSetHash,
+        threadItemCount: snapshot.threadItemCount
       });
       scrollIterations += 1;
       this.logTraceEvent({
@@ -4499,11 +4508,11 @@ export class LinkedInAdapter implements PlatformAdapter {
       } else {
         scrollNoMoveStreak = 0;
       }
-      if (!scrollOutcome.didScroll || scrollOutcome.reachedBottom) {
+      if (!scrollOutcome.didScroll) {
         stopReason = merged.size > 0 ? "end_of_list_reached" : "zero_threads_found";
         this.logTraceDecision({
           stage: "collect_threads",
-          decision: "Stopped collection because list reached bottom",
+          decision: "Stopped collection because the thread list could not be scrolled",
           details: {
             mergedCount: merged.size,
             stopReason

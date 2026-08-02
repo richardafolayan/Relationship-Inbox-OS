@@ -163,6 +163,12 @@ export default function TodayPage() {
   const [tourSeen, setTourSeen] = useState<boolean | undefined>(undefined);
   const [removedIds, setRemovedIds] = useState<Set<string>>(new Set());
   const [transitioning, setTransitioning] = useState<{ id: string; label: string } | null>(null);
+  const [heroAction, setHeroAction] = useState<{
+    id: string;
+    kind: "snooze" | "handled";
+    status: "running" | "success";
+  } | null>(null);
+  const heroActionInFlightRef = useRef(false);
   const transitionTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Mirror of the filtered Today queue (`rows`, computed below) so the
   // MESSAGE_SENT handler credits a send as "done" only when the thread is
@@ -313,6 +319,42 @@ export default function TodayPage() {
     }, 400);
   }, [refresh]);
 
+  const completeHeroAction = useCallback(
+    async (input: {
+      id: string;
+      level: "RED" | "AMBER" | "GREEN";
+      kind: "snooze" | "handled";
+    }) => {
+      if (heroActionInFlightRef.current) return;
+      heroActionInFlightRef.current = true;
+      setHeroAction({ id: input.id, kind: input.kind, status: "running" });
+      setError(null);
+      try {
+        if (input.kind === "snooze") {
+          await apiPost(`/runner/control/thread/${input.id}/snooze`, { hours: 16 });
+        } else {
+          await apiPost(`/runner/control/thread/${input.id}/mark-done`, {});
+        }
+        setHeroAction({ id: input.id, kind: input.kind, status: "success" });
+        advanceHero(
+          input.id,
+          input.kind === "snooze" ? "Snoozed, next up" : "Handled, next up",
+          input.level
+        );
+        window.setTimeout(
+          () => setHeroAction((current) => (current?.id === input.id ? null : current)),
+          700
+        );
+      } catch (actionError) {
+        setHeroAction(null);
+        setError(actionError instanceof Error ? actionError.message : "Could not update this conversation.");
+      } finally {
+        heroActionInFlightRef.current = false;
+      }
+    },
+    [advanceHero]
+  );
+
   useEffect(() => {
     const handler = (event: Event) => {
       const detail = (event as CustomEvent<RunnerEventDetail>).detail;
@@ -434,7 +476,10 @@ export default function TodayPage() {
   // Background-predraft the top 3 threads — but only when the user has
   // opted into full AI drafts. At lower help levels the dashboard never
   // surfaces a complete draft, so generating one would be wasted work.
-  const top3Ids = useMemo(() => rows.slice(0, 3).map((row) => row.id).join("|"), [rows]);
+  const top3Ids = useMemo(
+    () => sortedRows.slice(0, 3).map((row) => row.id).join("|"),
+    [sortedRows]
+  );
   const fullDrafts = profile?.aiHelpLevel === "full_drafts";
   useEffect(() => {
     if (!top3Ids || !fullDrafts) return;
@@ -465,21 +510,15 @@ export default function TodayPage() {
         router.push(`/thread/${hero.id}`);
       } else if (key === "s") {
         event.preventDefault();
-        const id = hero.id;
-        const level = hero.riskLevel;
-        runAction(apiPost(`/runner/control/thread/${id}/snooze`, { hours: 16 }), setError, refresh);
-        advanceHero(id, "Snoozed, next up", level);
+        void completeHeroAction({ id: hero.id, level: hero.riskLevel, kind: "snooze" });
       } else if (key === "e") {
         event.preventDefault();
-        const id = hero.id;
-        const level = hero.riskLevel;
-        runAction(apiPost(`/runner/control/thread/${id}/mark-done`, {}), setError, refresh);
-        advanceHero(id, "Handled, next up", level);
+        void completeHeroAction({ id: hero.id, level: hero.riskLevel, kind: "handled" });
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [hero, router, advanceHero, refresh]);
+  }, [hero, router, completeHeroAction]);
 
   // Right-rail outline rows jump to the first live thread of their risk
   // level: the hero when it matches, otherwise its row in the queue below.
@@ -814,39 +853,37 @@ export default function TodayPage() {
                   </Button>
                   <Button
                     variant="quiet"
+                    disabled={heroAction?.id === hero.id && heroAction.status === "running"}
                     className="min-h-[44px] w-full justify-center gap-3 hover:border-[color-mix(in_oklch,var(--accent)_45%,transparent)] hover:bg-accent-soft hover:text-accent-ink sm:min-h-0 sm:w-auto"
                     onClick={() => {
-                      const id = hero.id;
-                      const level = hero.riskLevel;
-                      runAction(
-                        apiPost(`/runner/control/thread/${id}/snooze`, { hours: 16 }),
-                        setError,
-                        refresh
-                      );
-                      advanceHero(id, "Snoozed, next up", level);
+                      void completeHeroAction({ id: hero.id, level: hero.riskLevel, kind: "snooze" });
                     }}
                   >
-                    <span className="sm:hidden">Snooze</span>
-                    <span className="hidden sm:inline">Snooze ’til tomorrow</span>
+                    <span className="sm:hidden">
+                      {heroAction?.id === hero.id && heroAction.kind === "snooze"
+                        ? heroAction.status === "running" ? "Snoozing…" : "Snoozed"
+                        : "Snooze"}
+                    </span>
+                    <span className="hidden sm:inline">
+                      {heroAction?.id === hero.id && heroAction.kind === "snooze"
+                        ? heroAction.status === "running" ? "Snoozing…" : "Snoozed"
+                        : "Snooze ’til tomorrow"}
+                    </span>
                     <span className="hidden sm:inline">
                       <KbHint label="S" />
                     </span>
                   </Button>
                   <Button
                     variant="quiet"
+                    disabled={heroAction?.id === hero.id && heroAction.status === "running"}
                     className="min-h-[44px] w-full justify-center gap-3 hover:border-[color-mix(in_oklch,var(--accent)_45%,transparent)] hover:bg-accent-soft hover:text-accent-ink sm:min-h-0 sm:w-auto"
                     onClick={() => {
-                      const id = hero.id;
-                      const level = hero.riskLevel;
-                      runAction(
-                        apiPost(`/runner/control/thread/${id}/mark-done`, {}),
-                        setError,
-                        refresh
-                      );
-                      advanceHero(id, "Handled, next up", level);
+                      void completeHeroAction({ id: hero.id, level: hero.riskLevel, kind: "handled" });
                     }}
                   >
-                    Mark handled
+                    {heroAction?.id === hero.id && heroAction.kind === "handled"
+                      ? heroAction.status === "running" ? "Saving…" : "Handled"
+                      : "Mark handled"}
                     <span className="hidden sm:inline">
                       <KbHint label="E" />
                     </span>

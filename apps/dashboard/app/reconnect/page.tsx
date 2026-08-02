@@ -93,6 +93,7 @@ export default function ReconnectPage() {
     try {
       const inbox = await apiGet<InboxResponse>("/runner/data/inbox");
       setData(inbox);
+      setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not reach the runner.");
     } finally {

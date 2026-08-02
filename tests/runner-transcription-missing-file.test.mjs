@@ -76,7 +76,7 @@ test("missing file from the resolver writes a skipped row with errorMessage=miss
   assert.equal(outcome.kind, "processed");
   assert.equal(outcome.skipped, 1);
   assert.equal(provider.calls.length, 0);
-  const row = prisma.audioRows.get("k1|g1");
+  const row = prisma.audioRows.get("m1|k1|g1");
   assert.equal(row.status, "skipped");
   assert.equal(row.errorMessage, "missing_file");
 });

@@ -12,6 +12,7 @@ function buildDeps(overrides = {}) {
     isMyContact = true,
     recentOutbound = null, // pass a Date to simulate a prior recent send to this recipient
     dailyOutboundCount = 0,
+    dailyAttachmentCounts = [],
     minIntervalMs = 30_000,
     dailyCap = 30,
     expectedRecipient = RECIPIENT
@@ -34,13 +35,18 @@ function buildDeps(overrides = {}) {
           }
           return null;
         },
-        async count(args) {
+        async findMany(args) {
           assert.equal(args.where.thread.platform, "WHATSAPP");
           assert.equal(args.where.direction, "OUT");
           // The query window must be exactly 24h before now.
           const expectedCutoff = new Date(NOW - ONE_DAY_MS);
           assert.equal(args.where.timestamp.gte.toISOString(), expectedCutoff.toISOString());
-          return dailyOutboundCount;
+          return [
+            ...Array.from({ length: dailyOutboundCount }, () => ({ attachmentsJson: null })),
+            ...dailyAttachmentCounts.map((count) => ({
+              attachmentsJson: JSON.stringify(Array.from({ length: count }, (_, index) => ({ index })))
+            }))
+          ];
         }
       }
     },
@@ -124,6 +130,15 @@ test("checkSendGuard honours custom dailyCap from config", async () => {
   );
   assert.equal(result.allowed, false);
   assert.match(result.reason, /5\/5/);
+});
+
+test("checkSendGuard counts every attachment in earlier media batches", async () => {
+  const result = await checkSendGuard(
+    buildDeps({ dailyOutboundCount: 28, dailyAttachmentCounts: [2] }),
+    RECIPIENT
+  );
+  assert.equal(result.allowed, false);
+  assert.match(result.reason, /30\/30/);
 });
 
 test("checkSendGuard honours custom minIntervalMs from config", async () => {

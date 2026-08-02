@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { X } from "lucide-react";
 import { apiGet, apiPost } from "@/lib/api";
@@ -48,9 +48,17 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
 
 function CommandPalettePanel({ onClose }: { onClose: () => void }) {
   const router = useRouter();
+  const previousFocusRef = useRef<HTMLElement | null>(
+    typeof document === "undefined" ? null : document.activeElement instanceof HTMLElement ? document.activeElement : null
+  );
   const [query, setQuery] = useState("");
   const [threads, setThreads] = useState<InboxResponse["rows"]>([]);
   const [activeIndex, setActiveIndex] = useState(0);
+
+  useEffect(() => {
+    const previous = previousFocusRef.current;
+    return () => previous?.focus();
+  }, []);
 
   useEffect(() => {
     // Index the full inbox, not just the first 30 rows. With hundreds of
@@ -164,6 +172,11 @@ function CommandPalettePanel({ onClose }: { onClose: () => void }) {
         <div className="flex flex-shrink-0 items-center border-b border-hairline">
           <input
             autoFocus
+            role="combobox"
+            aria-autocomplete="list"
+            aria-controls="command-palette-results"
+            aria-expanded="true"
+            aria-activedescendant={items[activeIndex] ? `command-palette-option-${activeIndex}` : undefined}
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             onKeyDown={onKeyDown}
@@ -179,10 +192,18 @@ function CommandPalettePanel({ onClose }: { onClose: () => void }) {
             <X className="h-5 w-5" strokeWidth={1.7} />
           </button>
         </div>
-        <ul className="app-main-scroll m-0 min-h-0 flex-1 list-none overflow-y-auto p-[6px]">
+        <ul
+          id="command-palette-results"
+          role="listbox"
+          aria-label="Search results"
+          className="app-main-scroll m-0 min-h-0 flex-1 list-none overflow-y-auto p-[6px]"
+        >
           {items.map((item, index) => (
             <li
               key={item.id}
+              id={`command-palette-option-${index}`}
+              role="option"
+              aria-selected={index === activeIndex}
               onMouseEnter={() => setActiveIndex(index)}
               onClick={() => {
                 item.run();

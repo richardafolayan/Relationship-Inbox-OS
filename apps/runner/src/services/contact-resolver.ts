@@ -17,8 +17,8 @@ import { readAllAddressBookContacts } from "../platforms/addressbook-db";
  * their machine.
  *
  * Matching strategy:
- *   - Phone numbers are reduced to their last 10 digits (UK mobile length)
- *     so "+447700900123" / "07700900123" / "07700 900123" all match.
+ *   - Phone numbers retain their country code. Common UK local forms are
+ *     canonicalised to +44 so local and international spellings still match.
  *   - Emails are lowercased.
  *
  * If two contacts share a phone number, the last one parsed wins. The
@@ -92,11 +92,18 @@ function parseVcardEntries(raw: string): VcardEntry[] {
 }
 
 export function normalizePhone(raw: string): string | null {
+  const trimmed = raw.trim();
   const digits = raw.replace(/[^\d]/g, "");
   if (digits.length < 7) return null;
-  // Match on the trailing 10 digits — handles UK mobiles in any of:
-  // "+447xxxxxxxxx", "07xxxxxxxxx", "447xxxxxxxxx", "07xxx xxx xxx".
-  return digits.slice(-10);
+  if (trimmed.startsWith("+")) return `+${digits}`;
+  if (digits.startsWith("00") && digits.length > 7) return `+${digits.slice(2)}`;
+  if (digits.startsWith("44") && digits.length >= 11) return `+${digits}`;
+  if (digits.startsWith("1") && digits.length === 11) return `+${digits}`;
+  if (digits.startsWith("0") && digits.length >= 10 && digits.length <= 11) {
+    return `+44${digits.slice(1)}`;
+  }
+  if (digits.length === 10 && digits.startsWith("7")) return `+44${digits}`;
+  return `national:${digits}`;
 }
 
 export function normalizeEmail(raw: string): string | null {

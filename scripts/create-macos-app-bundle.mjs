@@ -106,7 +106,7 @@ alert() {
   /usr/bin/osascript -e "display dialog \\"$1\\" buttons {\\"OK\\"} default button \\"OK\\" with title \\"${APP_NAME}\\"" >/dev/null 2>&1 || true
 }
 
-if /usr/bin/curl -fsS --max-time 2 "$DASHBOARD_URL" >/dev/null 2>&1; then
+if /usr/bin/curl -fsS --max-time 2 "$DASHBOARD_URL/api/health" 2>/dev/null | /usr/bin/grep -q '"application":"relationship-inbox-os"'; then
   /usr/bin/open "$DASHBOARD_URL" >/dev/null 2>&1 || true
   exit 0
 fi

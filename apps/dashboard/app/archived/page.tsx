@@ -280,6 +280,13 @@ export default function ArchivedPage() {
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Escape" && selectMode) clearSelection();
       if (selectMode && (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "a") {
+        const target = event.target;
+        if (
+          target instanceof HTMLElement &&
+          (target.matches("input, textarea, select") || target.isContentEditable)
+        ) {
+          return;
+        }
         event.preventDefault();
         setSelectedIds(orderedIds);
       }

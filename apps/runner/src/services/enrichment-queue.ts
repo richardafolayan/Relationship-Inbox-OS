@@ -34,9 +34,8 @@ interface EnrichmentQueueDeps {
   /** Max jobs processed in a single drain pass (defensive). Default 6. */
   batchMax: number;
   /**
-   * Soft cap on profile visits per rolling 24h window. Tracked in
-   * memory; resets on runner restart. When the cap is reached the
-   * worker defers all further jobs by 1h.
+   * Soft cap on profile visits per rolling 24h window. Stored durably in
+   * runner settings so a restart cannot reset the allowance.
    */
   dailyCap: number;
   /**
@@ -103,15 +102,15 @@ export function createEnrichmentQueue(deps: EnrichmentQueueDeps): EnrichmentQueu
   let periodicTimer: NodeJS.Timeout | null = null;
   let lastVisitAt = 0;
   const nonManualEnqueueLocks = new Map<string, Promise<void>>();
-  // In-memory ring of visit timestamps used to enforce the daily cap.
-  // Pruned of entries older than 24h on every read. Resets on restart —
-  // the LinkedIn-side rate limit is the authoritative one; this is a
-  // belt-and-suspenders safeguard against the queue running unattended.
+  // In-memory mirror for fast same-process checks. The durable Setting row is
+  // re-read and reserved transactionally before each visit, so restarts and
+  // concurrent drain attempts cannot reset or overshoot the real allowance.
   const recentVisits: number[] = [];
   // Counter feeding the long-idle pause cadence. Increments on every
   // completed visit (success or failure that hit the network).
   let visitsSinceLongIdle = 0;
   const DAY_MS = 24 * 60 * 60 * 1000;
+  const VISIT_HISTORY_KEY = "enrichment_visit_history_v1";
 
   function randomInRange(min: number, max: number): number {
     if (max <= min) return min;
@@ -194,7 +193,55 @@ export function createEnrichmentQueue(deps: EnrichmentQueueDeps): EnrichmentQueu
     return { id: job.id, personId: job.personId, attempts: job.attempts };
   }
 
-  async function visitProfile(personId: string): Promise<ProfileExtractionResult> {
+  async function reserveDailyVisit(): Promise<boolean> {
+    const setting = (prisma as unknown as {
+      setting?: {
+        findUnique: (args: unknown) => Promise<{ valueJson: string } | null>;
+        upsert: (args: unknown) => Promise<unknown>;
+      };
+      $transaction?: <T>(work: (client: {
+        setting: {
+          findUnique: (args: unknown) => Promise<{ valueJson: string } | null>;
+          upsert: (args: unknown) => Promise<unknown>;
+        };
+      }) => Promise<T>) => Promise<T>;
+    });
+    if (!setting.setting || !setting.$transaction) {
+      pruneOldVisits();
+      if (recentVisits.length >= deps.dailyCap) return false;
+      recentVisits.push(Date.now());
+      return true;
+    }
+    const reserved = await setting.$transaction(async (transaction) => {
+      const row = await transaction.setting.findUnique({ where: { key: VISIT_HISTORY_KEY } });
+      let history: number[] = [];
+      try {
+        const parsed = row ? JSON.parse(row.valueJson) : [];
+        if (Array.isArray(parsed)) {
+          history = parsed.filter((stamp): stamp is number => typeof stamp === "number");
+        }
+      } catch {
+        history = [];
+      }
+      const now = Date.now();
+      history = history.filter((stamp) => stamp >= now - DAY_MS);
+      if (history.length >= deps.dailyCap) return false;
+      history.push(now);
+      await transaction.setting.upsert({
+        where: { key: VISIT_HISTORY_KEY },
+        update: { valueJson: JSON.stringify(history) },
+        create: { key: VISIT_HISTORY_KEY, valueJson: JSON.stringify(history) }
+      });
+      return true;
+    });
+    if (reserved) recentVisits.push(Date.now());
+    return reserved;
+  }
+
+  async function visitProfile(
+    personId: string,
+    reserveVisit = false
+  ): Promise<ProfileExtractionResult> {
     const platform: PlatformName = "LINKEDIN";
     const person = await prisma.person.findUnique({ where: { id: personId } });
     if (!person) {
@@ -214,6 +261,9 @@ export function createEnrichmentQueue(deps: EnrichmentQueueDeps): EnrichmentQueu
     } catch (error) {
       const detail = error instanceof ProfileUrlPolicyError ? error.message : String(error);
       return { failed: true, reason: "navigation_error", detail };
+    }
+    if (reserveVisit && !(await reserveDailyVisit())) {
+      return { failed: true, reason: "daily_cap", detail: "rolling 24h cap reached" };
     }
     const page = await deps.sessionManager.getManagedPage({ platform, personKey });
     if (deps.ensureConnected) {
@@ -260,10 +310,14 @@ export function createEnrichmentQueue(deps: EnrichmentQueueDeps): EnrichmentQueu
   }
 
   async function persistFailure(personId: string, reason: string): Promise<void> {
-    await prisma.person.update({
-      where: { id: personId },
-      data: { enrichmentFailedReason: reason }
-    });
+    try {
+      await prisma.person.update({
+        where: { id: personId },
+        data: { enrichmentFailedReason: reason }
+      });
+    } catch (error) {
+      if ((error as { code?: string })?.code !== "P2025") throw error;
+    }
   }
 
   // Close out any unfinished EnrichmentJob rows for a person after a manual
@@ -383,7 +437,7 @@ export function createEnrichmentQueue(deps: EnrichmentQueueDeps): EnrichmentQueu
       // instead of racing. (No re-entrancy: visitProfile only touches the
       // session manager's personMutex / lease refcount, never this mutex.)
       const acquired = await deps.operationMutex.tryAcquire(deps.enrichLockKey, () =>
-        deps.operationMutex.runExclusive(scanLock, () => visitProfile(job.personId))
+        deps.operationMutex.runExclusive(scanLock, () => visitProfile(job.personId, true))
       );
       if (!acquired.acquired) {
         await prisma.enrichmentJob.update({
@@ -393,12 +447,22 @@ export function createEnrichmentQueue(deps: EnrichmentQueueDeps): EnrichmentQueu
         return { visited: false };
       }
       result = acquired.value;
+      if ("failed" in result && result.failed && result.reason === "daily_cap") {
+        await prisma.enrichmentJob.update({
+          where: { id: job.id },
+          data: {
+            status: "PENDING",
+            nextAttemptAt: new Date(Date.now() + 60 * 60 * 1000),
+            lastError: `deferred: daily cap reached (${deps.dailyCap}/24h)`
+          }
+        });
+        return { visited: false };
+      }
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       result = { failed: true, reason: "unknown", detail };
     }
     lastVisitAt = Date.now();
-    recentVisits.push(lastVisitAt);
     visitsSinceLongIdle += 1;
 
     // The visit happened above (rate-limit accounting already ran). Guard the
@@ -520,12 +584,15 @@ export function createEnrichmentQueue(deps: EnrichmentQueueDeps): EnrichmentQueu
     let result: ProfileExtractionResult;
     try {
       const acquired = await deps.operationMutex.tryAcquire(deps.enrichLockKey, () =>
-        deps.operationMutex.runExclusive(scanLock, () => visitProfile(personId))
+        deps.operationMutex.runExclusive(scanLock, () => visitProfile(personId, true))
       );
       if (!acquired.acquired) {
         return { deferred: true };
       }
       result = acquired.value;
+      if ("failed" in result && result.failed && result.reason === "daily_cap") {
+        return { deferred: true };
+      }
     } catch (error) {
       // A thrown visit (e.g. getManagedPage threw, or a step escaped
       // extractProfile) must not skip the rate-limit accounting and
@@ -535,7 +602,6 @@ export function createEnrichmentQueue(deps: EnrichmentQueueDeps): EnrichmentQueu
       result = { failed: true, reason: "unknown", detail };
     }
     lastVisitAt = Date.now();
-    recentVisits.push(lastVisitAt);
     visitsSinceLongIdle += 1;
     // The manual visit has now run (success or recorded failure), so retire any
     // PENDING/RUNNING job for this person — otherwise the background drain would

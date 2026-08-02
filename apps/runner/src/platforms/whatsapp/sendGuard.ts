@@ -33,13 +33,14 @@ export interface SendGuardPrisma {
       orderBy: { timestamp: "desc" };
       select: { timestamp: true };
     }): Promise<{ timestamp: Date } | null>;
-    count(args: {
+    findMany(args: {
       where: {
         direction: "OUT";
         thread: { platform: "WHATSAPP" };
         timestamp: { gte: Date };
       };
-    }): Promise<number>;
+      select: { attachmentsJson: true };
+    }): Promise<Array<{ attachmentsJson: string | null }>>;
   };
 }
 
@@ -71,6 +72,8 @@ export interface SendGuardDeps {
   config: SendGuardConfig;
   /** Override the clock for tests. Defaults to `Date.now`. */
   now?: () => number;
+  sendCount?: number;
+  reservedCount?: number;
 }
 
 const ONE_DAY_MS = 24 * 60 * 60 * 1000;
@@ -118,20 +121,32 @@ export async function checkSendGuard(
     };
   }
 
-  // 3. Rolling 24h cap. Counts all WhatsApp outbound Messages timestamped
-  //    within the last 24 hours, regardless of thread.
+  // 3. Rolling 24h cap. A media batch creates one platform send per attachment,
+  //    so count those durable attachment receipts individually.
   const dayCutoff = new Date(now() - ONE_DAY_MS);
-  const count = await deps.prisma.message.count({
+  const outboundRows = await deps.prisma.message.findMany({
     where: {
       direction: "OUT",
       thread: { platform: "WHATSAPP" },
       timestamp: { gte: dayCutoff }
-    }
+    },
+    select: { attachmentsJson: true }
   });
-  if (count >= deps.config.dailyCap) {
+  const count = outboundRows.reduce((total, row) => {
+    if (!row.attachmentsJson) return total + 1;
+    try {
+      const attachments = JSON.parse(row.attachmentsJson);
+      return total + (Array.isArray(attachments) && attachments.length > 0 ? attachments.length : 1);
+    } catch {
+      return total + 1;
+    }
+  }, 0);
+  const requested = Math.max(1, deps.sendCount ?? 1);
+  const reserved = Math.max(0, deps.reservedCount ?? 0);
+  if (count + reserved + requested > deps.config.dailyCap) {
     return {
       allowed: false,
-      reason: `WhatsApp 24h send cap reached (${count}/${deps.config.dailyCap})`
+      reason: `WhatsApp 24h send cap reached (${count + reserved}/${deps.config.dailyCap}); ${requested} requested`
     };
   }
 

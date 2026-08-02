@@ -46,29 +46,33 @@ test("null or malformed attachmentsJson returns empty", () => {
 
 test("audioFingerprint folds platform key plus guid", () => {
   const fp = buildAudioFingerprint({
+    messageId: "message-row-1",
     platformMessageKey: "msg-1",
     attachmentGuid: "att-abc",
     attachmentIndex: 0
   });
-  assert.equal(fp, "msg-1|att-abc");
+  assert.equal(fp, "message-row-1|msg-1|att-abc");
 });
 
 test("audioFingerprint falls back to index when guid is missing", () => {
   const fp = buildAudioFingerprint({
+    messageId: "message-row-1",
     platformMessageKey: "msg-1",
     attachmentGuid: null,
     attachmentIndex: 2
   });
-  assert.equal(fp, "msg-1|idx-2");
+  assert.equal(fp, "message-row-1|msg-1|idx-2");
 });
 
 test("audioFingerprint deduplicates same message with same guid", () => {
   const a = buildAudioFingerprint({
+    messageId: "message-row-1",
     platformMessageKey: "msg-1",
     attachmentGuid: "att-abc",
     attachmentIndex: 0
   });
   const b = buildAudioFingerprint({
+    messageId: "message-row-1",
     platformMessageKey: "msg-1",
     attachmentGuid: "att-abc",
     attachmentIndex: 0
@@ -78,12 +82,30 @@ test("audioFingerprint deduplicates same message with same guid", () => {
 
 test("audioFingerprint differs across messages even with the same guid", () => {
   const a = buildAudioFingerprint({
+    messageId: "message-row-1",
     platformMessageKey: "msg-1",
     attachmentGuid: "att-abc",
     attachmentIndex: 0
   });
   const b = buildAudioFingerprint({
+    messageId: "message-row-1",
     platformMessageKey: "msg-2",
+    attachmentGuid: "att-abc",
+    attachmentIndex: 0
+  });
+  assert.notEqual(a, b);
+});
+
+test("audioFingerprint differs across database messages when imported keys collide", () => {
+  const a = buildAudioFingerprint({
+    messageId: "message-row-1",
+    platformMessageKey: "duplicate-import-key",
+    attachmentGuid: "att-abc",
+    attachmentIndex: 0
+  });
+  const b = buildAudioFingerprint({
+    messageId: "message-row-2",
+    platformMessageKey: "duplicate-import-key",
     attachmentGuid: "att-abc",
     attachmentIndex: 0
   });

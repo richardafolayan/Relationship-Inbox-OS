@@ -119,6 +119,7 @@ model Person {
   // card is the source of truth; these are never edited from the dashboard.
   birthday                String?
   birthYear               Int?
+  birthdaySource          String?
   // Operator-pinned "favourite" contact (pilot feedback R-0066 / #483). When
   // set, this person's conversations float to the top of the Inbox section
   // and the Today queue they already belong to — favourites are prioritised
@@ -429,7 +430,7 @@ model MessageAudioTranscription {
   // transcript back to its specific attachment when a message carries
   // more than one. Nullable when the source attachment lacks a stable id.
   attachmentId     String?
-  // Stable dedup key. Today: `${platformMessageKey}|${attachmentId ?? "idx-N"}`.
+  // Stable dedup key scoped to the Message row and attachment.
   // Lets re-scans short-circuit before they spend an OpenAI call on
   // already-known audio. Globally unique so a single retry path covers
   // both same-message rescans and cross-thread reuse.
@@ -527,14 +528,13 @@ model MessageAudioTranscriptionAttempt {
 
 model Draft {
   id        String   @id @default(cuid())
-  threadId  String
+  threadId  String   @unique
   text      String
   updatedAt DateTime @updatedAt
   createdAt DateTime @default(now())
 
   thread Thread @relation(fields: [threadId], references: [id], onDelete: Cascade)
 
-  @@index([threadId])
   @@map("drafts")
 }
 

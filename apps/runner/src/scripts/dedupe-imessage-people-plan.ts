@@ -31,16 +31,16 @@ export interface DedupePlan {
 }
 
 /**
- * Stable identity for a Person row. Phone handles collapse to their trailing
- * 10 digits and emails are lowercased (so "+44 7…", "07…" and "447…" for one
- * number agree); anything else (e.g. a group-chat id) falls back to the
+ * Stable identity for a Person row. Phone handles retain country identity
+ * while common local forms are canonicalised (so "+44 7…", "07…" and "447…"
+ * for one number agree); anything else (e.g. a group-chat id) falls back to the
  * trimmed, lowercased raw handle — still the *handle*, never the displayName.
  * Returns null when there is no usable handle, which excludes the row from any
  * merge.
  *
  * Classification is @-first, mirroring resolveName (contact-resolver.ts): a
  * handle containing "@" is ALWAYS treated as an email and never run through
- * normalizePhone. normalizePhone strips non-digits and keeps the trailing 10
+ * normalizePhone. normalizePhone preserves international country identity and
  * with no shape guard, so without this an email whose local-part carries 7+
  * digits would key as a phone — collapsing two distinct digit-bearing emails
  * (or an email and a phone) that happen to share a 10-digit suffix onto one

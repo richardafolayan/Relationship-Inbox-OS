@@ -36,7 +36,7 @@
     "audit:mobile": "node scripts/mobile-pilot-audit.mjs",
     "move-on": "npm run test:all",
     "db:generate": "prisma generate --schema packages/core/prisma/schema.prisma",
-    "db:push": "DATABASE_URL=file:$(pwd)/data/inbox-os.sqlite prisma db push --schema packages/core/prisma/schema.prisma",
+    "db:push": "DATABASE_URL=file:$(pwd)/data/inbox-os.sqlite node scripts/preflight-schema-repairs.mjs && DATABASE_URL=file:$(pwd)/data/inbox-os.sqlite prisma db push --schema packages/core/prisma/schema.prisma",
     "db:migrate": "DATABASE_URL=file:$(pwd)/data/inbox-os.sqlite prisma migrate dev --schema packages/core/prisma/schema.prisma",
     "dev:dashboard": "npm run dev --workspace @inbox-os/dashboard",
     "dev:runner": "npm run db:generate && npm run db:push && npm run build --workspace @inbox-os/core && npm run dev --workspace @inbox-os/runner",

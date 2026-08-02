@@ -1,6 +1,5 @@
-import { networkInterfaces } from "node:os";
 import QRCode from "qrcode";
-import { buildPhoneAccessUrl } from "@/lib/phone-access-server";
+import { securePhoneAccessUrl } from "@/lib/phone-access-server";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -16,9 +15,8 @@ function escapeHtml(value: string): string {
 }
 
 export async function GET(request: Request): Promise<Response> {
-  const connectUrl = buildPhoneAccessUrl(
-    networkInterfaces(),
-    process.env.RIOS_PHONE_ACCESS_PORT || "",
+  const connectUrl = securePhoneAccessUrl(
+    process.env.RIOS_PHONE_ACCESS_SECURE_URL || "",
     process.env.RIOS_PHONE_ACCESS_TOKEN || ""
   );
   const threadId = new URL(request.url).searchParams.get("threadId") || "";

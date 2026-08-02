@@ -11,10 +11,11 @@
  * one in practice but the typed shape allows null.
  */
 export function buildAudioFingerprint(input: {
+  messageId: string;
   platformMessageKey: string;
   attachmentGuid: string | null | undefined;
   attachmentIndex: number;
 }): string {
   const id = input.attachmentGuid?.trim() || `idx-${input.attachmentIndex}`;
-  return `${input.platformMessageKey}|${id}`;
+  return `${input.messageId}|${input.platformMessageKey}|${id}`;
 }

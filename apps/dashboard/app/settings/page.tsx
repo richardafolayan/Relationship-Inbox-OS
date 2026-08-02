@@ -388,6 +388,7 @@ export default function SettingsPage() {
     window: QuietHoursWindow;
   }) => {
     if (quietHoursStatus === "saving") return;
+    const previous = { enabled: quietHours, window: quietWindow };
     const applied = setQuietHoursHostState(next);
     setQuietHours(applied.enabled);
     setQuietWindow(applied.window);
@@ -397,6 +398,9 @@ export default function SettingsPage() {
       setQuietHoursStatus("idle");
       setSavedAt(Date.now());
     } catch {
+      const restored = setQuietHoursHostState(previous);
+      setQuietHours(restored.enabled);
+      setQuietWindow(restored.window);
       setQuietHoursStatus("error");
     }
   };

@@ -55,6 +55,8 @@ export function DictationMessageReview({
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   const textareaRefs = useRef<Record<string, HTMLTextAreaElement | null>>({});
   const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const inFlightMessageIdsRef = useRef<Set<string>>(new Set());
+  const sendAllInFlightRef = useRef(false);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -139,8 +141,16 @@ export function DictationMessageReview({
   };
 
   const sendMessages = async () => {
-    const ready = messages.filter((message) => !sentMessageIds.has(message.id) && message.text.trim());
+    if (sendAllInFlightRef.current) return;
+    const ready = messages.filter(
+      (message) =>
+        !sentMessageIds.has(message.id) &&
+        !inFlightMessageIdsRef.current.has(message.id) &&
+        message.text.trim()
+    );
     if (!ready.length) return;
+    sendAllInFlightRef.current = true;
+    ready.forEach((message) => inFlightMessageIdsRef.current.add(message.id));
     setView("sending");
     setError(null);
     const sentTexts: string[] = [];
@@ -152,6 +162,9 @@ export function DictationMessageReview({
         sentTexts.push(text);
         setSentMessageIds((current) => new Set(current).add(message.id));
       } catch (sendError) {
+        for (const unsent of ready.slice(index)) {
+          inFlightMessageIdsRef.current.delete(unsent.id);
+        }
         if (sentTexts.length) {
           void apiPost(`/runner/control/thread/${threadId}/dictation-message-example`, {
             messages: sentTexts
@@ -162,22 +175,33 @@ export function DictationMessageReview({
           `${sendError instanceof Error ? sendError.message : "Sending stopped."} ${remaining} ${remaining === 1 ? "message is" : "messages are"} still here.`
         );
         setView("review");
+        sendAllInFlightRef.current = false;
         return;
       }
     }
     void apiPost(`/runner/control/thread/${threadId}/dictation-message-example`, {
       messages: sentTexts
     }).catch(() => undefined);
+    sendAllInFlightRef.current = false;
     onDone();
   };
 
   const sendOneMessage = async (message: FormattedDictationMessage) => {
     const text = message.text.trim();
-    if (!text || sendingMessageIds.has(message.id) || sentMessageIds.has(message.id) || view === "sending") return;
+    if (
+      !text ||
+      inFlightMessageIdsRef.current.has(message.id) ||
+      sentMessageIds.has(message.id) ||
+      sendAllInFlightRef.current ||
+      view === "sending"
+    ) return;
+    inFlightMessageIdsRef.current.add(message.id);
     setSendingMessageIds((current) => new Set(current).add(message.id));
     setError(null);
+    let sent = false;
     try {
       await onSendMessage(text);
+      sent = true;
       setSentMessageIds((current) => new Set(current).add(message.id));
       onMessageSent();
       void apiPost(`/runner/control/thread/${threadId}/dictation-message-example`, {
@@ -186,6 +210,7 @@ export function DictationMessageReview({
     } catch (sendError) {
       setError(sendError instanceof Error ? sendError.message : "This message was not sent. Try again.");
     } finally {
+      if (!sent) inFlightMessageIdsRef.current.delete(message.id);
       setSendingMessageIds((current) => {
         const next = new Set(current);
         next.delete(message.id);

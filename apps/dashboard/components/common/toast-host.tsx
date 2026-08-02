@@ -169,14 +169,11 @@ function ToastCard({
     }
     switch (resolveToastGesture(travelled, interactive)) {
       case "dismiss":
+        e.preventDefault();
         manualDismiss();
         break;
       case "activate":
-        // Any release below the swipe threshold on a clickable toast is a
-        // click, not a swipe: open the linked thread / view. A click rarely
-        // lands pixel-perfect, so we no longer require a near-stationary
-        // release (which left a 7-80px dead zone that swallowed the click).
-        activate();
+        setDragX(0);
         break;
       default:
         setDragX(0);
@@ -189,16 +186,10 @@ function ToastCard({
   return (
     <div
       data-toast-href={toast.href ?? undefined}
-      className={`pointer-events-auto select-none rounded-xl bg-paper p-2.5 shadow-sm transition-shadow sm:p-3 ${style.ring} ${
-        interactive ? "cursor-pointer hover:ring-hairline-strong focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent" : ""
+      className={`pointer-events-auto relative select-none rounded-xl bg-paper p-2.5 shadow-sm transition-shadow sm:p-3 ${style.ring} ${
+        interactive ? "hover:ring-hairline-strong" : ""
       }`}
-      role={interactive ? "button" : toast.kind === "error" ? "alert" : "status"}
-      tabIndex={interactive ? 0 : undefined}
-      aria-label={
-        interactive
-          ? `${toast.title}${toast.description ? `. ${toast.description}` : ""}. Activate.`
-          : undefined
-      }
+      role={toast.kind === "error" ? "alert" : "status"}
       style={{
         transform: `translateX(${dragX}px)`,
         opacity,
@@ -209,18 +200,16 @@ function ToastCard({
       onPointerMove={onPointerMove}
       onPointerUp={endDrag}
       onPointerCancel={endDrag}
-      onKeyDown={
-        interactive
-          ? (e) => {
-              if (e.key === "Enter" || e.key === " ") {
-                e.preventDefault();
-                activate();
-              }
-            }
-          : undefined
-      }
     >
-      <div className="flex items-start gap-2">
+      {interactive ? (
+        <button
+          type="button"
+          aria-label={`${toast.title}${toast.description ? `. ${toast.description}` : ""}. Activate.`}
+          onClick={activate}
+          className="absolute inset-0 z-0 cursor-pointer rounded-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+        />
+      ) : null}
+      <div className="pointer-events-none relative z-[1] flex items-start gap-2">
         {toast.kind === "pending" ? (
           <Loader2
             aria-hidden
@@ -254,7 +243,7 @@ function ToastCard({
           data-toast-close
           aria-label="Dismiss notification"
           onClick={manualDismiss}
-          className="-mr-1 -mt-1 flex-none rounded-md p-1 text-ink-3 transition-colors hover:bg-hairline/60 hover:text-ink-1"
+          className="pointer-events-auto -mr-1 -mt-1 flex-none rounded-md p-1 text-ink-3 transition-colors hover:bg-hairline/60 hover:text-ink-1"
         >
           <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true">
             <path

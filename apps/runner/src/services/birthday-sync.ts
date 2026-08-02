@@ -1,7 +1,10 @@
 import type { PrismaClient } from "@prisma/client";
 import { prisma as defaultPrisma } from "../db";
 import { runnerConfig } from "../config";
-import { readAllAddressBookBirthdays } from "../platforms/addressbook-db";
+import {
+  readAllAddressBookBirthdays,
+  readAllAddressBookContacts
+} from "../platforms/addressbook-db";
 import { IMessageDb } from "../platforms/imessage-db";
 import { normalizeEmail, normalizePhone } from "./contact-resolver";
 
@@ -31,6 +34,9 @@ interface BirthdaySyncDeps {
   dbPaths?: string[];
   /** macOS Messages chat.db path. Defaults to the runner's iMessage config. */
   chatDbPath?: string;
+  readBirthdays?: typeof readAllAddressBookBirthdays;
+  readContacts?: typeof readAllAddressBookContacts;
+  readChatHandles?: () => Map<string, string[]>;
 }
 
 export interface BirthdaySyncResult {
@@ -56,7 +62,7 @@ export interface BirthdaySync {
 
 const DAILY_MS = 24 * 60 * 60 * 1000;
 
-/** Normalized phone (last 10 digits) or email key for a raw handle, or null. */
+/** Normalized phone or email key for a raw handle, or null. */
 function handleKey(raw: string): string | null {
   const trimmed = raw.trim();
   // A comma marks a joined multi-handle string - a group-chat displayName,
@@ -81,16 +87,23 @@ export function createBirthdaySync(deps: BirthdaySyncDeps = {}): BirthdaySync {
    * Full Disk Access, signed out) the sync falls back to displayName-only
    * matching for the unresolved contacts.
    */
-  function birthdaysByChatGuid(byHandle: Map<string, BirthdayValue>): Map<string, BirthdayValue> {
+  function contactMatchesByChatGuid(
+    byHandle: Map<string, BirthdayValue>,
+    knownHandles: Set<string>
+  ): { birthdays: Map<string, BirthdayValue>; contacts: Set<string> } {
     const guidBirthday = new Map<string, BirthdayValue>();
+    const guidContact = new Set<string>();
     let db: IMessageDb | null = null;
     try {
-      db = new IMessageDb(chatDbPath);
-      for (const [guid, handles] of db.listChatHandleMap()) {
+      const chatHandles = deps.readChatHandles
+        ? deps.readChatHandles()
+        : (db = new IMessageDb(chatDbPath)).listChatHandleMap();
+      for (const [guid, handles] of chatHandles) {
         // Only 1:1 chats: a group's birthday assignment would be ambiguous.
         if (handles.length !== 1) continue;
         const key = handleKey(handles[0] ?? "");
         if (!key) continue;
+        if (knownHandles.has(key)) guidContact.add(guid);
         const birthday = byHandle.get(key);
         if (birthday) guidBirthday.set(guid, birthday);
       }
@@ -99,14 +112,18 @@ export function createBirthdaySync(deps: BirthdaySyncDeps = {}): BirthdaySync {
     } finally {
       db?.close();
     }
-    return guidBirthday;
+    return { birthdays: guidBirthday, contacts: guidContact };
   }
 
   async function tick(): Promise<BirthdaySyncResult> {
     if (running) return { scanned: 0, matched: 0, updated: 0 };
     running = true;
     try {
-      const contacts = readAllAddressBookBirthdays(deps.dbPaths);
+      const contacts = (deps.readBirthdays ?? readAllAddressBookBirthdays)(deps.dbPaths);
+      const allContacts = (deps.readContacts ?? readAllAddressBookContacts)(deps.dbPaths);
+      if (allContacts.length === 0) {
+        return { scanned: contacts.length, matched: 0, updated: 0 };
+      }
 
       // Normalized phone/email -> birthday. Last contact wins on a key
       // collision, matching contact-resolver's resolution semantics.
@@ -122,13 +139,21 @@ export function createBirthdaySync(deps: BirthdaySyncDeps = {}): BirthdaySync {
           if (key) byHandle.set(key, value);
         }
       }
-      if (byHandle.size === 0) {
-        return { scanned: contacts.length, matched: 0, updated: 0 };
+      const knownHandles = new Set<string>();
+      for (const contact of allContacts) {
+        for (const phone of contact.phones) {
+          const key = normalizePhone(phone);
+          if (key) knownHandles.add(key);
+        }
+        for (const email of contact.emails) {
+          const key = normalizeEmail(email);
+          if (key) knownHandles.add(key);
+        }
       }
 
       // chat.db bridges a Thread (keyed by an opaque chat guid) back to the
       // contact handle; the Person row itself stores no handle.
-      const guidBirthday = birthdaysByChatGuid(byHandle);
+      const guidMatches = contactMatchesByChatGuid(byHandle, knownHandles);
 
       const people = await prisma.person.findMany({
         where: { platform: "IMESSAGE" },
@@ -137,6 +162,7 @@ export function createBirthdaySync(deps: BirthdaySyncDeps = {}): BirthdaySync {
           displayName: true,
           birthday: true,
           birthYear: true,
+          birthdaySource: true,
           threads: { select: { platformThreadId: true } }
         }
       });
@@ -148,24 +174,43 @@ export function createBirthdaySync(deps: BirthdaySyncDeps = {}): BirthdaySync {
         // displayName. Route 2: bridge the person's threads through chat.db.
         const nameKey = handleKey(person.displayName);
         let birthday: BirthdayValue | undefined = nameKey ? byHandle.get(nameKey) : undefined;
+        let matchedContact = Boolean(nameKey && knownHandles.has(nameKey));
         if (!birthday) {
           for (const thread of person.threads) {
-            const found = guidBirthday.get(thread.platformThreadId);
+            if (guidMatches.contacts.has(thread.platformThreadId)) matchedContact = true;
+            const found = guidMatches.birthdays.get(thread.platformThreadId);
             if (found) {
               birthday = found;
               break;
             }
           }
         }
-        if (!birthday) continue;
+        if (!birthday) {
+          if (matchedContact && person.birthdaySource === "macos_contacts") {
+            await prisma.person.update({
+              where: { id: person.id },
+              data: { birthday: null, birthYear: null, birthdaySource: null }
+            });
+            updated++;
+          }
+          continue;
+        }
         matched++;
         // Skip no-op writes so the Person.updatedAt stamp is not churned.
-        if (person.birthday === birthday.monthDay && person.birthYear === birthday.year) {
+        if (
+          person.birthday === birthday.monthDay &&
+          person.birthYear === birthday.year &&
+          person.birthdaySource === "macos_contacts"
+        ) {
           continue;
         }
         await prisma.person.update({
           where: { id: person.id },
-          data: { birthday: birthday.monthDay, birthYear: birthday.year }
+          data: {
+            birthday: birthday.monthDay,
+            birthYear: birthday.year,
+            birthdaySource: "macos_contacts"
+          }
         });
         updated++;
       }

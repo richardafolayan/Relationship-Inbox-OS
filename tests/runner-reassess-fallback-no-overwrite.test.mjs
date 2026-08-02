@@ -96,6 +96,10 @@ function makeFakePrisma({ thread, messages }) {
         calls.findUnique += 1;
         return thread;
       },
+      async updateMany(args) {
+        calls.threadUpdate.push(args);
+        return { count: 1 };
+      },
       async update(args) {
         calls.threadUpdate.push(args);
         return { id: args.where.id };
@@ -113,9 +117,14 @@ function makeFakePrisma({ thread, messages }) {
         return { count: args.where.messageId.in.length };
       }
     },
-    async $transaction(ops) {
-      calls.transaction.push(ops.length);
-      return Promise.all(ops);
+    async $transaction(work) {
+      calls.transaction.push(1);
+      return work({
+        thread: { updateMany: prisma.thread.updateMany },
+        messageAudioTranscription: {
+          updateMany: prisma.messageAudioTranscription.updateMany
+        }
+      });
     }
   };
   return { prisma, calls };

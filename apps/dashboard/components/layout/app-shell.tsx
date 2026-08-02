@@ -44,6 +44,7 @@ import {
   writeNotifiedUpdateVersion,
   type UpdateCheckResponse
 } from "@/lib/update-notice";
+import { withBrowserTaskLease } from "@/lib/browser-task-lease";
 import {
   buildNewMessageDigestNotice,
   buildNewMessageNotice,
@@ -492,16 +493,10 @@ export function AppShell({ children }: { children: ReactNode }) {
     }
   }, [router]);
 
-  useEffect(() => {
-    void checkAppUpdate();
-    const timer = window.setInterval(() => void checkAppUpdate(), UPDATE_CHECK_INTERVAL_MS);
-    const onFocus = () => void checkAppUpdate();
-    window.addEventListener("focus", onFocus);
-    return () => {
-      window.clearInterval(timer);
-      window.removeEventListener("focus", onFocus);
-    };
-  }, [checkAppUpdate]);
+  useVisiblePolling(
+    () => void withBrowserTaskLease("update-check", 30_000, checkAppUpdate),
+    UPDATE_CHECK_INTERVAL_MS
+  );
 
   useEffect(() => {
     if (autoScanDisabled) {
@@ -588,7 +583,7 @@ export function AppShell({ children }: { children: ReactNode }) {
     if (autoScanDisabled || !autoScanEnabled) return undefined;
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
-    const tick = () => {
+    const tick = async () => {
       if (cancelled) return;
       // Three reasons we skip a tick:
       //   - already mid-scan (don't pile up requests)
@@ -596,24 +591,27 @@ export function AppShell({ children }: { children: ReactNode }) {
       //   - outside plausible active hours (weekend / before 08:00 /
       //     after 19:00 — keeps the scrape footprint matched to a
       //     real person's working pattern rather than a 24/7 bot)
-      const skip =
+      let skip =
+        document.visibilityState !== "visible" ||
         autoScanInFlightRef.current ||
         shouldSkipAutoScanForQuietHours() ||
         !isWithinActiveHours();
       if (!skip) {
         autoScanInFlightRef.current = true;
-        void apiPost("/runner/control/scan", { scope: "update" }).catch(() => undefined).finally(() => {
-          autoScanInFlightRef.current = false;
-        });
+        const lease = await withBrowserTaskLease("linkedin-auto-scan", 5 * 60_000, async () => {
+          await apiPost("/runner/control/scan", { scope: "update" });
+        }).catch(() => ({ acquired: true }));
+        skip = !lease.acquired;
+        autoScanInFlightRef.current = false;
       }
       // Re-schedule with a fresh jitter on every firing so we don't
       // settle into a predictable cadence even with quiet-hours skips.
       // A skipped tick retries on the short window whatever the cadence:
       // the gates above still decide whether the retry scans, so a daily
       // interval can't starve just because its timer landed at night.
-      timer = setTimeout(tick, nextScanDelayMs(scanInterval, { skipped: skip }));
+      timer = setTimeout(() => void tick(), nextScanDelayMs(scanInterval, { skipped: skip }));
     };
-    timer = setTimeout(tick, nextScanDelayMs(scanInterval));
+    timer = setTimeout(() => void tick(), nextScanDelayMs(scanInterval));
     return () => {
       cancelled = true;
       if (timer) clearTimeout(timer);
@@ -836,15 +834,15 @@ export function AppShell({ children }: { children: ReactNode }) {
       });
       recordClientError(failure.message, Date.now());
       logConsumerFailure(failure, reason, { method: "POST", phase: "runtime" });
-      setRuntimeFailure(failure);
+      if (reason instanceof Error && reason.name === "ToviFatalRuntimeError") {
+        setRuntimeFailure(failure);
+      }
     };
     const onError = (event: ErrorEvent) => {
       capture(event.error ?? event.message);
-      event.preventDefault();
     };
     const onRejection = (event: PromiseRejectionEvent) => {
       capture(event.reason);
-      event.preventDefault();
     };
     window.addEventListener("error", onError);
     window.addEventListener("unhandledrejection", onRejection);

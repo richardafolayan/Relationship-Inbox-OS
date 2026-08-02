@@ -7,6 +7,7 @@ import type { EventBus, SettingsStore } from "../types/runtime";
 import { AdapterFailure } from "../platforms/utils";
 import { buildDemoSendReceipt } from "./demo-send";
 import { classifySendFailureKind, consumerSendFailure } from "./send-failure";
+import { cleanupStagedAttachments } from "./staged-attachments";
 
 interface SendServiceDeps {
   // Partial: not every PlatformName has an adapter on main today. The
@@ -96,7 +97,10 @@ function parseReceipt(receiptJson: string): Omit<SendResult, "replayed"> {
 }
 
 function isUniqueConstraintError(error: unknown): boolean {
-  return error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002";
+  return (
+    error instanceof Prisma.PrismaClientKnownRequestError ||
+    (typeof error === "object" && error !== null)
+  ) && (error as { code?: string }).code === "P2002";
 }
 
 // Marker written into `receiptJson` the instant a worker claims a PENDING row,
@@ -309,6 +313,10 @@ export function createSendService(deps: SendServiceDeps) {
 
     const jobId = uuid();
     const input = { threadId: thread.id, text: sendRequest.requestText, clientSendId: sendRequest.clientSendId };
+    let deliveredReceipt: SendReceipt | null = null;
+    const stagedAttachments = sendRequest.attachmentsJson
+      ? (JSON.parse(sendRequest.attachmentsJson) as Array<{ absolutePath: string; displayName: string; mimeType?: string; kind?: string }>)
+      : [];
 
     try {
       await deps.auditLog({
@@ -329,9 +337,6 @@ export function createSendService(deps: SendServiceDeps) {
       const settings = await deps.settingsStore.getSettings();
       const inSandbox = settings.presenterDemoMode === "sandbox";
       let receipt: SendReceipt;
-      const stagedAttachments = sendRequest.attachmentsJson
-        ? (JSON.parse(sendRequest.attachmentsJson) as Array<{ absolutePath: string; displayName: string; mimeType?: string; kind?: string }>)
-        : [];
       if (inSandbox) {
         const manifest = await deps.settingsStore.getDemoSeedManifest();
         if (!manifest || !manifest.threadIds.includes(thread.id)) {
@@ -361,6 +366,15 @@ export function createSendService(deps: SendServiceDeps) {
           )
         );
       }
+      deliveredReceipt = receipt;
+      await prisma.sendRequest.update({
+        where: { clientSendId: input.clientSendId },
+        data: {
+          status: "SENT",
+          receiptJson: JSON.stringify(receipt),
+          errorJson: null
+        }
+      });
 
       // Persist platform-side attachments on the OUT row when the adapter
       // captured them post-send (iMessage adapter looks them up from
@@ -447,14 +461,6 @@ export function createSendService(deps: SendServiceDeps) {
         }
       });
 
-      await prisma.sendRequest.update({
-        where: { clientSendId: input.clientSendId },
-        data: {
-          status: "SENT",
-          receiptJson: JSON.stringify(receipt)
-        }
-      });
-
       await deps.auditLog({
         platform: thread.platform as PlatformName,
         stage: "Verify",
@@ -484,7 +490,44 @@ export function createSendService(deps: SendServiceDeps) {
         acknowledgedAt: receipt.acknowledgedAt,
         platformResultAt
       });
+      await cleanupStagedAttachments(stagedAttachments);
     } catch (error) {
+      if (deliveredReceipt) {
+        await prisma.sendRequest.update({
+          where: { clientSendId: input.clientSendId },
+          data: {
+            status: "SENT",
+            receiptJson: JSON.stringify(deliveredReceipt),
+            errorJson: null
+          }
+        }).catch(() => undefined);
+        await deps.auditLog({
+          platform: thread.platform as PlatformName,
+          stage: "Persist",
+          action: "POST_SEND_PERSIST_FAILED",
+          status: "FAIL",
+          details: { threadId: thread.id, clientSendId: input.clientSendId, message: describeSendError(error) }
+        }).catch(() => undefined);
+        const platformResultAt = deliveredReceipt.platformResultAt ?? new Date().toISOString();
+        deps.onPlatformResult?.({
+          clientSendId: input.clientSendId,
+          platform: thread.platform as PlatformName,
+          outcome: "success",
+          finishedAt: platformResultAt
+        });
+        deps.eventBus.emit({
+          type: "MESSAGE_SENT",
+          jobId,
+          threadId: thread.id,
+          platform: thread.platform as PlatformName,
+          clientSendId: input.clientSendId,
+          verifiedBy: deliveredReceipt.verifiedBy,
+          acknowledgedAt: deliveredReceipt.acknowledgedAt,
+          platformResultAt
+        });
+        await cleanupStagedAttachments(stagedAttachments);
+        return;
+      }
       const adapterError = error instanceof AdapterFailure ? error : undefined;
       const errorMessage = describeSendError(error);
 
@@ -543,6 +586,7 @@ export function createSendService(deps: SendServiceDeps) {
         errorKind,
         platformResultAt
       });
+      await cleanupStagedAttachments(stagedAttachments);
 
       // Don't rethrow — the worker already logged FAILED state. Rethrowing
       // would crash the worker loop; we want it to pick up the next pending
@@ -619,11 +663,21 @@ export function createSendService(deps: SendServiceDeps) {
       if (!isUniqueConstraintError(error)) {
         throw error;
       }
-      // Concurrent insert beat us; treat as replay.
+      const winner = await prisma.sendRequest.findUnique({
+        where: { clientSendId: input.clientSendId }
+      });
+      if (
+        !winner ||
+        winner.threadId !== input.threadId ||
+        winner.status !== "SCHEDULED" ||
+        !winner.scheduledFor
+      ) {
+        throw new Error(`Send request ${input.clientSendId} was concurrently claimed by an incompatible request`);
+      }
       return {
         clientSendId: input.clientSendId,
         status: "SCHEDULED",
-        scheduledFor: input.scheduledFor.toISOString(),
+        scheduledFor: winner.scheduledFor.toISOString(),
         replayed: true
       };
     }
@@ -703,6 +757,11 @@ export function createSendService(deps: SendServiceDeps) {
         }
       });
     }
+
+    const stagedAttachments = row.attachmentsJson
+      ? (JSON.parse(row.attachmentsJson) as Array<{ absolutePath: string }>)
+      : [];
+    await cleanupStagedAttachments(stagedAttachments);
 
     return { cancelled: true };
   }

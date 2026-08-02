@@ -268,6 +268,9 @@ export default function InboxPage() {
   // re-sorts and re-marks instantly without waiting for the 10s poll. Merged
   // over the server rows below; reverted if the toggle request fails.
   const [favOverrides, setFavOverrides] = useState<Record<string, boolean>>({});
+  const favouriteChainsRef = useRef<Map<string, Promise<void>>>(new Map());
+  const favouriteVersionsRef = useRef<Map<string, number>>(new Map());
+  const confirmedFavouritesRef = useRef<Map<string, boolean>>(new Map());
   // Issue #287: by default the inbox hides conversations whose last activity
   // is older than the recency horizon. Searching or flipping "show all"
   // lifts the horizon so dormant threads stay reachable.
@@ -436,10 +439,31 @@ export default function InboxPage() {
   // personId so every row of a multi-thread contact updates together.
   const toggleFavourite = useCallback((personId: string | undefined, next: boolean) => {
     if (!personId) return;
+    if (!confirmedFavouritesRef.current.has(personId)) {
+      confirmedFavouritesRef.current.set(personId, !next);
+    }
+    const version = (favouriteVersionsRef.current.get(personId) ?? 0) + 1;
+    favouriteVersionsRef.current.set(personId, version);
     setFavOverrides((prev) => ({ ...prev, [personId]: next }));
-    void setFavourite(personId, next).catch(() => {
-      setFavOverrides((prev) => ({ ...prev, [personId]: !next }));
-    });
+    const previous = favouriteChainsRef.current.get(personId) ?? Promise.resolve();
+    const request = previous
+      .catch(() => undefined)
+      .then(async () => {
+        await setFavourite(personId, next);
+        confirmedFavouritesRef.current.set(personId, next);
+      })
+      .catch(() => {
+        if (favouriteVersionsRef.current.get(personId) === version) {
+          const confirmed = confirmedFavouritesRef.current.get(personId) ?? !next;
+          setFavOverrides((prev) => ({ ...prev, [personId]: confirmed }));
+        }
+      })
+      .finally(() => {
+        if (favouriteChainsRef.current.get(personId) === request) {
+          favouriteChainsRef.current.delete(personId);
+        }
+      });
+    favouriteChainsRef.current.set(personId, request);
   }, []);
 
   // Per-tab counts. Scoped to the active platform + category chips so the

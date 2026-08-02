@@ -1,4 +1,4 @@
-const { app, autoUpdater, BrowserWindow, Menu, dialog, shell } = require("electron");
+const { app, autoUpdater, BrowserWindow, Menu, dialog, screen, shell } = require("electron");
 const { spawn, spawnSync } = require("node:child_process");
 const {
   chmodSync,
@@ -38,13 +38,15 @@ const {
   startAppEnvironment
 } = require("./launcher.cjs");
 const {
-  consumeNativeUpdateRequest,
+  clearNativeUpdateRequest,
   isSigningCertificateTrusted,
   nativeUpdateRequestPath,
   nativeUpdaterConfiguration,
+  readNativeUpdateRequest,
   signingCertificatePath,
   trustSigningCertificate
 } = require("./updater.cjs");
+const { resolveWindowBounds } = require("./window-bounds.cjs");
 
 const APP_DIR = resolveAppDir(__dirname);
 const START_TIMEOUT_MS = 180_000;
@@ -77,6 +79,7 @@ let menuRefreshTimer = null;
 let nativeUpdateInProgress = false;
 let nativeUpdateRequest = "";
 let nativeUpdateTimer = null;
+let nativeUpdateRetryAt = 0;
 
 app.setName(APP_NAME);
 if (process.platform === "win32") app.setAppUserModelId(APP_ID);
@@ -237,7 +240,7 @@ async function preparePackagedStorage() {
   return true;
 }
 
-function request(url, { json = false } = {}) {
+function request(url, { json = false, service } = {}) {
   return new Promise((resolveRequest) => {
     const requestHandle = get(url, { timeout: 2500 }, (response) => {
       if (!json) {
@@ -256,7 +259,8 @@ function request(url, { json = false } = {}) {
           resolveRequest(
             response.statusCode > 0 &&
             response.statusCode < 500 &&
-            parsed?.application === "relationship-inbox-os"
+            parsed?.application === "relationship-inbox-os" &&
+            (!service || parsed?.service === service)
           );
         } catch {
           resolveRequest(false);
@@ -272,7 +276,7 @@ function request(url, { json = false } = {}) {
 }
 
 function dashboardReady() {
-  return request(dashboardUrl(process.env));
+  return request(`${dashboardUrl(process.env)}/api/health`, { json: true, service: "dashboard" });
 }
 
 function runnerReady() {
@@ -442,11 +446,14 @@ async function configureNativeUpdater() {
   autoUpdater.on("error", (error) => {
     writeLog(`Native update failed: ${error.message}`);
     nativeUpdateInProgress = false;
+    nativeUpdateRetryAt = Date.now() + 30_000;
   });
   autoUpdater.on("update-not-available", () => {
+    clearNativeUpdateRequest(nativeUpdateRequest);
     nativeUpdateInProgress = false;
   });
   autoUpdater.on("update-downloaded", () => {
+    clearNativeUpdateRequest(nativeUpdateRequest);
     if (nativeUpdateTimer) {
       clearInterval(nativeUpdateTimer);
       nativeUpdateTimer = null;
@@ -460,8 +467,8 @@ async function configureNativeUpdater() {
   });
 
   nativeUpdateTimer = setInterval(() => {
-    if (nativeUpdateInProgress) return;
-    const request = consumeNativeUpdateRequest(nativeUpdateRequest);
+    if (nativeUpdateInProgress || Date.now() < nativeUpdateRetryAt) return;
+    const request = readNativeUpdateRequest(nativeUpdateRequest);
     if (!request) return;
     nativeUpdateInProgress = true;
     writeLog(`Downloading signed update ${request.fromVersion || ""} -> ${request.toVersion}.`);
@@ -469,6 +476,7 @@ async function configureNativeUpdater() {
       autoUpdater.checkForUpdates();
     } catch (error) {
       nativeUpdateInProgress = false;
+      nativeUpdateRetryAt = Date.now() + 30_000;
       writeLog(`Could not start native update: ${error.message}`);
     }
   }, 500);
@@ -939,10 +947,17 @@ function createMenu() {
 
 function createWindow() {
   if (mainWindow && !mainWindow.isDestroyed()) return mainWindow;
-  const savedBounds = readWindowBounds();
+  const primaryDisplay = screen.getPrimaryDisplay();
+  const savedBounds = resolveWindowBounds(
+    readWindowBounds(),
+    screen.getAllDisplays().map((display) => ({
+      primary: display.id === primaryDisplay.id,
+      workArea: display.workArea
+    }))
+  );
   mainWindow = new BrowserWindow({
-    width: savedBounds?.width || 1280,
-    height: savedBounds?.height || 820,
+    width: savedBounds.width,
+    height: savedBounds.height,
     x: savedBounds?.x,
     y: savedBounds?.y,
     minWidth: 960,
