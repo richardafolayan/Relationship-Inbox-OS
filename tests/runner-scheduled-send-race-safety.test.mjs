@@ -228,3 +228,57 @@ test("update: promoted during the read window -> refused, content NOT rewritten"
   assert.equal(res.reason, "no_longer_scheduled");
   assert.equal(rows[0].requestText, "original", "an in-flight send's content must not be rewritten");
 });
+
+test("enqueue race returns the winning request's actual scheduled time", async () => {
+  const requestedFor = future(60 * 60 * 1000);
+  const winnerFor = future(2 * 60 * 60 * 1000);
+  let reads = 0;
+  const prisma = {
+    thread: {
+      async findUnique({ where }) {
+        return { id: where.id, platform: "LINKEDIN" };
+      }
+    },
+    sendRequest: {
+      async findUnique() {
+        reads += 1;
+        return reads === 1
+          ? null
+          : {
+              clientSendId: "c1",
+              threadId: "t1",
+              status: "SCHEDULED",
+              scheduledFor: winnerFor
+            };
+      },
+      async create() {
+        const error = new Error("unique constraint");
+        error.code = "P2002";
+        throw error;
+      }
+    }
+  };
+  const service = createSendService({
+    adapters: {},
+    eventBus: noopEventBus,
+    settingsStore: {},
+    auditLog: async () => "",
+    withPlatformLock: (_platform, work) => work(),
+    prisma
+  });
+
+  assert.deepEqual(
+    await service.enqueueScheduledSend({
+      threadId: "t1",
+      text: "hello",
+      clientSendId: "c1",
+      scheduledFor: requestedFor
+    }),
+    {
+      clientSendId: "c1",
+      status: "SCHEDULED",
+      scheduledFor: winnerFor.toISOString(),
+      replayed: true
+    }
+  );
+});

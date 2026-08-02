@@ -62,10 +62,18 @@ export function classifyDictationResponse(input: {
     const text = typeof data.text === "string" ? data.text.trim() : "";
     return text ? { kind: "text", text } : { kind: "empty" };
   }
-  // A retry only helps when the same audio could plausibly succeed next time:
-  // a connection/proxy drop (no JSON `error`) or a transient 5xx that isn't
-  // the "not configured" 503.
-  const transient = (status >= 500 && status !== 503) || !data.error;
+  const permanentReasons = new Set(["unavailable", "no_speech", "invalid_audio", "skipped"]);
+  if (data.reason && permanentReasons.has(data.reason)) {
+    return { kind: "error", message: data.error || DICTATION_GENERIC_ERROR_MESSAGE };
+  }
+  const transientStatus =
+    status === 408 ||
+    status === 409 ||
+    status === 423 ||
+    status === 425 ||
+    status === 429 ||
+    status >= 500;
+  const transient = transientStatus || !data.error;
   if (transient) {
     return { kind: "retry", message: DICTATION_TRANSPORT_MESSAGE };
   }

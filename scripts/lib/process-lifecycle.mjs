@@ -329,6 +329,23 @@ export async function reclaimPortConflict(conflict, { graceMs = 2500 } = {}) {
 
 export async function stopChildGroups(children, { graceMs = 4000 } = {}) {
   const records = children.filter((child) => positivePid(child?.pid)).map((child) => ({ ...child, group: true }));
+  if (process.platform === "win32") {
+    for (const record of records) {
+      try {
+        execFileSync("taskkill.exe", ["/PID", String(record.pid), "/T"], { stdio: "ignore" });
+      } catch {
+      }
+    }
+    await delay(graceMs);
+    for (const record of records) {
+      if (!processIsAlive(record.pid)) continue;
+      try {
+        execFileSync("taskkill.exe", ["/PID", String(record.pid), "/T", "/F"], { stdio: "ignore" });
+      } catch {
+      }
+    }
+    return;
+  }
   for (const record of records) signal(record, "SIGTERM");
   await delay(graceMs);
   for (const record of records) {

@@ -48,6 +48,7 @@ test("per-platform reset scopes orphan-People GC to the reset platform", async (
       }
     }
   };
+  mockPrisma.$transaction = async (work) => work(mockPrisma);
 
   await resetPlatformInboxGraph("LINKEDIN", mockPrisma);
 

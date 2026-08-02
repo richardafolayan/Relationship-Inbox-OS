@@ -47,7 +47,8 @@ test("Info.plist carries a stable bundle identity and truthful focus-note Messag
 
 test("launcher opens an already-running dashboard instead of spawning another app", () => {
   const launcher = buildLauncherScript({ appDir: "/tmp/RelationshipInboxOS", nodeDir: "/tmp/node" });
-  assert.match(launcher, /curl -fsS --max-time 2 "\$DASHBOARD_URL"/);
+  assert.match(launcher, /curl -fsS --max-time 2 "\$DASHBOARD_URL\/api\/health"/);
+  assert.match(launcher, /"application":"relationship-inbox-os"/);
   assert.match(launcher, /open "\$DASHBOARD_URL"/);
   assert.match(launcher, /scripts\/start-student\.mjs/);
 });

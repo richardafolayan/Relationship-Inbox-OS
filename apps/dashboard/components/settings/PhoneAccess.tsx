@@ -7,7 +7,6 @@ import { APP_NAME } from "@/lib/branding";
 interface PhoneAccessInfo {
   available: boolean;
   dictationReady?: boolean;
-  fallbackUrl?: string;
   qrDataUrl?: string;
   secure?: boolean;
   url?: string;
@@ -95,14 +94,14 @@ export function PhoneAccess() {
                   {status === "error"
                     ? "Couldn’t copy. Select the address above."
                     : info.secure
-                      ? "The HTTPS link is private to your Tailscale network and contains your access key. Do not share it."
+                      ? "The HTTPS pairing link works once and is private to your Tailscale network. Do not share it."
                       : "Reading and typing work on this link, but full dictation needs the HTTPS setup above."}
                 </span>
               </div>
             </>
           ) : (
             <p className="mt-3 text-[12px] leading-5 text-ink-3" aria-live="polite">
-              Connect this computer to a private Wi-Fi network, then quit and reopen {APP_NAME}.
+              Connect Tailscale on this computer and your phone, enable Tailscale HTTPS, then quit and reopen {APP_NAME}.
             </p>
           )}
         </div>

@@ -25,16 +25,18 @@ function nativeUpdaterConfiguration({ appDir, isPackaged, platform }) {
   return { enabled, feedUrl: enabled ? release.updateFeedUrl : "", release };
 }
 
-function consumeNativeUpdateRequest(path) {
+function readNativeUpdateRequest(path) {
   if (!existsSync(path)) return null;
   try {
     const request = JSON.parse(readFileSync(path, "utf8"));
     return typeof request?.toVersion === "string" ? request : null;
   } catch {
     return null;
-  } finally {
-    rmSync(path, { force: true });
   }
+}
+
+function clearNativeUpdateRequest(path) {
+  rmSync(path, { force: true });
 }
 
 function signingCertificatePath(appDir, release) {
@@ -64,10 +66,11 @@ function trustSigningCertificate(certificatePath) {
 }
 
 module.exports = {
-  consumeNativeUpdateRequest,
+  clearNativeUpdateRequest,
   isSigningCertificateTrusted,
   nativeUpdateRequestPath,
   nativeUpdaterConfiguration,
+  readNativeUpdateRequest,
   readDesktopRelease,
   signingCertificatePath,
   trustSigningCertificate

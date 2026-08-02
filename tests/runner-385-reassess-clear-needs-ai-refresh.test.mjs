@@ -68,7 +68,8 @@ const baseThread = {
   openLoopsJson: null,
   rememberJson: null,
   lastInboundAt: new Date("2026-05-29T09:00:00.000Z"),
-  lastOutboundAt: null
+  lastOutboundAt: null,
+  updatedAt: new Date("2026-05-29T09:01:00.000Z")
 };
 
 const SUMMARY = {
@@ -94,16 +95,16 @@ const SUMMARY = {
 };
 
 function makeFakePrisma({ thread, messages }) {
-  const calls = { findUnique: 0, findMany: 0, threadUpdate: [], updateMany: [], transaction: [] };
+  const calls = { findUnique: 0, findMany: 0, threadUpdateMany: [], updateMany: [], transaction: [] };
   const prisma = {
     thread: {
       async findUnique() {
         calls.findUnique += 1;
         return thread;
       },
-      async update(args) {
-        calls.threadUpdate.push(args);
-        return { id: args.where.id };
+      async updateMany(args) {
+        calls.threadUpdateMany.push(args);
+        return { count: 1 };
       }
     },
     message: {
@@ -118,9 +119,9 @@ function makeFakePrisma({ thread, messages }) {
         return { count: args.where.messageId.in.length };
       }
     },
-    async $transaction(ops) {
-      calls.transaction.push(ops.length);
-      return Promise.all(ops);
+    async $transaction(work) {
+      calls.transaction.push("callback");
+      return work(prisma);
     }
   };
   return { prisma, calls };
@@ -156,11 +157,14 @@ test("resummarizeThread: a successful summary clears needsAiRefresh on the contr
   assert.equal(result.ok, true);
   assert.equal(result.summary, "Fresh summary");
   assert.equal(aiCalls[0].race, true); // race option threads through to the AI call
-  // Summary write + clear happen together in exactly one transaction (2 ops).
+  // Summary write + clear happen together in one callback transaction.
   assert.equal(calls.transaction.length, 1);
-  assert.equal(calls.transaction[0], 2);
-  assert.equal(calls.threadUpdate.length, 1);
-  assert.equal(calls.threadUpdate[0].data.rollingSummary, "Fresh summary");
+  assert.equal(calls.threadUpdateMany.length, 1);
+  assert.equal(calls.threadUpdateMany[0].data.rollingSummary, "Fresh summary");
+  assert.deepEqual(calls.threadUpdateMany[0].where, {
+    id: "t1",
+    updatedAt: baseThread.updatedAt
+  });
   assert.equal(calls.updateMany.length, 1);
   assert.deepEqual(calls.updateMany[0].where.messageId.in, ["m1"]);
   assert.equal(calls.updateMany[0].where.needsAiRefresh, true);
@@ -179,7 +183,7 @@ test("resummarizeThread: the background self-heal path (no race) also clears", a
   assert.deepEqual(calls.updateMany[0].where.messageId.in, ["m1"]);
 });
 
-test("resummarizeThread: no upgraded transcripts writes the summary with no clear and no transaction", async () => {
+test("resummarizeThread: no upgraded transcripts still guards the summary write transactionally", async () => {
   const messages = [
     msg("m1", { text: "hi", audioTranscription: null }),
     msg("m2", { text: "ok", audioTranscription: transcript(false) })
@@ -192,8 +196,8 @@ test("resummarizeThread: no upgraded transcripts writes the summary with no clea
   });
 
   assert.equal(result.ok, true);
-  assert.equal(calls.threadUpdate.length, 1); // summary still persisted
-  assert.equal(calls.transaction.length, 0); // but no transaction
+  assert.equal(calls.threadUpdateMany.length, 1); // summary still persisted
+  assert.equal(calls.transaction.length, 1); // stale-result guard is transactional
   assert.equal(calls.updateMany.length, 0); // and nothing cleared
 });
 
@@ -207,7 +211,7 @@ test("resummarizeThread: a missing thread writes nothing and clears nothing", as
 
   assert.deepEqual(result, { ok: false, reason: "not_found" });
   assert.equal(aiCalls.length, 0); // never reached the AI
-  assert.equal(calls.threadUpdate.length, 0);
+  assert.equal(calls.threadUpdateMany.length, 0);
   assert.equal(calls.updateMany.length, 0);
   assert.equal(calls.transaction.length, 0);
 });
@@ -226,7 +230,7 @@ test("resummarizeThread: a failed summary generation leaves the summary and flag
     /provider down/
   );
 
-  assert.equal(calls.threadUpdate.length, 0);
+  assert.equal(calls.threadUpdateMany.length, 0);
   assert.equal(calls.updateMany.length, 0);
   assert.equal(calls.transaction.length, 0);
 });

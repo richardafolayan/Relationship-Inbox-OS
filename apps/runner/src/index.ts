@@ -106,6 +106,7 @@ import {
 } from "./services/message-sync-latency";
 import { createSendService } from "./services/send";
 import { createSendQueue } from "./services/send-queue";
+import { cleanupStagedAttachments } from "./services/staged-attachments";
 import { createFocusAutoAckService } from "./services/focus-auto-ack";
 import {
   classifySendFailureKind,
@@ -2157,6 +2158,7 @@ app.get("/events", (req, res) => {
   // buffered window on every reconnect (see resolveSseResumeCursor).
   const sinceEventId = resolveSseResumeCursor(req.query.sinceEventId, req.header("last-event-id"));
   const oldest = eventBus.oldestEventId();
+  const newest = eventBus.newestEventId();
 
   // Immediate comment frame: EventSource fires `open` only once response
   // bytes arrive, and the dashboard's /events-proxy (and `next start`'s
@@ -2183,7 +2185,10 @@ app.get("/events", (req, res) => {
     res.write(`data: ${JSON.stringify(event)}\n\n`);
   }
 
-  if (sinceEventId > 0 && oldest > 0 && sinceEventId < oldest - 1) {
+  if (
+    sinceEventId > 0 &&
+    (sinceEventId > newest || (oldest > 0 && sinceEventId < oldest - 1))
+  ) {
     const resyncEvent = eventBus.emit({
       type: "RESYNC_REQUIRED",
       jobId: uuid(),
@@ -3858,6 +3863,7 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
     kind: kindFromMime(f.mimetype, f.originalname)
   }));
   if (stagedAttachments.length === 0 && payload.text.trim().length === 0) {
+    await cleanupStagedAttachments(stagedAttachments);
     res.status(400).json({ error: "send must have text, attachments, or both" });
     return;
   }
@@ -3867,7 +3873,23 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
   // confusing "Cannot read properties of undefined" on the FAILED row.
   // Same guard as /open and /rescan; see requireAdapter.
   const target = await getThreadStub(threadId);
-  requireAdapter(target.platform);
+  try {
+    requireAdapter(target.platform);
+  } catch (error) {
+    await cleanupStagedAttachments(stagedAttachments);
+    throw error;
+  }
+  if (payload.replyToMessageId) {
+    const parent = await prisma.message.findUnique({
+      where: { id: payload.replyToMessageId },
+      select: { threadId: true }
+    });
+    if (!parent || parent.threadId !== threadId) {
+      await cleanupStagedAttachments(stagedAttachments);
+      res.status(400).json({ error: "replyToMessageId must identify a message in this thread" });
+      return;
+    }
+  }
 
   // Schedule path: persist a SCHEDULED row and return immediately. The
   // dashboard renders a "scheduled for X" pill instead of pushing the
@@ -3883,6 +3905,7 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
         attachments: stagedAttachments,
         replyToMessageId: payload.replyToMessageId
       });
+      if (scheduleResult.replayed) await cleanupStagedAttachments(stagedAttachments);
       res.json({
         clientSendId: scheduleResult.clientSendId,
         status: scheduleResult.status,
@@ -3896,7 +3919,7 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
       return;
     } catch (error) {
       await auditService.log({
-        platform: "LINKEDIN",
+        platform: target.platform,
         stage: "Send",
         action: "SEND_SCHEDULE_FAIL",
         status: "FAIL",
@@ -3906,6 +3929,7 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
           ...summarizeError(error)
         }
       });
+      await cleanupStagedAttachments(stagedAttachments);
       throw error;
     }
   }
@@ -3929,10 +3953,11 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
       attachments: stagedAttachments,
       replyToMessageId: payload.replyToMessageId
     });
+    if (queueResult.replayed) await cleanupStagedAttachments(stagedAttachments);
     res.json(queueResult);
   } catch (error) {
     await auditService.log({
-      platform: "LINKEDIN",
+      platform: target.platform,
       stage: "Send",
       action: "SEND_ENQUEUE_FAIL",
       status: "FAIL",
@@ -3942,6 +3967,7 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
         ...summarizeError(error)
       }
     });
+    await cleanupStagedAttachments(stagedAttachments);
     throw error;
   }
 }));
@@ -6380,25 +6406,34 @@ app.post("/control/thread/:threadId/open-loop", asyncRoute(async (req, res) => {
   const { loop, dismissed } = z
     .object({ loop: z.string().min(1).max(2_000), dismissed: z.boolean() })
     .parse(req.body ?? {});
-  const thread = await prisma.thread.findUnique({
-    where: { id: threadId },
-    select: { id: true, dismissedOpenLoopsJson: true }
-  });
-  if (!thread) {
+  const dismissedOpenLoops = await operationMutex.runExclusive(
+    `thread-open-loop:${threadId}`,
+    async () => {
+      const thread = await prisma.thread.findUnique({
+        where: { id: threadId },
+        select: { id: true, dismissedOpenLoopsJson: true }
+      });
+      if (!thread) return null;
+      const current = new Set(
+        thread.dismissedOpenLoopsJson
+          ? (JSON.parse(thread.dismissedOpenLoopsJson) as string[])
+          : []
+      );
+      if (dismissed) current.add(loop);
+      else current.delete(loop);
+      const values = Array.from(current);
+      await prisma.thread.update({
+        where: { id: threadId },
+        data: { dismissedOpenLoopsJson: values.length > 0 ? JSON.stringify(values) : null }
+      });
+      return values;
+    }
+  );
+  if (!dismissedOpenLoops) {
     res.status(404).json({ error: "thread not found" });
     return;
   }
-  const current = new Set(
-    thread.dismissedOpenLoopsJson ? (JSON.parse(thread.dismissedOpenLoopsJson) as string[]) : []
-  );
-  if (dismissed) current.add(loop);
-  else current.delete(loop);
-  const nextJson = current.size > 0 ? JSON.stringify(Array.from(current)) : null;
-  await prisma.thread.update({
-    where: { id: threadId },
-    data: { dismissedOpenLoopsJson: nextJson }
-  });
-  res.json({ ok: true, dismissedOpenLoops: Array.from(current) });
+  res.json({ ok: true, dismissedOpenLoops });
 }));
 
 // Unarchive — clears archivedAt so the thread returns to the active Inbox.
@@ -7823,6 +7858,7 @@ app.post("/control/thread/:threadId/predraft", asyncRoute(async (req, res) => {
       select: {
         id: true,
         lastInboundAt: true,
+        updatedAt: true,
         rollingSummary: true,
         whatTheyWant: true,
         openLoopsJson: true,
@@ -7962,14 +7998,14 @@ app.post("/control/thread/:threadId/predraft", asyncRoute(async (req, res) => {
   void aiService
     .generateSuggestedReplies(aiInputs)
     .then(async (generated) => {
-      await prisma.thread.update({
-        where: { id: aiSource.id },
+      const persisted = await prisma.thread.updateMany({
+        where: { id: aiSource.id, updatedAt: aiSource.updatedAt },
         data: {
           suggestedRepliesJson: JSON.stringify(generated),
           suggestedRepliesCacheKey: cacheKey
         }
       });
-      eventBus.emit({
+      if (persisted.count === 1) eventBus.emit({
         type: "SUGGESTED_REPLIES_UPDATED",
         jobId: uuid(),
         threadId
@@ -7986,13 +8022,14 @@ app.post("/control/thread/:threadId/predraft", asyncRoute(async (req, res) => {
       // dashboard transitions out of "generating" and a follow-up fetch
       // doesn't loop into another doomed generation.
       try {
-        await prisma.thread.update({
-          where: { id: aiSource.id },
+        const persisted = await prisma.thread.updateMany({
+          where: { id: aiSource.id, updatedAt: aiSource.updatedAt },
           data: {
             suggestedRepliesJson: JSON.stringify(emptySuggestedReplies),
             suggestedRepliesCacheKey: cacheKey
           }
         });
+        if (persisted.count !== 1) return;
       } catch (persistError) {
         console.warn(
           `[predraft] also failed to persist empty replies for threadId=${threadId}: ${
@@ -8083,21 +8120,11 @@ app.post("/control/thread/:threadId/draft", asyncRoute(async (req, res) => {
   if (await checkPresenterGuard(res, settingsStore, { threadId, action: "save a draft", kind: "thread-mutation" })) return;
   const payload = z.object({ text: z.string().max(5000) }).parse(req.body);
 
-  const existingDraft = await prisma.draft.findFirst({ where: { threadId } });
-
-  if (existingDraft) {
-    await prisma.draft.update({
-      where: { id: existingDraft.id },
-      data: { text: payload.text }
-    });
-  } else {
-    await prisma.draft.create({
-      data: {
-        threadId,
-        text: payload.text
-      }
-    });
-  }
+  await prisma.draft.upsert({
+    where: { threadId },
+    update: { text: payload.text },
+    create: { threadId, text: payload.text }
+  });
 
   res.json({ status: "ok" });
 }));

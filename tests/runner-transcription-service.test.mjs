@@ -158,8 +158,8 @@ test("successful transcription writes a transcribed row", async () => {
   assert.equal(outcome.failed, 0);
   assert.equal(outcome.skipped, 0);
   assert.equal(provider.calls.length, 1);
-  const row = prisma.audioRows.get("k1|g1");
-  assert.ok(row, "expected a row at fingerprint k1|g1");
+  const row = prisma.audioRows.get("m1|k1|g1");
+  assert.ok(row, "expected a row at fingerprint m1|k1|g1");
   assert.equal(row.status, "transcribed");
   assert.equal(row.transcript, "hello there");
   assert.equal(row.provider, "openai");
@@ -233,7 +233,7 @@ test("idempotent: existing fingerprint row is skipped, provider never called", a
   // Seed an existing transcribed row. The service now dedups by
   // messageId (the strict @unique constraint), so the seed must carry
   // the messageId of the message the test is re-running.
-  prisma.audioRows.set("k1|g1", {
+  prisma.audioRows.set("m1|k1|g1", {
     status: "transcribed",
     id: "old",
     messageId: "m1"
@@ -280,7 +280,7 @@ test("provider error stores a failed row and does not throw", async () => {
   const outcome = await service.transcribeMessage("m1");
   assert.equal(outcome.kind, "processed");
   assert.equal(outcome.failed, 1);
-  const row = prisma.audioRows.get("k1|g1");
+  const row = prisma.audioRows.get("m1|k1|g1");
   assert.equal(row.status, "failed");
   assert.equal(row.errorMessage, "rate limited");
 });
@@ -314,7 +314,7 @@ test("unsupported mime is recorded as skipped without calling the provider", asy
   assert.equal(outcome.kind, "processed");
   assert.equal(outcome.skipped, 1);
   assert.equal(provider.calls.length, 0);
-  const row = prisma.audioRows.get("k1|g1");
+  const row = prisma.audioRows.get("m1|k1|g1");
   assert.equal(row.status, "skipped");
 });
 
@@ -340,7 +340,7 @@ test("oversized files are skipped with a clear reason", async () => {
   });
   const outcome = await service.transcribeMessage("m1");
   assert.equal(outcome.skipped, 1);
-  const row = prisma.audioRows.get("k1|g1");
+  const row = prisma.audioRows.get("m1|k1|g1");
   assert.equal(row.status, "skipped");
   assert.match(row.errorMessage, /exceeds size cap/);
 });

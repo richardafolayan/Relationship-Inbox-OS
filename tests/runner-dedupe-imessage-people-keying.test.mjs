@@ -38,7 +38,7 @@ test("personIdentityKey: a digit-bearing email and a phone sharing a 10-digit su
   const emailKey = personIdentityKey("team1234567890@corp.com");
   const phoneKey = personIdentityKey("+44 1234 567890");
   assert.notEqual(emailKey, phoneKey, "email and phone must classify into different keyspaces");
-  assert.equal(phoneKey, "1234567890");
+  assert.equal(phoneKey, "+441234567890");
 });
 
 test("personIdentityKey: real phones still collapse across formats (no regression)", () => {

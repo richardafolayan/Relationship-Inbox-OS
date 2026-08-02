@@ -57,7 +57,17 @@ async function probe(url) {
 }
 
 async function dashboardUp() {
-  return probe(DASHBOARD_URL);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 1500);
+  try {
+    const response = await fetch(`${DASHBOARD_URL}/api/health`, { signal: controller.signal });
+    const body = await response.json().catch(() => null);
+    return response.ok && body?.application === "relationship-inbox-os" && body?.service === "dashboard";
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 async function runnerUp() {

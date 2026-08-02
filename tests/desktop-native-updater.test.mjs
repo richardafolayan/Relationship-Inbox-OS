@@ -7,8 +7,9 @@ import { join } from "node:path";
 
 const require = createRequire(import.meta.url);
 const {
-  consumeNativeUpdateRequest,
+  clearNativeUpdateRequest,
   nativeUpdaterConfiguration,
+  readNativeUpdateRequest,
   signingCertificatePath
 } = require("../apps/desktop/updater.cjs");
 
@@ -31,14 +32,16 @@ test("native updater only enables for a packaged signed macOS release", () => {
   }
 });
 
-test("native update requests are consumed once", () => {
+test("native update requests remain retryable until explicitly cleared", () => {
   const root = mkdtempSync(join(tmpdir(), "tovi-native-request-"));
   try {
     const path = join(root, "request.json");
     mkdirSync(root, { recursive: true });
     writeFileSync(path, JSON.stringify({ fromVersion: "1", toVersion: "2" }));
-    assert.deepEqual(consumeNativeUpdateRequest(path), { fromVersion: "1", toVersion: "2" });
-    assert.equal(consumeNativeUpdateRequest(path), null);
+    assert.deepEqual(readNativeUpdateRequest(path), { fromVersion: "1", toVersion: "2" });
+    assert.deepEqual(readNativeUpdateRequest(path), { fromVersion: "1", toVersion: "2" });
+    clearNativeUpdateRequest(path);
+    assert.equal(readNativeUpdateRequest(path), null);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

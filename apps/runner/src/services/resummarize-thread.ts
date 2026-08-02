@@ -147,21 +147,43 @@ export async function resummarizeThread(
     replyBriefJson: summary.reply_brief ? JSON.stringify(summary.reply_brief) : null
   };
 
-  // Issue #385: the summary now reflects the latest transcripts, so any
-  // "needs AI refresh" flag on the transcripts that fed it is stale. Clear
-  // them in the same transaction as the summary write. A first summary with
-  // no upgraded transcripts clears nothing (plain update, no transaction).
   const refreshMessageIds = transcriptionMessageIdsToRefresh(orderedMessages);
-  if (refreshMessageIds.length > 0) {
-    await prisma.$transaction([
-      prisma.thread.update({ where: { id: thread.id }, data: summaryData }),
-      prisma.messageAudioTranscription.updateMany({
+  const persisted = await prisma.$transaction(async (transaction) => {
+    const updated = await transaction.thread.updateMany({
+      where: { id: thread.id, updatedAt: thread.updatedAt },
+      data: summaryData
+    });
+    if (updated.count !== 1) return false;
+    if (refreshMessageIds.length > 0) {
+      await transaction.messageAudioTranscription.updateMany({
         where: { messageId: { in: refreshMessageIds }, needsAiRefresh: true },
         data: { needsAiRefresh: false }
-      })
-    ]);
-  } else {
-    await prisma.thread.update({ where: { id: thread.id }, data: summaryData });
+      });
+    }
+    return true;
+  });
+  if (!persisted) {
+    const latest = await prisma.thread.findUnique({
+      where: { id: thread.id },
+      select: {
+        rollingSummary: true,
+        whatTheyWant: true,
+        openLoopsJson: true,
+        lastInboundAt: true,
+        lastOutboundAt: true
+      }
+    });
+    if (!latest) return { ok: false, reason: "not_found" };
+    return {
+      ok: true,
+      summary: latest.rollingSummary ?? "",
+      whatTheyWant: latest.whatTheyWant ?? "",
+      openLoops: latest.openLoopsJson ? (JSON.parse(latest.openLoopsJson) as string[]) : [],
+      needsReply: Boolean(
+        latest.lastInboundAt &&
+          (!latest.lastOutboundAt || latest.lastInboundAt > latest.lastOutboundAt)
+      )
+    };
   }
 
   return {

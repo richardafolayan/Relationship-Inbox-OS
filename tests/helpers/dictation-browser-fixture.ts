@@ -35,10 +35,14 @@ async function generatedWebm(gainValue: number): Promise<Blob> {
   recorder.addEventListener("dataavailable", (event) => {
     if (event.data.size) chunks.push(event.data);
   });
+  const started = new Promise<void>((resolve) =>
+    recorder.addEventListener("start", () => resolve(), { once: true })
+  );
   const stopped = new Promise<void>((resolve) => recorder.addEventListener("stop", () => resolve(), { once: true }));
   recorder.start();
+  await started;
   oscillator.start();
-  await new Promise((resolve) => setTimeout(resolve, 900));
+  await new Promise((resolve) => setTimeout(resolve, 1_600));
   oscillator.stop();
   recorder.stop();
   await stopped;

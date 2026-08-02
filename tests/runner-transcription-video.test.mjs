@@ -151,7 +151,7 @@ test("a video attachment routes through the video extractor and OpenAI sees the 
   assert.equal(provider.calls[0].mimeType, "audio/mp4");
   assert.equal(provider.calls[0].filename, "video-audio.m4a");
   assert.equal(provider.calls[0].filePath, audioPath);
-  const row = prisma.audioRows.get("k1|vid-1");
+  const row = prisma.audioRows.get("m1|k1|vid-1");
   assert.equal(row.status, "transcribed");
   assert.equal(row.transcript, "Yeah, see you Friday.");
 });
@@ -189,7 +189,7 @@ test("a video whose extractor fails records a skip with a clear reason", async (
   assert.equal(outcome.kind, "processed");
   assert.equal(outcome.skipped, 1);
   assert.equal(provider.calls.length, 0);
-  const row = prisma.audioRows.get("k1|vid-1");
+  const row = prisma.audioRows.get("m1|k1|vid-1");
   assert.equal(row.status, "skipped");
   assert.equal(row.errorMessage, "video to m4a conversion failed");
 });

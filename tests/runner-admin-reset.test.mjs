@@ -107,6 +107,7 @@ test("admin reset applies platform-scoped deletes and removes only orphan people
       }
     }
   };
+  mockPrisma.$transaction = async (work) => work(mockPrisma);
 
   const result = await resetPlatformInboxGraph("LINKEDIN", mockPrisma);
 

@@ -124,8 +124,10 @@ export function UserVoiceProfile({
       setStatus("saved");
       // Let the sidebar avatar / greeting pick up a name change live.
       window.dispatchEvent(new CustomEvent("operator-profile-saved"));
+      return true;
     } catch {
       setStatus("error");
+      return false;
     }
   }, []);
 
@@ -257,8 +259,15 @@ export function UserVoiceProfile({
   const finishSetup = useCallback(async () => {
     setFinishing(true);
     try {
-      await persist({ setupCompletedAt: new Date().toISOString() });
-      onCompleted?.();
+      const pending = buildPendingSavePartial(pendingSave.current);
+      if (pending) {
+        pendingSave.current = null;
+        if (saveTimer.current) clearTimeout(saveTimer.current);
+        if (!(await persist(pending))) return;
+      }
+      if (await persist({ setupCompletedAt: new Date().toISOString() })) {
+        onCompleted?.();
+      }
     } finally {
       setFinishing(false);
     }

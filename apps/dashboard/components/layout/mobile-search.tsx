@@ -40,6 +40,7 @@ import { onUiScaleChange } from "@/lib/ui-scale";
 // is surfaced inside this screen so pilots still see host health on /search.
 
 const ATTENTION_POLL_MS = 5000;
+const INBOX_POLL_MS = 10_000;
 
 export function MobileSearchScreen() {
   const router = useRouter();
@@ -58,12 +59,32 @@ export function MobileSearchScreen() {
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [platforms, setPlatforms] = useState<PlatformCard[] | null>(null);
   const [runnerStartState, setRunnerStartState] = useState<"idle" | "starting" | "started">("idle");
+  const [threadLoadError, setThreadLoadError] = useState<string | null>(null);
+  const [actionState, setActionState] = useState<{
+    id: string;
+    status: "running" | "success" | "error";
+    message?: string;
+  } | null>(null);
+
+  const refreshThreads = useCallback(async () => {
+    try {
+      const data = await apiGet<InboxResponse>("/runner/data/inbox", { ttlMs: 0 });
+      setThreads(data.rows);
+      setThreadLoadError(null);
+    } catch (loadError) {
+      setThreadLoadError(
+        loadError instanceof Error ? loadError.message : "Could not load conversations."
+      );
+    }
+  }, []);
+
+  useVisiblePolling(() => void refreshThreads(), INBOX_POLL_MS);
 
   useEffect(() => {
-    void apiGet<InboxResponse>("/runner/data/inbox")
-      .then((data) => setThreads(data.rows))
-      .catch(() => undefined);
-  }, []);
+    const onResync = () => void refreshThreads();
+    window.addEventListener("runner-resync", onResync);
+    return () => window.removeEventListener("runner-resync", onResync);
+  }, [refreshThreads]);
 
   useEffect(() => {
     try {
@@ -218,25 +239,47 @@ export function MobileSearchScreen() {
     }
   };
 
-  const runAction = (actionId: string) => {
+  const runAction = async (actionId: string) => {
     if (actionId === "scan-now") {
-      void apiPost("/runner/control/scan", { scope: "update" }).catch(() => undefined);
-      return;
+      setActionState({ id: actionId, status: "running" });
+      try {
+        await apiPost("/runner/control/scan", { scope: "update" });
+        setActionState({ id: actionId, status: "success", message: "Scan started" });
+      } catch (actionError) {
+        setActionState({
+          id: actionId,
+          status: "error",
+          message: actionError instanceof Error ? actionError.message : "Could not start scan."
+        });
+      }
+      return false;
     }
     if (actionId === "scan-full") {
-      void apiPost("/runner/control/scan", { platform: "LINKEDIN", scope: "full" }).catch(() => undefined);
-      return;
+      setActionState({ id: actionId, status: "running" });
+      try {
+        await apiPost("/runner/control/scan", { platform: "LINKEDIN", scope: "full" });
+        setActionState({ id: actionId, status: "success", message: "Full scan started" });
+      } catch (actionError) {
+        setActionState({
+          id: actionId,
+          status: "error",
+          message: actionError instanceof Error ? actionError.message : "Could not start full scan."
+        });
+      }
+      return false;
     }
     if (actionId === "send-feedback") {
       openPilotFeedback("feedback");
-      return;
+      return true;
     }
     if (actionId === "report-bug") {
       openPilotFeedback("bug");
+      return true;
     }
+    return false;
   };
 
-  const onSelect = (item: MobileSearchItem) => {
+  const onSelect = async (item: MobileSearchItem) => {
     if (query.trim()) persistQuery(query);
     if (item.group === "conversations") persistThread(item);
     rememberSearchScroll(resultsRef.current?.scrollTop ?? 0);
@@ -251,8 +294,7 @@ export function MobileSearchScreen() {
       return;
     }
     if (item.actionId) {
-      runAction(item.actionId);
-      closeSearch();
+      if (await runAction(item.actionId)) closeSearch();
     }
   };
 
@@ -384,6 +426,19 @@ export function MobileSearchScreen() {
         }}
         className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-2 pb-[max(16px,env(safe-area-inset-bottom))] pt-2"
       >
+        {threadLoadError ? (
+          <div role="alert" className="mx-2 mb-2 rounded-[12px] border border-hairline px-3 py-2 text-[13px] text-risk-overdue">
+            Conversations could not refresh. Results below may be out of date.
+          </div>
+        ) : null}
+        {actionState?.message ? (
+          <div
+            role={actionState.status === "error" ? "alert" : "status"}
+            className="mx-2 mb-2 rounded-[12px] border border-hairline px-3 py-2 text-[13px] text-ink-2"
+          >
+            {actionState.message}
+          </div>
+        ) : null}
         {sections.conversations.length > 0 ? (
           <section aria-label={conversationHeading} className="mb-4">
             <h2 className="px-3 pb-1 pt-2 font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3">
@@ -391,7 +446,7 @@ export function MobileSearchScreen() {
             </h2>
             <ul className="m-0 list-none p-0">
               {sections.conversations.map((item) => (
-                <ResultRow key={item.id} item={item} onSelect={onSelect} />
+                <ResultRow key={item.id} item={item} onSelect={onSelect} actionState={actionState} />
               ))}
             </ul>
           </section>
@@ -404,7 +459,7 @@ export function MobileSearchScreen() {
             </h2>
             <ul className="m-0 list-none p-0">
               {sections.pagesAndActions.map((item) => (
-                <ResultRow key={item.id} item={item} onSelect={onSelect} />
+                <ResultRow key={item.id} item={item} onSelect={onSelect} actionState={actionState} />
               ))}
             </ul>
           </section>
@@ -443,18 +498,22 @@ export function MobileSearchScreen() {
 
 function ResultRow({
   item,
-  onSelect
+  onSelect,
+  actionState
 }: {
   item: MobileSearchItem;
-  onSelect: (item: MobileSearchItem) => void;
+  onSelect: (item: MobileSearchItem) => void | Promise<void>;
+  actionState: { id: string; status: "running" | "success" | "error"; message?: string } | null;
 }) {
   const isConversation = item.group === "conversations";
+  const itemAction = item.actionId && actionState?.id === item.actionId ? actionState : null;
   return (
     <li>
       <button
         type="button"
-        onClick={() => onSelect(item)}
-        className="flex min-h-[56px] w-full items-center gap-3 rounded-[12px] px-3 py-2 text-left hover:bg-paper-2 active:bg-paper-3"
+        disabled={itemAction?.status === "running"}
+        onClick={() => void onSelect(item)}
+        className="flex min-h-[56px] w-full items-center gap-3 rounded-[12px] px-3 py-2 text-left hover:bg-paper-2 active:bg-paper-3 disabled:opacity-60"
       >
         {isConversation ? (
           <PersonAvatar name={item.personName || item.label} avatarUrl={item.avatarUrl} size={40} />
@@ -470,7 +529,13 @@ function ResultRow({
           ) : null}
         </span>
         <span className="max-w-[88px] shrink-0 truncate text-right font-mono text-[11px] capitalize text-ink-3">
-          {item.kindLabel}
+          {itemAction?.status === "running"
+            ? "Starting…"
+            : itemAction?.status === "success"
+              ? "Started"
+              : itemAction?.status === "error"
+                ? "Try again"
+                : item.kindLabel}
         </span>
       </button>
     </li>

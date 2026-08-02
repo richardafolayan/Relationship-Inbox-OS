@@ -52,6 +52,7 @@ test("reset reports real child delete counts and does not race the thread cascad
       deleteMany: async () => ({ count: 0 })
     }
   };
+  mockPrisma.$transaction = async (work) => work(mockPrisma);
 
   const result = await resetPlatformInboxGraph("LINKEDIN", mockPrisma);
 

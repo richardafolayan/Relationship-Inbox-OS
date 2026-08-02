@@ -148,7 +148,7 @@ test("force=true deletes the old row and re-attempts the call", async () => {
   assert.equal(outcome.kind, "processed");
   assert.equal(outcome.ok, 1);
   assert.equal(provider.calls.length, 1);
-  const row = prisma.audioRows.get("k1|g-m1");
+  const row = prisma.audioRows.get("m1|k1|g-m1");
   assert.equal(row.status, "transcribed");
   assert.equal(row.transcript, "fresh");
 });
@@ -179,7 +179,7 @@ test("force=true on a still-missing file writes a fresh missing_file row", async
   assert.equal(outcome.skipped, 1);
   assert.equal(provider.calls.length, 0);
   // Old row was deleted; a new missing_file row was written in its place.
-  const row = prisma.audioRows.get("k1|g-m1");
+  const row = prisma.audioRows.get("m1|k1|g-m1");
   assert.notEqual(row.id, "old", "expected a fresh row, not the original");
   assert.equal(row.status, "skipped");
   assert.equal(row.errorMessage, "missing_file");

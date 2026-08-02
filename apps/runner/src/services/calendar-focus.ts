@@ -128,7 +128,7 @@ export function createCalendarFocusService(deps: CalendarFocusDeps): CalendarFoc
   const fetchIcs = deps.fetchIcs ?? (async (url: string) => (await fetchIcsText(url)).text);
 
   let timer: ReturnType<typeof setInterval> | null = null;
-  let running = false;
+  let runningPromise: Promise<CalendarFocusAction> | null = null;
   const cache = new Map<string, { text: string; at: number }>();
 
   async function getIcsCached(url: string): Promise<string> {
@@ -140,10 +140,7 @@ export function createCalendarFocusService(deps: CalendarFocusDeps): CalendarFoc
     return text;
   }
 
-  async function tick(): Promise<CalendarFocusAction> {
-    if (running) return { type: "none" };
-    running = true;
-    try {
+  async function runTick(): Promise<CalendarFocusAction> {
       const settings = (await deps.settingsStore.getOperatorProfile()).calendarSync;
       const currentNow = now();
 
@@ -256,9 +253,21 @@ export function createCalendarFocusService(deps: CalendarFocusDeps): CalendarFoc
         });
       }
       return action;
-    } finally {
-      running = false;
-    }
+  }
+
+  function tick(): Promise<CalendarFocusAction> {
+    if (runningPromise) return Promise.resolve({ type: "none" });
+    const current = runTick();
+    runningPromise = current;
+    void current.then(
+      () => {
+        if (runningPromise === current) runningPromise = null;
+      },
+      () => {
+        if (runningPromise === current) runningPromise = null;
+      }
+    );
+    return current;
   }
 
   function start(): void {
@@ -290,6 +299,11 @@ export function createCalendarFocusService(deps: CalendarFocusDeps): CalendarFoc
 
   async function refresh(): Promise<void> {
     cache.clear();
+    const active = runningPromise;
+    if (active) {
+      await active.catch(() => undefined);
+      cache.clear();
+    }
     await tick();
   }
 

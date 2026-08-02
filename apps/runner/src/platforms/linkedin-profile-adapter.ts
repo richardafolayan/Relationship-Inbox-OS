@@ -70,6 +70,7 @@ export interface ExtractionFailure {
     | "timeout"
     | "navigation_error"
     | "selectors_outdated"
+    | "daily_cap"
     | "unknown";
   detail?: string;
 }

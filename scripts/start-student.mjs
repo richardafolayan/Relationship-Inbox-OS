@@ -37,8 +37,9 @@ async function dashboardUp() {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), 3000);
   try {
-    const res = await fetch(DASHBOARD_URL, { signal: ctrl.signal });
-    return res.status > 0 && res.status < 500;
+    const res = await fetch(`${DASHBOARD_URL}/api/health`, { signal: ctrl.signal });
+    const body = await res.json().catch(() => null);
+    return res.ok && body?.application === "relationship-inbox-os" && body?.service === "dashboard";
   } catch {
     return false;
   } finally {

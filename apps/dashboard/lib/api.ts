@@ -266,6 +266,27 @@ export function invalidateCache(path?: string): void {
   }
 }
 
+export function purgeApiSnapshots(): void {
+  responseCache.clear();
+  const storage = snapshotStorage();
+  if (!storage) return;
+  for (let index = storage.length - 1; index >= 0; index -= 1) {
+    const key = storage.key(index);
+    if (key?.startsWith(SNAPSHOT_PREFIX_BASE)) storage.removeItem(key);
+  }
+}
+
+function mutationInvalidatesSnapshots(path: string): boolean {
+  return (
+    path === "/runner/admin/reset" ||
+    path === "/runner/control/platform/reset-session" ||
+    path === "/runner/control/whatsapp/reset" ||
+    path === "/runner/control/whatsapp/disconnect" ||
+    path === "/runner/control/google-messages/disconnect" ||
+    path === "/runner/control/presenter-demo/reset"
+  );
+}
+
 /** Write a value into the cache directly (e.g. optimistic update / SSE delta). */
 export function mutateCache<T>(path: string, data: T): void {
   responseCache.set(path, { data, ts: Date.now() });
@@ -411,7 +432,9 @@ export async function apiPost<T>(path: string, body: unknown, init?: RequestInit
   } catch (error) {
     throw requestError(error, { path, method: "POST", phase: "network" });
   }
-  return readJson<T>(response, { path, method: "POST" });
+  const data = await readJson<T>(response, { path, method: "POST" });
+  if (mutationInvalidatesSnapshots(path)) purgeApiSnapshots();
+  return data;
 }
 
 export async function apiPostForm<T>(path: string, body: FormData, init?: RequestInit): Promise<T> {

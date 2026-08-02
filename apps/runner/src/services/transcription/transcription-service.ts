@@ -486,6 +486,7 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
     let skipped = 0;
     for (const { attachment, index } of attachments) {
       const fingerprint = buildAudioFingerprint({
+        messageId: message.id,
         platformMessageKey: message.platformMessageKey,
         attachmentGuid: attachment.guid,
         attachmentIndex: index
@@ -674,6 +675,7 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
     if (!first) return "skipped";
     const { attachment, index } = first;
     const fingerprint = buildAudioFingerprint({
+      messageId: message.id,
       platformMessageKey: message.platformMessageKey,
       attachmentGuid: attachment.guid,
       attachmentIndex: index

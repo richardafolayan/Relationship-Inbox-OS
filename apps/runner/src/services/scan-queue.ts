@@ -3486,14 +3486,27 @@ export function createScanQueue(deps: ScanQueueDeps) {
               direction: "OUT",
               platformMessageKey: { in: retractedKeys }
             },
-            select: { attachmentsJson: true }
+            select: { id: true, attachmentsJson: true, text: true, timestamp: true }
           });
-          const removed = await prisma.message.deleteMany({
-            where: {
-              threadId: thread.id,
-              direction: "OUT",
-              platformMessageKey: { in: retractedKeys }
+          const removedIds = removedRows.map((row) => row.id);
+          const removed = await prisma.$transaction(async (transaction) => {
+            for (const row of removedRows) {
+              const survivor = await transaction.message.findFirst({
+                where: {
+                  threadId: thread.id,
+                  direction: "OUT",
+                  text: row.text,
+                  timestamp: row.timestamp,
+                  id: { notIn: removedIds }
+                },
+                select: { id: true }
+              });
+              await transaction.message.updateMany({
+                where: { replyToMessageId: row.id },
+                data: { replyToMessageId: survivor?.id ?? null }
+              });
             }
+            return transaction.message.deleteMany({ where: { id: { in: removedIds } } });
           });
           for (const guid of attachmentGuidsFromRows(removedRows)) {
             deleteImessageVoiceSnapshot(guid);

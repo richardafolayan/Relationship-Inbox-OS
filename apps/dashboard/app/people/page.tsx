@@ -36,6 +36,8 @@ export default function PeoplePage() {
   const [notesDraft, setNotesDraft] = useState<string>("");
   const [notesStatus, setNotesStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const notesSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingNotesRef = useRef<{ personId: string; value: string } | null>(null);
+  const notesFlushPromiseRef = useRef<Promise<boolean> | null>(null);
   const savedNotesAtRef = useRef<number>(0);
   // Which person the current notes draft belongs to, and the server value it
   // was last synced from. Used to decide whether a background refresh may
@@ -125,10 +127,57 @@ export default function PeoplePage() {
     setNotesStatus("idle");
   }, [selectedId, selected?.notes, notesDraft]);
 
-  useEffect(() => () => {
-    if (notesSaveTimer.current) clearTimeout(notesSaveTimer.current);
-    if (enrichStatusTimer.current) clearTimeout(enrichStatusTimer.current);
+  const flushPendingNotes = useCallback(async (): Promise<boolean> => {
+    if (notesFlushPromiseRef.current) return notesFlushPromiseRef.current;
+    const pending = pendingNotesRef.current;
+    if (!pending) return true;
+    if (notesSaveTimer.current) {
+      clearTimeout(notesSaveTimer.current);
+      notesSaveTimer.current = null;
+    }
+    const work = (async () => {
+      try {
+        await apiPost(`/runner/control/person/${pending.personId}/notes`, { notes: pending.value });
+        if (pendingNotesRef.current === pending) pendingNotesRef.current = null;
+        savedNotesAtRef.current = Date.now();
+        syncedNotesRef.current = pending.value;
+        setNotesStatus("saved");
+        void loadList();
+        return true;
+      } catch {
+        setNotesStatus("error");
+        return false;
+      }
+    })();
+    notesFlushPromiseRef.current = work;
+    try {
+      return await work;
+    } finally {
+      if (notesFlushPromiseRef.current === work) notesFlushPromiseRef.current = null;
+    }
+  }, [loadList]);
+
+  const flushPendingNotesKeepalive = useCallback(() => {
+    const pending = pendingNotesRef.current;
+    if (!pending) return;
+    void fetch(`/runner/control/person/${pending.personId}/notes`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ notes: pending.value }),
+      keepalive: true
+    });
   }, []);
+
+  useEffect(() => {
+    const onPageHide = () => flushPendingNotesKeepalive();
+    window.addEventListener("pagehide", onPageHide);
+    return () => {
+      window.removeEventListener("pagehide", onPageHide);
+      flushPendingNotesKeepalive();
+      if (notesSaveTimer.current) clearTimeout(notesSaveTimer.current);
+      if (enrichStatusTimer.current) clearTimeout(enrichStatusTimer.current);
+    };
+  }, [flushPendingNotesKeepalive]);
 
   useEffect(() => {
     if (enrichStatusTimer.current) {
@@ -144,17 +193,19 @@ export default function PeoplePage() {
     if (notesSaveTimer.current) clearTimeout(notesSaveTimer.current);
     const personId = selectedId;
     if (!personId) return;
-    notesSaveTimer.current = setTimeout(async () => {
-      try {
-        await apiPost(`/runner/control/person/${personId}/notes`, { notes: value });
-        savedNotesAtRef.current = Date.now();
-        setNotesStatus("saved");
-        void loadList();
-      } catch {
-        setNotesStatus("error");
+    pendingNotesRef.current = { personId, value };
+    notesSaveTimer.current = setTimeout(() => void flushPendingNotes(), 600);
+  }, [selectedId, flushPendingNotes]);
+
+  const selectPerson = useCallback(
+    async (personId: string | null) => {
+      while (pendingNotesRef.current) {
+        if (!(await flushPendingNotes())) return;
       }
-    }, 600);
-  }, [selectedId, loadList]);
+      setSelectedId(personId);
+    },
+    [flushPendingNotes]
+  );
 
   const refreshEnrichment = useCallback(() => {
     if (!selectedId) return;
@@ -284,7 +335,7 @@ export default function PeoplePage() {
               >
                 <button
                   type="button"
-                  onClick={() => setSelectedId(active ? null : person.id)}
+                  onClick={() => void selectPerson(active ? null : person.id)}
                   aria-expanded={active}
                   aria-controls={detailId}
                   className={`relative grid min-h-[76px] w-full grid-cols-[32px_minmax(0,1fr)] items-center gap-3 px-1 py-4 text-left transition-colors duration-calm hover:bg-paper-2 sm:grid-cols-[32px_1fr_auto] sm:gap-4 sm:py-[18px] ${

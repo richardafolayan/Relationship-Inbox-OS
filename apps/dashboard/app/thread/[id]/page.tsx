@@ -397,7 +397,8 @@ function formatScheduledFor(iso: string | null | undefined): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
   const now = new Date();
-  const within7Days = d.getTime() - now.getTime() < 7 * 24 * 60 * 60 * 1000;
+  const deltaMs = d.getTime() - now.getTime();
+  const within7Days = deltaMs >= 0 && deltaMs < 7 * 24 * 60 * 60 * 1000;
   if (within7Days) {
     const sameDay =
       d.getFullYear() === now.getFullYear() &&

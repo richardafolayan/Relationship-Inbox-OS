@@ -94,6 +94,8 @@ export class WhatsAppAdapter implements PlatformAdapter {
   private ready = false;
   private readyPromise: Promise<void> | null = null;
   private indexedExistingChats = false;
+  private sendReservations: Array<{ id: number; count: number; expiresAt: number }> = [];
+  private sendReservationSequence = 0;
 
   constructor(private readonly deps: WhatsAppAdapterDeps) {}
 
@@ -118,19 +120,21 @@ export class WhatsAppAdapter implements PlatformAdapter {
 
     this.readyPromise = new Promise<void>((resolve, reject) => {
       const onReady = () => {
-        if (this.ready) return;
+        if (this.client !== client || this.ready) return;
         this.ready = true;
         this.deps.onStateChange?.("connected");
         resolve();
       };
       const onAuthFailure = (msg: string) => {
-        this.deps.onStateChange?.("disconnected");
+        this.invalidateClient(client);
         reject(new Error(`WhatsApp auth_failure: ${msg}`));
       };
       const onDisconnected = (reason: string) => {
-        this.ready = false;
-        this.deps.onStateChange?.("disconnected");
-        if (!this.ready) reject(new Error(`WhatsApp disconnected before ready: ${reason}`));
+        const connectedBeforeDisconnect = this.ready;
+        this.invalidateClient(client);
+        if (!connectedBeforeDisconnect) {
+          reject(new Error(`WhatsApp disconnected before ready: ${reason}`));
+        }
       };
 
       client.on("qr", (qr: string) => {
@@ -173,7 +177,10 @@ export class WhatsAppAdapter implements PlatformAdapter {
             onReady();
           }
         })
-        .catch(reject);
+        .catch((error) => {
+          this.invalidateClient(client);
+          reject(error);
+        });
     });
 
     return this.readyPromise;
@@ -224,11 +231,15 @@ export class WhatsAppAdapter implements PlatformAdapter {
     attachments?: OutboundAttachment[]
   ): Promise<SendReceipt> {
     const client = this.requireClient();
-    await this.awaitSendClearance(thread.platformThreadId);
+    const media = (attachments ?? []).filter((a) => a.absolutePath && a.absolutePath.length > 0);
+    const reservationId = await this.awaitSendClearance(
+      thread.platformThreadId,
+      Math.max(1, media.length)
+    );
+    try {
 
     // No attachments → original text-only path. wweb.js's sendMessage
     // returns the sent Message object, whose timestamp we mirror.
-    const media = (attachments ?? []).filter((a) => a.absolutePath && a.absolutePath.length > 0);
     if (media.length === 0) {
       const sendStartedAt = Date.now();
       const sent = await this.resolveSendResult(
@@ -359,11 +370,15 @@ export class WhatsAppAdapter implements PlatformAdapter {
       verifiedBy: everyMessageAcknowledged ? "platform_acknowledged" : "best_effort",
       attachments: sentAttachments
     };
+    } finally {
+      this.releaseSendReservation(reservationId);
+    }
   }
 
   async sendPoll(thread: ThreadStub, poll: OutboundPoll): Promise<SendReceipt> {
     const client = this.requireClient();
-    await this.awaitSendClearance(thread.platformThreadId);
+    const reservationId = await this.awaitSendClearance(thread.platformThreadId);
+    try {
 
     const question = poll.question.trim();
     const options = poll.options.map((option) => option.trim()).filter(Boolean);
@@ -427,6 +442,9 @@ export class WhatsAppAdapter implements PlatformAdapter {
       ],
       raw: { whatsapp: { poll: structuredPoll } }
     };
+    } finally {
+      this.releaseSendReservation(reservationId);
+    }
   }
 
   /**
@@ -686,21 +704,34 @@ export class WhatsAppAdapter implements PlatformAdapter {
    * and a second re-arm mid-wait means something else is actively sending
    * to this recipient, which should surface rather than stack waits.
    */
-  private async awaitSendClearance(recipientJid: string): Promise<void> {
+  private async awaitSendClearance(recipientJid: string, sendCount = 1): Promise<number> {
     const sleep =
       this.deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
     const deadline = Date.now() + this.deps.sendGuardConfig.minIntervalMs + 10_000;
     const maxWaits = 2;
     for (let waits = 0; ; waits += 1) {
+      const now = Date.now();
+      this.sendReservations = this.sendReservations.filter(
+        (reservation) => reservation.expiresAt > now
+      );
       const guard = await checkSendGuard(
         {
           client: this.requireClient(),
           prisma: this.deps.prisma,
-          config: this.deps.sendGuardConfig
+          config: this.deps.sendGuardConfig,
+          sendCount,
+          reservedCount: this.sendReservations.reduce(
+            (total, reservation) => total + reservation.count,
+            0
+          )
         },
         recipientJid
       );
-      if (guard.allowed) return;
+      if (guard.allowed) {
+        const id = ++this.sendReservationSequence;
+        this.sendReservations.push({ id, count: sendCount, expiresAt: Date.now() + 10 * 60_000 });
+        return id;
+      }
       if (guard.retryAfterMs === undefined) {
         throw new Error(`WhatsApp send blocked: ${guard.reason}`);
       }
@@ -713,11 +744,25 @@ export class WhatsAppAdapter implements PlatformAdapter {
     }
   }
 
+  private releaseSendReservation(id: number): void {
+    const reservation = this.sendReservations.find((candidate) => candidate.id === id);
+    if (reservation) reservation.expiresAt = Math.min(reservation.expiresAt, Date.now() + 5_000);
+  }
+
   private requireClient(): Client {
     if (!this.client || !this.ready) {
       throw new Error("WhatsApp adapter not connected — call ensureConnected() first");
     }
     return this.client;
+  }
+
+  private invalidateClient(client: Client): void {
+    if (this.client !== client) return;
+    this.client = null;
+    this.ready = false;
+    this.readyPromise = null;
+    this.deps.onStateChange?.("disconnected");
+    void client.destroy().catch(() => undefined);
   }
 
   private async getChatsWithDetachedFrameRecovery(): Promise<WhatsAppChatLike[]> {

@@ -115,7 +115,7 @@ test("rows persist provider.id + provider.modelLabel from a local-whisper provid
     warn: () => {}
   });
   await service.transcribeMessage("m1");
-  const row = prisma.audioRows.get("k1|g-m1");
+  const row = prisma.audioRows.get("m1|k1|g-m1");
   assert.equal(row.status, "transcribed");
   assert.equal(row.provider, "local-whisper");
   assert.equal(row.model, "ggml-base.en.bin");
@@ -148,7 +148,7 @@ test("rows persist provider=openai when the OpenAI provider is wired", async () 
     warn: () => {}
   });
   await service.transcribeMessage("m2");
-  const row = prisma.audioRows.get("k2|g-m2");
+  const row = prisma.audioRows.get("m2|k2|g-m2");
   assert.equal(row.provider, "openai");
   assert.equal(row.model, "gpt-4o-mini-transcribe");
 });
@@ -178,7 +178,7 @@ test("provider that returns skipped persists the reason verbatim (e.g. local_whi
   const outcome = await service.transcribeMessage("m3");
   assert.equal(outcome.kind, "processed");
   assert.equal(outcome.skipped, 1);
-  const row = prisma.audioRows.get("k3|g-m3");
+  const row = prisma.audioRows.get("m3|k3|g-m3");
   assert.equal(row.status, "skipped");
   assert.equal(row.errorMessage, "local_whisper_not_configured");
 });

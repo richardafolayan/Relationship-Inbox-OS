@@ -17,6 +17,7 @@ import { loadAppEnv } from "./lib/env-file.mjs";
 import { packagedDashboardArgs } from "./lib/dashboard-command.mjs";
 import { prismaDbPushInvocation } from "./lib/prisma-command.mjs";
 import { resolveAppName } from "./lib/branding.mjs";
+import { repairDatabaseBeforeSchemaSync } from "./lib/preflight-schema-repairs.mjs";
 import {
   portConflict,
   reclaimPortConflict,
@@ -28,7 +29,7 @@ import {
 
 const require = createRequire(import.meta.url);
 const {
-  readOrCreateAccessToken,
+  rotateAccessToken,
   startSecurePhoneAccess,
   startPhoneAccessProxy,
   stopSecurePhoneAccess,
@@ -201,6 +202,12 @@ function databaseFile() {
 function syncDatabase() {
   mkdirSync(DATA_DIR, { recursive: true });
   process.env.DATABASE_URL ||= `file:${join(DATA_DIR, "inbox-os.sqlite")}`;
+  try {
+    repairDatabaseBeforeSchemaSync(databaseFile());
+  } catch (error) {
+    say(`  ${C.yellow}Could not safely prepare the existing database: ${error instanceof Error ? error.message : String(error)}${C.reset}`);
+    return false;
+  }
   const invocation = prismaDbPushInvocation({
     appDir: APP_DIR,
     packaged: PACKAGED,
@@ -323,7 +330,10 @@ function runnerReady() {
 }
 
 function dashboardReady() {
-  return probe(DASHBOARD_URL);
+  return probe(`${DASHBOARD_URL}/api/health`, async (response) => {
+    const body = await response.json().catch(() => null);
+    return body?.application === "relationship-inbox-os" && body?.service === "dashboard";
+  });
 }
 
 async function startApp(prod) {
@@ -390,24 +400,28 @@ async function startApp(prod) {
   });
 
   try {
-    const token = readOrCreateAccessToken(STATE_DIR);
+    const token = rotateAccessToken(STATE_DIR);
     phoneProxy = await startPhoneAccessProxy({
       appName: APP_NAME,
       dashboardPort: DASHBOARD_PORT,
       token
     });
-    process.env.RIOS_PHONE_ACCESS_PORT = String(phoneProxy.port);
-    process.env.RIOS_PHONE_ACCESS_TOKEN = token;
     securePhoneAccess = startSecurePhoneAccess({
       proxyPort: phoneProxy.port,
       token
     });
     if (securePhoneAccess.available) {
+      process.env.RIOS_PHONE_ACCESS_PORT = String(phoneProxy.port);
+      process.env.RIOS_PHONE_ACCESS_TOKEN = token;
       process.env.RIOS_PHONE_ACCESS_SECURE_URL = securePhoneAccess.url;
       say(`Secure phone access is ready at ${securePhoneAccess.url.replace(token, "[private-token]")}`);
     } else {
+      await stopPhoneAccessProxy(phoneProxy.server);
+      phoneProxy = null;
+      delete process.env.RIOS_PHONE_ACCESS_PORT;
+      delete process.env.RIOS_PHONE_ACCESS_TOKEN;
       delete process.env.RIOS_PHONE_ACCESS_SECURE_URL;
-      say("Secure phone dictation needs Tailscale HTTPS. The private Wi-Fi link remains available for reading and typing.");
+      say("Phone access needs Tailscale HTTPS and is unavailable on this launch.");
     }
   } catch (error) {
     delete process.env.RIOS_PHONE_ACCESS_PORT;

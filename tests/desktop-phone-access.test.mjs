@@ -36,14 +36,14 @@ function get(port, path = "/", headers = {}) {
   });
 }
 
-test("phone access keeps a stable private token outside the app bundle", () => {
+test("phone access rotates its private pairing token on every launch", () => {
   const stateDir = mkdtempSync(join(tmpdir(), "tovi-phone-token-"));
   try {
-    const first = phoneAccess.readOrCreateAccessToken(stateDir);
-    const second = phoneAccess.readOrCreateAccessToken(stateDir);
-    assert.equal(first, second);
+    const first = phoneAccess.rotateAccessToken(stateDir);
+    const second = phoneAccess.rotateAccessToken(stateDir);
+    assert.notEqual(first, second);
     assert.equal(phoneAccess.isValidAccessToken(first), true);
-    assert.equal(readFileSync(join(stateDir, "phone-access-token"), "utf8").trim(), first);
+    assert.equal(readFileSync(join(stateDir, "phone-access-token"), "utf8").trim(), second);
   } finally {
     rmSync(stateDir, { recursive: true, force: true });
   }
@@ -85,15 +85,22 @@ test("phone access requires the private link before proxying dashboard requests"
     assert.equal(locked.status, 401);
     assert.match(locked.body, /Tovi is locked/);
 
-    const connected = await get(proxy.port, `/connect/${token}`);
+    const insecure = await get(proxy.port, `/connect/${token}`);
+    assert.equal(insecure.status, 400);
+
+    const connected = await get(proxy.port, `/connect/${token}`, {
+      "X-Forwarded-Proto": "https"
+    });
     assert.equal(connected.status, 302);
     assert.equal(connected.headers.location, "/");
     assert.match(connected.headers["set-cookie"][0], /HttpOnly/);
     assert.match(connected.headers["set-cookie"][0], /SameSite=Strict/);
-    assert.doesNotMatch(connected.headers["set-cookie"][0], /Secure/);
+    assert.match(connected.headers["set-cookie"][0], /Secure/);
+    const sessionCookie = connected.headers["set-cookie"][0].split(";", 1)[0];
+    assert.notEqual(sessionCookie, `${phoneAccess.ACCESS_COOKIE}=${token}`);
 
     const opened = await get(proxy.port, "/inbox?q=reply", {
-      Cookie: `${phoneAccess.ACCESS_COOKIE}=${token}; session=student`
+      Cookie: `${sessionCookie}; session=student`
     });
     assert.equal(opened.status, 200);
     assert.deepEqual(JSON.parse(opened.body), {
@@ -101,6 +108,11 @@ test("phone access requires the private link before proxying dashboard requests"
       forwardedFor: "127.0.0.1",
       path: "/inbox?q=reply"
     });
+
+    const reused = await get(proxy.port, `/connect/${token}`, {
+      "X-Forwarded-Proto": "https"
+    });
+    assert.equal(reused.status, 401);
   } finally {
     await phoneAccess.stopPhoneAccessProxy(proxy.server);
     await close(upstream);
@@ -127,9 +139,10 @@ test("secure phone access sets a secure cookie and keeps camera permission disab
     });
     assert.match(connected.headers["set-cookie"][0], /; Secure/);
     assert.equal(connected.headers["permissions-policy"], "camera=(), microphone=(self)");
+    const sessionCookie = connected.headers["set-cookie"][0].split(";", 1)[0];
 
     const opened = await get(proxy.port, "/", {
-      Cookie: `${phoneAccess.ACCESS_COOKIE}=${token}`
+      Cookie: sessionCookie
     });
     assert.equal(opened.headers["permissions-policy"], "camera=(), microphone=(self)");
   } finally {
@@ -141,12 +154,12 @@ test("secure phone access sets a secure cookie and keeps camera permission disab
 test("phone access links contain the pairing path", () => {
   const token = "a".repeat(43);
   assert.equal(
-    phoneAccess.phoneAccessUrl("192.168.1.4", 3110, token),
-    `http://192.168.1.4:3110/connect/${token}`
-  );
-  assert.equal(
     phoneAccess.phoneAccessUrl("tovi.example.ts.net", 3111, token, "https"),
     `https://tovi.example.ts.net:3111/connect/${token}`
+  );
+  assert.throws(
+    () => phoneAccess.phoneAccessUrl("192.168.1.4", 3110, token, "http"),
+    /require HTTPS/
   );
 });
 
