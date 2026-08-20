@@ -2,12 +2,13 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { X } from "lucide-react";
-import { apiGet, apiPost } from "@/lib/api";
-import type { InboxResponse } from "@/lib/types";
+import { apiPost } from "@/lib/api";
 import { PLATFORM_LABEL } from "@/lib/risk";
 import { normalizePreview } from "@/lib/preview";
 import { openPilotFeedback } from "@/lib/pilot";
 import { clampActiveIndex, paletteItemMatches } from "@/lib/command-palette-search";
+import { shouldShowSearchInboxEmptyState } from "@/lib/search-inbox-state";
+import { useSearchInbox } from "@/lib/use-search-inbox";
 import {
   activateCommandPaletteAction,
   type CommandPaletteAction
@@ -57,19 +58,9 @@ function CommandPalettePanel({
   onNavigate: (href: string) => void;
 }) {
   const [query, setQuery] = useState("");
-  const [threads, setThreads] = useState<InboxResponse["rows"]>([]);
   const [activeIndex, setActiveIndex] = useState(0);
-
-  useEffect(() => {
-    // Index the full inbox, not just the first 30 rows. With hundreds of
-    // threads the old slice(0, 30) silently dropped most contacts from
-    // search — e.g. a LinkedIn thread last active 12d ago would never
-    // match by name even though it's right there in the inbox (#434
-    // R-0056). The list is already fetched whole for the inbox page.
-    void apiGet<InboxResponse>("/runner/data/inbox")
-      .then((data) => setThreads(data.rows))
-      .catch(() => undefined);
-  }, []);
+  const searchInbox = useSearchInbox();
+  const threads = searchInbox.rows;
 
   const items: PaletteItem[] = useMemo(() => {
     const pages: PaletteItem[] = [
@@ -209,7 +200,38 @@ function CommandPalettePanel({
               </span>
             </li>
           ))}
-          {!items.length ? (
+          {searchInbox.phase === "loading" || searchInbox.phase === "refreshing" ? (
+            <li
+              role="status"
+              aria-live="polite"
+              className="px-[14px] py-[10px] text-[14px] text-ink-3"
+            >
+              {searchInbox.phase === "refreshing"
+                ? "Refreshing conversations…"
+                : "Loading conversations…"}
+            </li>
+          ) : null}
+          {searchInbox.phase === "error" ? (
+            <li
+              role="status"
+              aria-live="polite"
+              className="flex items-center gap-3 px-[14px] py-[10px] text-[14px] text-ink-3"
+            >
+              <span className="flex-1">
+                {searchInbox.rows.length > 0
+                  ? "Conversation results may be out of date."
+                  : "Conversations are temporarily unavailable."}
+              </span>
+              <button
+                type="button"
+                onClick={() => void searchInbox.refresh()}
+                className="shrink-0 font-medium text-ink-2 underline-offset-2 hover:text-ink hover:underline"
+              >
+                {searchInbox.rows.length > 0 ? "Refresh" : "Try again"}
+              </button>
+            </li>
+          ) : null}
+          {shouldShowSearchInboxEmptyState(searchInbox, items.length > 0) ? (
             <li className="px-[14px] py-[10px] text-[14px] text-ink-3">
               No matching conversations. A contact appears after a conversation is synced.
             </li>
