@@ -168,6 +168,12 @@ export interface HistoryBinding {
    * a rebinding listener would treat that deferred traversal as a user Back.
    */
   retarget: (overlayId: string) => void;
+  /**
+   * Consume the current marker before intentional route navigation. The caller
+   * must replace this history entry with the destination instead of pushing a
+   * new entry above it.
+   */
+  consumeForNavigation: () => boolean;
   /** Call when the overlay is closed by UI (X, Escape), not by system Back. */
   release: () => void;
 }
@@ -181,6 +187,18 @@ function overlayHistoryState(history: HistoryHost, overlayId: string): Record<st
     ...base,
     [MOBILE_OVERLAY_HISTORY_KEY]: overlayId
   };
+}
+
+function historyStateWithoutOverlayMarker(history: HistoryHost): unknown {
+  if (typeof history.state !== "object" || history.state === null) return history.state;
+  const next = { ...(history.state as Record<string, unknown>) };
+  delete next[MOBILE_OVERLAY_HISTORY_KEY];
+  return next;
+}
+
+function currentOverlayMarker(history: HistoryHost): unknown {
+  if (typeof history.state !== "object" || history.state === null) return undefined;
+  return (history.state as Record<string, unknown>)[MOBILE_OVERLAY_HISTORY_KEY];
 }
 
 /** Programmatic history.back() counts per host that must not dismiss overlays. */
@@ -244,6 +262,17 @@ export function bindOverlayHistory(options: HistoryBindingOptions): HistoryBindi
       } catch {
         // History may be unavailable; marker is best-effort.
       }
+    },
+    consumeForNavigation: () => {
+      if (!active || currentOverlayMarker(history) !== overlayId) return false;
+      active = false;
+      history.removeEventListener("popstate", onPopState);
+      try {
+        history.replaceState(historyStateWithoutOverlayMarker(history), "");
+      } catch {
+        // The route replacement that follows remains the source of truth.
+      }
+      return true;
     },
     release: () => {
       if (!active) {

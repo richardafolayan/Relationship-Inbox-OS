@@ -32,6 +32,8 @@ import {
   type HistoryBinding
 } from "@/lib/mobile-overlay-effects";
 
+export type OverlayNavigationMode = "push" | "replace";
+
 /** Stable actions + controller. Does not change when top/primaryActive updates. */
 export interface MobileOverlayActions {
   controller: MobileOverlayController;
@@ -39,6 +41,7 @@ export interface MobileOverlayActions {
   close: (id?: string, options?: { silent?: boolean }) => OverlayEntry | null;
   closeTop: (options?: { silent?: boolean }) => OverlayEntry | null;
   handleDismiss: () => boolean;
+  prepareNavigation: (id?: string) => OverlayNavigationMode;
   getTop: () => OverlayEntry | null;
   isPrimaryActive: () => boolean;
   hasKind: (kind: PrimaryOverlayKind) => boolean;
@@ -206,6 +209,24 @@ export function MobileOverlayProvider({ children }: { children: ReactNode }) {
     [controller]
   );
   const handleDismiss = useCallback(() => controller.handleDismiss(), [controller]);
+  const prepareNavigation = useCallback(
+    (id?: string): OverlayNavigationMode => {
+      const current = controller.getTop();
+      if (!current || (id && current.id !== id)) return "push";
+
+      const binding = historyBindingRef.current;
+      if (!binding?.consumeForNavigation()) return "push";
+
+      if (historyReleaseTimerRef.current != null) {
+        clearTimeout(historyReleaseTimerRef.current);
+        historyReleaseTimerRef.current = null;
+      }
+      historyBindingRef.current = null;
+      activeIdRef.current = null;
+      return "replace";
+    },
+    [controller]
+  );
   const getTop = useCallback(() => controller.getTop(), [controller]);
   const isPrimaryActive = useCallback(() => controller.isPrimaryActive(), [controller]);
   const hasKind = useCallback(
@@ -221,11 +242,22 @@ export function MobileOverlayProvider({ children }: { children: ReactNode }) {
       close,
       closeTop,
       handleDismiss,
+      prepareNavigation,
       getTop,
       isPrimaryActive,
       hasKind
     }),
-    [controller, open, close, closeTop, handleDismiss, getTop, isPrimaryActive, hasKind]
+    [
+      controller,
+      open,
+      close,
+      closeTop,
+      handleDismiss,
+      prepareNavigation,
+      getTop,
+      isPrimaryActive,
+      hasKind
+    ]
   );
 
   const snapshot = useMemo<MobileOverlaySnapshot>(
@@ -300,6 +332,7 @@ export interface UsePrimaryOverlayOptions {
 export function usePrimaryOverlay(options: UsePrimaryOverlayOptions): {
   isTop: boolean;
   entryId: string | null;
+  prepareNavigation: () => OverlayNavigationMode;
 } {
   const actions = useMobileOverlayActionsOptional();
   const snapshot = useMobileOverlaySnapshot();
@@ -316,6 +349,7 @@ export function usePrimaryOverlay(options: UsePrimaryOverlayOptions): {
   // provider lifetime; controller/open/close do not change when top updates.
   const controller = actions?.controller;
   const openOverlay = actions?.open;
+  const prepareOverlayNavigation = actions?.prepareNavigation;
 
   useEffect(() => {
     if (!controller || !openOverlay) return;
@@ -365,7 +399,10 @@ export function usePrimaryOverlay(options: UsePrimaryOverlayOptions): {
   ]);
 
   const isTop = Boolean(controller && entryId && snapshot.top && snapshot.top.id === entryId);
+  const prepareNavigation = useCallback(
+    () => prepareOverlayNavigation?.(entryIdRef.current ?? undefined) ?? "push",
+    [prepareOverlayNavigation]
+  );
 
-  return { isTop, entryId };
+  return { isTop, entryId, prepareNavigation };
 }
-
