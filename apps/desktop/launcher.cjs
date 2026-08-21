@@ -161,6 +161,7 @@ function startAppEnvironment(env = process.env, nodeExecutable = "", options = {
     RIOS_NATIVE_UPDATE_REQUEST: options.nativeUpdateRequest || env.RIOS_NATIVE_UPDATE_REQUEST,
     RIOS_PACKAGED_APP: options.packaged ? "1" : env.RIOS_PACKAGED_APP,
     RIOS_RECLAIM_EXISTING: "1",
+    RIOS_RECLAIM_STALE_PORT_CONFLICTS: "1",
     RIOS_STATE_DIR: options.stateDir || env.RIOS_STATE_DIR
   };
 }

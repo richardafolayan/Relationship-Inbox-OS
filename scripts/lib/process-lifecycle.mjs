@@ -246,12 +246,38 @@ export function portConflict(port, appDir) {
 }
 
 function processParentPid(pid, exec = execFileSync) {
-  if (process.platform === "win32") return null;
+  if (process.platform === "win32") {
+    try {
+      return positivePid(exec(
+        "powershell.exe",
+        [
+          "-NoProfile",
+          "-NonInteractive",
+          "-Command",
+          `Get-CimInstance Win32_Process -Filter \"ProcessId = ${positivePid(pid)}\" | Select-Object -ExpandProperty ParentProcessId`
+        ],
+        { encoding: "utf8" }
+      ).trim());
+    } catch {
+      return null;
+    }
+  }
   try {
     return positivePid(exec("ps", ["-p", String(pid), "-o", "ppid="], { encoding: "utf8" }).trim());
   } catch {
     return null;
   }
+}
+
+export function runtimeRootIsOrphaned(pid, {
+  platform = process.platform,
+  parentPidFor = processParentPid,
+  isAlive = processIsAlive
+} = {}) {
+  const parentPid = parentPidFor(pid);
+  if (!parentPid) return false;
+  if (platform !== "win32" && parentPid === 1) return true;
+  return !isAlive(parentPid);
 }
 
 function processTreePids(rootPid, exec = execFileSync) {
@@ -297,12 +323,23 @@ function toviProcessRoot(pid) {
   return root;
 }
 
+export function portConflictIsStaleTovi(conflict) {
+  if (!conflict?.owners?.length || conflict.owners.some((owner) => !owner.toviOwned)) return false;
+  const roots = [...new Set(conflict.owners.map((owner) => toviProcessRoot(owner.pid)).filter(Boolean))];
+  if (roots.length === 0) return listeningPids(conflict.port).length === 0;
+  return roots.every((pid) => runtimeRootIsOrphaned(pid));
+}
+
 export async function reclaimPortConflict(conflict, { graceMs = 2500 } = {}) {
   if (!conflict?.owners?.length || conflict.owners.some((owner) => !owner.toviOwned)) {
     return { status: "refused", stopped: [] };
   }
   const roots = [...new Set(conflict.owners.map((owner) => toviProcessRoot(owner.pid)).filter(Boolean))];
-  if (roots.length === 0) return { status: "refused", stopped: [] };
+  if (roots.length === 0) {
+    return listeningPids(conflict.port).length === 0
+      ? { status: "recovered", stopped: [] }
+      : { status: "refused", stopped: [] };
+  }
 
   if (process.platform === "win32") {
     for (const pid of roots) {
@@ -332,6 +369,6 @@ export async function stopChildGroups(children, { graceMs = 4000 } = {}) {
   for (const record of records) signal(record, "SIGTERM");
   await delay(graceMs);
   for (const record of records) {
-    if (processIsAlive(record.pid)) signal(record, "SIGKILL");
+    if (process.platform !== "win32" || processIsAlive(record.pid)) signal(record, "SIGKILL");
   }
 }

@@ -19,6 +19,7 @@ import { prismaDbPushInvocation } from "./lib/prisma-command.mjs";
 import { resolveAppName } from "./lib/branding.mjs";
 import {
   portConflict,
+  portConflictIsStaleTovi,
   reclaimPortConflict,
   recoverPriorRuntime,
   removeRuntimeState,
@@ -466,7 +467,10 @@ async function main() {
     for (const [label, port] of [["dashboard", DASHBOARD_PORT], ["local service", RUNNER_PORT]]) {
       const conflict = portConflict(port, APP_DIR);
       if (!conflict) continue;
-      if (process.env.RIOS_RECLAIM_PORT_CONFLICTS === "1") {
+      const reclaimConfirmed = process.env.RIOS_RECLAIM_PORT_CONFLICTS === "1";
+      const reclaimStale = process.env.RIOS_RECLAIM_STALE_PORT_CONFLICTS === "1" &&
+        portConflictIsStaleTovi(conflict);
+      if (reclaimConfirmed || reclaimStale) {
         const reclaimed = await reclaimPortConflict(conflict);
         if (reclaimed.status === "recovered") {
           say(`  Stopped an older ${APP_NAME} process that was using port ${port}.`);
