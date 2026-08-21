@@ -93,6 +93,7 @@ export class WhatsAppAdapter implements PlatformAdapter {
   private client: Client | null = null;
   private ready = false;
   private readyPromise: Promise<void> | null = null;
+  private teardownPromise: Promise<void> | null = null;
   private indexedExistingChats = false;
 
   constructor(private readonly deps: WhatsAppAdapterDeps) {}
@@ -106,6 +107,9 @@ export class WhatsAppAdapter implements PlatformAdapter {
   async ensureConnected(): Promise<void> {
     if (this.ready) return;
     if (this.readyPromise) return this.readyPromise;
+    if (this.teardownPromise) await this.teardownPromise;
+    if (this.ready) return;
+    if (this.readyPromise) return this.readyPromise;
 
     // Default factory wraps the string authDir into the options object the
     // wweb.js Client constructor expects. Tests override with a fake that
@@ -116,24 +120,29 @@ export class WhatsAppAdapter implements PlatformAdapter {
     this.client = client;
     this.deps.onStateChange?.("connecting");
 
-    this.readyPromise = new Promise<void>((resolve, reject) => {
+    const connection = new Promise<void>((resolve, reject) => {
       const onReady = () => {
-        if (this.ready) return;
+        if (this.client !== client || this.ready) return;
         this.ready = true;
         this.deps.onStateChange?.("connected");
         resolve();
       };
       const onAuthFailure = (msg: string) => {
-        this.deps.onStateChange?.("disconnected");
+        if (this.client !== client) return;
+        this.invalidateRuntimeClient(client);
         reject(new Error(`WhatsApp auth_failure: ${msg}`));
       };
       const onDisconnected = (reason: string) => {
-        this.ready = false;
-        this.deps.onStateChange?.("disconnected");
-        if (!this.ready) reject(new Error(`WhatsApp disconnected before ready: ${reason}`));
+        if (this.client !== client) return;
+        const disconnectedBeforeReady = !this.ready;
+        this.invalidateRuntimeClient(client);
+        if (disconnectedBeforeReady) {
+          reject(new Error(`WhatsApp disconnected before ready: ${reason}`));
+        }
       };
 
       client.on("qr", (qr: string) => {
+        if (this.client !== client) return;
         this.deps.onStateChange?.("qr_ready");
         this.deps.onQr?.(qr);
       });
@@ -150,6 +159,7 @@ export class WhatsAppAdapter implements PlatformAdapter {
       if (this.deps.onIncomingMessage) {
         const notify = this.deps.onIncomingMessage;
         client.on("message", (message: WaMessage) => {
+          if (this.client !== client) return;
           try {
             notify({
               platformThreadId: message.from,
@@ -162,10 +172,10 @@ export class WhatsAppAdapter implements PlatformAdapter {
         });
       }
 
-      client
-        .initialize()
+      Promise.resolve()
+        .then(() => client.initialize())
         .then(async () => {
-          if (this.ready) return;
+          if (this.client !== client || this.ready) return;
           // A restored session can finish syncing before whatsapp-web.js
           // attaches its one-shot hasSynced listener, so recover from the
           // missed ready event using the authoritative socket state.
@@ -173,10 +183,14 @@ export class WhatsAppAdapter implements PlatformAdapter {
             onReady();
           }
         })
-        .catch(reject);
+        .catch((error) => {
+          if (this.client === client) this.invalidateRuntimeClient(client);
+          reject(error);
+        });
     });
 
-    return this.readyPromise;
+    this.readyPromise = connection;
+    return connection;
   }
 
   async scanUnreadThreads(): Promise<ThreadStub[]> {
@@ -657,9 +671,11 @@ export class WhatsAppAdapter implements PlatformAdapter {
     // saw a "connecting" state and short-circuited via the alreadyInFlight
     // guard. Operator was effectively locked out until a runner restart.
     const client = this.client;
+    const pendingTeardown = this.teardownPromise;
     this.client = null;
     this.ready = false;
     this.readyPromise = null;
+    this.indexedExistingChats = false;
     if (client) {
       try {
         await client.destroy();
@@ -670,11 +686,37 @@ export class WhatsAppAdapter implements PlatformAdapter {
           }`
         );
       }
+    } else if (pendingTeardown) {
+      await pendingTeardown;
     }
+    if (this.teardownPromise === pendingTeardown) this.teardownPromise = null;
     this.deps.onStateChange?.("disconnected");
   }
 
   // --- internals ---
+
+  private invalidateRuntimeClient(client: Client): void {
+    if (this.client !== client) return;
+    this.client = null;
+    this.ready = false;
+    this.readyPromise = null;
+    this.indexedExistingChats = false;
+    this.deps.onStateChange?.("disconnected");
+
+    const teardown = Promise.resolve()
+      .then(() => client.destroy())
+      .catch((error) => {
+        console.warn(
+          `[whatsapp] client.destroy() failed after disconnect: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
+      })
+      .finally(() => {
+        if (this.teardownPromise === teardown) this.teardownPromise = null;
+      });
+    this.teardownPromise = teardown;
+  }
 
   /**
    * Run the send guard, and when the only obstacle is the per-recipient

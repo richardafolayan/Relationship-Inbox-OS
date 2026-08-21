@@ -86,10 +86,9 @@ test("navigating to a thread that already has chips never shows the spinner", ()
 // before the fix (line absent) and passes after.
 
 test("the thread-change reset effect clears the suggestions timeout flag", () => {
-  // Scope to the reset effect: from the composer reset down to its deps array.
-  const start = SRC.indexOf("setComposer(\"\");");
-  assert.notEqual(start, -1, "located the thread-change reset effect");
+  const start = SRC.indexOf("useLayoutEffect(() => {", SRC.indexOf("Thread-local composer"));
   const end = SRC.indexOf("}, [threadId]);", start);
+  assert.notEqual(start, -1, "located the thread-change reset layout effect");
   assert.notEqual(end, -1, "located the end of the thread-change reset effect");
   const resetEffect = SRC.slice(start, end);
   assert.match(

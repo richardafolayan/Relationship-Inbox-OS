@@ -16,6 +16,9 @@ test("each reviewed bubble has its own user-triggered send action and inline sta
   assert.match(reviewSource, /onClick=\{\(\) => void sendOneMessage\(message\)\}/);
   assert.match(reviewSource, /sendingMessageIds\.has\(message\.id\)/);
   assert.match(reviewSource, /sentMessageIds\.has\(message\.id\)/);
+  assert.match(reviewSource, /sendingMessageIdsRef\.current\.has\(message\.id\)/);
+  assert.match(reviewSource, /sendingMessageIdsRef\.current\.add\(message\.id\)/);
+  assert.match(reviewSource, /sentMessageIdsRef\.current\.add\(message\.id\)/);
   assert.match(reviewSource, />\s*Sent\s*</);
 });
 
@@ -51,4 +54,9 @@ test("successful sends become voice examples and formatter provenance is visible
   assert.match(reviewSource, /messages: sentTexts/);
   assert.match(reviewSource, /messages: \[text\]/);
   assert.match(reviewSource, /Formatted with \{result\.source\.providerDisplayName\}, model \{result\.source\.model\}/);
+});
+
+test("composer and reviewed-dictation failures are announced immediately", () => {
+  assert.match(threadSource, /\{error \? \(\s*<p role="alert"/);
+  assert.match(reviewSource, /\{error \? \(\s*<p role="alert"/);
 });

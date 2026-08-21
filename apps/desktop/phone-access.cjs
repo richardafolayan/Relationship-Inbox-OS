@@ -97,7 +97,7 @@ function lockedPage(appName) {
   return `<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>${safeName}</title><style>body{margin:0;background:#0f1115;color:#f5f1e8;font:16px -apple-system,BlinkMacSystemFont,sans-serif;display:grid;min-height:100vh;place-items:center}main{max-width:360px;padding:32px;text-align:center}p{color:#b9b2a6;line-height:1.5}</style></head><body><main><h1>${safeName} is locked</h1><p>On your computer, open ${safeName} and choose Use ${safeName} on Your Phone from the app menu.</p></main></body></html>`;
 }
 
-function proxyHandler({ appName, dashboardPort, token }) {
+function proxyHandler({ allowInsecure, appName, dashboardPort, token }) {
   return (incoming, outgoing) => {
     let pathname = "/";
     try {
@@ -110,10 +110,23 @@ function proxyHandler({ appName, dashboardPort, token }) {
         .trim()
         .toLowerCase();
       const secureCookie = forwardedProtocol === "https" || Boolean(incoming.socket.encrypted);
+      if (!secureCookie && !allowInsecure) {
+        const body = lockedPage(appName);
+        outgoing.writeHead(426, {
+          "Cache-Control": "no-store",
+          "Content-Length": Buffer.byteLength(body),
+          "Content-Type": "text/html; charset=utf-8",
+          "Permissions-Policy": "camera=(), microphone=()",
+          "Referrer-Policy": "no-referrer"
+        });
+        outgoing.end(body);
+        return;
+      }
       outgoing.writeHead(302, {
         "Cache-Control": "no-store",
         Location: "/",
         "Permissions-Policy": "camera=(), microphone=(self)",
+        "Referrer-Policy": "no-referrer",
         "Set-Cookie": `${ACCESS_COOKIE}=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000${secureCookie ? "; Secure" : ""}`
       });
       outgoing.end();
@@ -126,7 +139,8 @@ function proxyHandler({ appName, dashboardPort, token }) {
         "Cache-Control": "no-store",
         "Content-Length": Buffer.byteLength(body),
         "Content-Type": "text/html; charset=utf-8",
-        "Permissions-Policy": "camera=(), microphone=()"
+        "Permissions-Policy": "camera=(), microphone=()",
+        "Referrer-Policy": "no-referrer"
       });
       outgoing.end(body);
       return;
@@ -151,7 +165,8 @@ function proxyHandler({ appName, dashboardPort, token }) {
     }, (response) => {
       outgoing.writeHead(response.statusCode || 502, {
         ...response.headers,
-        "Permissions-Policy": "camera=(), microphone=(self)"
+        "Permissions-Policy": "camera=(), microphone=(self)",
+        "Referrer-Policy": "no-referrer"
       });
       response.pipe(outgoing);
     });
@@ -316,14 +331,15 @@ function listen(handler, port, host) {
 }
 
 async function startPhoneAccessProxy({
+  allowInsecure = false,
   appName = "Tovi",
   dashboardPort,
-  host = "0.0.0.0",
+  host = "127.0.0.1",
   preferredPort = DEFAULT_PHONE_PORT,
   token
 }) {
   if (!isValidAccessToken(token)) throw new Error("Phone access requires a valid private token.");
-  const handler = proxyHandler({ appName, dashboardPort, token });
+  const handler = proxyHandler({ allowInsecure, appName, dashboardPort, token });
   try {
     return await listen(handler, preferredPort, host);
   } catch (error) {

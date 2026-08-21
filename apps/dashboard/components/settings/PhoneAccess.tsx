@@ -9,6 +9,7 @@ interface PhoneAccessInfo {
   dictationReady?: boolean;
   fallbackUrl?: string;
   qrDataUrl?: string;
+  reason?: string;
   secure?: boolean;
   url?: string;
 }
@@ -102,7 +103,9 @@ export function PhoneAccess() {
             </>
           ) : (
             <p className="mt-3 text-[12px] leading-5 text-ink-3" aria-live="polite">
-              Connect this computer to a private Wi-Fi network, then quit and reopen {APP_NAME}.
+              {info.reason === "secure-phone-access-required"
+                ? `Phone access requires Tailscale HTTPS. Connect Tailscale on this Mac and your phone, then quit and reopen ${APP_NAME}. Plain Wi-Fi links are disabled because they can expose the private access key.`
+                : `Connect this computer to your private Tailscale network, then quit and reopen ${APP_NAME}.`}
             </p>
           )}
         </div>

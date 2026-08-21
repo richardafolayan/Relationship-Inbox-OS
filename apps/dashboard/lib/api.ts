@@ -122,6 +122,10 @@ interface CacheEntry {
 }
 
 const responseCache = new Map<string, CacheEntry>();
+const forcedRefreshes = new Map<
+  string,
+  { barrier: Promise<unknown>; refresh: Promise<unknown> }
+>();
 
 // ---------------------------------------------------------------------------
 // Persistent snapshot layer (localStorage) under the in-memory cache.
@@ -284,6 +288,47 @@ export type ApiGetOptions = RequestInit & {
   onFresh?: (data: unknown) => void;
 };
 
+function queueForcedRefresh<T>(
+  path: string,
+  olderInflight: Promise<unknown>,
+  init: RequestInit
+): Promise<T> {
+  const queued = forcedRefreshes.get(path);
+  if (queued?.barrier === olderInflight) return queued.refresh as Promise<T>;
+
+  const refresh = olderInflight
+    .catch(() => undefined)
+    .then(() => {
+      const entry = responseCache.get(path);
+      let network!: Promise<T>;
+      network = apiGetRaw<T>(path, init)
+        .then((data) => {
+          responseCache.set(path, { data, ts: Date.now() });
+          writeSnapshot(path, data);
+          return data;
+        })
+        .catch((error) => {
+          const current = responseCache.get(path);
+          if (current?.inflight === network) {
+            responseCache.set(path, { data: current.data, ts: current.ts });
+          }
+          throw error;
+        });
+      responseCache.set(path, {
+        data: entry?.data,
+        ts: entry?.ts ?? 0,
+        inflight: network
+      });
+      return network;
+    })
+    .finally(() => {
+      if (forcedRefreshes.get(path)?.refresh === refresh) forcedRefreshes.delete(path);
+    });
+
+  forcedRefreshes.set(path, { barrier: olderInflight, refresh });
+  return refresh;
+}
+
 /**
  * Cache-aware GET.
  *
@@ -308,7 +353,13 @@ export async function apiGet<T>(path: string, opts?: ApiGetOptions): Promise<T> 
 
   // Ensure exactly one in-flight request per path (de-dupe concurrent callers).
   let inflight = entry?.inflight as Promise<T> | undefined;
-  if (!inflight) {
+  const explicitForcedRefresh = opts?.ttlMs === 0;
+  if (inflight && explicitForcedRefresh) {
+    // A data-change event can arrive while an older poll is still in flight.
+    // Reusing that request would allow a pre-change snapshot to win, so queue
+    // one coalesced network read after the older request has settled.
+    inflight = queueForcedRefresh<T>(path, inflight, init);
+  } else if (!inflight) {
     inflight = apiGetRaw<T>(path, init)
       .then((data) => {
         responseCache.set(path, { data, ts: Date.now() });

@@ -24,3 +24,18 @@ export function resolveSseResumeCursor(
 ): number {
   return Number(lastEventIdHeader ?? sinceEventIdQuery ?? 0);
 }
+
+export function resolveSseResyncReason(input: {
+  sinceEventId: number;
+  oldestEventId: number;
+  newestEventId: number;
+}): string | null {
+  if (!Number.isFinite(input.sinceEventId) || input.sinceEventId <= 0) return null;
+  if (input.oldestEventId > 0 && input.sinceEventId < input.oldestEventId - 1) {
+    return "Event replay window exceeded";
+  }
+  if (input.sinceEventId > input.newestEventId) {
+    return "Event cursor is ahead of this runner";
+  }
+  return null;
+}

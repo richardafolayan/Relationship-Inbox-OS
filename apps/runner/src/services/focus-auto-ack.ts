@@ -25,6 +25,7 @@ interface FocusAutoAckDeps {
   };
   sendQueue: Pick<SendQueueService, "enqueueAndKick">;
   loadThread(threadId: string): Promise<FocusAutoAckThread | null>;
+  loadSendRequest(clientSendId: string): Promise<{ threadId: string; status: string } | null>;
   now?: () => Date;
   auditLog?: (input: {
     platform?: PlatformName;
@@ -37,6 +38,10 @@ interface FocusAutoAckDeps {
 
 export type FocusAutoAckResult =
   | { type: "queued"; personId: string; clientSendId: string }
+  | { type: "skipped"; reason: string };
+
+export type FocusAutoAckDeliveryResult =
+  | { type: "acknowledged"; personId: string }
   | { type: "skipped"; reason: string };
 
 function looksLikePhoneOrEmail(value: string): boolean {
@@ -110,6 +115,17 @@ function isLiveAutoWindow(profile: OperatorProfile, now: Date): boolean {
 
 export function createFocusAutoAckService(deps: FocusAutoAckDeps) {
   const inFlight = new Set<string>();
+  const deliveryInFlight = new Set<string>();
+  let deliveryWrites: Promise<void> = Promise.resolve();
+
+  function serializeDeliveryWrite<T>(work: () => Promise<T>): Promise<T> {
+    const run = deliveryWrites.then(work, work);
+    deliveryWrites = run.then(
+      () => undefined,
+      () => undefined
+    );
+    return run;
+  }
 
   async function handleThread(threadId: string): Promise<FocusAutoAckResult> {
     const profile = await deps.settingsStore.getOperatorProfile();
@@ -152,18 +168,31 @@ export function createFocusAutoAckService(deps: FocusAutoAckDeps) {
       const text = focusAutoAckText(thread, latest);
       if (!text) return { type: "skipped", reason: "empty_note" };
       const clientSendId = uuidv5(key, uuidv5.URL);
-      await deps.sendQueue.enqueueAndKick({ threadId, text, clientSendId });
-
-      const afterQueue = await deps.settingsStore.getOperatorProfile();
-      if (afterQueue.focusWindow.windowId === latest.focusWindow.windowId) {
-        await deps.settingsStore.updateOperatorProfile({
-          focusWindow: {
-            ...afterQueue.focusWindow,
-            ackedPersonIds: Array.from(
-              new Set([...afterQueue.focusWindow.ackedPersonIds, personId])
-            )
-          }
-        });
+      const existing = await deps.loadSendRequest(clientSendId);
+      if (existing) {
+        if (existing.status === "SENT") {
+          const delivered = await handleDelivered({
+            threadId: existing.threadId,
+            clientSendId
+          });
+          return delivered.type === "acknowledged"
+            ? { type: "skipped", reason: "already_delivered" }
+            : delivered;
+        }
+        return {
+          type: "skipped",
+          reason: existing.status === "PENDING" ? "already_queued" : "existing_attempt"
+        };
+      }
+      const queueResult = await deps.sendQueue.enqueueAndKick({ threadId, text, clientSendId });
+      if (queueResult.status === "SENT") {
+        const delivered = await handleDelivered({ threadId, clientSendId });
+        return delivered.type === "acknowledged"
+          ? { type: "skipped", reason: "already_delivered" }
+          : delivered;
+      }
+      if (queueResult.status === "FAILED") {
+        return { type: "skipped", reason: "existing_attempt" };
       }
       await deps.auditLog?.({
         platform: thread.platform,
@@ -192,5 +221,67 @@ export function createFocusAutoAckService(deps: FocusAutoAckDeps) {
     }
   }
 
-  return { handleThread };
+  async function handleDelivered(input: {
+    threadId: string;
+    clientSendId: string;
+  }): Promise<FocusAutoAckDeliveryResult> {
+    const profile = await deps.settingsStore.getOperatorProfile();
+    if (!isLiveAutoWindow(profile, deps.now?.() ?? new Date())) {
+      return { type: "skipped", reason: "disabled" };
+    }
+    const thread = await deps.loadThread(input.threadId);
+    if (!thread) return { type: "skipped", reason: "thread_not_found" };
+    if (!focusAutoAckCoverage(thread, profile)) {
+      return { type: "skipped", reason: "not_covered" };
+    }
+
+    const personId = thread.person.id;
+    const key = `${profile.focusWindow.windowId}:${personId}`;
+    if (uuidv5(key, uuidv5.URL) !== input.clientSendId) {
+      return { type: "skipped", reason: "not_focus_note" };
+    }
+    if (profile.focusWindow.ackedPersonIds.includes(personId)) {
+      return { type: "skipped", reason: "already_acknowledged" };
+    }
+    if (deliveryInFlight.has(key)) return { type: "skipped", reason: "in_flight" };
+
+    deliveryInFlight.add(key);
+    try {
+      return await serializeDeliveryWrite<FocusAutoAckDeliveryResult>(async () => {
+        const latest = await deps.settingsStore.getOperatorProfile();
+        if (
+          !isLiveAutoWindow(latest, deps.now?.() ?? new Date()) ||
+          latest.focusWindow.windowId !== profile.focusWindow.windowId
+        ) {
+          return { type: "skipped", reason: "window_changed" };
+        }
+        if (latest.focusWindow.ackedPersonIds.includes(personId)) {
+          return { type: "skipped", reason: "already_acknowledged" };
+        }
+        await deps.settingsStore.updateOperatorProfile({
+          focusWindow: {
+            ...latest.focusWindow,
+            ackedPersonIds: Array.from(new Set([...latest.focusWindow.ackedPersonIds, personId]))
+          }
+        });
+        await deps.auditLog?.({
+          platform: thread.platform,
+          stage: "focus-auto-ack",
+          action: "focus_auto_ack_delivered",
+          status: "OK",
+          details: {
+            threadId: input.threadId,
+            personId,
+            windowId: latest.focusWindow.windowId,
+            clientSendId: input.clientSendId
+          }
+        });
+        return { type: "acknowledged", personId };
+      });
+    } finally {
+      deliveryInFlight.delete(key);
+    }
+  }
+
+  return { handleThread, handleDelivered };
 }

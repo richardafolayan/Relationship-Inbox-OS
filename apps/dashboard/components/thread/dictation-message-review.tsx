@@ -52,6 +52,9 @@ export function DictationMessageReview({
   const [error, setError] = useState<string | null>(null);
   const [sendingMessageIds, setSendingMessageIds] = useState<Set<string>>(() => new Set());
   const [sentMessageIds, setSentMessageIds] = useState<Set<string>>(() => new Set());
+  const sendingMessageIdsRef = useRef(new Set<string>());
+  const sentMessageIdsRef = useRef(new Set<string>());
+  const batchSendingRef = useRef(false);
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   const textareaRefs = useRef<Record<string, HTMLTextAreaElement | null>>({});
   const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -139,8 +142,10 @@ export function DictationMessageReview({
   };
 
   const sendMessages = async () => {
-    const ready = messages.filter((message) => !sentMessageIds.has(message.id) && message.text.trim());
+    if (batchSendingRef.current || sendingMessageIdsRef.current.size > 0) return;
+    const ready = messages.filter((message) => !sentMessageIdsRef.current.has(message.id) && message.text.trim());
     if (!ready.length) return;
+    batchSendingRef.current = true;
     setView("sending");
     setError(null);
     const sentTexts: string[] = [];
@@ -150,6 +155,7 @@ export function DictationMessageReview({
         const text = message.text.trim();
         await onSendMessage(text);
         sentTexts.push(text);
+        sentMessageIdsRef.current.add(message.id);
         setSentMessageIds((current) => new Set(current).add(message.id));
       } catch (sendError) {
         if (sentTexts.length) {
@@ -162,22 +168,32 @@ export function DictationMessageReview({
           `${sendError instanceof Error ? sendError.message : "Sending stopped."} ${remaining} ${remaining === 1 ? "message is" : "messages are"} still here.`
         );
         setView("review");
+        batchSendingRef.current = false;
         return;
       }
     }
     void apiPost(`/runner/control/thread/${threadId}/dictation-message-example`, {
       messages: sentTexts
     }).catch(() => undefined);
+    batchSendingRef.current = false;
     onDone();
   };
 
   const sendOneMessage = async (message: FormattedDictationMessage) => {
     const text = message.text.trim();
-    if (!text || sendingMessageIds.has(message.id) || sentMessageIds.has(message.id) || view === "sending") return;
+    if (
+      !text ||
+      sendingMessageIdsRef.current.has(message.id) ||
+      sentMessageIdsRef.current.has(message.id) ||
+      batchSendingRef.current ||
+      view === "sending"
+    ) return;
+    sendingMessageIdsRef.current.add(message.id);
     setSendingMessageIds((current) => new Set(current).add(message.id));
     setError(null);
     try {
       await onSendMessage(text);
+      sentMessageIdsRef.current.add(message.id);
       setSentMessageIds((current) => new Set(current).add(message.id));
       onMessageSent();
       void apiPost(`/runner/control/thread/${threadId}/dictation-message-example`, {
@@ -186,6 +202,7 @@ export function DictationMessageReview({
     } catch (sendError) {
       setError(sendError instanceof Error ? sendError.message : "This message was not sent. Try again.");
     } finally {
+      sendingMessageIdsRef.current.delete(message.id);
       setSendingMessageIds((current) => {
         const next = new Set(current);
         next.delete(message.id);
@@ -422,7 +439,7 @@ export function DictationMessageReview({
               </details>
 
               {error ? (
-                <p className="rounded-[14px] border border-accent-ink/30 bg-accent-soft px-3 py-2 text-[12px] leading-relaxed text-ink-2" aria-live="polite">
+                <p role="alert" className="rounded-[14px] border border-accent-ink/30 bg-accent-soft px-3 py-2 text-[12px] leading-relaxed text-ink-2">
                   {error}
                 </p>
               ) : null}

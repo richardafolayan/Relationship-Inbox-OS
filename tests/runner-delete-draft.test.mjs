@@ -44,10 +44,10 @@ test("runner exposes POST /control/thread/:threadId/delete-draft", () => {
 test("dashboard thread page wires a Delete draft button to the endpoint", () => {
   const pageTsx = readSource("apps/dashboard/app/thread/[id]/page.tsx");
 
-  // POSTs to the new endpoint (template literal: path then closing backtick).
-  assert.ok(
-    pageTsx.includes("/delete-draft`"),
-    "thread page must POST to the delete-draft endpoint"
+  assert.match(
+    pageTsx,
+    /postForActiveThread\(thread\.id, "\/delete-draft", \{\}\)/,
+    "thread page must POST to the delete-draft endpoint through the active-thread guard"
   );
   // Gated on a persisted draft existing — never shown for an AI predraft
   // (its own local-only "Discard") or unsaved typing.

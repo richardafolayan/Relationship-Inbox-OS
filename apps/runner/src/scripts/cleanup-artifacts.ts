@@ -1,5 +1,5 @@
-import { readdir, rm, stat } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { readdir, realpath, rm, stat } from "node:fs/promises";
+import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export interface CleanupCandidate {
@@ -17,6 +17,17 @@ export interface CleanupOptions {
   keepRecent: number;
   keepDays: number;
   nowMs: number;
+}
+
+export interface CleanupRoots {
+  runs: string;
+  screenshots: string;
+  dom_dumps: string;
+  repair: string;
+}
+
+export function resolveCleanupRepoRoot(scriptRoot: string): string {
+  return resolve(scriptRoot, "../../../..");
 }
 
 const DAY_MS = 24 * 60 * 60 * 1_000;
@@ -89,17 +100,36 @@ async function collectFlatFileCandidates(root: string, source: CleanupCandidate[
   return candidates;
 }
 
-export async function collectDefaultCleanupCandidates(repoRoot: string): Promise<CleanupCandidate[]> {
-  const runsRoot = resolve(repoRoot, "apps/runner/logs/runs");
-  const screenshotsRoot = resolve(repoRoot, "data/screenshots");
-  const domDumpsRoot = resolve(repoRoot, "data/dom_dumps");
-  const repairRoot = resolve(repoRoot, "data/repair");
+export function resolveDefaultCleanupRoots(input: {
+  repoRoot: string;
+  cwd?: string;
+  env?: NodeJS.ProcessEnv;
+}): CleanupRoots {
+  const cwd = resolve(input.cwd ?? process.cwd());
+  const env = input.env ?? process.env;
+  const dataSetting = env.RIOS_DATA_DIR?.trim();
+  const runsSetting = env.RUN_TRACE_DIR?.trim();
+  const dataRoot = dataSetting
+    ? resolve(cwd, dataSetting)
+    : resolve(input.repoRoot, "data");
+  const runsRoot = runsSetting
+    ? resolve(cwd, runsSetting)
+    : resolve(input.repoRoot, "apps/runner/logs/runs");
+  return {
+    runs: runsRoot,
+    screenshots: resolve(dataRoot, "screenshots"),
+    dom_dumps: resolve(dataRoot, "dom_dumps"),
+    repair: resolve(dataRoot, "repair")
+  };
+}
+
+export async function collectDefaultCleanupCandidates(roots: CleanupRoots): Promise<CleanupCandidate[]> {
 
   const [runs, screenshots, domDumps, repair] = await Promise.all([
-    collectRunCandidates(runsRoot),
-    collectFlatFileCandidates(screenshotsRoot, "screenshots"),
-    collectFlatFileCandidates(domDumpsRoot, "dom_dumps"),
-    collectFlatFileCandidates(repairRoot, "repair")
+    collectRunCandidates(roots.runs),
+    collectFlatFileCandidates(roots.screenshots, "screenshots"),
+    collectFlatFileCandidates(roots.dom_dumps, "dom_dumps"),
+    collectFlatFileCandidates(roots.repair, "repair")
   ]);
 
   return [...runs, ...screenshots, ...domDumps, ...repair];
@@ -141,7 +171,32 @@ export function planArtifactCleanup(candidates: CleanupCandidate[], options: Cle
   };
 }
 
-export async function applyArtifactCleanup(plan: CleanupPlan): Promise<{ removedCount: number }> {
+function assertRelativeConfinement(path: string, root: string): void {
+  const resolvedRoot = resolve(root);
+  const resolvedPath = resolve(path);
+  const offset = relative(resolvedRoot, resolvedPath);
+  if (!offset || offset.startsWith("..") || isAbsolute(offset)) {
+    throw new Error(`Refusing artifact cleanup outside configured root: ${resolvedPath}`);
+  }
+}
+
+async function assertConfined(path: string, root: string): Promise<void> {
+  assertRelativeConfinement(path, root);
+  try {
+    const [realRoot, realPath] = await Promise.all([realpath(root), realpath(path)]);
+    assertRelativeConfinement(realPath, realRoot);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+}
+
+export async function applyArtifactCleanup(
+  plan: CleanupPlan,
+  roots: CleanupRoots
+): Promise<{ removedCount: number }> {
+  for (const entry of plan.remove) {
+    await assertConfined(entry.path, roots[entry.source]);
+  }
   for (const entry of plan.remove) {
     await rm(entry.path, {
       recursive: true,
@@ -150,8 +205,9 @@ export async function applyArtifactCleanup(plan: CleanupPlan): Promise<{ removed
 
     // Remove empty date bucket directories left by run-folder deletion.
     const maybeDateDir = dirname(entry.path);
-    if (/\/\d{4}-\d{2}-\d{2}$/.test(maybeDateDir)) {
+    if (/^\d{4}-\d{2}-\d{2}$/.test(basename(maybeDateDir))) {
       try {
+        await assertConfined(maybeDateDir, roots.runs);
         const leftovers = await readdir(maybeDateDir);
         if (leftovers.length === 0) {
           await rm(maybeDateDir, { recursive: true, force: true });
@@ -210,8 +266,9 @@ function parseCliOptions(argv: string[]): CliOptions {
 async function runFromCli(): Promise<void> {
   const cliOptions = parseCliOptions(process.argv.slice(2));
   const scriptRoot = dirname(fileURLToPath(import.meta.url));
-  const repoRoot = resolve(scriptRoot, "../../..");
-  const candidates = await collectDefaultCleanupCandidates(repoRoot);
+  const repoRoot = resolveCleanupRepoRoot(scriptRoot);
+  const roots = resolveDefaultCleanupRoots({ repoRoot });
+  const candidates = await collectDefaultCleanupCandidates(roots);
   const plan = planArtifactCleanup(candidates, {
     keepRecent: cliOptions.keepRecent,
     keepDays: cliOptions.keepDays,
@@ -238,7 +295,7 @@ async function runFromCli(): Promise<void> {
     return;
   }
 
-  const result = await applyArtifactCleanup(plan);
+  const result = await applyArtifactCleanup(plan, roots);
   // eslint-disable-next-line no-console
   console.log(
     JSON.stringify(

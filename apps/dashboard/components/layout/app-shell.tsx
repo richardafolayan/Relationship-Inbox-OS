@@ -187,7 +187,25 @@ export function AppShell({ children }: { children: ReactNode }) {
   const [runtimeFailure, setRuntimeFailure] = useState<ConsumerFailure | null>(null);
   const [recovering, setRecovering] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const paletteReturnFocusRef = useRef<HTMLElement | null>(null);
+  const paletteWasOpenRef = useRef(false);
+  const openPalette = useCallback(() => {
+    paletteReturnFocusRef.current =
+      document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    setPaletteOpen(true);
+  }, []);
   const closePalette = useCallback(() => setPaletteOpen(false), []);
+  useEffect(() => {
+    if (paletteOpen) {
+      paletteWasOpenRef.current = true;
+      return;
+    }
+    if (!paletteWasOpenRef.current) return;
+    paletteWasOpenRef.current = false;
+    const target = paletteReturnFocusRef.current;
+    paletteReturnFocusRef.current = null;
+    if (target?.isConnected) target.focus();
+  }, [paletteOpen]);
   const { prepareNavigation: preparePaletteNavigation } = usePrimaryOverlay({
     kind: "search",
     id: "command-palette",
@@ -253,8 +271,8 @@ export function AppShell({ children }: { children: ReactNode }) {
 
   const openSearch = useCallback(() => {
     if (tourSurfaceActive || isGuidedTourSurfaceActive()) return;
-    setPaletteOpen(true);
-  }, [tourSurfaceActive]);
+    openPalette();
+  }, [openPalette, tourSurfaceActive]);
 
   // Diff the latest inbox poll against the previous one and surface any
   // thread that gained a new inbound message. Gated so it stays a signal,
@@ -796,7 +814,8 @@ export function AppShell({ children }: { children: ReactNode }) {
           if (pathname !== "/search") router.push("/search");
           return;
         }
-        setPaletteOpen((value) => !value);
+        if (paletteOpen) closePalette();
+        else openPalette();
         return;
       }
       if (event.key === "Escape") {
@@ -834,7 +853,7 @@ export function AppShell({ children }: { children: ReactNode }) {
     };
     window.addEventListener("keydown", onKeydown);
     return () => window.removeEventListener("keydown", onKeydown);
-  }, [paletteOpen, pathname, router]);
+  }, [closePalette, openPalette, paletteOpen, pathname, router]);
 
   useEffect(() => {
     const capture = (reason: unknown) => {

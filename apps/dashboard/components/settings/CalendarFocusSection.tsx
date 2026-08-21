@@ -53,7 +53,7 @@ type CheckState =
   | { kind: "result"; data: CalendarPreviewResponse };
 
 export function CalendarFocusSection() {
-  const { profile, calendarSync, saveCalendarSync } = useFocusWindow();
+  const { profile, profileLoadState, reload, calendarSync, saveCalendarSync } = useFocusWindow();
   const [local, setLocal] = useState<CalendarSyncSettings>(calendarSync);
   const [status, setStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [check, setCheck] = useState<CheckState>({ kind: "idle" });
@@ -70,12 +70,12 @@ export function CalendarFocusSection() {
   // Own local editor state once the real profile lands, so a background
   // profile refresh can't clobber an in-progress edit.
   useEffect(() => {
-    if (profile && !hydrated.current) {
+    if (profileLoadState === "ready" && profile && !hydrated.current) {
       setLocal(calendarSync);
       latest.current = calendarSync;
       hydrated.current = true;
     }
-  }, [profile, calendarSync]);
+  }, [profile, profileLoadState, calendarSync]);
 
   const persistNow = async () => {
     if (debounceRef.current) {
@@ -196,6 +196,32 @@ export function CalendarFocusSection() {
   const checkLine = renderCheckLine(check);
   const calendarUrls = [local.url, ...local.additionalUrls];
   const hasCalendarUrl = calendarUrls.some((url) => url.trim());
+
+  if (profileLoadState !== "ready") {
+    return (
+      <section className="mb-9">
+        <p className="mb-3 font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">
+          Calendar auto-focus
+        </p>
+        <div className="rounded-card border border-hairline bg-paper p-6" aria-live="polite">
+          <p className="m-0 text-[13.5px] leading-[1.5] text-ink-2">
+            {profileLoadState === "loading"
+              ? "Loading your saved calendar settings..."
+              : "Your saved calendar settings could not be loaded. Editing is paused so the saved values cannot be replaced by defaults."}
+          </p>
+          {profileLoadState === "error" ? (
+            <button
+              type="button"
+              onClick={reload}
+              className="mt-4 rounded-pill border border-hairline px-3 py-[7px] text-[13px] text-ink-2 hover:border-hairline-strong"
+            >
+              Try again
+            </button>
+          ) : null}
+        </div>
+      </section>
+    );
+  }
 
   return (
     <section className="mb-9">

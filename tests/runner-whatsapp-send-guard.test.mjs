@@ -11,7 +11,9 @@ function buildDeps(overrides = {}) {
   const {
     isMyContact = true,
     recentOutbound = null, // pass a Date to simulate a prior recent send to this recipient
+    recentReceipt = null,
     dailyOutboundCount = 0,
+    dailyReceiptCount = 0,
     minIntervalMs = 30_000,
     dailyCap = 30,
     expectedRecipient = RECIPIENT
@@ -34,13 +36,32 @@ function buildDeps(overrides = {}) {
           }
           return null;
         },
-        async count(args) {
+        async findMany(args) {
           assert.equal(args.where.thread.platform, "WHATSAPP");
           assert.equal(args.where.direction, "OUT");
           // The query window must be exactly 24h before now.
           const expectedCutoff = new Date(NOW - ONE_DAY_MS);
           assert.equal(args.where.timestamp.gte.toISOString(), expectedCutoff.toISOString());
-          return dailyOutboundCount;
+          return Array.from({ length: dailyOutboundCount }, (_, index) => ({
+            platformMessageKey: `message-${index}`
+          }));
+        }
+      },
+      sendRequest: {
+        async findFirst(args) {
+          assert.equal(args.where.thread.platform, "WHATSAPP");
+          assert.equal(args.where.thread.platformThreadId, expectedRecipient);
+          assert.equal(args.where.status, "SENT");
+          return recentReceipt ? { updatedAt: recentReceipt } : null;
+        },
+        async findMany(args) {
+          assert.equal(args.where.thread.platform, "WHATSAPP");
+          assert.equal(args.where.status, "SENT");
+          const expectedCutoff = new Date(NOW - ONE_DAY_MS);
+          assert.equal(args.where.updatedAt.gte.toISOString(), expectedCutoff.toISOString());
+          return Array.from({ length: dailyReceiptCount }, (_, index) => ({
+            receiptJson: JSON.stringify({ platformMessageKey: `message-${index}` })
+          }));
         }
       }
     },
@@ -137,4 +158,20 @@ test("checkSendGuard honours custom minIntervalMs from config", async () => {
   );
   assert.equal(result.allowed, false);
   assert.match(result.reason, /60s remaining/);
+});
+
+test("durable SENT receipts enforce interval and daily cap when Message projection is missing", async () => {
+  const interval = await checkSendGuard(
+    buildDeps({ recentReceipt: new Date(NOW - 5_000) }),
+    RECIPIENT
+  );
+  assert.equal(interval.allowed, false);
+  assert.equal(interval.retryAfterMs, 25_000);
+
+  const capped = await checkSendGuard(
+    buildDeps({ dailyOutboundCount: 29, dailyReceiptCount: 30 }),
+    RECIPIENT
+  );
+  assert.equal(capped.allowed, false);
+  assert.match(capped.reason, /30\/30/);
 });

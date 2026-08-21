@@ -165,7 +165,7 @@ const SETTINGS_TABS: SettingsTab[] = [
   {
     id: "app",
     label: "App",
-    description: "Updates, demo mode, and local app controls.",
+    description: "Updates and local app controls.",
     icon: MonitorCog
   },
   {

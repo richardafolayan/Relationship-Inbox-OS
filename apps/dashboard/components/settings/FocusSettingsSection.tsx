@@ -26,7 +26,15 @@ const AUDIENCE_OPTIONS: Array<{ value: FocusAudience; name: string; desc: string
 ];
 
 export function FocusSettingsSection() {
-  const { profile, settings, templates, saveSettings, saveTemplates } = useFocusWindow();
+  const {
+    profile,
+    profileLoadState,
+    reload,
+    settings,
+    templates,
+    saveSettings,
+    saveTemplates
+  } = useFocusWindow();
   const [local, setLocal] = useState<FocusSettings>(settings);
   const [tpl, setTpl] = useState<AckTemplates>(templates);
   const [status, setStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
@@ -37,12 +45,12 @@ export function FocusSettingsSection() {
   // Hydrate local editor state once the real profile lands, then own it
   // locally so a background profile refresh can't clobber an in-progress edit.
   useEffect(() => {
-    if (profile && !hydrated.current) {
+    if (profileLoadState === "ready" && profile && !hydrated.current) {
       setLocal(settings);
       setTpl(templates);
       hydrated.current = true;
     }
-  }, [profile, settings, templates]);
+  }, [profile, profileLoadState, settings, templates]);
 
   // Flush any pending template save on unmount.
   useEffect(
@@ -101,6 +109,32 @@ export function FocusSettingsSection() {
       .then(() => setStatus("saved"))
       .catch(() => setStatus("error"));
   };
+
+  if (profileLoadState !== "ready") {
+    return (
+      <section className="mb-9">
+        <p className="mb-3 font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">
+          Focus Reply Buffer
+        </p>
+        <div className="rounded-card border border-hairline bg-paper p-6" aria-live="polite">
+          <p className="m-0 text-[13.5px] leading-[1.5] text-ink-2">
+            {profileLoadState === "loading"
+              ? "Loading your saved Focus settings..."
+              : "Your saved Focus settings could not be loaded. Editing is paused so the saved values cannot be replaced by defaults."}
+          </p>
+          {profileLoadState === "error" ? (
+            <button
+              type="button"
+              onClick={reload}
+              className="mt-4 rounded-pill border border-hairline px-3 py-[7px] text-[13px] text-ink-2 hover:border-hairline-strong"
+            >
+              Try again
+            </button>
+          ) : null}
+        </div>
+      </section>
+    );
+  }
 
   return (
     <section className="mb-9">

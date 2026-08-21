@@ -13,7 +13,7 @@ import { chromium } from "patchright";
 const require = createRequire(import.meta.url);
 const phoneAccess = require("../apps/desktop/phone-access.cjs");
 const ROOT = resolve(new URL("..", import.meta.url).pathname);
-const CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+const LOCAL_CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 
 function listen(server) {
   return new Promise((resolveListen, rejectListen) => {
@@ -126,9 +126,7 @@ async function browserBundle() {
   return result.outputFiles[0].text;
 }
 
-test("phone-sized secure browser records, uploads through the token proxy, and never autosends", {
-  skip: !existsSync(CHROME)
-}, async () => {
+test("phone-sized secure browser records, uploads through the token proxy, and never autosends", async () => {
   const temp = mkdtempSync(join(tmpdir(), "tovi-secure-dictation-"));
   const keyPath = join(temp, "key.pem");
   const certPath = join(temp, "cert.pem");
@@ -181,6 +179,7 @@ test("phone-sized secure browser records, uploads through the token proxy, and n
   const dashboardPort = await listen(dashboard);
   const token = phoneAccess.createAccessToken();
   const proxy = await phoneAccess.startPhoneAccessProxy({
+    allowInsecure: true,
     dashboardPort,
     host: "127.0.0.1",
     preferredPort: 0,
@@ -204,7 +203,7 @@ test("phone-sized secure browser records, uploads through the token proxy, and n
   );
   const tlsPort = await listen(tls);
   const browser = await chromium.launch({
-    executablePath: CHROME,
+    ...(existsSync(LOCAL_CHROME) ? { executablePath: LOCAL_CHROME } : {}),
     headless: true,
     args: [
       "--host-resolver-rules=MAP tovi.test 127.0.0.1",

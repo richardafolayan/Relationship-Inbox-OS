@@ -16,6 +16,7 @@ const { shouldInboxRefreshOnRunnerEvent } = await import(
 
 test("refreshes on the data-changing runner events (mirrors Today)", () => {
   assert.equal(shouldInboxRefreshOnRunnerEvent("THREAD_UPDATED"), true);
+  assert.equal(shouldInboxRefreshOnRunnerEvent("MESSAGES_PERSISTED"), true);
   assert.equal(shouldInboxRefreshOnRunnerEvent("MESSAGE_SENT"), true);
   assert.equal(shouldInboxRefreshOnRunnerEvent("MESSAGE_SEND_FAILED"), true);
   assert.equal(shouldInboxRefreshOnRunnerEvent("SCAN_FINISHED"), true);
@@ -56,6 +57,15 @@ test("a SCAN_FINISHED event schedules exactly one inbox refresh", () => {
   });
   handler({ detail: { type: "SCAN_FINISHED" } });
   assert.equal(refreshes, 1, "finished scan must refresh the open inbox");
+});
+
+test("newly persisted messages refresh before optional scan enrichment finishes", () => {
+  let refreshes = 0;
+  const handler = makeInboxRunnerEventHandler(() => {
+    refreshes += 1;
+  });
+  handler({ detail: { type: "MESSAGES_PERSISTED", threadId: "t1" } });
+  assert.equal(refreshes, 1);
 });
 
 test("a thread-page send (MESSAGE_SENT) refreshes the open inbox", () => {

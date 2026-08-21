@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   ArrowLeft,
@@ -23,7 +23,10 @@ import { startPilotTour } from "@/lib/pilot-tour";
 import {
   isSetupComplete,
   markSetupComplete,
-  onSetupWizardStart
+  onSetupWizardStart,
+  persistSetupCompletion,
+  persistSetupProfile,
+  resolveReconciledSetupGate
 } from "@/lib/setup-wizard";
 import type { OperatorProfile, PlatformCard } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -83,6 +86,13 @@ export function SetupWizard() {
   const [aiConfigured, setAiConfigured] = useState(false);
   const [selected, setSelected] = useState<SetupPlatform[]>([]);
   const [aiEnabled, setAiEnabled] = useState(false);
+  const [setupLoadState, setSetupLoadState] = useState<"loading" | "ready" | "error">(
+    "loading"
+  );
+  const [reconcileAttempt, setReconcileAttempt] = useState(0);
+  const [finishing, setFinishing] = useState(false);
+  const [finishError, setFinishError] = useState("");
+  const finishingRef = useRef(false);
 
   const load = useCallback(async () => {
     const [setup, ai] = await Promise.all([
@@ -100,28 +110,40 @@ export function SetupWizard() {
   }, []);
 
   useEffect(() => {
-    if (isSetupComplete(window.localStorage)) return;
     let cancelled = false;
+    const storedComplete = isSetupComplete(window.localStorage);
+    setSetupLoadState("loading");
     void load().then(({ setup, ai }) => {
       if (cancelled) return;
-      if (setup.preferences.completedAt) {
+      const decision = resolveReconciledSetupGate({
+        storedComplete,
+        durableComplete: Boolean(
+          setup.preferences.completedAt && setup.operatorProfile.setupCompletedAt
+        ),
+        setupStarted: Boolean(setup.preferences.startedAt),
+        aiConfigured: ai.configuredProviders.length > 0,
+        anyPlatformConnected: setup.platforms.some(
+          (platform) => platform.status === "CONNECTED"
+        )
+      });
+      if (decision === "auto-complete") {
         markSetupComplete(window.localStorage);
-        return;
       }
-      const existingInstall =
-        !setup.preferences.startedAt &&
-        (ai.configuredProviders.length > 0 || setup.platforms.some((platform) => platform.status === "CONNECTED"));
-      if (existingInstall) {
-        markSetupComplete(window.localStorage);
-        return;
-      }
+      setSetupLoadState("ready");
+      setOpen(decision === "show");
+    }).catch(() => {
+      if (cancelled) return;
+      setSetupLoadState("error");
       setOpen(true);
-    }).catch(() => undefined);
+    });
     return () => { cancelled = true; };
-  }, [load]);
+  }, [load, reconcileAttempt]);
 
   useEffect(() => onSetupWizardStart(() => {
-    void load().catch(() => undefined);
+    setSetupLoadState("loading");
+    void load()
+      .then(() => setSetupLoadState("ready"))
+      .catch(() => setSetupLoadState("error"));
     setStep("welcome");
     setOpen(true);
   }), [load]);
@@ -142,12 +164,29 @@ export function SetupWizard() {
     return result.preferences;
   }, []);
 
-  const finish = useCallback(async () => {
+  const finish = useCallback(async (): Promise<boolean> => {
+    if (finishingRef.current) return false;
+    finishingRef.current = true;
     const now = new Date().toISOString();
-    await savePreferences({ completedAt: now }).catch(() => undefined);
-    await apiPost("/runner/control/operator-profile", { setupCompletedAt: now }).catch(() => undefined);
-    markSetupComplete(window.localStorage);
-    setOpen(false);
+    setFinishing(true);
+    setFinishError("");
+    try {
+      await persistSetupCompletion({
+        persistProfileCompletion: () =>
+          apiPost("/runner/control/operator-profile", { setupCompletedAt: now }),
+        persistPreferencesCompletion: () =>
+          savePreferences({ completedAt: now }).then(() => undefined),
+        markBrowserComplete: () => markSetupComplete(window.localStorage)
+      });
+      setOpen(false);
+      return true;
+    } catch {
+      setFinishError(`Setup could not be saved. Check that ${APP_NAME} is running, then try again.`);
+      return false;
+    } finally {
+      finishingRef.current = false;
+      setFinishing(false);
+    }
   }, [savePreferences]);
 
   if (!open) return null;
@@ -155,20 +194,39 @@ export function SetupWizard() {
   return (
     <div role="dialog" aria-modal="true" aria-label={`Set up ${APP_NAME}`} data-testid="setup-wizard" className="app-main-scroll fixed inset-0 z-[100] overflow-y-auto bg-paper">
       <div className="mx-auto flex min-h-full w-full max-w-[720px] flex-col px-4 pb-[calc(24px+env(safe-area-inset-bottom))] pt-[calc(20px+env(safe-area-inset-top))] sm:px-5 sm:py-12">
-        <div className="mb-8 flex items-center justify-between gap-4">
-          <div className="flex items-center gap-[8px]" aria-label={`Step ${index + 1} of ${steps.length}`}>
-            {steps.map((item, itemIndex) => (
-              <span key={item} aria-hidden className={cn("h-[5px] rounded-pill transition-all", itemIndex === index ? "w-7 bg-accent" : itemIndex < index ? "w-3 bg-accent/50" : "w-3 bg-hairline-strong")} />
-            ))}
-          </div>
-          {step !== "done" ? (
-            <button type="button" onClick={() => void finish()} className="font-mono text-[11px] text-ink-3 underline underline-offset-2 hover:text-ink">
-              Finish later
+        {setupLoadState === "ready" ? (
+          <div className="mb-8 flex items-center justify-between gap-4">
+            <div className="flex items-center gap-[8px]" aria-label={`Step ${index + 1} of ${steps.length}`}>
+              {steps.map((item, itemIndex) => (
+                <span key={item} aria-hidden className={cn("h-[5px] rounded-pill transition-all", itemIndex === index ? "w-7 bg-accent" : itemIndex < index ? "w-3 bg-accent/50" : "w-3 bg-hairline-strong")} />
+              ))}
+            </div>
+            {step !== "done" ? (
+            <button type="button" disabled={finishing} onClick={() => void finish()} className="font-mono text-[11px] text-ink-3 underline underline-offset-2 hover:text-ink disabled:opacity-50">
+              {finishing ? "Saving..." : "Finish later"}
             </button>
-          ) : null}
-        </div>
+            ) : null}
+          </div>
+        ) : null}
 
-        {step === "welcome" ? (
+        {finishError ? <Notice>{finishError}</Notice> : null}
+
+        {setupLoadState !== "ready" ? (
+          <Card
+            icon={<Settings2 />}
+            eyebrow="Setup status"
+            title={setupLoadState === "loading" ? "Checking your saved setup..." : "Your saved setup could not be checked."}
+            body={setupLoadState === "loading" ? `Waiting for ${APP_NAME} to confirm your setup.` : `Check that ${APP_NAME} is running, then try again. Setup will stay open until its saved state can be confirmed.`}
+          >
+            {setupLoadState === "error" ? (
+              <Actions>
+                <Primary onClick={() => setReconcileAttempt((attempt) => attempt + 1)}>
+                  Try again
+                </Primary>
+              </Actions>
+            ) : null}
+          </Card>
+        ) : step === "welcome" ? (
           <Card icon={<Sparkles />} eyebrow="Welcome" title={`Make ${APP_NAME} yours.`} body={`Choose what you want ${APP_NAME} to help with. You can add, change, or remove anything later in Settings.`}>
             <InfoRows rows={[
               ["Messages", "Choose only the places you actually use."],
@@ -208,8 +266,8 @@ export function SetupWizard() {
         {step === "done" ? (
           <Card icon={<Check />} eyebrow="Ready" title={`${APP_NAME} is ready when you are.`} body="New conversations appear after their first scan. You can rerun this assistant or manage optional parts from Settings at any time.">
             <Actions>
-              <Primary onClick={() => { void finish().then(() => router.push("/today")); }}>Go to Today</Primary>
-              <Quiet onClick={() => { void finish().then(() => { router.push("/today"); window.setTimeout(() => startPilotTour(), 350); }); }}>Show me with safe demo messages</Quiet>
+              <Primary disabled={finishing} onClick={() => { void finish().then((saved) => { if (saved) router.push("/today"); }); }}>{finishing ? "Saving..." : "Go to Today"}</Primary>
+              <Quiet onClick={() => { void finish().then((saved) => { if (!saved) return; router.push("/today"); window.setTimeout(() => startPilotTour(), 350); }); }}>Show me with safe demo messages</Quiet>
             </Actions>
           </Card>
         ) : null}
@@ -221,16 +279,31 @@ export function SetupWizard() {
 function ProfileStep({ initial, onBack, onNext }: { initial?: OperatorProfile; onBack: () => void; onNext: () => void }) {
   const [name, setName] = useState(initial?.displayName ?? "");
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
   const save = async () => {
     if (!name.trim()) { onNext(); return; }
     setBusy(true);
-    await apiPost("/runner/control/operator-profile", { displayName: name.trim() }).catch(() => undefined);
-    window.dispatchEvent(new CustomEvent("operator-profile-saved"));
-    setBusy(false);
-    onNext();
+    setError("");
+    try {
+      await persistSetupProfile(
+        () =>
+          apiPost("/runner/control/operator-profile", { displayName: name.trim() }).then(
+            () => undefined
+          ),
+        () => {
+          window.dispatchEvent(new CustomEvent("operator-profile-saved"));
+          onNext();
+        }
+      );
+    } catch {
+      setError(`Your name was not saved. Check that ${APP_NAME} is running, then try again.`);
+    } finally {
+      setBusy(false);
+    }
   };
   return <Card icon={<UserRound />} eyebrow="About you" title={`What should ${APP_NAME} call you?`} body="This name stays in your app and makes the welcome screen feel like yours.">
     <label className="mt-5 block text-[13px] text-ink-2">Your first name<input value={name} onChange={(event) => setName(event.target.value)} autoFocus className="mt-2 block w-full rounded-[8px] border border-hairline bg-paper px-3 py-[10px] text-[14px] text-ink focus:border-hairline-strong focus:outline-none" placeholder="For example, Maya" /></label>
+    {error ? <Notice>{error}</Notice> : null}
     <Actions><Back onClick={onBack} /><Primary disabled={busy} onClick={() => void save()}>{busy ? "Saving..." : name.trim() ? "Save and continue" : "Skip for now"}</Primary></Actions>
   </Card>;
 }

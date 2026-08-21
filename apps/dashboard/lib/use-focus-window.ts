@@ -8,7 +8,7 @@
 // fields we send, so this never clobbers the voice profile), then broadcast a
 // "focus-window-changed" event so the other mounted surfaces refetch.
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { apiGet, apiPost } from "@/lib/api";
 import { useCacheSeed } from "@/lib/use-cache-seed";
 import type {
@@ -105,6 +105,7 @@ export async function sendAcknowledgement(threadId: string, text: string): Promi
 
 export interface UseFocusWindow {
   profile: OperatorProfile | null;
+  profileLoadState: "loading" | "ready" | "error";
   focusWindow: FocusWindowState;
   templates: AckTemplates;
   settings: FocusSettings;
@@ -150,12 +151,25 @@ export function useFocusWindow(): UseFocusWindow {
   // hydration render and mismatch the server HTML.
   const profileSeed = useCacheSeed<OperatorProfile>(PROFILE_PATH);
   const [profileState, setProfile] = useState<OperatorProfile | null>(null);
+  const [profileLoadState, setProfileLoadState] = useState<"loading" | "ready" | "error">(
+    "loading"
+  );
+  const loadRequestRef = useRef(0);
   const profile = profileState ?? profileSeed ?? null;
 
   const load = useCallback(() => {
+    const requestId = ++loadRequestRef.current;
+    setProfileLoadState((current) => (current === "ready" ? current : "loading"));
     void apiGet<OperatorProfile>(PROFILE_PATH, { ttlMs: 2000 })
-      .then((data) => setProfile(data ?? null))
-      .catch(() => undefined);
+      .then((data) => {
+        if (requestId !== loadRequestRef.current) return;
+        if (!data) throw new Error("Operator profile was empty");
+        setProfile(data);
+        setProfileLoadState("ready");
+      })
+      .catch(() => {
+        if (requestId === loadRequestRef.current) setProfileLoadState("error");
+      });
   }, []);
 
   useEffect(() => {
@@ -333,6 +347,7 @@ export function useFocusWindow(): UseFocusWindow {
 
   return {
     profile,
+    profileLoadState,
     focusWindow,
     templates,
     settings,

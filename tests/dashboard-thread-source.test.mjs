@@ -4,7 +4,13 @@ import assert from "node:assert/strict";
 // The dashboard ships ESM TypeScript. This test must be invoked with
 // `node --import tsx --test ...` so the tsx hook resolves the .ts import
 // below (matches the existing dashboard-action-items.test.mjs pattern).
-const { recordThreadSource, readThreadSource, __test } = await import(
+const {
+  canNavigateBackToSameOrigin,
+  readPreviousNavigationEntryUrl,
+  recordThreadSource,
+  readThreadSource,
+  __test
+} = await import(
   "../apps/dashboard/lib/thread-source.ts"
 );
 
@@ -103,4 +109,48 @@ test("readThreadSource: swallows getItem throws", () => {
     setItem: () => {}
   };
   assert.equal(readThreadSource(storage), "/today");
+});
+
+test("thread back uses browser history only when the referrer is same-origin", () => {
+  assert.equal(canNavigateBackToSameOrigin(2, "https://tovi.local/inbox", "https://tovi.local"), true);
+  assert.equal(canNavigateBackToSameOrigin(1, "https://tovi.local/inbox", "https://tovi.local"), false);
+  assert.equal(canNavigateBackToSameOrigin(2, "https://external.example/link", "https://tovi.local"), false);
+  assert.equal(canNavigateBackToSameOrigin(2, "not a url", "https://tovi.local"), false);
+});
+
+test("thread back recognizes same-origin SPA history when document.referrer is stale", () => {
+  assert.equal(
+    canNavigateBackToSameOrigin(
+      4,
+      "https://external.example/landing",
+      "https://tovi.local",
+      "https://tovi.local/thread/A"
+    ),
+    true
+  );
+  assert.equal(
+    canNavigateBackToSameOrigin(
+      4,
+      "https://external.example/landing",
+      "https://tovi.local",
+      "https://external.example/previous"
+    ),
+    false
+  );
+});
+
+test("previous navigation entry detection feature-degrades for WebKit", () => {
+  assert.equal(readPreviousNavigationEntryUrl(undefined), undefined);
+  assert.equal(readPreviousNavigationEntryUrl({}), undefined);
+  assert.equal(
+    readPreviousNavigationEntryUrl({
+      currentEntry: { index: 3 },
+      entries: () => [
+        { index: 1, url: "https://tovi.local/inbox" },
+        { index: 2, url: "https://tovi.local/thread/A" },
+        { index: 3, url: "https://tovi.local/thread/B" }
+      ]
+    }),
+    "https://tovi.local/thread/A"
+  );
 });

@@ -342,8 +342,8 @@ export default function InboxPage() {
     []
   );
 
-  // Live updates: the runner streams THREAD_UPDATED / MESSAGE_SENT /
-  // MESSAGE_SEND_FAILED / SCAN_FINISHED to the browser as `runner-event`
+  // Live updates: the runner streams MESSAGES_PERSISTED / THREAD_UPDATED /
+  // MESSAGE_SENT / MESSAGE_SEND_FAILED / SCAN_FINISHED as `runner-event`
   // window events (the reassess-on-send path included). Today already
   // refetches on these, so a scan finishing or a send from the thread page /
   // another tab reflected near-instantly there while the Inbox stayed stale
@@ -780,7 +780,7 @@ export default function InboxPage() {
               type="button"
               onClick={() => setQuery("")}
               aria-label="Clear search"
-              className="shrink-0 p-[2px] text-ink-3 transition-colors duration-calm hover:text-ink"
+              className="-my-2 -mr-2 grid h-11 w-11 shrink-0 place-items-center rounded-full text-ink-3 transition-colors duration-calm hover:bg-paper-2 hover:text-ink sm:my-0 sm:mr-0 sm:h-auto sm:w-auto sm:p-[2px]"
             >
               <XIcon />
             </button>
@@ -791,7 +791,7 @@ export default function InboxPage() {
             above a horizontally-scrollable tab strip so the bar stays two
             calm rows (horizontal only, never a second vertical scroller). */}
         <div className="flex flex-col-reverse gap-1 border-b border-hairline sm:flex-row sm:flex-wrap sm:items-end sm:gap-[14px]">
-          <div className="flex min-w-0 flex-1 gap-[1px] overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden sm:flex-wrap sm:overflow-x-visible">
+          <div role="tablist" aria-label="Inbox status" className="flex min-w-0 flex-1 gap-[1px] overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden sm:flex-wrap sm:overflow-x-visible">
             {TABS.map((entry) => {
               const active = tab === entry.key;
               const count = counts[entry.key];
@@ -800,9 +800,11 @@ export default function InboxPage() {
                 <button
                   key={entry.key}
                   type="button"
+                  role="tab"
+                  aria-selected={active}
                   onClick={() => setTab(entry.key)}
                   className={cn(
-                    "relative -mb-px shrink-0 whitespace-nowrap border-b-2 border-transparent px-[14px] py-[10px] text-[13px] transition-colors duration-calm",
+                    "relative -mb-px min-h-[44px] shrink-0 whitespace-nowrap border-b-2 border-transparent px-[14px] py-[10px] text-[13px] transition-colors duration-calm sm:min-h-0",
                     active
                       ? "border-accent font-medium text-ink"
                       : zero
@@ -1362,15 +1364,10 @@ const InboxRowItem = memo(function InboxRowItem({ row, selectMode, selected, onT
   };
 
   return (
-    <Link
-      href={`/thread/${row.id}`}
-      onClick={onClick}
-      onMouseEnter={() => prefetchThreadData(row.id)}
-      onMouseLeave={() => cancelThreadPrefetch(row.id)}
-      onFocus={() => prefetchThreadData(row.id)}
-      onBlur={() => cancelThreadPrefetch(row.id)}
+    <div
+      data-selected={selected ? "true" : "false"}
       className={cn(
-        "group grid grid-cols-[28px_30px_1fr_auto] items-center gap-[14px] border-b border-hairline px-1 py-[13px] transition-colors duration-calm hover:bg-paper-2",
+        "group grid grid-cols-[44px_minmax(0,1fr)_auto] items-center gap-[10px] border-b border-hairline px-1 py-[13px] transition-colors duration-calm hover:bg-paper-2 sm:grid-cols-[28px_minmax(0,1fr)_auto] sm:gap-[14px]",
         selected ? "bg-paper-2" : ""
       )}
     >
@@ -1378,7 +1375,7 @@ const InboxRowItem = memo(function InboxRowItem({ row, selectMode, selected, onT
           row hover (and stays put in select mode) so multi-select is
           discoverable without a ⌘-click. The button stops propagation so a
           click selects rather than opening the thread. */}
-      <span className="relative h-7 w-7">
+      <span className="relative grid h-11 w-11 place-items-center sm:h-7 sm:w-7">
         <PersonAvatar
           name={row.personName}
           avatarUrl={row.personAvatarUrl}
@@ -1411,10 +1408,19 @@ const InboxRowItem = memo(function InboxRowItem({ row, selectMode, selected, onT
           ) : null}
         </button>
       </span>
-      <span className="rounded-[5px] border border-hairline px-1 py-[3px] text-center font-mono text-[9.5px] uppercase tracking-[0.02em] text-ink-3 self-start mt-[2px]">
-        {PLATFORM_GLYPH[row.platform] ?? PLATFORM_LABEL[row.platform].slice(0, 2)}
-      </span>
-      <span className="flex min-w-0 flex-col gap-[2px]">
+      <Link
+        href={`/thread/${row.id}`}
+        onClick={onClick}
+        onMouseEnter={() => prefetchThreadData(row.id)}
+        onMouseLeave={() => cancelThreadPrefetch(row.id)}
+        onFocus={() => prefetchThreadData(row.id)}
+        onBlur={() => cancelThreadPrefetch(row.id)}
+        className="grid min-w-0 grid-cols-[30px_minmax(0,1fr)] items-start gap-[14px] rounded-[8px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+      >
+        <span className="mt-[2px] rounded-[5px] border border-hairline px-1 py-[3px] text-center font-mono text-[9.5px] uppercase tracking-[0.02em] text-ink-3">
+          {PLATFORM_GLYPH[row.platform] ?? PLATFORM_LABEL[row.platform].slice(0, 2)}
+        </span>
+        <span className="flex min-w-0 flex-col gap-[2px]">
         {/* Phone: preview drops to its own line under the name so it gets
             the full row width instead of the 2 characters left beside the
             meta column. From sm up the two sit inline as before. */}
@@ -1446,7 +1452,8 @@ const InboxRowItem = memo(function InboxRowItem({ row, selectMode, selected, onT
             ))}
           </span>
         ) : null}
-      </span>
+        </span>
+      </Link>
       <span className="flex items-center gap-[10px] font-mono text-[11px] text-ink-3">
         {/* Favourite star (R-0066 / #483). Filled + always visible once
             favourited (doubles as the at-a-glance marker); a quiet outline
@@ -1464,7 +1471,7 @@ const InboxRowItem = memo(function InboxRowItem({ row, selectMode, selected, onT
             onToggleFavourite(row.personId, !fav);
           }}
           className={cn(
-            "-my-1 shrink-0 rounded p-[3px] transition-[color,opacity] duration-calm",
+            "-my-1 grid h-11 w-11 shrink-0 place-items-center rounded transition-[color,opacity] duration-calm sm:h-auto sm:w-auto sm:p-[3px]",
             fav
               ? "text-accent opacity-100"
               : "text-ink-4 opacity-0 hover:text-accent group-hover:opacity-100 focus-visible:opacity-100"
@@ -1475,6 +1482,6 @@ const InboxRowItem = memo(function InboxRowItem({ row, selectMode, selected, onT
         <span aria-hidden className={`h-[6px] w-[6px] rounded-full ${dot}`} />
         <span className={right.tone}>{right.text}</span>
       </span>
-    </Link>
+    </div>
   );
 });

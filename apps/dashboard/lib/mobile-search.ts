@@ -58,6 +58,7 @@ export const STATIC_SEARCH_COMMANDS: ReadonlyArray<{
 }> = [
   { id: "today", label: "Go to Today", group: "pages", kindLabel: "Page", href: "/today" },
   { id: "inbox", label: "Go to Inbox", group: "pages", kindLabel: "Page", href: "/inbox" },
+  { id: "reconnect", label: "Go to Reconnect", group: "pages", kindLabel: "Page", href: "/reconnect" },
   { id: "archived", label: "Go to Archived", group: "pages", kindLabel: "Page", href: "/archived" },
   { id: "settings", label: "Go to Settings", group: "pages", kindLabel: "Page", href: "/settings" },
   { id: "scan-now", label: "Run scan now", group: "actions", kindLabel: "Action", actionId: "scan-now" },

@@ -7,11 +7,9 @@ export const runtime = "nodejs";
 
 export async function GET() {
   const token = process.env.RIOS_PHONE_ACCESS_TOKEN || "";
-  const fallbackUrl = buildPhoneAccessUrl(
-    networkInterfaces(),
-    process.env.RIOS_PHONE_ACCESS_PORT || "",
-    token
-  );
+  const fallbackUrl = process.env.RIOS_ALLOW_INSECURE_PHONE_ACCESS === "1"
+    ? buildPhoneAccessUrl(networkInterfaces(), process.env.RIOS_PHONE_ACCESS_PORT || "", token)
+    : null;
   const secureUrl = securePhoneAccessUrl(
     process.env.RIOS_PHONE_ACCESS_SECURE_URL || "",
     token
@@ -19,7 +17,7 @@ export async function GET() {
   const url = secureUrl || fallbackUrl;
   if (!url) {
     return Response.json(
-      { available: false },
+      { available: false, reason: "secure-phone-access-required" },
       { headers: { "Cache-Control": "no-store" } }
     );
   }

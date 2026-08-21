@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useState } from "react";
 import { X } from "lucide-react";
 import { apiPost } from "@/lib/api";
 import { PLATFORM_LABEL } from "@/lib/risk";
@@ -59,6 +59,7 @@ function CommandPalettePanel({
 }) {
   const [query, setQuery] = useState("");
   const [activeIndex, setActiveIndex] = useState(0);
+  const listboxId = useId();
   const searchInbox = useSearchInbox();
   const threads = searchInbox.rows;
 
@@ -66,6 +67,7 @@ function CommandPalettePanel({
     const pages: PaletteItem[] = [
       { id: "today", label: "Go to Today", kind: "Page", href: "/today" },
       { id: "inbox", label: "Go to Inbox", kind: "Page", href: "/inbox" },
+      { id: "reconnect", label: "Go to Reconnect", kind: "Page", href: "/reconnect" },
       { id: "archived", label: "Go to Archived", kind: "Page", href: "/archived" },
       { id: "settings", label: "Go to Settings", kind: "Page", href: "/settings" },
       {
@@ -166,6 +168,12 @@ function CommandPalettePanel({
         <div className="flex flex-shrink-0 items-center border-b border-hairline">
           <input
             autoFocus
+            role="combobox"
+            aria-label="Search conversations, pages, or actions"
+            aria-autocomplete="list"
+            aria-expanded="true"
+            aria-controls={listboxId}
+            aria-activedescendant={items[activeIndex] ? `${listboxId}-${items[activeIndex].id}` : undefined}
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             onKeyDown={onKeyDown}
@@ -181,11 +189,20 @@ function CommandPalettePanel({
             <X className="h-5 w-5" strokeWidth={1.7} />
           </button>
         </div>
-        <ul className="app-main-scroll m-0 min-h-0 flex-1 list-none overflow-y-auto p-[6px]">
+        <ul
+          id={listboxId}
+          role="listbox"
+          aria-label="Search results"
+          className="app-main-scroll m-0 min-h-0 flex-1 list-none overflow-y-auto p-[6px]"
+        >
           {items.map((item, index) => (
             <li
               key={item.id}
+              id={`${listboxId}-${item.id}`}
+              role="option"
+              aria-selected={index === activeIndex}
               onMouseEnter={() => setActiveIndex(index)}
+              onMouseDown={(event) => event.preventDefault()}
               onClick={() => activateItem(item)}
               className={`flex min-h-[48px] cursor-pointer items-center gap-[10px] rounded-[10px] px-[14px] py-[10px] text-[14px] ${
                 index === activeIndex ? "bg-paper-2 text-ink" : "text-ink-2"

@@ -25,23 +25,8 @@ interface ArchivedResponse {
   rows: InboxRow[];
 }
 
-type Outcome = "handled" | "snoozed" | "ghosted";
-type OutcomeTab = "all" | Outcome;
 type PlatformFilter = "all" | "LINKEDIN" | "IMESSAGE" | "WHATSAPP" | "GOOGLE_MESSAGES";
 type ArchSort = "recent" | "oldest" | "name";
-
-const OUTCOME_TABS: { key: OutcomeTab; label: string }[] = [
-  { key: "all", label: "All" },
-  { key: "handled", label: "Handled" },
-  { key: "snoozed", label: "Snoozed" },
-  { key: "ghosted", label: "Ghosted" }
-];
-
-const OUTCOME_GROUPS: { key: Outcome; label: string }[] = [
-  { key: "handled", label: "Handled" },
-  { key: "snoozed", label: "Snoozed" },
-  { key: "ghosted", label: "Ghosted" }
-];
 
 // WhatsApp is opt-in: the archived view only surfaces its chip when there
 // are actually archived WhatsApp threads to filter to (see platformOptions
@@ -59,50 +44,6 @@ const ARCH_SORTS: { key: ArchSort; label: string }[] = [
   { key: "oldest", label: "oldest first" },
   { key: "name", label: "name A-Z" }
 ];
-
-// A future "until <when>" label for a snoozed thread: a weekday inside the
-// week ("until Monday"), a short date beyond it ("until 12 Jun").
-function untilLabel(ts: number): string {
-  const days = (ts - Date.now()) / 86_400_000;
-  const date = new Date(ts);
-  if (days <= 7) return date.toLocaleDateString([], { weekday: "long" });
-  return date.toLocaleDateString([], { day: "numeric", month: "short" });
-}
-
-// The outcome is the organising principle of the archive. Inferred from row
-// signals — a live snooze → snoozed; the operator spoke last → handled; an
-// old inbound-last thread → ghosted — each with a short human note.
-function archiveOutcome(row: InboxRow): { key: Outcome; note: string | null } {
-  const snoozeUntil = row.snoozedUntil ?? row.scheduledSendAt ?? null;
-  if (snoozeUntil) {
-    const ts = Date.parse(snoozeUntil);
-    if (Number.isFinite(ts) && ts > Date.now()) {
-      return { key: "snoozed", note: `until ${untilLabel(ts)}` };
-    }
-    return { key: "snoozed", note: null };
-  }
-  if (row.lastMessageDirection === "OUT") {
-    return { key: "handled", note: "you replied" };
-  }
-  if (row.archivedAt && row.lastInboundAt) {
-    const archivedTs = Date.parse(row.archivedAt);
-    const inboundTs = Date.parse(row.lastInboundAt);
-    if (
-      Number.isFinite(archivedTs) &&
-      Number.isFinite(inboundTs) &&
-      archivedTs - inboundTs > 30 * 86_400_000
-    ) {
-      return { key: "ghosted", note: "no reply" };
-    }
-  }
-  return { key: "handled", note: null };
-}
-
-function outcomeDot(outcome: Outcome): string {
-  if (outcome === "handled") return "bg-risk-fresh"; // green
-  if (outcome === "snoozed") return "bg-risk-waiting"; // amber
-  return "bg-ink-4"; // ghosted → muted grey
-}
 
 function monthLabel(timestamp: string): string {
   const ts = Date.parse(timestamp);
@@ -122,11 +63,9 @@ function applyArchSort(items: InboxRow[], sort: ArchSort): InboxRow[] {
   return copy.sort((a, b) => archivedTs(b) - archivedTs(a)); // most recent
 }
 
-// Archived — the graveyard of closed threads, organised by OUTCOME
-// (handled / snoozed / ghosted) rather than time. Consolidated filter bar
-// (status tabs + Sort + a Platform-only Filters popover + Select), grouped
-// sections, and a calm foot note. Threads land here from Inbox; nothing is
-// deleted automatically.
+// Archived contains only threads the operator explicitly archived. It avoids
+// inventing an outcome from message direction or age because those signals do
+// not record why the thread was archived.
 export default function ArchivedPage() {
   // Seed from the shared client cache so returning to Archived paints the
   // last-known list instantly (refresh below revalidates immediately). Read
@@ -137,7 +76,6 @@ export default function ArchivedPage() {
   const rows = rowsState ?? archivedSeed?.rows ?? null;
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
-  const [tab, setTab] = useState<OutcomeTab>("all");
   const [platformFilter, setPlatformFilter] = useState<PlatformFilter>("all");
   const [sortMode, setSortMode] = useState<ArchSort>("recent");
 
@@ -183,26 +121,12 @@ export default function ArchivedPage() {
     void refresh();
   }, [refresh]);
 
-  // Per-tab outcome counts, scoped to the active platform filter so the
-  // badges track the current lens (search is transient and left out).
-  const counts = useMemo(() => {
-    const base = { all: 0, handled: 0, snoozed: 0, ghosted: 0 };
-    if (!rows) return base;
-    for (const row of rows) {
-      if (platformFilter !== "all" && row.platform !== platformFilter) continue;
-      base.all += 1;
-      base[archiveOutcome(row).key] += 1;
-    }
-    return base;
-  }, [rows, platformFilter]);
-
   const visible = useMemo(() => {
     if (!rows) return [];
     const q = query.trim().toLowerCase();
     return rows.filter((row) => {
       if (removedIds.has(row.id)) return false;
       if (platformFilter !== "all" && row.platform !== platformFilter) return false;
-      if (tab !== "all" && archiveOutcome(row).key !== tab) return false;
       if (!q) return true;
       return (
         row.personName.toLowerCase().includes(q) ||
@@ -210,24 +134,11 @@ export default function ArchivedPage() {
         PLATFORM_LABEL[row.platform].includes(q)
       );
     });
-  }, [rows, query, tab, platformFilter, removedIds]);
+  }, [rows, query, platformFilter, removedIds]);
 
-  // "All" mixes outcomes, so it's bucketed into outcome sections; a single
-  // outcome tab renders one flat list.
-  const grouped = tab === "all";
   const sections = useMemo(() => {
-    if (!grouped) {
-      return [{ key: tab, label: null as string | null, items: applyArchSort(visible, sortMode) }];
-    }
-    return OUTCOME_GROUPS.map((group) => ({
-      key: group.key,
-      label: group.label,
-      items: applyArchSort(
-        visible.filter((row) => archiveOutcome(row).key === group.key),
-        sortMode
-      )
-    })).filter((section) => section.items.length > 0);
-  }, [visible, grouped, tab, sortMode]);
+    return [{ key: "archived", label: null as string | null, items: applyArchSort(visible, sortMode) }];
+  }, [visible, sortMode]);
 
   const orderedIds = useMemo(
     () => sections.flatMap((section) => section.items.map((row) => row.id)),
@@ -327,7 +238,9 @@ export default function ArchivedPage() {
     void refresh();
   }, [selectedIds, clearSelection, refresh]);
 
-  const isEmpty = !rows || rows.length === 0;
+  const loading = rows === null;
+  const isEmpty = rows?.length === 0;
+  const hasRows = (rows?.length ?? 0) > 0;
 
   return (
     // Mobile (#897): same contained list shell as Inbox. Compact fixed
@@ -348,7 +261,7 @@ export default function ArchivedPage() {
         <header className="mb-3 flex items-start justify-between gap-4 sm:mb-[20px] sm:gap-6">
           <div className="min-w-0">
             <p className="mb-0.5 font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3 sm:mb-1">
-              Done &amp; dusted
+              Explicitly archived
             </p>
             <h1 className="m-0 font-display text-[20px] font-semibold leading-[1.1] tracking-[-0.02em] sm:text-[40px] sm:leading-[1.04] sm:tracking-[-0.035em]">
               Archived
@@ -367,7 +280,7 @@ export default function ArchivedPage() {
           ) : null}
         </header>
 
-        {!isEmpty ? (
+        {hasRows ? (
           <label
             className={cn(
               "mb-3 flex items-center gap-[10px] rounded-[12px] border bg-transparent px-[14px] py-[9px] transition-colors duration-calm sm:mb-[16px] sm:py-[10px]",
@@ -401,41 +314,8 @@ export default function ArchivedPage() {
           </label>
         ) : null}
 
-        {!isEmpty ? (
-          <div className="flex flex-col-reverse gap-1 border-b border-hairline sm:flex-row sm:flex-wrap sm:items-end sm:gap-[14px]">
-            <div className="flex min-w-0 flex-1 gap-[1px] overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden sm:flex-wrap sm:overflow-x-visible">
-              {OUTCOME_TABS.map((entry) => {
-                const active = tab === entry.key;
-                const count = counts[entry.key];
-                const zero = count === 0;
-                return (
-                  <button
-                    key={entry.key}
-                    type="button"
-                    onClick={() => setTab(entry.key)}
-                    className={cn(
-                      "relative -mb-px shrink-0 whitespace-nowrap border-b-2 border-transparent px-[14px] py-[10px] text-[13px] transition-colors duration-calm",
-                      active
-                        ? "border-accent font-medium text-ink"
-                        : zero
-                          ? "text-ink-4 hover:text-ink-2"
-                          : "text-ink-3 hover:text-ink"
-                    )}
-                  >
-                    {entry.label}
-                    <span
-                      className={cn(
-                        "ml-[5px] font-mono text-[11px]",
-                        active ? "text-accent-ink" : "text-ink-3"
-                      )}
-                    >
-                      {count}
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
-            <div className="flex items-center justify-end gap-[4px] pb-[6px]">
+        {hasRows ? (
+          <div className="flex items-center justify-end gap-[4px] border-b border-hairline pb-[6px]">
               <SortMenu value={sortMode} options={ARCH_SORTS} onChange={setSortMode} />
               <PlatformPopover
                 platformOptions={platformOptions}
@@ -453,7 +333,6 @@ export default function ArchivedPage() {
                   <span>Select</span>
                 </button>
               ) : null}
-            </div>
           </div>
         ) : null}
       </div>
@@ -469,7 +348,7 @@ export default function ArchivedPage() {
           </p>
         ) : null}
 
-        {!isEmpty && platformFilter !== "all" ? (
+        {hasRows && platformFilter !== "all" ? (
           <div className="flex flex-wrap items-center gap-2 pt-[14px]">
             <span className="inline-flex items-center gap-[6px] rounded-pill border border-hairline bg-paper px-[10px] py-[4px] font-mono text-[11.5px] text-ink-2">
               <span className="opacity-60">Platform</span>
@@ -486,8 +365,18 @@ export default function ArchivedPage() {
           </div>
         ) : null}
 
-        {isEmpty ? (
-          <CaughtUp title="No archived threads yet." body="Threads you mark as handled land here." />
+        {loading && !error ? (
+          <p className="py-8 text-center font-mono text-[12px] text-ink-3" role="status">
+            Loading archived threads…
+          </p>
+        ) : loading && error ? (
+          <div className="flex justify-center py-6">
+            <button type="button" className={TOOL_CLASS} onClick={() => void refresh()}>
+              Try again
+            </button>
+          </div>
+        ) : isEmpty ? (
+          <CaughtUp title="No archived threads yet." body="Threads you archive land here." />
         ) : visible.length === 0 ? (
           <CaughtUp
             title="Nothing matches that filter."
@@ -545,11 +434,10 @@ export default function ArchivedPage() {
           </div>
         ) : null}
 
-        {!isEmpty ? (
+        {hasRows ? (
           <div className="mt-9 flex flex-col items-center gap-4 pt-5 text-center">
             <p className="m-0 font-mono text-[11.5px] text-ink-3">
-              Threads move here once they are handled, snoozed out, or go cold. Nothing is deleted
-              automatically.
+              Only threads you archive appear here. Nothing is deleted automatically.
             </p>
           </div>
         ) : null}
@@ -619,7 +507,6 @@ interface ArchivedRowItemProps {
 }
 
 function ArchivedRowItem({ row, selectMode, selected, onToggle }: ArchivedRowItemProps) {
-  const outcome = archiveOutcome(row);
   const when = formatRelative(row.archivedAt ?? row.lastMessageAt);
 
   const onClick = (event: React.MouseEvent) => {
@@ -630,29 +517,28 @@ function ArchivedRowItem({ row, selectMode, selected, onToggle }: ArchivedRowIte
   };
 
   return (
-    <Link
-      href={`/thread/${row.id}`}
-      onClick={onClick}
+    <div
       className={cn(
-        "group grid grid-cols-[28px_1fr] items-center gap-[14px] border-b border-hairline px-1 py-[13px] transition-colors duration-calm hover:bg-paper-2 sm:grid-cols-[28px_1fr_auto]",
+        "group grid min-h-[56px] grid-cols-[44px_1fr] items-center gap-[10px] border-b border-hairline px-1 py-[6px] transition-colors duration-calm hover:bg-paper-2",
         selected ? "bg-paper-2" : ""
       )}
     >
-      {/* Avatar doubles as the select target (a check fades in on hover / in
-          select mode), matching the Inbox row. */}
-      <span className="relative h-7 w-7">
-        <PersonAvatar name={row.personName} avatarUrl={row.personAvatarUrl} size={28} className="text-[11px]" />
-        <button
-          type="button"
-          aria-label={selected ? `Deselect ${row.personName}` : `Select ${row.personName}`}
-          aria-pressed={selected}
-          onClick={(event) => {
-            event.preventDefault();
-            event.stopPropagation();
-            onToggle(row.id, { shiftKey: event.shiftKey });
-          }}
+      <button
+        type="button"
+        aria-label={selected ? `Deselect ${row.personName}` : `Select ${row.personName}`}
+        aria-pressed={selected}
+        onClick={(event) => onToggle(row.id, { shiftKey: event.shiftKey })}
+        className="relative grid h-11 w-11 place-items-center rounded-full"
+      >
+        <PersonAvatar
+          name={row.personName}
+          avatarUrl={row.personAvatarUrl}
+          size={28}
+          className="text-[11px]"
+        />
+        <span
           className={cn(
-            "absolute inset-0 grid place-items-center rounded-full border transition-opacity duration-calm",
+            "absolute grid h-7 w-7 place-items-center rounded-full border transition-opacity duration-calm",
             selected
               ? "border-accent bg-accent text-white"
               : "border-hairline-strong bg-paper text-ink-3 hover:border-ink-3 hover:text-ink-2",
@@ -664,30 +550,25 @@ function ArchivedRowItem({ row, selectMode, selected, onToggle }: ArchivedRowIte
               <path d="M3 8.5l3 3 7-7" strokeLinecap="round" strokeLinejoin="round" />
             </svg>
           ) : null}
-        </button>
-      </span>
-
-      <span className="flex min-w-0 flex-col gap-[2px] sm:flex-row sm:items-center sm:gap-[12px]">
-        <span className="truncate text-[14px] font-medium tracking-[-0.005em] text-ink">
-          {row.personName}
         </span>
-        <span className="flex min-w-0 flex-wrap items-center gap-x-[10px] gap-y-[2px] font-mono text-[11.5px] text-ink-3">
-          <span className="inline-flex shrink-0 items-center gap-[7px]">
-            <span aria-hidden className={`h-[6px] w-[6px] rounded-full ${outcomeDot(outcome.key)}`} />
-            {outcome.key}
+      </button>
+
+      <Link
+        href={`/thread/${row.id}`}
+        onClick={onClick}
+        className="grid min-w-0 grid-cols-1 items-center gap-[2px] rounded-[6px] py-[7px] outline-none focus-visible:ring-2 focus-visible:ring-accent sm:grid-cols-[minmax(0,1fr)_auto] sm:gap-[12px]"
+      >
+        <span className="min-w-0">
+          <span className="block truncate text-[14px] font-medium tracking-[-0.005em] text-ink">
+            {row.personName}
           </span>
-          {outcome.note ? (
-            <span className="shrink-0 text-ink-4">{outcome.note}</span>
-          ) : null}
-          <span className="sm:hidden">{when}</span>
-          <span className="sm:hidden text-ink-4">{PLATFORM_LABEL[row.platform]}</span>
+          <span className="block truncate text-[12px] text-ink-3">{row.preview}</span>
         </span>
-      </span>
-
-      <span className="hidden items-center gap-[12px] font-mono text-[11px] text-ink-3 sm:flex">
-        <span>{when}</span>
-        <span className="text-ink-3">{PLATFORM_LABEL[row.platform]}</span>
-      </span>
-    </Link>
+        <span className="flex items-center gap-[10px] font-mono text-[11px] text-ink-3">
+          <span>Archived {when}</span>
+          <span>{PLATFORM_LABEL[row.platform]}</span>
+        </span>
+      </Link>
+    </div>
   );
 }

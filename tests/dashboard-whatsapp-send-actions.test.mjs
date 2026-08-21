@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 const ROOT = join(fileURLToPath(new URL("..", import.meta.url)));
 const THREAD_PAGE = readFileSync(join(ROOT, "apps/dashboard/app/thread/[id]/page.tsx"), "utf8");
 const RUNNER_INDEX = readFileSync(join(ROOT, "apps/runner/src/index.ts"), "utf8");
+const RUNNER_SEND_SERVICE = readFileSync(join(ROOT, "apps/runner/src/services/send.ts"), "utf8");
 
 test("WhatsApp composer exposes rich text, poll and media send controls", () => {
   assert.match(THREAD_PAGE, /thread\.platform === "WHATSAPP"/);
@@ -25,6 +26,9 @@ test("WhatsApp composer exposes rich text, poll and media send controls", () => 
 test("runner exposes a dedicated WhatsApp poll send route", () => {
   assert.match(RUNNER_INDEX, /\/control\/thread\/:threadId\/send-poll/);
   assert.match(RUNNER_INDEX, /adapter\.sendPoll/);
-  assert.match(RUNNER_INDEX, /rawJson = receipt\.raw \? JSON\.stringify\(receipt\.raw\) : null/);
-  assert.match(RUNNER_INDEX, /attachmentsJson/);
+  assert.match(RUNNER_INDEX, /sendService\.enqueuePoll/);
+  assert.match(RUNNER_INDEX, /sendQueue\.describeAndKick\(result\)/);
+  assert.match(RUNNER_SEND_SERVICE, /requestKind: "POLL"/);
+  assert.match(RUNNER_SEND_SERVICE, /requestPayloadJson: JSON\.stringify/);
+  assert.match(RUNNER_SEND_SERVICE, /status: "SENT",[\s\S]*receiptJson: JSON\.stringify\(received\)/);
 });

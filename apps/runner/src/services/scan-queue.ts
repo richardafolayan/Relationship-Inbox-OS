@@ -17,7 +17,13 @@ import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
 import { prisma } from "../db";
 import { effectiveLastOutboundAt } from "./reaction-effects.js";
-import type { AiService, EventBus, ScanJobOutcome, SettingsStore } from "../types/runtime";
+import type {
+  AiService,
+  EventBus,
+  RunnerEventInput,
+  ScanJobOutcome,
+  SettingsStore
+} from "../types/runtime";
 import { AdapterFailure, cleanMessageText, cleanText, humanDelay, stripUnpairedSurrogates } from "../platforms/utils";
 import { shouldRefreshGroupDisplayName } from "../platforms/imessage-group-name";
 import type { LinkedInStreamPreOpenDecision } from "../platforms/linkedin-adapter";
@@ -151,6 +157,35 @@ export interface ScanTrigger {
   reason: string;
 }
 
+export interface ThreadFreshnessProjection {
+  threadUrl: string | null;
+  unreadCount: number;
+  isGroup: boolean;
+  groupName: string | null;
+  lastMessagePreview: string | null;
+  lastMessageDirection: NormalizedMessage["direction"] | null;
+  lastMessageText: string | null;
+  lastMessageAt: Date | null;
+  lastInboundAt: Date | null;
+  lastOutboundAt: Date | null;
+  snoozedUntil?: null;
+  handledAt?: null;
+  riskLevel: "GREEN" | "AMBER" | "RED";
+  slaDueAt: Date | null;
+  riskReason: string;
+  needsReply: boolean;
+  firstFullBackfillAt: Date | undefined;
+}
+
+export async function persistThreadFreshnessBeforeMessageEvent(input: {
+  persistProjection: () => Promise<unknown>;
+  eventBus: Pick<EventBus, "emit">;
+  event: Extract<RunnerEventInput, { type: "MESSAGES_PERSISTED" }>;
+}): Promise<void> {
+  await input.persistProjection();
+  input.eventBus.emit(input.event);
+}
+
 interface TraceAwareAdapter {
   setRunLogger?: (logger: RunLogger | null) => void;
 }
@@ -247,6 +282,19 @@ const allPlatforms: PlatformName[] = [
   "WHATSAPP",
   "GOOGLE_MESSAGES"
 ];
+
+export function resolveScheduledScanPlatforms(
+  platforms: readonly PlatformName[],
+  enabledPlatforms: readonly PlatformName[],
+  adapters: Partial<Record<PlatformName, unknown>>
+): PlatformName[] {
+  const enabled = new Set(enabledPlatforms);
+  return platforms.filter((platform) => enabled.has(platform) && Boolean(adapters[platform]));
+}
+
+export function shouldDelayBetweenThreadScans(platform: PlatformName): boolean {
+  return platform === "LINKEDIN";
+}
 
 type EnqueueScanOptions = {
   respectCooldown?: boolean;
@@ -1244,8 +1292,12 @@ export function createScanQueue(deps: ScanQueueDeps) {
         // with active backoff (#403) are skipped this tick and picked
         // up on a later one. The queue serialises jobs so this never
         // produces parallel scans of different platforms.
-        const enabledPlatforms = allPlatforms.filter((platform) => Boolean(deps.adapters[platform]));
-        for (const platform of enabledPlatforms) {
+        const scheduledPlatforms = resolveScheduledScanPlatforms(
+          allPlatforms,
+          settings.enabledPlatforms,
+          deps.adapters
+        );
+        for (const platform of scheduledPlatforms) {
           if (deps.isPlatformScannable && !deps.isPlatformScannable(platform)) {
             continue;
           }
@@ -1269,7 +1321,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
           scheduleNext(1_000);
           return;
         }
-        const nextDueMs = enabledPlatforms.reduce((soonest, platform) => {
+        const nextDueMs = scheduledPlatforms.reduce((soonest, platform) => {
           const state = adaptiveBackoffByPlatform.get(platform);
           if (!state) return Math.min(soonest, intervalMs);
           const dueAt =
@@ -2593,7 +2645,9 @@ export function createScanQueue(deps: ScanQueueDeps) {
               break;
             }
 
-            await humanDelay();
+            if (shouldDelayBetweenThreadScans(platform)) {
+              await humanDelay();
+            }
           }
 
           if (aborted) {
@@ -3245,6 +3299,30 @@ export function createScanQueue(deps: ScanQueueDeps) {
     });
 
     const timestampFallback = candidateListTimestamp ?? new Date();
+    const preparedMessages = messages.map((message) => {
+      const safeTimestamp = normalizeMessageTimestamp(message.timestamp, timestampFallback);
+      const messageText = cleanMessageText(message.text);
+      const key =
+        message.platformMessageKey ??
+        stableHash(`${thread.id}|${safeTimestamp.toISOString()}|${message.direction}|${messageText}`);
+      return { message, safeTimestamp, messageText, key };
+    });
+    const scannedMessageKeys = Array.from(new Set(preparedMessages.map(({ key }) => key)));
+    const existingScannedMessageKeys = scannedMessageKeys.length
+      ? await prisma.message.findMany({
+          where: {
+            threadId: thread.id,
+            platformMessageKey: { in: scannedMessageKeys }
+          },
+          select: { platformMessageKey: true }
+        })
+      : [];
+    const existingScannedMessageKeySet = new Set(
+      existingScannedMessageKeys.map(({ platformMessageKey }) => platformMessageKey)
+    );
+    const candidateNewMessageKeys = scannedMessageKeys.filter(
+      (key) => !existingScannedMessageKeySet.has(key)
+    );
     const batchedMessageWrites: Array<ReturnType<typeof prisma.message.upsert>> = [];
     const flushBatchedMessageWrites = async (): Promise<void> => {
       if (!batchedMessageWrites.length) {
@@ -3259,12 +3337,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
     // service's fingerprint dedup keeps re-scans free.
     const audioBearingMessageKeys: string[] = [];
 
-    for (const message of messages) {
-      const safeTimestamp = normalizeMessageTimestamp(message.timestamp, timestampFallback);
-      const messageText = cleanMessageText(message.text);
-      const key =
-        message.platformMessageKey ??
-        stableHash(`${thread.id}|${safeTimestamp.toISOString()}|${message.direction}|${messageText}`);
+    for (const { message, safeTimestamp, messageText, key } of preparedMessages) {
 
       // Reconcile send-time persistence vs scan-time parse for OUT messages.
       // See decideOutboundDedup for why this is needed (different keys for the
@@ -3539,6 +3612,14 @@ export function createScanQueue(deps: ScanQueueDeps) {
       }
     }
 
+    const newlyPersistedMessageCount = candidateNewMessageKeys.length
+      ? await prisma.message.count({
+          where: {
+            threadId: thread.id,
+            platformMessageKey: { in: candidateNewMessageKeys }
+          }
+        })
+      : 0;
     const persistedAt = new Date().toISOString();
     const syncTiming = trigger
       ? {
@@ -3553,49 +3634,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
         durationMs: Date.parse(syncTiming.persistedAt) - Date.parse(syncTiming.sourceChangedAt),
         platform
       });
-      deps.eventBus.emit({
-        type: "MESSAGES_PERSISTED",
-        jobId,
-        threadId: thread.id,
-        platform,
-        syncTiming
-      });
     }
-
-    // Transcription enqueue. We resolve the persisted Message ids in a
-    // single query rather than per-message lookups, then hand each one to
-    // the optional hook. Fire-and-forget: scans never block on OpenAI
-    // latency, and the transcription service's audioFingerprint dedup
-    // means re-scans of the same audio are free.
-    if (audioBearingMessageKeys.length > 0 && deps.onAudioMessage) {
-      try {
-        const persistedAudioRows = await prisma.message.findMany({
-          where: {
-            threadId: thread.id,
-            platformMessageKey: { in: audioBearingMessageKeys }
-          },
-          select: { id: true }
-        });
-        for (const row of persistedAudioRows) {
-          try {
-            deps.onAudioMessage({ messageId: row.id });
-          } catch (error) {
-            console.warn(
-              `[scan-queue] onAudioMessage hook threw for message ${row.id}: ${
-                error instanceof Error ? error.message : String(error)
-              }`
-            );
-          }
-        }
-      } catch (error) {
-        console.warn(
-          `[scan-queue] failed to resolve audio message ids for thread ${thread.id}: ${
-            error instanceof Error ? error.message : String(error)
-          }`
-        );
-      }
-    }
-
     // System-event placeholders (e.g. LinkedIn "X turned on read receipts")
     // shouldn't drive needs-reply state or surface as the latest preview —
     // they aren't real messages from the other party. Exclude them from
@@ -3725,6 +3764,95 @@ export function createScanQueue(deps: ScanQueueDeps) {
       amberHours: settings.amberHours,
       redHours: settings.redHours
     });
+
+    const threadFreshnessProjection: ThreadFreshnessProjection = {
+      threadUrl: candidate.threadUrl ?? thread.threadUrl,
+      unreadCount: candidate.unreadCount ?? thread.unreadCount,
+      isGroup: candidate.isGroup ?? thread.isGroup,
+      groupName: candidate.groupName ?? thread.groupName,
+      lastMessagePreview: resolvedLastMessagePreview || null,
+      lastMessageDirection: lastMessage?.direction ?? thread.lastMessageDirection,
+      lastMessageText: lastMessage?.text ?? thread.lastMessageText,
+      lastMessageAt: resolvedLastMessageAt,
+      lastInboundAt: resolvedLastInboundAt,
+      lastOutboundAt: resolvedLastOutboundAt,
+      ...(thread.snoozedUntil &&
+      resolvedLastInboundAt &&
+      (!thread.lastInboundAt || resolvedLastInboundAt.getTime() > thread.lastInboundAt.getTime())
+        ? { snoozedUntil: null }
+        : {}),
+      ...(handledBoundary.clearHandledAt ? { handledAt: null } : {}),
+      riskLevel: resolvedNeedsReply ? risk.level : "GREEN",
+      slaDueAt: resolvedNeedsReply ? (risk.slaDueAt ?? null) : null,
+      riskReason:
+        thread.handledAt && !handledBoundary.clearHandledAt
+          ? "Marked done manually"
+          : hasPersistedMessages
+            ? risk.riskReason
+            : resolvedNeedsReply
+              ? "Awaiting reply (list preview signal)"
+              : risk.riskReason,
+      needsReply: resolvedNeedsReply,
+      firstFullBackfillAt:
+        !thread.firstFullBackfillAt && hasPersistedMessages
+          ? new Date()
+          : (thread.firstFullBackfillAt ?? undefined)
+    };
+
+    if (newlyPersistedMessageCount > 0) {
+      await persistThreadFreshnessBeforeMessageEvent({
+        persistProjection: () =>
+          prisma.thread.update({
+            where: { id: thread.id },
+            data: threadFreshnessProjection
+          }),
+        eventBus: deps.eventBus,
+        event: {
+          type: "MESSAGES_PERSISTED",
+          jobId,
+          threadId: thread.id,
+          platform,
+          // Scheduled scans have no trustworthy source-change timestamp. The
+          // historical event type requires this key, so leave it undefined
+          // rather than inventing a zero-latency measurement.
+          syncTiming: syncTiming!
+        }
+      });
+    }
+
+    // Transcription enqueue. We resolve the persisted Message ids in a
+    // single query rather than per-message lookups, then hand each one to
+    // the optional hook. Fire-and-forget: scans never block on OpenAI
+    // latency, and the transcription service's audioFingerprint dedup
+    // means re-scans of the same audio are free.
+    if (audioBearingMessageKeys.length > 0 && deps.onAudioMessage) {
+      try {
+        const persistedAudioRows = await prisma.message.findMany({
+          where: {
+            threadId: thread.id,
+            platformMessageKey: { in: audioBearingMessageKeys }
+          },
+          select: { id: true }
+        });
+        for (const row of persistedAudioRows) {
+          try {
+            deps.onAudioMessage({ messageId: row.id });
+          } catch (error) {
+            console.warn(
+              `[scan-queue] onAudioMessage hook threw for message ${row.id}: ${
+                error instanceof Error ? error.message : String(error)
+              }`
+            );
+          }
+        }
+      } catch (error) {
+        console.warn(
+          `[scan-queue] failed to resolve audio message ids for thread ${thread.id}: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
+      }
+    }
 
     // Bump SUMMARY_VERSION whenever the summary prompt or output shape
     // changes — every stored hash mismatches and re-summary fires on next
@@ -3896,20 +4024,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
         // here meant any out-of-band personId repair (or a later parser
         // fix) would get reverted on the next rescan. PR #151's profileUrl-
         // first resolution still applies on first creation.
-        threadUrl: candidate.threadUrl ?? thread.threadUrl,
-        unreadCount: candidate.unreadCount ?? thread.unreadCount,
-        // Keep the thread's group flags current, but never wipe a known
-        // name: a group renamed on another device reports isGroup with no
-        // groupName, and we'd rather keep the last name we saw than blank it.
-        isGroup: candidate.isGroup ?? thread.isGroup,
-        groupName: candidate.groupName ?? thread.groupName,
-        lastMessagePreview: resolvedLastMessagePreview || null,
-        // Phase 2: track who sent the most recent message + its text, so the
-        // inbox-row preview reflects the latest of either party. Without
-        // these, lastMessagePreview only tracked the latest INBOUND and went
-        // stale the moment the operator replied.
-        lastMessageDirection: lastMessage?.direction ?? thread.lastMessageDirection,
-        lastMessageText: lastMessage?.text ?? thread.lastMessageText,
+        ...threadFreshnessProjection,
         // Phase 3: only write when AI returned a confident classification.
         // undefined leaves the existing column value unchanged (Prisma
         // omits the field from the UPDATE statement).
@@ -3925,48 +4040,13 @@ export function createScanQueue(deps: ScanQueueDeps) {
         ...(closedStatusCacheKeyUpdate !== undefined
           ? { closedStatusCacheKey: closedStatusCacheKeyUpdate }
           : {}),
-        lastMessageAt: resolvedLastMessageAt,
-        lastInboundAt: resolvedLastInboundAt,
-        lastOutboundAt: resolvedLastOutboundAt,
         lastInboundHash,
-        // Clear snooze when a new inbound arrives on a snoozed thread.
-        // Otherwise an in-window snooze would hide the contact's reply
-        // until the timer expires — turning snooze into a way to silently
-        // miss messages instead of just deferring stale ones.
-        ...(thread.snoozedUntil &&
-        resolvedLastInboundAt &&
-        (!thread.lastInboundAt || resolvedLastInboundAt.getTime() > thread.lastInboundAt.getTime())
-          ? { snoozedUntil: null }
-          : {}),
-        ...(handledBoundary.clearHandledAt ? { handledAt: null } : {}),
-        riskLevel: resolvedNeedsReply ? risk.level : "GREEN",
-        slaDueAt: resolvedNeedsReply ? risk.slaDueAt : null,
-        riskReason: thread.handledAt && !handledBoundary.clearHandledAt
-          ? "Marked done manually"
-          : hasPersistedMessages
-          ? risk.riskReason
-          : resolvedNeedsReply
-            ? "Awaiting reply (list preview signal)"
-            : risk.riskReason,
-        needsReply: resolvedNeedsReply,
         rollingSummary: summary,
         whatTheyWant,
         openLoopsJson,
         toneNotesJson,
         rememberJson,
-        replyBriefJson,
-        // Stamp the first-full-backfill marker on the FIRST successful
-        // persistence of any thread that has at least one message. We don't
-        // gate on the pre-click `markedFullBackfill` flag because the URL
-        // token isn't always extractable from the row anchor — that would
-        // leave the column null forever and break skip-if-unchanged on every
-        // subsequent scan. Once stamped (idempotent), future scans use the
-        // skip-if-unchanged path. The `markedFullBackfill` flag still drives
-        // the scroll-to-top behaviour upstream in the adapter.
-        firstFullBackfillAt:
-          !thread.firstFullBackfillAt && hasPersistedMessages
-            ? new Date()
-            : (thread.firstFullBackfillAt ?? undefined)
+        replyBriefJson
       }
     });
 

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import { apiGet } from "@/lib/api";
 import type { InboxResponse, InboxRow } from "@/lib/types";
@@ -14,28 +14,28 @@ import { FullDemoStartScreen } from "@/components/full-demo/FullDemoStartScreen"
  * else.
  *
  * Inbox rows are fetched up-front so the real-mode picker has something
- * to filter against without a second load. We don't gate on success —
- * an empty inbox is fine (sample mode still works) and a fetch error
- * just means the live picker shows "No matches".
+ * to filter against without a second load. Sample mode remains available
+ * when that fetch fails, while the page says that live data is unavailable.
  */
 export default function FullDemoPage() {
-  const [rows, setRows] = useState<InboxRow[]>([]);
+  const [rows, setRows] = useState<InboxRow[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const refresh = useCallback(async () => {
+    try {
+      const response = await apiGet<InboxResponse>("/runner/data/inbox");
+      setRows(response.rows ?? []);
+      setError(null);
+    } catch (loadError) {
+      setError(
+        loadError instanceof Error ? loadError.message : "Failed to load live conversations"
+      );
+    }
+  }, []);
 
   useEffect(() => {
-    let cancelled = false;
-    apiGet<InboxResponse>("/runner/data/inbox")
-      .then((res) => {
-        if (cancelled) return;
-        setRows(res.rows ?? []);
-      })
-      .catch(() => {
-        if (cancelled) return;
-        setRows([]);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+    void refresh();
+  }, [refresh]);
 
   return (
     <Canvas>
@@ -44,7 +44,20 @@ export default function FullDemoPage() {
         title="Run demo"
         subtitle="Try with sample conversations, or explore selected real conversations without sending. Nothing is sent automatically."
       />
-      <FullDemoStartScreen inboxRows={rows} />
+      {error ? (
+        <div className="mb-5 flex items-center justify-between gap-4 rounded-row border border-hairline bg-paper-2 px-4 py-3 text-[12px] leading-[1.5] text-ink-2">
+          <span>Live conversations could not be loaded. Sample conversations are still available.</span>
+          <button type="button" onClick={() => void refresh()} className="shrink-0 underline underline-offset-2">
+            Try again
+          </button>
+        </div>
+      ) : null}
+      {rows === null && !error ? (
+        <p className="mb-5 font-mono text-[12px] text-ink-3" role="status">
+          Loading live conversations…
+        </p>
+      ) : null}
+      <FullDemoStartScreen inboxRows={rows ?? []} />
     </Canvas>
   );
 }

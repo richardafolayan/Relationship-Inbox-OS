@@ -527,14 +527,13 @@ model MessageAudioTranscriptionAttempt {
 
 model Draft {
   id        String   @id @default(cuid())
-  threadId  String
+  threadId  String   @unique
   text      String
   updatedAt DateTime @updatedAt
   createdAt DateTime @default(now())
 
   thread Thread @relation(fields: [threadId], references: [id], onDelete: Cascade)
 
-  @@index([threadId])
   @@map("drafts")
 }
 
@@ -579,6 +578,15 @@ model Setting {
 model SendRequest {
   id           String            @id @default(cuid())
   clientSendId String            @unique
+  // MESSAGE is the normal composer path. POLL stores its structured payload
+  // separately so the same durable queue/claim/receipt boundary protects the
+  // non-idempotent platform side effect.
+  requestKind  String            @default("MESSAGE")
+  requestPayloadJson String?
+  // At most one automatic recovery attempt may be reserved for a failed
+  // request. Null is allowed on ordinary sends; SQLite permits multiple nulls
+  // under a unique constraint.
+  retryOfClientSendId String?     @unique
   threadId     String
   status       SendRequestStatus @default(PENDING)
   requestText  String
@@ -591,8 +599,9 @@ model SendRequest {
   // Outgoing attachments staged for this send. JSON array of
   // { absolutePath, displayName, mimeType, kind }. When the platform
   // adapter's sendMessage runs, it dispatches each file to the platform
-  // (iMessage today; LinkedIn cap at text-only). Cleaned up by the send
-  // worker after the row reaches SENT or FAILED.
+  // (iMessage today; LinkedIn cap at text-only). Failed and in-doubt sends
+  // retain this evidence for safe operator recovery; scoped admin reset
+  // removes the referenced private files.
   attachmentsJson String?
   /**
    * App-level threading: when the operator hits "Reply" in the dashboard

@@ -49,6 +49,22 @@ test("page selection uses the same navigation path", () => {
   assert.deepEqual(calls, [["navigate", "/inbox"], ["close"]]);
 });
 
+test("Reconnect is discoverable from desktop Search", () => {
+  assert.match(
+    paletteSource,
+    /label:\s*"Go to Reconnect"[\s\S]*?href:\s*"\/reconnect"/
+  );
+});
+
+test("desktop Search exposes a labelled combobox and selected listbox option", () => {
+  assert.match(paletteSource, /role="combobox"/);
+  assert.match(paletteSource, /aria-controls=\{listboxId\}/);
+  assert.match(paletteSource, /aria-activedescendant=/);
+  assert.match(paletteSource, /role="listbox"/);
+  assert.match(paletteSource, /role="option"/);
+  assert.match(paletteSource, /aria-selected=\{index === activeIndex\}/);
+});
+
 test("non-navigation actions still run before Search closes", () => {
   const calls = [];
 
@@ -83,4 +99,10 @@ test("app shell replaces the overlay marker for navigation", () => {
   assert.match(shellSource, /const mode = preparePaletteNavigation\(\)/);
   assert.match(shellSource, /router\[mode\]\(href\)/);
   assert.match(shellSource, /onNavigate=\{navigateFromPalette\}/);
+});
+
+test("desktop Search restores focus to its connected opener after close", () => {
+  assert.match(shellSource, /paletteReturnFocusRef/);
+  assert.match(shellSource, /document\.activeElement instanceof HTMLElement/);
+  assert.match(shellSource, /if \(target\?\.isConnected\) target\.focus\(\)/);
 });

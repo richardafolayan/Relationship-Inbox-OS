@@ -8,7 +8,7 @@
     "build": "next build",
     "start": "next start -p ${DASHBOARD_PORT:-3100}",
     "lint": "tsc -p tsconfig.json --noEmit --incremental false",
-    "test": "echo 'No dashboard tests yet'"
+    "test": "node ../../scripts/testing/run-tests.mjs dashboard"
   },
   "dependencies": {
     "@inbox-os/core": "0.1.0",

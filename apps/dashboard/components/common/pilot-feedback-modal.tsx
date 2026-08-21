@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useId, useRef, useState, type CSSProperties } from "react";
 import { usePathname } from "next/navigation";
 import { ChevronLeft, ImageUp } from "lucide-react";
 import { apiGet, apiPost } from "@/lib/api";
@@ -56,6 +56,9 @@ function readFileAsDataUrl(file: File): Promise<string> {
 // centred card. Collects only the tester's typed report and any screenshots
 // they attach. Never reads or sends message content.
 export function PilotFeedbackModal() {
+  const titleId = useId();
+  const detailsId = useId();
+  const expectedId = useId();
   const pathname = usePathname();
   const [open, setOpen] = useState(false);
   const [view, setView] = useState<"form" | "reports">("form");
@@ -401,6 +404,8 @@ export function PilotFeedbackModal() {
             >
               <Field label="What happened?">
                 <div
+                  role="group"
+                  aria-label="What happened?"
                   className="grid grid-cols-2 gap-2 sm:flex sm:flex-wrap"
                   data-pilot-feedback-types="true"
                 >
@@ -423,8 +428,9 @@ export function PilotFeedbackModal() {
                 </div>
               </Field>
 
-              <Field label="Title">
+              <Field label="Title" htmlFor={titleId}>
                 <input
+                  id={titleId}
                   type="text"
                   value={title}
                   onChange={(event) => setTitle(event.target.value)}
@@ -438,8 +444,10 @@ export function PilotFeedbackModal() {
               <Field
                 label="Details"
                 hint="In your own words. Please don't paste private message content."
+                htmlFor={detailsId}
               >
                 <textarea
+                  id={detailsId}
                   value={description}
                   onChange={(event) => setDescription(event.target.value)}
                   rows={4}
@@ -452,8 +460,9 @@ export function PilotFeedbackModal() {
                 />
               </Field>
 
-              <Field label="Expected result" hint="Optional.">
+              <Field label="Expected result" hint="Optional." htmlFor={expectedId}>
                 <textarea
+                  id={expectedId}
                   value={expected}
                   onChange={(event) => setExpected(event.target.value)}
                   rows={2}
@@ -532,6 +541,7 @@ export function PilotFeedbackModal() {
                 <input
                   ref={fileInputRef}
                   type="file"
+                  aria-label="Choose screenshots"
                   multiple
                   accept={[...ALLOWED_SCREENSHOT_TYPES, "image/*"].join(",")}
                   className="hidden"
@@ -542,7 +552,7 @@ export function PilotFeedbackModal() {
                   }}
                 />
                 {screenshotError ? (
-                  <p className="mt-1.5 text-[11.5px] text-risk-overdue">{screenshotError}</p>
+                  <p role="alert" className="mt-1.5 text-[11.5px] text-risk-overdue">{screenshotError}</p>
                 ) : null}
               </Field>
 
@@ -608,15 +618,23 @@ export function PilotFeedbackModal() {
 function Field({
   label,
   hint,
+  htmlFor,
   children
 }: {
   label: string;
   hint?: string;
+  htmlFor?: string;
   children: React.ReactNode;
 }) {
   return (
     <div className="mb-4">
-      <p className="m-0 text-[12.5px] font-medium text-ink">{label}</p>
+      {htmlFor ? (
+        <label htmlFor={htmlFor} className="m-0 block text-[12.5px] font-medium text-ink">
+          {label}
+        </label>
+      ) : (
+        <p className="m-0 text-[12.5px] font-medium text-ink">{label}</p>
+      )}
       {hint ? <p className="m-0 mt-0.5 text-[11.5px] leading-[1.45] text-ink-3">{hint}</p> : null}
       <div className="mt-1.5">{children}</div>
     </div>

@@ -107,6 +107,7 @@ test("#903: empty query still lists conversations before pages and actions", () 
   const flat = flattenMobileSearchSections(sections);
   assert.equal(flat[0].group, "conversations");
   assert.ok(flat.some((item) => item.kindLabel === "Page"));
+  assert.ok(flat.some((item) => item.href === "/reconnect"));
 });
 
 test("#903: person name and message content both match", () => {

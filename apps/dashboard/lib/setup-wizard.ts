@@ -51,6 +51,54 @@ export interface SetupGateInput {
   anyPlatformConnected: boolean | null;
 }
 
+export interface ReconciledSetupGateInput {
+  /** localStorage complete flag already set. */
+  storedComplete: boolean;
+  /** Both durable completion stamps were read successfully from the runner. */
+  durableComplete: boolean;
+  /** The operator has already started this setup flow. */
+  setupStarted: boolean;
+  /** Any AI provider has a key. */
+  aiConfigured: boolean;
+  /** Any platform is connected. */
+  anyPlatformConnected: boolean;
+}
+
+/**
+ * Reconcile the browser hint with durable runner state. The local flag is
+ * only an optimisation: it can suppress a redundant write after the runner
+ * confirms completion, but it can never hide an incomplete setup by itself.
+ */
+export function resolveReconciledSetupGate(
+  input: ReconciledSetupGateInput
+): SetupGateDecision {
+  if (input.durableComplete) {
+    return input.storedComplete ? "hidden" : "auto-complete";
+  }
+  if (!input.setupStarted && (input.aiConfigured || input.anyPlatformConnected)) {
+    return "auto-complete";
+  }
+  return "show";
+}
+
+export async function persistSetupProfile(
+  persist: () => Promise<void>,
+  onPersisted: () => void
+): Promise<void> {
+  await persist();
+  onPersisted();
+}
+
+export async function persistSetupCompletion(actions: {
+  persistProfileCompletion: () => Promise<void>;
+  persistPreferencesCompletion: () => Promise<void>;
+  markBrowserComplete: () => void;
+}): Promise<void> {
+  await actions.persistProfileCompletion();
+  await actions.persistPreferencesCompletion();
+  actions.markBrowserComplete();
+}
+
 /**
  * Legacy upgrade gate retained for older callers and its regression tests.
  * The current wizard also reads durable setup progress from the runner.

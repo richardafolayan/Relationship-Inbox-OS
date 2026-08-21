@@ -10,6 +10,7 @@ import { cleanContactSummary } from "@/lib/preview";
 import { personHeadlineLine } from "@/lib/people-headline";
 import { shouldAdoptIncomingNotes } from "@/lib/notes-sync";
 import { createLatestRequestGate } from "@/lib/latest-request";
+import { buildPersonInboxHref } from "@/lib/people-navigation";
 import { Canvas, PageHead, CaughtUp } from "@/components/common/canvas";
 import { Button } from "@/components/ui/button";
 import { PersonAvatar } from "@/components/common/person-avatar";
@@ -22,6 +23,7 @@ import { PersonAvatar } from "@/components/common/person-avatar";
 export default function PeoplePage() {
   const router = useRouter();
   const [people, setPeople] = useState<PeopleRow[]>([]);
+  const [loaded, setLoaded] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<PersonDetailResponse | null>(null);
   const [refreshing, setRefreshing] = useState(false);
@@ -56,15 +58,26 @@ export default function PeoplePage() {
       const message = loadError instanceof Error ? loadError.message : "Failed to load people";
       setError(message);
       return [];
+    } finally {
+      setLoaded(true);
     }
   }, []);
 
   const loadDetail = useCallback(
     async (personId: string, includeStarters = false) => {
       const token = detailReqGate.current.next();
-      const data = await apiGet<PersonDetailResponse>(
-        `/runner/data/person/${personId}${includeStarters ? "?includeStarters=1" : ""}`
-      ).catch(() => null);
+      let data: PersonDetailResponse | null = null;
+      try {
+        data = await apiGet<PersonDetailResponse>(
+          `/runner/data/person/${personId}${includeStarters ? "?includeStarters=1" : ""}`
+        );
+      } catch (loadError) {
+        if (detailReqGate.current.isLatest(token)) {
+          setError(
+            loadError instanceof Error ? loadError.message : "Failed to load this person"
+          );
+        }
+      }
       // A newer request started while this one was in flight - drop the stale
       // response so it can't overwrite the current selection's detail.
       if (!detailReqGate.current.isLatest(token)) return;
@@ -268,7 +281,17 @@ export default function PeoplePage() {
         <p className="mb-6 rounded-row border border-hairline bg-paper-2 px-4 py-3 text-[12px] leading-[1.5] text-ink-2">{error}</p>
       ) : null}
 
-      {people.length === 0 ? (
+      {!loaded ? (
+        <p className="py-8 text-center font-mono text-[12px] text-ink-3" role="status">
+          Loading relationships…
+        </p>
+      ) : error && people.length === 0 ? (
+        <div className="flex justify-center py-6">
+          <Button variant="quiet" onClick={() => void loadList()}>
+            Try again
+          </Button>
+        </div>
+      ) : people.length === 0 ? (
         <CaughtUp title="No relationships yet." body="Connect a platform to start mapping people." />
       ) : (
         <div className="flex flex-col">
@@ -341,7 +364,9 @@ export default function PeoplePage() {
                     onRefreshEnrichment={refreshEnrichment}
                     onStartConversation={fetchStarters}
                     startersLoading={startersLoading}
-                    onOpenInInbox={() => router.push(`/inbox?person=${person.id}`)}
+                    onOpenInInbox={() =>
+                      router.push(buildPersonInboxHref(person.name))
+                    }
                     notesDraft={notesDraft}
                     onNotesChange={onNotesChange}
                     notesStatus={notesStatus}
@@ -593,13 +618,12 @@ function ProfilePanel({
           ) : null}
 
           {starters.length > 0 ? (
-            <CtxBlock label="Suggested openers">
+            <CtxBlock label="Conversation ideas">
               <div className="grid grid-cols-1 gap-[10px] sm:grid-cols-2">
                 {starters.slice(0, 4).map((starter, idx) => (
-                  <button
+                  <article
                     key={idx}
-                    type="button"
-                    className="group flex w-full flex-col gap-2 rounded-[14px] border border-hairline bg-paper p-[14px_16px] text-left transition-[border-color,background-color] duration-calm hover:border-hairline-strong hover:bg-paper-2"
+                    className="flex w-full flex-col gap-2 rounded-[14px] border border-hairline bg-paper p-[14px_16px] text-left"
                   >
                     <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-accent-ink">
                       {starter.angle} · cited {starter.citedField}
@@ -618,11 +642,9 @@ function ProfilePanel({
                     </span>
                     <span className="mt-auto flex items-center justify-between pt-1 font-mono text-[10.5px] text-ink-3">
                       <span>{starter.angle}</span>
-                      <span className="text-accent-ink opacity-0 transition-opacity duration-calm group-hover:opacity-100">
-                        use ↵
-                      </span>
+                      <span>write it your way</span>
                     </span>
-                  </button>
+                  </article>
                 ))}
               </div>
             </CtxBlock>

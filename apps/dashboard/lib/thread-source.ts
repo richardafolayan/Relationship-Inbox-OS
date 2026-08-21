@@ -86,4 +86,44 @@ export function readThreadSource(
   return stored;
 }
 
+export function canNavigateBackToSameOrigin(
+  historyLength: number,
+  referrer: string,
+  origin: string,
+  previousEntryUrl?: string
+): boolean {
+  if (historyLength <= 1 || !origin) return false;
+  for (const candidate of [previousEntryUrl, referrer]) {
+    if (!candidate) continue;
+    try {
+      if (new URL(candidate).origin === origin) return true;
+    } catch {
+      // Try the next independently sourced history candidate.
+    }
+  }
+  return false;
+}
+
+export function readPreviousNavigationEntryUrl(navigationValue: unknown): string | undefined {
+  if (!navigationValue || typeof navigationValue !== "object") return undefined;
+  const navigation = navigationValue as {
+    currentEntry?: unknown;
+    entries?: unknown;
+  };
+  if (!navigation.currentEntry || typeof navigation.currentEntry !== "object") return undefined;
+  const currentIndex = (navigation.currentEntry as { index?: unknown }).index;
+  if (typeof currentIndex !== "number" || typeof navigation.entries !== "function") return undefined;
+  try {
+    const entries = navigation.entries.call(navigationValue) as unknown;
+    if (!Array.isArray(entries)) return undefined;
+    const previous = entries.find((entry) => {
+      if (!entry || typeof entry !== "object") return false;
+      return (entry as { index?: unknown }).index === currentIndex - 1;
+    }) as { url?: unknown } | undefined;
+    return typeof previous?.url === "string" ? previous.url : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export const __test = { KEY, FALLBACK };

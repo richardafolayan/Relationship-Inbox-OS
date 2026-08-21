@@ -1,7 +1,25 @@
 import { writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { performance } from "node:perf_hooks";
-import { chromium } from "playwright";
+import { chromium } from "patchright";
 import { PrismaClient } from "@prisma/client";
+
+const usage = `Usage: npm run perf:interactions -- [options]
+
+Options:
+  --runner URL       Runner origin (default http://127.0.0.1:4001)
+  --dashboard URL    Dashboard origin (default http://127.0.0.1:3100)
+  --thread ID        Thread fixture id
+  --search TEXT      Search fixture text
+  --samples COUNT    Samples per metric (default 30)
+  --output PATH      Write the JSON result to a file
+  --help             Show this help
+`;
+
+if (process.argv.includes("--help")) {
+  process.stdout.write(usage);
+  process.exit(0);
+}
 
 const args = new Map();
 for (let index = 2; index < process.argv.length; index += 2) {
@@ -13,6 +31,9 @@ const dashboardUrl = args.get("--dashboard") ?? "http://127.0.0.1:3100";
 const threadId = args.get("--thread") ?? "perf-thread-00000";
 const searchText = args.get("--search") ?? "Performance Contact 00999";
 const samplesPerMetric = Number(args.get("--samples") ?? 30);
+if (!Number.isInteger(samplesPerMetric) || samplesPerMetric < 1) {
+  throw new Error("--samples must be a positive integer");
+}
 const outputPath = args.get("--output");
 const chromePath = process.env.CHROME_PATH ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const raw = {};
@@ -43,22 +64,24 @@ async function measure(label, iterations, operation) {
   raw[label] = values;
 }
 
-async function read(url) {
-  const response = await fetch(url, { cache: "no-store" });
+async function read(url, { bypassCache = false } = {}) {
+  const response = await fetch(url, {
+    headers: bypassCache ? { "Cache-Control": "no-cache" } : undefined
+  });
   if (!response.ok) throw new Error(`${url} returned ${response.status}`);
   await response.arrayBuffer();
 }
 
 await measure("api_health_ms", samplesPerMetric, () => read(`${runnerUrl}/health`));
 await measure("api_inbox_cached_ms", samplesPerMetric, () => read(`${runnerUrl}/data/inbox`));
-await measure("api_inbox_uncached_ms", samplesPerMetric, (index) =>
-  read(`${runnerUrl}/data/inbox?benchmark=${Date.now()}-${index}`)
+await measure("api_inbox_uncached_ms", samplesPerMetric, () =>
+  read(`${runnerUrl}/data/inbox`, { bypassCache: true })
 );
-await measure("api_search_uncached_ms", samplesPerMetric, (index) =>
-  read(`${runnerUrl}/data/inbox?search=${encodeURIComponent(searchText)}&benchmark=${Date.now()}-${index}`)
+await measure("api_search_uncached_ms", samplesPerMetric, () =>
+  read(`${runnerUrl}/data/inbox?search=${encodeURIComponent(searchText)}`, { bypassCache: true })
 );
-await measure("api_thread_ms", samplesPerMetric, (index) =>
-  read(`${runnerUrl}/data/thread/${threadId}?benchmark=${index}`)
+await measure("api_thread_ms", samplesPerMetric, () =>
+  read(`${runnerUrl}/data/thread/${threadId}`)
 );
 
 if (process.env.DATABASE_URL) {
@@ -86,7 +109,10 @@ if (process.env.DATABASE_URL) {
   await prisma.$disconnect();
 }
 
-const browser = await chromium.launch({ headless: true, executablePath: chromePath });
+const browser = await chromium.launch({
+  headless: true,
+  ...(existsSync(chromePath) ? { executablePath: chromePath } : {})
+});
 const context = await browser.newContext();
 const page = await context.newPage();
 

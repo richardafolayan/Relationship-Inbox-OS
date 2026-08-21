@@ -10,7 +10,7 @@ import { cn } from "@/lib/utils";
 
 // "tool" button styling for the bar cluster (Sort / Filters / Select).
 export const TOOL_CLASS =
-  "inline-flex min-h-[40px] items-center gap-[6px] rounded-[8px] px-[10px] py-[6px] text-[12px] text-ink-3 transition-colors duration-calm hover:bg-paper-2 hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent sm:min-h-0";
+  "inline-flex min-h-[44px] items-center gap-[6px] rounded-[8px] px-[10px] py-[6px] text-[12px] text-ink-3 transition-colors duration-calm hover:bg-paper-2 hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent sm:min-h-0";
 
 // ---- Inline glyphs (drawn directly to match the prototype's tool icons
 // without adding icon-name dependencies) ----
@@ -118,7 +118,7 @@ export function SortMenu<K extends string>({
                   setOpen(false);
                 }}
                 className={cn(
-                  "flex min-h-[42px] w-full items-center gap-2 rounded-[7px] px-[10px] py-[7px] text-left text-[13px] transition-colors duration-calm hover:bg-paper-2 sm:min-h-0",
+                  "flex min-h-[44px] w-full items-center gap-2 rounded-[7px] px-[10px] py-[7px] text-left text-[13px] transition-colors duration-calm hover:bg-paper-2 sm:min-h-0",
                   sel ? "text-ink" : "text-ink-2 hover:text-ink"
                 )}
               >
@@ -161,7 +161,7 @@ export function PopOpt({
       onClick={onClick}
       aria-pressed={selected}
       className={cn(
-        "rounded-[8px] border px-[11px] py-[5px] text-[12px] transition-colors duration-calm",
+        "min-h-[44px] rounded-[8px] border px-[11px] py-[5px] text-[12px] transition-colors duration-calm sm:min-h-0",
         selected
           ? "border-ink bg-ink text-paper"
           : "border-hairline text-ink-2 hover:border-hairline-strong hover:text-ink"

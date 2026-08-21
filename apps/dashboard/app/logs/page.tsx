@@ -136,15 +136,19 @@ function collapseRuns(logs: AuditLogRow[]): Row[] {
 }
 
 export default function LogsPage() {
-  const [logs, setLogs] = useState<AuditLogRow[]>([]);
+  const [logs, setLogs] = useState<AuditLogRow[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
   const refresh = useCallback(async () => {
-    const rows = await apiGet<AuditLogRow[]>("/runner/data/logs?limit=300").catch(
-      () => [] as AuditLogRow[]
-    );
-    setLogs(rows);
+    try {
+      const rows = await apiGet<AuditLogRow[]>("/runner/data/logs?limit=300");
+      setLogs(rows);
+      setError(null);
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : "Failed to load activity");
+    }
   }, []);
 
   useEffect(() => {
@@ -158,7 +162,7 @@ export default function LogsPage() {
   // list of (day-label, rows[]) pairs in reverse-chronological order.
   const dayGroups = useMemo(() => {
     const grouped = new Map<string, AuditLogRow[]>();
-    for (const log of logs) {
+    for (const log of logs ?? []) {
       const key = dayKey(log.timestamp);
       const bucket = grouped.get(key) ?? [];
       bucket.push(log);
@@ -186,7 +190,7 @@ export default function LogsPage() {
         title="Activity"
         meta={
           <span>
-            <strong className="font-medium text-ink">{logs.length}</strong> events
+            <strong className="font-medium text-ink">{logs?.length ?? 0}</strong> events
             <button
               type="button"
               onClick={() => setDrawerOpen(true)}
@@ -198,7 +202,20 @@ export default function LogsPage() {
         }
       />
 
-      {logs.length === 0 ? (
+      {error ? (
+        <div className="mb-6 flex items-center justify-between gap-4 rounded-row border border-hairline bg-paper-2 px-4 py-3 text-[12px] leading-[1.5] text-ink-2">
+          <span>{error}</span>
+          <button type="button" onClick={() => void refresh()} className="shrink-0 underline underline-offset-2">
+            Try again
+          </button>
+        </div>
+      ) : null}
+
+      {logs === null ? (
+        <p className="py-8 text-center font-mono text-[12px] text-ink-3" role="status">
+          Loading activity…
+        </p>
+      ) : logs.length === 0 ? (
         <CaughtUp title="Nothing logged yet." body="Every scan, send, and selector check will appear here." />
       ) : (
         <div className="-mx-1 overflow-hidden rounded-[14px] border border-hairline sm:mx-0">
@@ -232,7 +249,7 @@ export default function LogsPage() {
       <ReceiptsDrawer
         open={drawerOpen}
         onClose={() => setDrawerOpen(false)}
-        rows={logs}
+        rows={logs ?? []}
         title="System receipts"
       />
     </Canvas>

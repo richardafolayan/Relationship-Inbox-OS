@@ -214,6 +214,47 @@ function syncDatabase() {
   );
 }
 
+function backupDatabaseBeforeSchemaChange(schemaHash) {
+  const source = resolve(databaseFile());
+  if (!existsSync(source)) return true;
+  const backupDir = join(dirname(source), "backups");
+  mkdirSync(backupDir, { recursive: true });
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const destination = join(
+    backupDir,
+    `inbox-os-before-schema-${schemaHash.slice(0, 12)}-${timestamp}.sqlite`
+  );
+  const result = spawnSync(
+    process.execPath,
+    [join(APP_DIR, "scripts", "lib", "backup-sqlite.mjs"), source, destination],
+    { cwd: APP_DIR, encoding: "utf8", env: runtimeCommandEnv() }
+  );
+  if (result.status !== 0) {
+    say(`  ${C.yellow}The existing database could not be backed up. No schema change was applied.${C.reset}`);
+    if (result.stderr) say(result.stderr.trim());
+    return false;
+  }
+  say(`  Backed up the existing database to ${destination}.`);
+  return true;
+}
+
+function repairDatabaseBeforeSchemaChange() {
+  const source = resolve(databaseFile());
+  if (!existsSync(source)) return true;
+  const result = spawnSync(
+    process.execPath,
+    [join(APP_DIR, "scripts", "lib", "repair-schema-data.mjs"), source],
+    { cwd: APP_DIR, encoding: "utf8", env: runtimeCommandEnv() }
+  );
+  if (result.status !== 0) {
+    say(`  ${C.yellow}The existing database could not be repaired. No schema change was applied.${C.reset}`);
+    if (result.stderr) say(result.stderr.trim());
+    if (!result.stderr && result.error) say(result.error.message);
+    return false;
+  }
+  return true;
+}
+
 function packagedArtifactsReady() {
   const required = [
     "packages/core/dist/index.js",
@@ -236,6 +277,10 @@ function prepare() {
   const schemaChanged = stamps.schemaHash !== schemaHash;
   if (!PACKAGED && (schemaChanged || !canResolve("@prisma/client"))) {
     if (!run("Updating the database client...", NPM_COMMAND, ["run", "db:generate"])) return { ok: false };
+  }
+  if (schemaChanged) {
+    if (!backupDatabaseBeforeSchemaChange(schemaHash)) return { ok: false };
+    if (!repairDatabaseBeforeSchemaChange()) return { ok: false };
   }
   if (schemaChanged || !existsSync(databaseFile())) {
     if (!syncDatabase()) return { ok: false };
@@ -391,12 +436,19 @@ async function startApp(prod) {
 
   try {
     const token = readOrCreateAccessToken(STATE_DIR);
+    const allowInsecurePhoneAccess = process.env.RIOS_ALLOW_INSECURE_PHONE_ACCESS === "1";
     phoneProxy = await startPhoneAccessProxy({
+      allowInsecure: allowInsecurePhoneAccess,
       appName: APP_NAME,
       dashboardPort: DASHBOARD_PORT,
+      host: allowInsecurePhoneAccess ? "0.0.0.0" : "127.0.0.1",
       token
     });
-    process.env.RIOS_PHONE_ACCESS_PORT = String(phoneProxy.port);
+    if (allowInsecurePhoneAccess) {
+      process.env.RIOS_PHONE_ACCESS_PORT = String(phoneProxy.port);
+    } else {
+      delete process.env.RIOS_PHONE_ACCESS_PORT;
+    }
     process.env.RIOS_PHONE_ACCESS_TOKEN = token;
     securePhoneAccess = startSecurePhoneAccess({
       proxyPort: phoneProxy.port,
@@ -407,7 +459,7 @@ async function startApp(prod) {
       say(`Secure phone access is ready at ${securePhoneAccess.url.replace(token, "[private-token]")}`);
     } else {
       delete process.env.RIOS_PHONE_ACCESS_SECURE_URL;
-      say("Secure phone dictation needs Tailscale HTTPS. The private Wi-Fi link remains available for reading and typing.");
+      say("Phone access needs Tailscale HTTPS. Plain Wi-Fi bearer links are disabled by default.");
     }
   } catch (error) {
     delete process.env.RIOS_PHONE_ACCESS_PORT;

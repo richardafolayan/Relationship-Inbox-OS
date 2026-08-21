@@ -5,8 +5,8 @@
 //   1. Direct-chat recipients must be saved contacts on the operator's phone
 //      (rules out cold outreach, accidental fuzz tests, and most spam patterns).
 //   2. Per-recipient minimum interval (default 15s, WHATSAPP_MIN_INTERVAL_MS) — derived from the
-//      most recent outbound Message stored on the thread, so the limit
-//      survives process restarts.
+//      newest outbound Message or terminal send receipt, so the limit survives
+//      process restarts and local projection failures.
 //   3. Rolling-24h cap across ALL WhatsApp threads (default 40, WHATSAPP_MAX_PER_DAY) — protects
 //      against a runaway loop firing dozens of messages.
 //
@@ -33,13 +33,33 @@ export interface SendGuardPrisma {
       orderBy: { timestamp: "desc" };
       select: { timestamp: true };
     }): Promise<{ timestamp: Date } | null>;
-    count(args: {
+    findMany(args: {
       where: {
         direction: "OUT";
         thread: { platform: "WHATSAPP" };
         timestamp: { gte: Date };
       };
-    }): Promise<number>;
+      select: { platformMessageKey: true };
+    }): Promise<Array<{ platformMessageKey: string }>>;
+  };
+  sendRequest: {
+    findFirst(args: {
+      where: {
+        status: "SENT";
+        thread: { platform: "WHATSAPP"; platformThreadId: string };
+        updatedAt: { gte: Date };
+      };
+      orderBy: { updatedAt: "desc" };
+      select: { updatedAt: true };
+    }): Promise<{ updatedAt: Date } | null>;
+    findMany(args: {
+      where: {
+        status: "SENT";
+        thread: { platform: "WHATSAPP" };
+        updatedAt: { gte: Date };
+      };
+      select: { receiptJson: true };
+    }): Promise<Array<{ receiptJson: string | null }>>;
   };
 }
 
@@ -98,17 +118,32 @@ export async function checkSendGuard(
   //    a WhatsApp thread keyed by this JID. If no row matches the
   //    interval window, no send happened recently and we proceed.
   const intervalCutoff = new Date(now() - deps.config.minIntervalMs);
-  const recent = await deps.prisma.message.findFirst({
-    where: {
-      direction: "OUT",
-      thread: { platform: "WHATSAPP", platformThreadId: recipientJid },
-      timestamp: { gte: intervalCutoff }
-    },
-    orderBy: { timestamp: "desc" },
-    select: { timestamp: true }
-  });
-  if (recent) {
-    const elapsedMs = now() - recent.timestamp.getTime();
+  const [recentMessage, recentReceipt] = await Promise.all([
+    deps.prisma.message.findFirst({
+      where: {
+        direction: "OUT",
+        thread: { platform: "WHATSAPP", platformThreadId: recipientJid },
+        timestamp: { gte: intervalCutoff }
+      },
+      orderBy: { timestamp: "desc" },
+      select: { timestamp: true }
+    }),
+    deps.prisma.sendRequest.findFirst({
+      where: {
+        status: "SENT",
+        thread: { platform: "WHATSAPP", platformThreadId: recipientJid },
+        updatedAt: { gte: intervalCutoff }
+      },
+      orderBy: { updatedAt: "desc" },
+      select: { updatedAt: true }
+    })
+  ]);
+  const recentAt = Math.max(
+    recentMessage?.timestamp.getTime() ?? 0,
+    recentReceipt?.updatedAt.getTime() ?? 0
+  );
+  if (recentAt > 0) {
+    const elapsedMs = now() - recentAt;
     const remainingMs = Math.max(0, deps.config.minIntervalMs - elapsedMs);
     const remainingSec = Math.ceil(remainingMs / 1000);
     return {
@@ -118,16 +153,42 @@ export async function checkSendGuard(
     };
   }
 
-  // 3. Rolling 24h cap. Counts all WhatsApp outbound Messages timestamped
-  //    within the last 24 hours, regardless of thread.
+  // 3. Rolling 24h cap. Counts projected outbound messages plus any terminal
+  //    receipts whose Message projection is absent.
   const dayCutoff = new Date(now() - ONE_DAY_MS);
-  const count = await deps.prisma.message.count({
-    where: {
-      direction: "OUT",
-      thread: { platform: "WHATSAPP" },
-      timestamp: { gte: dayCutoff }
+  const [messageRows, receiptRows] = await Promise.all([
+    deps.prisma.message.findMany({
+      where: {
+        direction: "OUT",
+        thread: { platform: "WHATSAPP" },
+        timestamp: { gte: dayCutoff }
+      },
+      select: { platformMessageKey: true }
+    }),
+    deps.prisma.sendRequest.findMany({
+      where: {
+        status: "SENT",
+        thread: { platform: "WHATSAPP" },
+        updatedAt: { gte: dayCutoff }
+      },
+      select: { receiptJson: true }
+    })
+  ]);
+  const projectedKeys = new Set(messageRows.map((row) => row.platformMessageKey));
+  const unprojectedReceiptCount = receiptRows.reduce((count, row) => {
+    try {
+      const receipt = row.receiptJson
+        ? (JSON.parse(row.receiptJson) as { platformMessageKey?: unknown })
+        : null;
+      return typeof receipt?.platformMessageKey === "string" &&
+        projectedKeys.has(receipt.platformMessageKey)
+        ? count
+        : count + 1;
+    } catch {
+      return count + 1;
     }
-  });
+  }, 0);
+  const count = messageRows.length + unprojectedReceiptCount;
   if (count >= deps.config.dailyCap) {
     return {
       allowed: false,

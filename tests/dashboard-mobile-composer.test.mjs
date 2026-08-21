@@ -68,13 +68,12 @@ test("desktop toolbar remains available at md+ and is not the mobile row", () =>
 });
 
 test("thread switch closes the mobile more sheet", () => {
-  const effectBodies = [
-    ...src.matchAll(/useEffect\(\(\)\s*=>\s*\{([\s\S]*?)\},\s*\[threadId\]\)/g)
-  ].map((m) => m[1]);
-  const reset = effectBodies.find(
-    (body) => body.includes('setComposer("")') && body.includes("setComposerMoreOpen(false)")
-  );
-  assert.ok(reset, "expected threadId reset to close composerMoreOpen");
+  const start = src.indexOf("useLayoutEffect(() => {", src.indexOf("Thread-local composer"));
+  const end = src.indexOf("}, [threadId]);", start);
+  assert.notEqual(start, -1, "located the threadId reset layout effect");
+  assert.notEqual(end, -1, "located the end of the threadId reset layout effect");
+  const reset = src.slice(start, end);
+  assert.match(reset, /setComposerMoreOpen\(false\)/);
   assert.match(reset, /setMobileSuggestionsOpen\(false\)/);
   assert.match(reset, /setMobileScheduleOpen\(false\)/);
 });

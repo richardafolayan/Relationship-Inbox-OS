@@ -73,6 +73,7 @@ test("phone access requires the private link before proxying dashboard requests"
   const dashboardPort = await listen(upstream);
   const token = phoneAccess.createAccessToken();
   const proxy = await phoneAccess.startPhoneAccessProxy({
+    allowInsecure: true,
     appName: "Tovi",
     dashboardPort,
     host: "127.0.0.1",
@@ -132,6 +133,27 @@ test("secure phone access sets a secure cookie and keeps camera permission disab
       Cookie: `${phoneAccess.ACCESS_COOKIE}=${token}`
     });
     assert.equal(opened.headers["permissions-policy"], "camera=(), microphone=(self)");
+  } finally {
+    await phoneAccess.stopPhoneAccessProxy(proxy.server);
+    await close(upstream);
+  }
+});
+
+test("plain HTTP pairing is rejected by default and leaks no access cookie", async () => {
+  const upstream = createServer((_incoming, outgoing) => outgoing.end("ready"));
+  const dashboardPort = await listen(upstream);
+  const token = phoneAccess.createAccessToken();
+  const proxy = await phoneAccess.startPhoneAccessProxy({
+    dashboardPort,
+    host: "127.0.0.1",
+    preferredPort: 0,
+    token
+  });
+  try {
+    const response = await get(proxy.port, `/connect/${token}`);
+    assert.equal(response.status, 426);
+    assert.equal(response.headers["set-cookie"], undefined);
+    assert.equal(response.headers["referrer-policy"], "no-referrer");
   } finally {
     await phoneAccess.stopPhoneAccessProxy(proxy.server);
     await close(upstream);
@@ -243,6 +265,8 @@ test("the shared launcher owns phone access for source and packaged apps", () =>
   assert.match(source, /RIOS_PHONE_ACCESS_SECURE_URL/);
   assert.match(source, /RIOS_PHONE_ACCESS_PORT/);
   assert.match(source, /RIOS_PHONE_ACCESS_TOKEN/);
+  assert.match(source, /RIOS_ALLOW_INSECURE_PHONE_ACCESS/);
+  assert.match(source, /host: allowInsecurePhoneAccess \? "0\.0\.0\.0" : "127\.0\.0\.1"/);
   assert.match(source, /stopPhoneAccessProxy\(phoneProxy\?\.server\)/);
   assert.match(source, /stopSecurePhoneAccess\(securePhoneAccess\)/);
 });

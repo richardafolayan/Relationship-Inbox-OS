@@ -17,17 +17,16 @@ const src = readFileSync(
 // on threadId change or it leaks across threads — risking a reply typed for A
 // being sent to B, phantom "sending" bubbles, and A's snooze durations on B.
 test("a [threadId]-keyed effect resets the composer cluster, pending sends, and snooze suggestions", () => {
-  const effectBodies = [
-    ...src.matchAll(/useEffect\(\(\)\s*=>\s*\{([\s\S]*?)\},\s*\[threadId\]\)/g)
-  ].map((m) => m[1]);
-  const reset = effectBodies.find(
-    (body) =>
-      body.includes('setComposer("")') &&
-      body.includes("setPendingSends([])") &&
-      body.includes("setSnoozeSuggestions(null)") &&
-      body.includes("setComposerAttachments(")
-  );
-  assert.ok(reset, "expected a [threadId] reset effect clearing composer + pending sends + snooze");
+  const start = src.indexOf("useLayoutEffect(() => {", src.indexOf("Thread-local composer"));
+  const end = src.indexOf("}, [threadId]);", start);
+  assert.notEqual(start, -1, "located the [threadId] reset layout effect");
+  assert.notEqual(end, -1, "located the end of the [threadId] reset layout effect");
+  const reset = src.slice(start, end);
+  assert.match(reset, /readThreadComposerSession\(threadId\)/);
+  assert.match(reset, /setComposer\(restoredComposer\?\.text \?\? ""\)/);
+  assert.match(reset, /setPendingSends\(\[\]\)/);
+  assert.match(reset, /setSnoozeSuggestions\(null\)/);
+  assert.match(reset, /setComposerAttachments\(/);
   // Staged attachment object URLs must be revoked on the reset, not leaked.
   assert.match(reset, /URL\.revokeObjectURL\(a\.previewUrl\)/);
 });
@@ -62,7 +61,10 @@ test("the timeline scroller clips horizontal overflow and bubble text wraps anyw
 // enqueueing two distinct clientSendIds. A synchronous ref closes the gap.
 test("onSend has a synchronous sendingRef re-entrancy guard", () => {
   assert.match(src, /const sendingRef = useRef\(false\)/);
-  assert.match(src, /if \(!thread \|\| sending \|\| sendingRef\.current\) return;/);
+  assert.match(
+    src,
+    /if \(!thread \|\| !isActiveThread\(thread\.id\) \|\| sending \|\| sendingRef\.current\) return;/
+  );
   assert.match(src, /sendingRef\.current = true;/);
   assert.match(src, /sendingRef\.current = false;/);
 });

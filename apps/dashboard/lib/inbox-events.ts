@@ -16,6 +16,7 @@
 /** Runner-event types that change inbox row data and warrant a refetch. */
 const INBOX_REFRESH_EVENT_TYPES = new Set([
   "THREAD_UPDATED",
+  "MESSAGES_PERSISTED",
   "MESSAGE_SENT",
   "MESSAGE_SEND_FAILED",
   "SCAN_FINISHED"

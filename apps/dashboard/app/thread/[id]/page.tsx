@@ -47,8 +47,27 @@ import { APP_NAME } from "@/lib/branding";
 import { setFavourite } from "@/lib/favourites";
 import { runActionWithFeedback, showToast } from "@/lib/feedback";
 import { signalReassessStart } from "@/lib/reassess-status";
-import { readThreadSource } from "@/lib/thread-source";
-import { shouldApplyThreadScopedResult, shouldRefetchForThreadEvent } from "@/lib/thread-identity-guard";
+import {
+  canNavigateBackToSameOrigin,
+  readPreviousNavigationEntryUrl,
+  readThreadSource
+} from "@/lib/thread-source";
+import {
+  isActiveThreadIdentity,
+  shouldApplyThreadScopedResult,
+  shouldRefetchForThreadEvent
+} from "@/lib/thread-identity-guard";
+import {
+  clearThreadComposerSession,
+  readThreadComposerSession,
+  writeThreadComposerSession,
+  type ThreadComposerSource
+} from "@/lib/thread-composer-session";
+import {
+  boundedSiblingRows,
+  INITIAL_SIBLING_LIMIT,
+  SIBLING_PAGE_SIZE
+} from "@/lib/thread-sibling-window";
 import { computeRepliesGenerating } from "@/lib/suggestions-spinner";
 import { composerSourceAfterClear } from "@/lib/composer-source";
 import { ageOnNextBirthday, birthdayCountdownLabel, daysUntilBirthday } from "@inbox-os/core/birthday";
@@ -136,6 +155,7 @@ import { ThreadBriefBand } from "@/components/thread/ThreadBriefBand";
 import { ViewportDiagnostics } from "@/components/thread/viewport-diagnostics";
 import { chooseDisplayBrief } from "@/lib/reply-brief";
 import { restoreFailedAttachments } from "@/lib/composer-attachments";
+import { buildScheduledSendRequest } from "@/lib/scheduled-send";
 import { nextMorningSendSlot, shouldOfferLateNightSchedule } from "@/lib/late-night-send";
 import {
   afterNextPaint,
@@ -610,6 +630,8 @@ export default function ThreadPage() {
     setFocusTrigger((n) => n + 1);
   }, []);
   const [composer, setComposer] = useState("");
+  const composerRef = useRef("");
+  const composerOwnerThreadIdRef = useRef(threadId);
   const composerInputRef = useRef<HTMLTextAreaElement | null>(null);
   const [whatsAppPollOpen, setWhatsAppPollOpen] = useState(false);
   const [whatsAppPollQuestion, setWhatsAppPollQuestion] = useState("");
@@ -634,6 +656,42 @@ export default function ThreadPage() {
   // Mirrors the live route thread id so async thread-scoped work cannot write
   // results into a different conversation after navigation.
   const routeThreadIdRef = useRef<string>(threadId);
+  routeThreadIdRef.current = threadId;
+  const threadRef = useRef<ThreadResponse | null>(thread);
+  threadRef.current = thread;
+  const isActiveThread = useCallback((expectedThreadId: string) => {
+    return isActiveThreadIdentity(
+      expectedThreadId,
+      routeThreadIdRef.current,
+      threadRef.current?.id
+    );
+  }, []);
+  const postForActiveThread = useCallback(
+    function postForActiveThread<T>(
+      expectedThreadId: string,
+      suffix: string,
+      body: unknown
+    ): Promise<T> {
+      if (!isActiveThread(expectedThreadId)) {
+        return Promise.reject(new Error("This conversation is no longer active."));
+      }
+      return apiPost<T>(`/runner/control/thread/${expectedThreadId}${suffix}`, body);
+    },
+    [isActiveThread]
+  );
+  const postFormForActiveThread = useCallback(
+    function postFormForActiveThread<T>(
+      expectedThreadId: string,
+      suffix: string,
+      body: FormData
+    ): Promise<T> {
+      if (!isActiveThread(expectedThreadId)) {
+        return Promise.reject(new Error("This conversation is no longer active."));
+      }
+      return apiPostForm<T>(`/runner/control/thread/${expectedThreadId}${suffix}`, body);
+    },
+    [isActiveThread]
+  );
   // Threads on which the operator has explicitly dismissed the AI predraft
   // (Discard / Delete draft). applyThread must not re-inject a predraft the
   // operator just cleared; keyed by route thread id, cleared on navigation.
@@ -715,6 +773,7 @@ export default function ThreadPage() {
   const [recording, setRecording] = useState(false);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const recordedChunksRef = useRef<BlobPart[]>([]);
+  const voiceRecordingGenerationRef = useRef(0);
   const voiceNoteFileInputRef = useRef<HTMLInputElement | null>(null);
   const [browserAudioCaptureAvailable, setBrowserAudioCaptureAvailable] = useState(false);
   const [dictationCaptureUnavailableReason, setDictationCaptureUnavailableReason] =
@@ -736,6 +795,7 @@ export default function ThreadPage() {
     DictationCaptureSession | NativeDictationCaptureSession | null
   >(null);
   const dictationStartGenerationRef = useRef(0);
+  const dictationAbortRef = useRef<AbortController | null>(null);
   const [dictationRecovery, setDictationRecovery] =
     useState<RecoveredDictationCapture | null>(null);
   // #462 follow-up: when a dictation transcription fails for a *transient*
@@ -750,7 +810,10 @@ export default function ThreadPage() {
   // Source of the current composer text: empty / explicit draft typed
   // by the operator / AI predraft (first suggested reply auto-filled
   // when no explicit draft exists). Drives the "AI predraft" badge.
-  const [composerSource, setComposerSource] = useState<"empty" | "draft" | "predraft" | "user">("empty");
+  const [composerSource, setComposerSource] = useState<ThreadComposerSource>("empty");
+  const composerSourceRef = useRef<ThreadComposerSource>("empty");
+  composerRef.current = composer;
+  composerSourceRef.current = composerSource;
   // Whether a draft is persisted in the DB for this thread (issue #486 /
   // pilot R-0067). Drives the "Delete draft" button — it only appears
   // when there's actually a saved draft to remove, never for an AI
@@ -1065,6 +1128,7 @@ export default function ThreadPage() {
   // give the chat column more room. State persists in localStorage and
   // toggles with the `]` keyboard shortcut.
   const [threadsCollapsed, setThreadsCollapsed] = useState(false);
+  const [siblingVisibleLimit, setSiblingVisibleLimit] = useState(INITIAL_SIBLING_LIMIT);
 
   useEffect(() => {
     const stored = window.localStorage.getItem("dashboard_threads_collapsed");
@@ -1293,7 +1357,13 @@ export default function ThreadPage() {
   // on the inbox/platforms/logs context fetches), and so a stale-while-
   // revalidate cache hit can paint instantly and then re-apply the network
   // value via this same path.
-  const applyThread = useCallback((fresh: ThreadResponse) => {
+  const applyThread = useCallback((fresh: ThreadResponse, expectedThreadId: string) => {
+    if (
+      !shouldApplyThreadScopedResult(expectedThreadId, routeThreadIdRef.current) ||
+      fresh.id !== expectedThreadId
+    ) {
+      return;
+    }
     // Merge the fresh recent-messages window with any older messages
     // the operator has already paginated in. Without this, every poll
     // (every send, every SSE event, the 3s polling tick) would
@@ -1301,6 +1371,9 @@ export default function ThreadPage() {
     // yanked back to the bottom — exactly the "I scroll up, more
     // loads, then I get kicked back down" symptom.
     setThread((current) => {
+      if (!shouldApplyThreadScopedResult(expectedThreadId, routeThreadIdRef.current)) {
+        return current;
+      }
       if (!current || current.id !== fresh.id) return fresh;
       const freshIds = new Set(fresh.messages.map((m) => m.id));
       const olderKept = current.messages.filter((m) => !freshIds.has(m.id));
@@ -1335,16 +1408,19 @@ export default function ThreadPage() {
       }
     }
     setPendingSends((prev) =>
-      prev.filter((pending) => {
-        if (pending.failed) return true; // keep failed bubbles so the operator can retry
-        const ts = freshOutTexts.get(pending.text);
-        if (ts === undefined) return true;
-        const pendingTs = Date.parse(pending.sentAt);
-        if (Number.isNaN(pendingTs)) return false; // can't compare timestamps; trust the text+thread match
-        return Math.abs(ts - pendingTs) > RECONCILE_WINDOW_MS;
-      })
+      shouldApplyThreadScopedResult(expectedThreadId, routeThreadIdRef.current)
+        ? prev.filter((pending) => {
+            if (pending.failed) return true; // keep failed bubbles so the operator can retry
+            const ts = freshOutTexts.get(pending.text);
+            if (ts === undefined) return true;
+            const pendingTs = Date.parse(pending.sentAt);
+            if (Number.isNaN(pendingTs)) return false; // can't compare timestamps; trust the text+thread match
+            return Math.abs(ts - pendingTs) > RECONCILE_WINDOW_MS;
+          })
+        : prev
     );
     setComposer((prev) => {
+      if (!shouldApplyThreadScopedResult(expectedThreadId, routeThreadIdRef.current)) return prev;
       if (prev) return prev; // operator already typed something
       const explicitDraft = fresh.draft;
       if (explicitDraft) {
@@ -1374,8 +1450,14 @@ export default function ThreadPage() {
     // Track DB-persisted draft presence independently of the composer
     // text (the operator may have typed over it), so "Delete draft"
     // reflects what's actually saved server-side.
-    setHasSavedDraft(Boolean((fresh.draft ?? "").trim()));
-    setError(null);
+    setHasSavedDraft((current) =>
+      shouldApplyThreadScopedResult(expectedThreadId, routeThreadIdRef.current)
+        ? Boolean((fresh.draft ?? "").trim())
+        : current
+    );
+    setError((current) =>
+      shouldApplyThreadScopedResult(expectedThreadId, routeThreadIdRef.current) ? null : current
+    );
   }, []);
 
   // Paint the conversation off /data/thread alone. This is the ONLY fetch
@@ -1384,17 +1466,29 @@ export default function ThreadPage() {
   // Uses the SWR cache so a hover-prefetched or previously-seen thread paints
   // instantly and revalidates in the background.
   const refreshThread = useCallback(async () => {
+    const requestedThreadId = threadId;
     try {
-      const fresh = await apiGet<ThreadResponse>(`/runner/data/thread/${threadId}`, {
+      const fresh = await apiGet<ThreadResponse>(`/runner/data/thread/${requestedThreadId}`, {
         swr: true,
-        onFresh: (data) => applyThread(data as ThreadResponse)
+        onFresh: (data) => applyThread(data as ThreadResponse, requestedThreadId)
       });
-      applyThread(fresh);
+      applyThread(fresh, requestedThreadId);
     } catch (err) {
+      if (!shouldApplyThreadScopedResult(requestedThreadId, routeThreadIdRef.current)) return;
       const message = err instanceof Error ? err.message : "Failed to load thread";
-      setError(message);
+      setError((current) =>
+        shouldApplyThreadScopedResult(requestedThreadId, routeThreadIdRef.current)
+          ? message
+          : current
+      );
     } finally {
-      setLoading(false);
+      if (shouldApplyThreadScopedResult(requestedThreadId, routeThreadIdRef.current)) {
+        setLoading((current) =>
+          shouldApplyThreadScopedResult(requestedThreadId, routeThreadIdRef.current)
+            ? false
+            : current
+        );
+      }
     }
   }, [threadId, applyThread]);
 
@@ -1427,31 +1521,40 @@ export default function ThreadPage() {
   // operator came from). Unarchive updates local state so the button flips
   // back to "Archive" without a full refetch.
   const unarchiveThread = useCallback(() => {
-    if (unarchiving) return;
+    if (unarchiving || !isActiveThread(threadId)) return;
+    const actionThreadId = threadId;
     setUnarchiving(true);
     runAction(
-      apiPost(`/runner/control/thread/${threadId}/unarchive`, {}),
+      postForActiveThread(actionThreadId, "/unarchive", {}),
       (message) => {
+        if (!isActiveThread(actionThreadId)) return;
         setError(message);
         setUnarchiving(false);
       },
-      () => setThread((current) => (current ? { ...current, archivedAt: null } : current))
+      () => {
+        if (!isActiveThread(actionThreadId)) return;
+        setThread((current) => (current ? { ...current, archivedAt: null } : current));
+      }
     );
-  }, [threadId, unarchiving]);
+  }, [isActiveThread, postForActiveThread, threadId, unarchiving]);
 
   const archiveThread = useCallback(() => {
-    if (archiving) return;
+    if (archiving || !isActiveThread(threadId)) return;
+    const actionThreadId = threadId;
     setArchiving(true);
     const returnTo = readThreadSource();
     runAction(
-      apiPost(`/runner/control/thread/${threadId}/archive`, {}),
+      postForActiveThread(actionThreadId, "/archive", {}),
       (message) => {
+        if (!isActiveThread(actionThreadId)) return;
         setError(message);
         if (message) setArchiving(false);
       },
-      () => router.push(returnTo)
+      () => {
+        if (isActiveThread(actionThreadId)) router.push(returnTo);
+      }
     );
-  }, [threadId, archiving, router]);
+  }, [archiving, isActiveThread, postForActiveThread, router, threadId]);
 
   useEffect(() => {
     refresh().catch((err) => {
@@ -1486,19 +1589,57 @@ export default function ThreadPage() {
   // attachments, in-flight optimistic sends, and A's AI snooze suggestions
   // would carry into B — risking A's draft being sent to B. Keyed on the
   // route param so it clears the instant navigation starts, before B loads.
-  useEffect(() => {
-    // Point the guard ref at the thread we're now on. In-flight thread work
-    // from the previous route will see this changed value and skip its write.
-    routeThreadIdRef.current = threadId;
+  useLayoutEffect(() => {
+    if (threadRefreshTimerRef.current) {
+      clearTimeout(threadRefreshTimerRef.current);
+      threadRefreshTimerRef.current = null;
+    }
+    const previousOwner = composerOwnerThreadIdRef.current;
+    if (previousOwner && previousOwner !== threadId) {
+      writeThreadComposerSession(previousOwner, {
+        text: composerRef.current,
+        source: composerSourceRef.current
+      });
+    }
+    const restoredComposer = readThreadComposerSession(threadId);
+    composerOwnerThreadIdRef.current = threadId;
+    composerRef.current = restoredComposer?.text ?? "";
+    composerSourceRef.current = restoredComposer?.source ?? "empty";
+    const cachedThread = peekCache<ThreadResponse>(`/runner/data/thread/${threadId}`);
+    const routeThread = cachedThread?.id === threadId ? cachedThread : null;
+    threadRef.current = routeThread;
+    setThread(routeThread);
+    setLoading(routeThread === null);
     // A freshly-opened thread starts with its predraft un-dismissed.
     predraftDismissedRef.current.delete(threadId);
-    setComposer("");
-    setComposerSource("empty");
+    setComposer(restoredComposer?.text ?? "");
+    setComposerSource(restoredComposer?.source ?? "empty");
     setHasSavedDraft(false);
+    setLoadingOlderMessages(false);
+    sendingRef.current = false;
+    setSending(false);
+    setReassessing(false);
+    setArchiving(false);
+    setUnarchiving(false);
     setComposeIntent("");
+    setComposing(false);
     setComposeDraft("");
     setComposeError(null);
     setAskAnswer(null);
+    setReceiptsOpen(false);
+    setProfileDrawerOpen(false);
+    setLinkBrowserTarget(null);
+    setReactionPickerMessageId(null);
+    setReactingMessageId(null);
+    setReactionErrorByMessageId({});
+    setOptimisticReactionsByMessageId({});
+    setEditingMessageId(null);
+    setEditDraft("");
+    setSavingEditMessageId(null);
+    setSavedEditMessageId(null);
+    setEditErrorByMessageId({});
+    setOptimisticTextByMessageId({});
+    setFavOverride(null);
     setSnoozeSuggestions(null);
     setSnoozeMenuOpen(false);
     // The suggested-replies safety-timeout flag is thread-local: it means
@@ -1516,13 +1657,53 @@ export default function ThreadPage() {
     setWhatsAppPollAllowMultiple(true);
     setWhatsAppPollSending(false);
     setWhatsAppPollSent(false);
+    voiceRecordingGenerationRef.current += 1;
+    stopRecorderAndStream(recorderRef.current, recordingStreamRef.current);
+    recorderRef.current = null;
+    recordingStreamRef.current = null;
+    recordedChunksRef.current = [];
+    setRecording(false);
+    dictationStartGenerationRef.current += 1;
+    dictationAbortRef.current?.abort();
+    dictationAbortRef.current = null;
+    dictationSessionRef.current?.cancel();
+    dictationSessionRef.current = null;
+    failedDictationAudioRef.current = null;
+    setDictationStatus("idle");
     setDictationTranscript(null);
+    setDictationRetry(null);
+    setDictationRecovery(null);
+    setDropActive(false);
+    dragDepthRef.current = 0;
     setComposerMoreOpen(false);
     setMobileSuggestionsOpen(false);
     setMobileScheduleOpen(false);
     setScheduleMenuOpen(false);
+    setScheduling(false);
+    setCancellingScheduledId(null);
+    setSavingScheduledId(null);
+    setEditingScheduledId(null);
+    setEditingScheduledDraft("");
+    setEditingScheduledTime("");
+    setOriginalScheduledTime("");
     setChipsMenuOpen(false);
     setMemoryOpen(false);
+    setOverflowOpen(false);
+    aiHistoryPushedRef.current = false;
+    aiReturnFocusRef.current = null;
+    setAiOpen(false);
+    setFocusedThreadParentId(null);
+    setAiCoverageItems([]);
+    setVoiceRewritePending(false);
+    setShowJumpToLatest(false);
+    setRescanStage(null);
+    if (rescanTimeoutRef.current) {
+      clearTimeout(rescanTimeoutRef.current);
+      rescanTimeoutRef.current = null;
+    }
+    setParticipantPopover(null);
+    setSiblingVisibleLimit(INITIAL_SIBLING_LIMIT);
+    setError(null);
     setComposerAttachments((prev) => {
       for (const a of prev) {
         if (a.previewUrl) URL.revokeObjectURL(a.previewUrl);
@@ -1530,6 +1711,21 @@ export default function ThreadPage() {
       return [];
     });
   }, [threadId]);
+
+  useEffect(() => {
+    if (composerOwnerThreadIdRef.current !== threadId) return;
+    writeThreadComposerSession(threadId, { text: composer, source: composerSource });
+  }, [composer, composerSource, threadId]);
+
+  useEffect(
+    () => () => {
+      writeThreadComposerSession(composerOwnerThreadIdRef.current, {
+        text: composerRef.current,
+        source: composerSourceRef.current
+      });
+    },
+    []
+  );
 
   // Load the operator voice profile once. Reloads on a profile-saved
   // event so an AI-help-level change in Settings lands without a reload.
@@ -1573,13 +1769,16 @@ export default function ThreadPage() {
         };
       }>).detail;
       if (!detail || !threadId) return;
+      if (!shouldApplyThreadScopedResult(threadId, routeThreadIdRef.current)) return;
       // Sibling-aware routing: accept events for the open thread OR any sibling
       // in its cohort (a split iMessage Person's other handle), so a new inbound
       // / reassess / scan on the other handle refetches the open view.
       if (!shouldRefetchForThreadEvent(detail.threadId, threadId, siblingIdsRef.current)) return;
       if (detail.type === "MESSAGE_SENT" && detail.clientSendId) {
         void refreshThread().finally(() => {
-          setPendingSends((prev) => prev.filter((p) => p.clientSendId !== detail.clientSendId));
+          if (shouldApplyThreadScopedResult(threadId, routeThreadIdRef.current)) {
+            setPendingSends((prev) => prev.filter((p) => p.clientSendId !== detail.clientSendId));
+          }
         });
       } else if (detail.type === "MESSAGE_SEND_FAILED" && detail.clientSendId) {
         const message = detail.errorMessage ?? "Send failed";
@@ -1657,7 +1856,7 @@ export default function ThreadPage() {
             deliveryUncertain?: boolean;
           }>;
         }>("/runner/data/send-queue");
-        if (cancelled) return;
+        if (cancelled || !shouldApplyThreadScopedResult(threadId, routeThreadIdRef.current)) return;
         const recentByClientId = new Map(queue.recent.map((row) => [row.clientSendId, row]));
         let sawSent = false;
         const sentIds = new Set<string>();
@@ -1684,7 +1883,7 @@ export default function ThreadPage() {
         });
         if (sawSent) {
           await refresh();
-          if (cancelled) return;
+          if (cancelled || !shouldApplyThreadScopedResult(threadId, routeThreadIdRef.current)) return;
           setPendingSends((prev) => prev.filter((p) => !sentIds.has(p.clientSendId)));
         } else if (next.some((p, i) => p !== pendingSendsRef.current[i])) {
           setPendingSends(next);
@@ -1710,13 +1909,15 @@ export default function ThreadPage() {
   }, [threadId, refresh, pendingSends.length]);
 
   const checkPendingDelivery = useCallback(
-    async (clientSendId: string) => {
+    async (clientSendId: string, expectedThreadId = routeThreadIdRef.current) => {
+      if (!isActiveThread(expectedThreadId)) return;
       const pending = pendingSendsRef.current.find((item) => item.clientSendId === clientSendId);
       if (!pending) return;
       try {
         const response = await apiGet<SendStatusResponse>(
           `/runner/data/send-status/${encodeURIComponent(clientSendId)}`
         );
+        if (!isActiveThread(expectedThreadId)) return;
         const outcome = resolveSendRecovery(response);
         if (outcome.kind === "sent") {
           for (const attachment of pending.attachments) {
@@ -1791,6 +1992,7 @@ export default function ThreadPage() {
         );
         setError(outcome.message);
       } catch {
+        if (!isActiveThread(expectedThreadId)) return;
         const message = "Delivery is still not confirmed. Reconnect, then check the conversation before sending again.";
         setPendingSends((prev) =>
           prev.map((item) =>
@@ -1807,7 +2009,7 @@ export default function ThreadPage() {
         setError(message);
       }
     },
-    [refresh]
+    [isActiveThread, refresh]
   );
 
   // Suggestions-spinner safety timer. When the runner-side status is
@@ -1840,8 +2042,9 @@ export default function ThreadPage() {
   };
 
   const onSend = useCallback(async () => {
-    if (!thread || sending || sendingRef.current) return;
+    if (!thread || !isActiveThread(thread.id) || sending || sendingRef.current) return;
     if (!composer.trim() && composerAttachments.length === 0) return;
+    const sendThreadId = thread.id;
     sendingRef.current = true;
     const clientSendId = uuid();
     const text = composer;
@@ -1859,10 +2062,13 @@ export default function ThreadPage() {
       });
     });
     setComposer("");
+    composerRef.current = "";
     // Reset the source too: an emptied composer must never keep the AI-predraft
     // accent frame + badge (#350). Without this the badge frames a blank input
     // after sending a predraft on the same thread until the operator types.
     setComposerSource(composerSourceAfterClear());
+    composerSourceRef.current = composerSourceAfterClear();
+    clearThreadComposerSession(sendThreadId);
     setComposerAttachments([]);
     setSending(true);
     setError(null);
@@ -1881,9 +2087,9 @@ export default function ThreadPage() {
         for (const a of attachmentsToSend) {
           form.append("attachments", a.file, a.file.name);
         }
-        await apiPostForm(`/runner/control/thread/${thread.id}/send`, form);
+        await postFormForActiveThread(sendThreadId, "/send", form);
       } else {
-        await apiPost(`/runner/control/thread/${thread.id}/send`, {
+        await postForActiveThread(sendThreadId, "/send", {
           text,
           clientSendId,
           clientRequestedAt: sentAt,
@@ -1897,8 +2103,9 @@ export default function ThreadPage() {
         if (a.previewUrl) URL.revokeObjectURL(a.previewUrl);
       }
     } catch (sendError) {
+      if (!isActiveThread(sendThreadId)) return;
       const failure = classifyConsumerFailure(sendError, {
-        path: `/runner/control/thread/${thread.id}/send`,
+        path: `/runner/control/thread/${sendThreadId}/send`,
         method: "POST"
       });
       if (failure.deliveryUncertain) {
@@ -1916,7 +2123,7 @@ export default function ThreadPage() {
           )
         );
         setError(message);
-        window.setTimeout(() => void checkPendingDelivery(clientSendId), 750);
+        window.setTimeout(() => void checkPendingDelivery(clientSendId, sendThreadId), 750);
       } else {
         setPendingSends((prev) => prev.filter((p) => p.clientSendId !== clientSendId));
         setError(failure.message);
@@ -1924,10 +2131,12 @@ export default function ThreadPage() {
         setComposerAttachments((prev) => restoreFailedAttachments(attachmentsToSend, prev));
       }
     } finally {
-      sendingRef.current = false;
-      setSending(false);
+      if (isActiveThread(sendThreadId)) {
+        sendingRef.current = false;
+        setSending(false);
+      }
     }
-  }, [checkPendingDelivery, composer, composerAttachments, sending, thread, focusedThreadParentId]);
+  }, [checkPendingDelivery, composer, composerAttachments, focusedThreadParentId, isActiveThread, postForActiveThread, postFormForActiveThread, sending, thread]);
 
   const addFiles = useCallback((files: FileList | File[]) => {
     const list = Array.from(files);
@@ -2072,7 +2281,8 @@ export default function ThreadPage() {
   );
 
   const sendWhatsAppPoll = useCallback(async () => {
-    if (!thread || whatsAppPollSending) return;
+    if (!thread || !isActiveThread(thread.id) || whatsAppPollSending) return;
+    const sendThreadId = thread.id;
     const question = whatsAppPollQuestion.trim();
     const options = whatsAppPollOptions.map((option) => option.trim()).filter(Boolean);
     if (!question) {
@@ -2088,12 +2298,13 @@ export default function ThreadPage() {
     setWhatsAppPollSent(false);
     setError(null);
     try {
-      await apiPost(`/runner/control/thread/${thread.id}/send-poll`, {
+      await postForActiveThread(sendThreadId, "/send-poll", {
         question,
         options,
         allowMultipleAnswers: whatsAppPollAllowMultiple,
         clientSendId: uuid()
       });
+      if (!isActiveThread(sendThreadId)) return;
       setWhatsAppPollQuestion("");
       setWhatsAppPollOptions(["", ""]);
       setWhatsAppPollAllowMultiple(true);
@@ -2101,13 +2312,16 @@ export default function ThreadPage() {
       setWhatsAppPollSent(true);
       stickToBottomRef.current = true;
       await refresh();
-      window.setTimeout(() => setWhatsAppPollSent(false), 1800);
+      window.setTimeout(() => {
+        if (isActiveThread(sendThreadId)) setWhatsAppPollSent(false);
+      }, 1800);
     } catch (pollError) {
+      if (!isActiveThread(sendThreadId)) return;
       setError(pollError instanceof Error ? pollError.message : "Failed to send poll");
     } finally {
-      setWhatsAppPollSending(false);
+      if (isActiveThread(sendThreadId)) setWhatsAppPollSending(false);
     }
-  }, [refresh, thread, whatsAppPollAllowMultiple, whatsAppPollOptions, whatsAppPollQuestion, whatsAppPollSending]);
+  }, [isActiveThread, postForActiveThread, refresh, thread, whatsAppPollAllowMultiple, whatsAppPollOptions, whatsAppPollQuestion, whatsAppPollSending]);
 
   // Revoke any outstanding image preview object URLs when the thread view
   // unmounts (e.g. navigating away mid-compose) so they don't leak.
@@ -2132,12 +2346,14 @@ export default function ThreadPage() {
   useEffect(
     () => () => {
       dictationStartGenerationRef.current += 1;
+      voiceRecordingGenerationRef.current += 1;
+      dictationAbortRef.current?.abort();
+      dictationAbortRef.current = null;
       stopRecorderAndStream(recorderRef.current, recordingStreamRef.current);
       recorderRef.current = null;
       recordingStreamRef.current = null;
       const dictationSession = dictationSessionRef.current;
-      if (dictationSession?.native) dictationSession.stop();
-      else dictationSession?.interrupt("pagehide");
+      dictationSession?.cancel();
       dictationSessionRef.current = null;
     },
     []
@@ -2171,8 +2387,17 @@ export default function ThreadPage() {
       voiceNoteFileInputRef.current?.click();
       return;
     }
+    const startThreadId = threadId;
+    const generation = ++voiceRecordingGenerationRef.current;
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      if (
+        generation !== voiceRecordingGenerationRef.current ||
+        !isActiveThread(startThreadId)
+      ) {
+        stream.getTracks().forEach((track) => track.stop());
+        return;
+      }
       // Prefer mp4/aac if supported (Safari + iMessage friendly); fall back
       // to webm/opus everywhere else and let the runner transcode.
       const mimeType = MediaRecorder.isTypeSupported("audio/mp4")
@@ -2184,21 +2409,30 @@ export default function ThreadPage() {
       recordedChunksRef.current = [];
       recorder.ondataavailable = (e) => { if (e.data.size > 0) recordedChunksRef.current.push(e.data); };
       recorder.onstop = () => {
-        const blob = new Blob(recordedChunksRef.current, { type: recorder.mimeType });
-        const ext = recorder.mimeType.includes("mp4") ? "m4a" : "webm";
-        const file = new File([blob], `Voice Message.${ext}`, { type: recorder.mimeType });
-        addFiles([file]);
+        if (
+          generation === voiceRecordingGenerationRef.current &&
+          isActiveThread(startThreadId)
+        ) {
+          const blob = new Blob(recordedChunksRef.current, { type: recorder.mimeType });
+          const ext = recorder.mimeType.includes("mp4") ? "m4a" : "webm";
+          const file = new File([blob], `Voice Message.${ext}`, { type: recorder.mimeType });
+          addFiles([file]);
+        }
         stream.getTracks().forEach((t) => t.stop());
-        recordingStreamRef.current = null;
+        if (generation === voiceRecordingGenerationRef.current) {
+          recordingStreamRef.current = null;
+        }
       };
       recorder.start();
       recorderRef.current = recorder;
       recordingStreamRef.current = stream;
       setRecording(true);
     } catch (err) {
-      setError(microphoneAccessMessage(err));
+      if (generation === voiceRecordingGenerationRef.current && isActiveThread(startThreadId)) {
+        setError(microphoneAccessMessage(err));
+      }
     }
-  }, [addFiles, recording]);
+  }, [addFiles, isActiveThread, recording, threadId]);
 
   const stopRecording = useCallback(() => {
     if (!recording || !recorderRef.current) return;
@@ -2234,7 +2468,18 @@ export default function ThreadPage() {
   // Nothing is persisted server-side; on a *transient* failure we keep the
   // audio in memory and show a retry banner so the
   // operator never loses a recording to a dropped connection.
-  const submitDictationAudio = useCallback(async (audio: PreparedDictationAudio) => {
+  const submitDictationAudio = useCallback(async (
+    audio: PreparedDictationAudio,
+    expectedThreadId = routeThreadIdRef.current,
+    expectedGeneration = dictationStartGenerationRef.current
+  ) => {
+    const isCurrent = () =>
+      shouldApplyThreadScopedResult(expectedThreadId, routeThreadIdRef.current) &&
+      expectedGeneration === dictationStartGenerationRef.current;
+    if (!isCurrent()) return;
+    const controller = new AbortController();
+    dictationAbortRef.current?.abort();
+    dictationAbortRef.current = controller;
     setDictationRetry(null);
     setDictationStatus("transcribing");
     try {
@@ -2244,9 +2489,11 @@ export default function ThreadPage() {
       try {
         resp = await fetch("/runner/control/transcribe-dictation", {
           method: "POST",
-          body: form
+          body: form,
+          signal: controller.signal
         });
       } catch {
+        if (!isCurrent() || controller.signal.aborted) return;
         // The request never completed — network / dev-proxy drop. The clip
         // is fine; keep it for a one-tap retry rather than losing the audio.
         failedDictationAudioRef.current = audio;
@@ -2254,6 +2501,7 @@ export default function ThreadPage() {
         return;
       }
       const data = (await resp.json().catch(() => ({}))) as DictationResponseBody;
+      if (!isCurrent()) return;
       const outcome = classifyDictationResponse({
         ok: resp.ok,
         status: resp.status,
@@ -2281,6 +2529,7 @@ export default function ThreadPage() {
           break;
       }
     } catch (err) {
+      if (!isCurrent() || controller.signal.aborted) return;
       // Defensive: anything unexpected after a completed request. Keep the
       // clip so the operator can still retry without re-recording.
       failedDictationAudioRef.current = audio;
@@ -2290,15 +2539,22 @@ export default function ThreadPage() {
           : "Dictation failed. Your recording is still here. Try again."
       );
     } finally {
-      setDictationStatus("idle");
+      if (dictationAbortRef.current === controller) dictationAbortRef.current = null;
+      if (isCurrent()) setDictationStatus("idle");
     }
   }, []);
 
   const prepareAndSubmitDictation = useCallback(async (
     blob: Blob,
     source: "live-recording" | "selected-file",
-    originalName?: string
+    originalName?: string,
+    expectedThreadId = routeThreadIdRef.current,
+    expectedGeneration = dictationStartGenerationRef.current
   ) => {
+    const isCurrent = () =>
+      shouldApplyThreadScopedResult(expectedThreadId, routeThreadIdRef.current) &&
+      expectedGeneration === dictationStartGenerationRef.current;
+    if (!isCurrent()) return;
     setDictationStatus("transcribing");
     try {
       const prepared = await prepareDictationAudio({
@@ -2307,8 +2563,10 @@ export default function ThreadPage() {
         uploadMode: dictationUploadMode,
         originalName
       });
-      await submitDictationAudio(prepared);
+      if (!isCurrent()) return;
+      await submitDictationAudio(prepared, expectedThreadId, expectedGeneration);
     } catch {
+      if (!isCurrent()) return;
       setError("Could not prepare the recording for transcription.");
       setDictationStatus("idle");
     }
@@ -2317,7 +2575,7 @@ export default function ThreadPage() {
   // #462: record a short clip and hand it to the runner. No autosend;
   // nothing is persisted server-side.
   const startDictation = useCallback(async () => {
-    if (dictationStatus !== "idle") return;
+    if (dictationStatus !== "idle" || !isActiveThread(threadId)) return;
     // A fresh recording supersedes any earlier failed clip + retry banner.
     failedDictationAudioRef.current = null;
     setDictationRetry(null);
@@ -2334,37 +2592,51 @@ export default function ThreadPage() {
       return;
     }
     const generation = ++dictationStartGenerationRef.current;
+    const startThreadId = threadId;
+    const isCurrentCapture = () =>
+      generation === dictationStartGenerationRef.current &&
+      isActiveThread(startThreadId);
     try {
       const standalone = window.matchMedia("(display-mode: standalone)").matches;
       const captureOptions = {
         onCancel: () => {
-          if (dictationStartGenerationRef.current === generation) setDictationStatus("idle");
+          if (isCurrentCapture()) setDictationStatus("idle");
         },
         onError: (captureError: unknown) => {
+          if (!isCurrentCapture()) return;
           dictationSessionRef.current = null;
           setError(microphoneAccessMessage(captureError, standalone));
           setDictationStatus("idle");
         },
         onInterrupted: (capture: RecoveredDictationCapture) => {
+          if (!isCurrentCapture()) return;
           dictationSessionRef.current = null;
           setDictationRecovery(capture);
           setDictationStatus("idle");
         },
         onRecorded: async (raw: Blob) => {
+          if (!isCurrentCapture()) return;
           dictationSessionRef.current = null;
-          await prepareAndSubmitDictation(raw, "live-recording");
+          await prepareAndSubmitDictation(
+            raw,
+            "live-recording",
+            undefined,
+            startThreadId,
+            generation
+          );
         }
       };
       const session = nativeDictationCaptureAvailable()
         ? await startNativeDictationCapture(captureOptions)
         : await startDictationCapture(captureOptions);
-      if (dictationStartGenerationRef.current !== generation) {
+      if (!isCurrentCapture()) {
         session.cancel();
         return;
       }
       dictationSessionRef.current = session;
       setDictationStatus("recording");
     } catch (err) {
+      if (!isCurrentCapture()) return;
       setError(
         microphoneAccessMessage(
           err,
@@ -2373,7 +2645,7 @@ export default function ThreadPage() {
       );
       setDictationStatus("idle");
     }
-  }, [dictationStatus, prepareAndSubmitDictation]);
+  }, [dictationStatus, isActiveThread, prepareAndSubmitDictation, threadId]);
 
   const stopDictation = useCallback(() => {
     if (dictationStatus !== "recording" || !dictationSessionRef.current) return;
@@ -2407,8 +2679,15 @@ export default function ThreadPage() {
 
   useEffect(() => {
     let active = true;
+    const recoveryThreadId = routeThreadIdRef.current;
     void recoverInterruptedDictationCapture().then((recovery) => {
-      if (active && recovery) setDictationRecovery(recovery);
+      if (
+        active &&
+        recovery &&
+        shouldApplyThreadScopedResult(recoveryThreadId, routeThreadIdRef.current)
+      ) {
+        setDictationRecovery(recovery);
+      }
     });
     return () => {
       active = false;
@@ -2439,7 +2718,8 @@ export default function ThreadPage() {
   }, [dictationTranscript]);
 
   const sendDictationMessage = useCallback(async (text: string) => {
-    if (!thread) throw new Error("This conversation is no longer available.");
+    if (!thread || !isActiveThread(thread.id)) throw new Error("This conversation is no longer available.");
+    const sendThreadId = thread.id;
     const trimmed = text.trim();
     if (!trimmed) throw new Error("An empty message cannot be sent.");
     const clientSendId = uuid();
@@ -2448,17 +2728,19 @@ export default function ThreadPage() {
     setPendingSends((current) => [...current, { clientSendId, text: trimmed, sentAt, attachments: [] }]);
     stickToBottomRef.current = true;
     try {
-      await apiPost(`/runner/control/thread/${thread.id}/send`, {
+      await postForActiveThread(sendThreadId, "/send", {
         text: trimmed,
         clientSendId,
         clientRequestedAt: sentAt,
         ...(focusedThreadParentId ? { replyToMessageId: focusedThreadParentId } : {})
       });
     } catch (sendError) {
-      setPendingSends((current) => current.filter((pending) => pending.clientSendId !== clientSendId));
+      if (isActiveThread(sendThreadId)) {
+        setPendingSends((current) => current.filter((pending) => pending.clientSendId !== clientSendId));
+      }
       throw sendError;
     }
-  }, [focusedThreadParentId, thread]);
+  }, [focusedThreadParentId, isActiveThread, postForActiveThread, thread]);
 
   // Cmd/Ctrl-Enter sends.
   useEffect(() => {
@@ -2479,53 +2761,90 @@ export default function ThreadPage() {
   // only).
   const scheduleSend = useCallback(
     async (at: Date) => {
-      if (!thread || !composer.trim() || scheduling) return;
+      if (
+        !thread ||
+        !isActiveThread(thread.id) ||
+        (!composer.trim() && composerAttachments.length === 0) ||
+        scheduling
+      ) return;
+      const sendThreadId = thread.id;
       const clientSendId = uuid();
       const text = composer;
+      const attachmentsToSchedule = composerAttachments;
+      const replyToMessageId = focusedThreadParentId ?? undefined;
       setScheduling(true);
       setError(null);
       try {
-        await apiPost(`/runner/control/thread/${thread.id}/send`, {
-          text,
+        const request = buildScheduledSendRequest({
+          attachments: attachmentsToSchedule,
           clientSendId,
-          scheduledFor: at.toISOString()
+          replyToMessageId,
+          scheduledFor: at.toISOString(),
+          text
         });
+        if (request.kind === "multipart") {
+          await postFormForActiveThread(sendThreadId, "/send", request.body);
+        } else {
+          await postForActiveThread(sendThreadId, "/send", request.body);
+        }
+        if (!isActiveThread(sendThreadId)) return;
+        for (const attachment of attachmentsToSchedule) {
+          if (attachment.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
+        }
         setComposer("");
+        composerRef.current = "";
+        setComposerAttachments([]);
         // Reset the source too (see onSend): a scheduled predraft empties the
         // composer, so the predraft badge/frame must not linger over a blank
         // input.
         setComposerSource(composerSourceAfterClear());
+        composerSourceRef.current = composerSourceAfterClear();
+        clearThreadComposerSession(sendThreadId);
         setScheduleMenuOpen(false);
         setCustomScheduleValue("");
         await refresh();
       } catch (sendError) {
+        if (!isActiveThread(sendThreadId)) return;
         const message = sendError instanceof Error ? sendError.message : "Failed to schedule send";
         setError(message);
       } finally {
-        setScheduling(false);
+        if (isActiveThread(sendThreadId)) setScheduling(false);
       }
     },
-    [composer, refresh, scheduling, thread]
+    [
+      composer,
+      composerAttachments,
+      focusedThreadParentId,
+      isActiveThread,
+      postForActiveThread,
+      postFormForActiveThread,
+      refresh,
+      scheduling,
+      thread
+    ]
   );
 
   const cancelScheduledSend = useCallback(
     async (clientSendId: string) => {
-      if (!thread) return;
+      if (!thread || !isActiveThread(thread.id)) return;
+      const actionThreadId = thread.id;
       setCancellingScheduledId(clientSendId);
       try {
-        await apiPost(`/runner/control/thread/${thread.id}/cancel-send`, {
+        await postForActiveThread(actionThreadId, "/cancel-send", {
           clientSendId
         });
+        if (!isActiveThread(actionThreadId)) return;
         await refresh();
       } catch (cancelError) {
+        if (!isActiveThread(actionThreadId)) return;
         const message =
           cancelError instanceof Error ? cancelError.message : "Failed to cancel scheduled send";
         setError(message);
       } finally {
-        setCancellingScheduledId(null);
+        if (isActiveThread(actionThreadId)) setCancellingScheduledId(null);
       }
     },
-    [refresh, thread]
+    [isActiveThread, postForActiveThread, refresh, thread]
   );
 
   const beginEditScheduled = useCallback(
@@ -2549,7 +2868,8 @@ export default function ThreadPage() {
 
   const saveEditScheduled = useCallback(
     async (clientSendId: string) => {
-      if (!thread) return;
+      if (!thread || !isActiveThread(thread.id)) return;
+      const actionThreadId = thread.id;
       const text = editingScheduledDraft.trim();
       if (!text) return;
       // Only include scheduledFor when the operator changed it. Sending
@@ -2570,18 +2890,20 @@ export default function ThreadPage() {
       }
       setSavingScheduledId(clientSendId);
       try {
-        await apiPost(`/runner/control/thread/${thread.id}/update-send`, body);
+        await postForActiveThread(actionThreadId, "/update-send", body);
+        if (!isActiveThread(actionThreadId)) return;
         cancelEditScheduled();
         await refresh();
       } catch (saveError) {
+        if (!isActiveThread(actionThreadId)) return;
         const message =
           saveError instanceof Error ? saveError.message : "Failed to update scheduled send";
         setError(message);
       } finally {
-        setSavingScheduledId(null);
+        if (isActiveThread(actionThreadId)) setSavingScheduledId(null);
       }
     },
-    [cancelEditScheduled, editingScheduledDraft, editingScheduledTime, originalScheduledTime, refresh, thread]
+    [cancelEditScheduled, editingScheduledDraft, editingScheduledTime, isActiveThread, originalScheduledTime, postForActiveThread, refresh, thread]
   );
 
   // Click-outside / Escape closes the schedule picker. Mirrors the
@@ -2627,7 +2949,8 @@ export default function ThreadPage() {
 
   const retryPendingSend = (clientSendId: string) => {
     const target = pendingSends.find((p) => p.clientSendId === clientSendId);
-    if (!target || !thread || target.uncertain) return;
+    if (!target || !thread || !isActiveThread(thread.id) || target.uncertain) return;
+    const actionThreadId = thread.id;
     // Re-queue the existing failed SendRequest under a fresh clientSendId
     // via the runner's /retry-send endpoint (the runner keeps the failed
     // row for receipts and inserts a new PENDING row with the same text).
@@ -2636,10 +2959,9 @@ export default function ThreadPage() {
         p.clientSendId === clientSendId ? { ...p, failed: false, errorMessage: undefined, errorKind: undefined } : p
       )
     );
-    apiPost<{ clientSendId: string }>(`/runner/control/thread/${thread.id}/retry-send`, {
-      clientSendId
-    })
+    postForActiveThread<{ clientSendId: string }>(actionThreadId, "/retry-send", { clientSendId })
       .then((r) => {
+        if (!isActiveThread(actionThreadId)) return;
         // Swap the local pending row's clientSendId so SSE reconciliation
         // matches the new, in-flight one.
         setPendingSends((prev) =>
@@ -2649,6 +2971,7 @@ export default function ThreadPage() {
         );
       })
       .catch((retryErr: unknown) => {
+        if (!isActiveThread(actionThreadId)) return;
         const message = retryErr instanceof Error ? retryErr.message : "Retry failed";
         setPendingSends((prev) =>
           prev.map((p) =>
@@ -2728,14 +3051,21 @@ export default function ThreadPage() {
   // slice and the dashboard requests older pages with `?beforeMessageId`
   // when the operator scrolls near the top of the timeline.
   const loadOlderMessages = async () => {
-    if (!thread?.messagePage.hasOlder || !thread.messagePage.olderCursor || loadingOlderMessages) {
+    if (
+      !thread?.messagePage.hasOlder ||
+      !thread.messagePage.olderCursor ||
+      !isActiveThread(thread.id) ||
+      loadingOlderMessages
+    ) {
       return;
     }
+    const requestedThreadId = thread.id;
     setLoadingOlderMessages(true);
     try {
       const olderPage = await apiGet<ThreadResponse>(
         `/runner/data/thread/${thread.id}?beforeMessageId=${encodeURIComponent(thread.messagePage.olderCursor)}&messagesLimit=${thread.messagePage.limit}`
       );
+      if (!isActiveThread(requestedThreadId)) return;
       setThread((current) => {
         // Race guard: if the user has navigated to a different thread
         // mid-fetch, the in-flight older-messages response now belongs
@@ -2762,15 +3092,17 @@ export default function ThreadPage() {
       });
       setError(null);
     } catch (loadError) {
+      if (!isActiveThread(requestedThreadId)) return;
       const message = loadError instanceof Error ? loadError.message : "Failed to load older messages";
       setError(message);
     } finally {
-      setLoadingOlderMessages(false);
+      if (isActiveThread(requestedThreadId)) setLoadingOlderMessages(false);
     }
   };
 
   const toggleOpenLoop = async (loop: string, dismissed: boolean) => {
-    if (!thread) return;
+    if (!thread || !isActiveThread(thread.id)) return;
+    const actionThreadId = thread.id;
     // Optimistic local update so the checkbox flips immediately. The
     // refresh that follows will reconcile against the runner.
     setThread((current) => {
@@ -2791,8 +3123,9 @@ export default function ThreadPage() {
       };
     });
     try {
-      await apiPost(`/runner/control/thread/${thread.id}/open-loop`, { loop, dismissed });
+      await postForActiveThread(actionThreadId, "/open-loop", { loop, dismissed });
     } catch (loopError) {
+      if (!isActiveThread(actionThreadId)) return;
       // Roll back via a fresh refresh; surfacing the error inline is
       // enough - the operator sees the box flip back.
       const message = loopError instanceof Error ? loopError.message : "Failed to update open loop";
@@ -2802,7 +3135,7 @@ export default function ThreadPage() {
   };
 
   const reassessThread = () => {
-    if (!thread || reassessing) return;
+    if (!thread || !isActiveThread(thread.id) || reassessing) return;
     setReassessing(true);
     // Issue #369. Reassess is a 5-15s LLM call — ongoing work, not an
     // event. Surface the in-flight state in TopStatus (via
@@ -2812,13 +3145,15 @@ export default function ThreadPage() {
     // established by #337 for the pilot feedback modal.
     const threadId = thread.id;
     const stopTickerSignal = signalReassessStart(threadId);
-    apiPost(`/runner/control/thread/${threadId}/reassess`, {})
+    postForActiveThread(threadId, "/reassess", {})
       .then(async () => {
+        if (!isActiveThread(threadId)) return;
         showToast({ kind: "success", title: "Reply Brief refreshed" });
         setError(null);
         await refresh();
       })
       .catch((err) => {
+        if (!isActiveThread(threadId)) return;
         const message = err instanceof Error ? err.message : String(err);
         showToast({
           kind: "error",
@@ -2829,7 +3164,7 @@ export default function ThreadPage() {
       })
       .finally(() => {
         stopTickerSignal();
-        setReassessing(false);
+        if (isActiveThread(threadId)) setReassessing(false);
       });
   };
 
@@ -2840,7 +3175,8 @@ export default function ThreadPage() {
   // optimistically (OUT direction) the instant it is sent, then confirmed
   // by refresh(); on failure the optimistic glyph is rolled back.
   const reactToMessage = async (messageId: string, emoji: string) => {
-    if (!thread || reactingMessageId) return;
+    if (!thread || !isActiveThread(thread.id) || reactingMessageId) return;
+    const actionThreadId = thread.id;
     const optimistic: MessageReaction = { emoji, kind: "emoji", direction: "OUT" };
     setReactionPickerMessageId(null);
     setReactingMessageId(messageId);
@@ -2855,10 +3191,12 @@ export default function ThreadPage() {
       [messageId]: [...(prev[messageId] ?? []), optimistic]
     }));
     try {
-      await apiPost<{ status: string; emoji: string }>(
-        `/runner/control/thread/${thread.id}/message/${messageId}/react`,
+      await postForActiveThread<{ status: string; emoji: string }>(
+        actionThreadId,
+        `/message/${messageId}/react`,
         { emoji }
       );
+      if (!isActiveThread(actionThreadId)) return;
       setError(null);
       // The runner has persisted the reaction; the refresh below pulls the
       // authoritative copy. Drop our optimistic overlay for this message so
@@ -2871,6 +3209,7 @@ export default function ThreadPage() {
       });
       await refresh();
     } catch (reactError) {
+      if (!isActiveThread(actionThreadId)) return;
       const message = reactError instanceof Error ? reactError.message : "Reaction failed";
       // Roll the optimistic glyph back so the bubble reflects reality, then
       // surface the failure inline on this message only.
@@ -2889,14 +3228,16 @@ export default function ThreadPage() {
       });
       setReactionErrorByMessageId((prev) => ({ ...prev, [messageId]: message }));
     } finally {
-      setReactingMessageId(null);
+      if (isActiveThread(actionThreadId)) setReactingMessageId(null);
     }
   };
 
   const voteOnPoll = async (messageId: string, selectedOptions: string[]) => {
-    if (!thread) return;
-    await apiPost<{ status: string; selectedOptions: string[] }>(
-      `/runner/control/thread/${thread.id}/message/${messageId}/poll-vote`,
+    if (!thread || !isActiveThread(thread.id)) return;
+    const actionThreadId = thread.id;
+    await postForActiveThread<{ status: string; selectedOptions: string[] }>(
+      actionThreadId,
+      `/message/${messageId}/poll-vote`,
       { selectedOptions }
     );
     await refresh();
@@ -2906,10 +3247,12 @@ export default function ThreadPage() {
   // Always fetched fresh — WhatsApp-side votes change under us, so there
   // is nothing worth caching.
   const fetchPollVotes = async (messageId: string) => {
-    if (!thread) return [];
+    if (!thread || !isActiveThread(thread.id)) return [];
+    const actionThreadId = thread.id;
     const response = await apiGet<{ votes: PollVoteRecord[] }>(
-      `/runner/control/thread/${thread.id}/message/${messageId}/poll-votes`
+      `/runner/control/thread/${actionThreadId}/message/${messageId}/poll-votes`
     );
+    if (!isActiveThread(actionThreadId)) return [];
     return response.votes;
   };
 
@@ -2934,7 +3277,8 @@ export default function ThreadPage() {
   };
 
   const saveMessageEdit = async (messageId: string) => {
-    if (!thread || savingEditMessageId) return;
+    if (!thread || !isActiveThread(thread.id) || savingEditMessageId) return;
+    const actionThreadId = thread.id;
     const nextText = editDraft.trim();
     if (!nextText) {
       setEditErrorByMessageId((prev) => ({ ...prev, [messageId]: "Message cannot be empty" }));
@@ -2949,32 +3293,40 @@ export default function ThreadPage() {
       return next;
     });
     try {
-      const output = await apiPost<{ status: string; text: string }>(
-        `/runner/control/thread/${thread.id}/message/${messageId}/edit`,
+      const output = await postForActiveThread<{ status: string; text: string }>(
+        actionThreadId,
+        `/message/${messageId}/edit`,
         { text: nextText }
       );
+      if (!isActiveThread(actionThreadId)) return;
       const confirmedText = output.text || nextText;
       setOptimisticTextByMessageId((prev) => ({ ...prev, [messageId]: confirmedText }));
       setEditDraft(confirmedText);
       setSavedEditMessageId(messageId);
       setError(null);
       await refresh();
+      if (!isActiveThread(actionThreadId)) return;
       window.setTimeout(() => {
-        setEditingMessageId((current) => (current === messageId ? null : current));
+        if (isActiveThread(actionThreadId)) {
+          setEditingMessageId((current) => (current === messageId ? null : current));
+        }
       }, 700);
       window.setTimeout(() => {
-        setSavedEditMessageId((current) => (current === messageId ? null : current));
+        if (isActiveThread(actionThreadId)) {
+          setSavedEditMessageId((current) => (current === messageId ? null : current));
+        }
       }, 1800);
     } catch (editError) {
+      if (!isActiveThread(actionThreadId)) return;
       const message = editError instanceof Error ? editError.message : "Edit failed";
       setEditErrorByMessageId((prev) => ({ ...prev, [messageId]: message }));
     } finally {
-      setSavingEditMessageId(null);
+      if (isActiveThread(actionThreadId)) setSavingEditMessageId(null);
     }
   };
 
   const composeFromIntent = async () => {
-    if (!thread) return;
+    if (!thread || !isActiveThread(thread.id)) return;
     const intent = composeIntent.trim();
     if (!intent || composing) return;
     setComposing(true);
@@ -2982,24 +3334,23 @@ export default function ThreadPage() {
     setAskAnswer(null);
     const startThreadId = threadId;
     try {
-      const output = await apiPost<{ text: string }>(`/runner/control/thread/${thread.id}/compose`, {
-        intent
-      });
+      const output = await postForActiveThread<{ text: string }>(thread.id, "/compose", { intent });
       // Multi-second LLM call; the page does not remount across /thread/A ->
       // /thread/B, so bail if the operator navigated away rather than writing
       // A's draft into B's drawer (a wrong-recipient hazard).
       if (!shouldApplyThreadScopedResult(startThreadId, routeThreadIdRef.current)) return;
       setComposeDraft(output.text);
     } catch (composeErr) {
+      if (!shouldApplyThreadScopedResult(startThreadId, routeThreadIdRef.current)) return;
       const message = composeErr instanceof Error ? composeErr.message : "Compose failed";
       setComposeError(message);
     } finally {
-      setComposing(false);
+      if (shouldApplyThreadScopedResult(startThreadId, routeThreadIdRef.current)) setComposing(false);
     }
   };
 
   const askAi = async () => {
-    if (!thread) return;
+    if (!thread || !isActiveThread(thread.id)) return;
     const question = composeIntent.trim();
     if (!question || composing) return;
     setComposing(true);
@@ -3014,10 +3365,11 @@ export default function ThreadPage() {
       if (!shouldApplyThreadScopedResult(startThreadId, routeThreadIdRef.current)) return;
       setAskAnswer(output.answer ?? "");
     } catch (askErr) {
+      if (!shouldApplyThreadScopedResult(startThreadId, routeThreadIdRef.current)) return;
       const message = askErr instanceof Error ? askErr.message : "Ask failed";
       setComposeError(message);
     } finally {
-      setComposing(false);
+      if (shouldApplyThreadScopedResult(startThreadId, routeThreadIdRef.current)) setComposing(false);
     }
   };
 
@@ -3095,7 +3447,8 @@ export default function ThreadPage() {
           // to a different thread).
           if (
             draftCoverageThreadIdRef.current !== threadId ||
-            draftCoverageDraftRef.current !== trimmed
+            draftCoverageDraftRef.current !== trimmed ||
+            !shouldApplyThreadScopedResult(threadId, routeThreadIdRef.current)
           ) {
             return;
           }
@@ -3408,6 +3761,41 @@ export default function ThreadPage() {
         return bAt - aAt;
       });
   }, [siblings, siblingPlatform]);
+  const selectedSibling = useMemo(
+    () => {
+      const inboxRow = siblings.find((row) => row.id === threadId);
+      if (inboxRow) return inboxRow;
+      if (!thread || thread.id !== threadId) return null;
+      const latest = thread.messages.at(-1);
+      return {
+        id: thread.id,
+        personId: thread.personId,
+        personName: thread.personName,
+        personAvatarUrl: thread.personAvatarUrl,
+        platform: thread.platform,
+        preview: latest?.text ?? "",
+        lastMessageDirection: latest?.direction ?? null,
+        unreadCount: thread.unreadCount,
+        riskLevel: thread.riskLevel,
+        needsReply: thread.needsReply,
+        lastMessageAt: latest?.timestamp ?? null,
+        lastInboundAt: null,
+        lastOutboundAt: null,
+        slaCountdown: "",
+        archivedAt: thread.archivedAt,
+        snoozedUntil: thread.snoozedUntil,
+        personFavourite: thread.personFavourite
+      } satisfies InboxRow;
+    },
+    [siblings, thread, threadId]
+  );
+  const visibleSiblingRows = useMemo(
+    () => boundedSiblingRows(siblingRows, siblingVisibleLimit, selectedSibling),
+    [selectedSibling, siblingRows, siblingVisibleLimit]
+  );
+  const siblingRowTotal =
+    siblingRows.length +
+    (selectedSibling && !siblingRows.some((row) => row.id === selectedSibling.id) ? 1 : 0);
 
   // Force-scroll-to-bottom when switching threads.
   useEffect(() => {
@@ -3524,7 +3912,7 @@ export default function ThreadPage() {
     setShowJumpToLatest(false);
   }, []);
 
-  if (!thread) {
+  if (!thread || thread.id !== threadId) {
     // `loading` flips false the moment the fetch settles. A failed fetch
     // (stale / removed thread id, runner unreachable) leaves `thread` null
     // with an `error` set — render that instead of a "Loading…" that would
@@ -3561,7 +3949,26 @@ export default function ThreadPage() {
   // Favourite star in the header (R-0066 / #483). Optimistic: flip locally,
   // persist, then refresh so the inbox/today views re-sort; revert on failure.
   const favourite = favOverride ?? thread.personFavourite ?? false;
+  const goBackFromThread = () => {
+    const previousEntryUrl = readPreviousNavigationEntryUrl(
+      (window as unknown as { navigation?: unknown }).navigation
+    );
+    if (
+      typeof window !== "undefined" &&
+      canNavigateBackToSameOrigin(
+        window.history.length,
+        document.referrer,
+        window.location.origin,
+        previousEntryUrl
+      )
+    ) {
+      router.back();
+      return;
+    }
+    router.push(readThreadSource());
+  };
   const toggleFavourite = () => {
+    if (!isActiveThread(thread.id)) return;
     const next = !favourite;
     const personId = thread.personId;
     const startThreadId = threadId;
@@ -3686,8 +4093,11 @@ export default function ThreadPage() {
       items: [
         {
           label: "Schedule send",
-          description: composer.trim() ? "Choose when this reply should be sent." : "Write a reply first.",
-          disabled: !composer.trim() || sending || scheduling,
+          description:
+            composer.trim() || composerAttachments.length > 0
+              ? "Choose when this reply should be sent."
+              : "Write a reply or attach a file first.",
+          disabled: (!composer.trim() && composerAttachments.length === 0) || sending || scheduling,
           onSelect: () => setMobileScheduleOpen(true)
         }
       ]
@@ -3765,12 +4175,16 @@ export default function ThreadPage() {
     label: "Save draft",
     onSelect: () =>
       runActionWithFeedback(
-        apiPost(`/runner/control/thread/${thread.id}/draft`, { text: composer }),
+        postForActiveThread(thread.id, "/draft", { text: composer }),
         {
           pending: "Saving draft…",
           success: "Draft saved",
-          setError,
-          onDone: () => setHasSavedDraft(composer.trim().length > 0)
+          setError: (message) => {
+            if (isActiveThread(thread.id)) setError(message);
+          },
+          onDone: () => {
+            if (isActiveThread(thread.id)) setHasSavedDraft(composer.trim().length > 0);
+          }
         }
       )
   };
@@ -3779,13 +4193,19 @@ export default function ThreadPage() {
     danger: true as const,
     onSelect: () =>
       runActionWithFeedback(
-        apiPost(`/runner/control/thread/${thread.id}/delete-draft`, {}),
+        postForActiveThread(thread.id, "/delete-draft", {}),
         {
           pending: "Deleting draft…",
           success: "Draft deleted",
-          setError,
+          setError: (message) => {
+            if (isActiveThread(thread.id)) setError(message);
+          },
           onDone: () => {
+            if (!isActiveThread(thread.id)) return;
             predraftDismissedRef.current.add(thread.id);
+            clearThreadComposerSession(thread.id);
+            composerRef.current = "";
+            composerSourceRef.current = "empty";
             setComposer("");
             setComposerSource("empty");
             setHasSavedDraft(false);
@@ -3799,8 +4219,10 @@ export default function ThreadPage() {
           label: "Wake up",
           onSelect: () =>
             runAction(
-              apiPost(`/runner/control/thread/${thread.id}/unsnooze`, {}),
-              setError,
+              postForActiveThread(thread.id, "/unsnooze", {}),
+              (message) => {
+                if (isActiveThread(thread.id)) setError(message);
+              },
               refresh
             )
         }
@@ -3812,10 +4234,16 @@ export default function ThreadPage() {
               void apiGet<{
                 suggestions: Array<{ label: string; hours: number; reason: string }>;
               }>(`/runner/control/thread/${thread.id}/suggest-snooze`)
-                .then((r) =>
-                  setSnoozeSuggestions({ loading: false, items: r.suggestions ?? [] })
-                )
-                .catch(() => setSnoozeSuggestions({ loading: false, items: [] }));
+                .then((r) => {
+                  if (isActiveThread(thread.id)) {
+                    setSnoozeSuggestions({ loading: false, items: r.suggestions ?? [] });
+                  }
+                })
+                .catch(() => {
+                  if (isActiveThread(thread.id)) {
+                    setSnoozeSuggestions({ loading: false, items: [] });
+                  }
+                });
             }
             setSnoozeMenuOpen(true);
           }
@@ -3864,14 +4292,15 @@ export default function ThreadPage() {
         "Remind me to…\n\nExample: \"follow up with him next Tuesday\" or \"ask about the offer in 3 days\"."
       );
       if (!intent || !intent.trim()) return;
-      apiPost<{
+      postForActiveThread<{
         ok: boolean;
         remindAt?: string;
         reminderText?: string;
         needsClarification?: boolean;
         reason?: string;
-      }>(`/runner/control/thread/${thread.id}/remind`, { intent: intent.trim() })
+      }>(thread.id, "/remind", { intent: intent.trim() })
         .then(async (res) => {
+          if (!isActiveThread(thread.id)) return;
           if (res.ok && res.remindAt && res.reminderText) {
             const whenLabel = new Date(res.remindAt).toLocaleString(undefined, {
               weekday: "short",
@@ -3898,6 +4327,7 @@ export default function ThreadPage() {
           }
         })
         .catch((err) => {
+          if (!isActiveThread(thread.id)) return;
           showToast({
             kind: "error",
             title: "Reminder failed",
@@ -3910,7 +4340,9 @@ export default function ThreadPage() {
   const openInPlatformAction = {
     label: `Open in ${platformLabel}`,
     onSelect: () =>
-      runAction(apiPost(`/runner/control/thread/${thread.id}/open`, {}), setError)
+      runAction(postForActiveThread(thread.id, "/open", {}), (message) => {
+        if (isActiveThread(thread.id)) setError(message);
+      })
   };
   const rescanOverflowAction = {
     // Progress lives in the TopStatus ticker ("Checking
@@ -3922,8 +4354,10 @@ export default function ThreadPage() {
     onSelect: () => {
       if (rescanStage) return;
       runAction(
-        apiPost(`/runner/control/thread/${thread.id}/rescan`, {}),
-        setError,
+        postForActiveThread(thread.id, "/rescan", {}),
+        (message) => {
+          if (isActiveThread(thread.id)) setError(message);
+        },
         refresh
       );
     }
@@ -4044,9 +4478,12 @@ export default function ThreadPage() {
                 <select
                   value={siblingPlatform}
                   onChange={(e) =>
-                    setSiblingPlatform(
-                      e.target.value as "all" | "LINKEDIN" | "IMESSAGE" | "WHATSAPP" | "GOOGLE_MESSAGES"
-                    )
+                    {
+                      setSiblingPlatform(
+                        e.target.value as "all" | "LINKEDIN" | "IMESSAGE" | "WHATSAPP" | "GOOGLE_MESSAGES"
+                      );
+                      setSiblingVisibleLimit(INITIAL_SIBLING_LIMIT);
+                    }
                   }
                   className="rounded border border-hairline bg-paper px-1 py-[2px] font-mono text-[10px] uppercase tracking-[0.06em] text-ink-2 focus:border-ink-3 focus:outline-none"
                   aria-label="Filter sibling threads by platform"
@@ -4075,7 +4512,7 @@ export default function ThreadPage() {
           )}
         </div>
         <ul className={`m-0 list-none ${threadsCollapsed ? "space-y-[4px] p-1" : "space-y-[2px] p-2"}`}>
-          {siblingRows.map((row) => {
+          {visibleSiblingRows.map((row) => {
             const active = row.id === thread.id;
             const dotClass =
               row.riskLevel === "RED"
@@ -4141,8 +4578,19 @@ export default function ThreadPage() {
               </li>
             );
           })}
-          {siblingRows.length === 0 && !threadsCollapsed ? (
+          {siblingRowTotal === 0 && !threadsCollapsed ? (
             <li className="px-3 py-3 font-mono text-[11px] text-ink-3">no other threads</li>
+          ) : null}
+          {visibleSiblingRows.length < siblingRowTotal && !threadsCollapsed ? (
+            <li className="px-2 py-2">
+              <button
+                type="button"
+                onClick={() => setSiblingVisibleLimit((current) => current + SIBLING_PAGE_SIZE)}
+                className="w-full rounded-[8px] border border-hairline bg-paper px-3 py-2 text-[12px] font-medium text-ink-2 transition-colors duration-calm hover:bg-paper-2 hover:text-ink"
+              >
+                Show {Math.min(SIBLING_PAGE_SIZE, siblingRowTotal - visibleSiblingRows.length)} more threads
+              </button>
+            </li>
           ) : null}
         </ul>
       </aside>
@@ -4203,9 +4651,9 @@ export default function ThreadPage() {
           <header className="flex items-center gap-1 sm:gap-2">
               <button
                 type="button"
-                onClick={() => router.push("/today")}
-                aria-label="Back to today"
-                title="Back to today (Esc)"
+                onClick={goBackFromThread}
+                aria-label="Back"
+                title="Back"
                 className="grid h-8 w-8 shrink-0 place-items-center rounded-[8px] text-ink-3 transition-colors duration-calm hover:bg-paper-2 hover:text-ink"
               >
                 <ChevronLeft className="h-[16px] w-[16px]" strokeWidth={1.6} />
@@ -4276,11 +4724,15 @@ export default function ThreadPage() {
                 variant="ghost"
                 runningLabel="Saving…"
                 doneLabel="Saved"
-                onError={setError}
+                onError={(message) => {
+                  if (isActiveThread(thread.id)) setError(message);
+                }}
                 action={() =>
-                  apiPost(`/runner/control/thread/${thread.id}/draft`, { text: composer })
+                  postForActiveThread(thread.id, "/draft", { text: composer })
                 }
-                onSuccess={() => setHasSavedDraft(composer.trim().length > 0)}
+                onSuccess={() => {
+                  if (isActiveThread(thread.id)) setHasSavedDraft(composer.trim().length > 0);
+                }}
                 title="Save draft"
                 className="hidden px-2 py-1.5 text-[12px] sm:inline-flex 2xl:px-3"
               >
@@ -4297,12 +4749,18 @@ export default function ThreadPage() {
                   variant="ghost"
                   runningLabel="Deleting…"
                   doneLabel="Deleted"
-                  onError={setError}
+                  onError={(message) => {
+                    if (isActiveThread(thread.id)) setError(message);
+                  }}
                   action={() =>
-                    apiPost(`/runner/control/thread/${thread.id}/delete-draft`, {})
+                    postForActiveThread(thread.id, "/delete-draft", {})
                   }
                   onSuccess={() => {
+                    if (!isActiveThread(thread.id)) return;
                     predraftDismissedRef.current.add(thread.id);
+                    clearThreadComposerSession(thread.id);
+                    composerRef.current = "";
+                    composerSourceRef.current = "empty";
                     setComposer("");
                     setComposerSource("empty");
                     setHasSavedDraft(false);
@@ -4322,8 +4780,10 @@ export default function ThreadPage() {
                   variant="ghost"
                   onClick={() =>
                     runAction(
-                      apiPost(`/runner/control/thread/${thread.id}/unsnooze`, {}),
-                      setError,
+                      postForActiveThread(thread.id, "/unsnooze", {}),
+                      (message) => {
+                        if (isActiveThread(thread.id)) setError(message);
+                      },
                       refresh
                     )
                   }
@@ -4344,8 +4804,16 @@ export default function ThreadPage() {
                       void apiGet<{ suggestions: Array<{ label: string; hours: number; reason: string }> }>(
                         `/runner/control/thread/${thread.id}/suggest-snooze`
                       )
-                        .then((r) => setSnoozeSuggestions({ loading: false, items: r.suggestions ?? [] }))
-                        .catch(() => setSnoozeSuggestions({ loading: false, items: [] }));
+                        .then((r) => {
+                          if (isActiveThread(thread.id)) {
+                            setSnoozeSuggestions({ loading: false, items: r.suggestions ?? [] });
+                          }
+                        })
+                        .catch(() => {
+                          if (isActiveThread(thread.id)) {
+                            setSnoozeSuggestions({ loading: false, items: [] });
+                          }
+                        });
                     }
                     setSnoozeMenuOpen((prev) => !prev);
                   }}
@@ -4361,9 +4829,13 @@ export default function ThreadPage() {
                 variant="ghost"
                 runningLabel="Marking…"
                 doneLabel="Handled"
-                onError={setError}
-                onSuccess={refresh}
-                action={() => apiPost(`/runner/control/thread/${thread.id}/mark-done`, {})}
+                onError={(message) => {
+                  if (isActiveThread(thread.id)) setError(message);
+                }}
+                onSuccess={() => {
+                  if (isActiveThread(thread.id)) void refresh();
+                }}
+                action={() => postForActiveThread(thread.id, "/mark-done", {})}
                 title="Mark as handled"
                 className="px-2 py-1.5 text-[12px] 2xl:px-3"
               >
@@ -5277,7 +5749,7 @@ export default function ThreadPage() {
               composer owns the home-indicator inset (not the shell). */}
           <div className="mx-auto w-full max-w-[820px] px-3 pb-[max(8px,env(safe-area-inset-bottom))] pt-2 sm:px-8 sm:pb-2">
             {error ? (
-              <p className="mb-1.5 rounded-[10px] border border-hairline bg-paper-2 px-2.5 py-1.5 text-[12px] leading-[1.45] text-ink-2">{error}</p>
+              <p role="alert" className="mb-1.5 rounded-[10px] border border-hairline bg-paper-2 px-2.5 py-1.5 text-[12px] leading-[1.45] text-ink-2">{error}</p>
             ) : null}
             {dictationRecovery ? (
               <div
@@ -5392,6 +5864,9 @@ export default function ThreadPage() {
                       type="button"
                       onClick={() => {
                         predraftDismissedRef.current.add(threadId);
+                        clearThreadComposerSession(threadId);
+                        composerRef.current = "";
+                        composerSourceRef.current = "empty";
                         setComposer("");
                         setComposerSource("empty");
                       }}
@@ -5866,7 +6341,11 @@ export default function ThreadPage() {
                     <button
                       type="button"
                       onClick={() => setScheduleMenuOpen((v) => !v)}
-                      disabled={!composer.trim() || sending || scheduling}
+                      disabled={
+                        (!composer.trim() && composerAttachments.length === 0) ||
+                        sending ||
+                        scheduling
+                      }
                       title="Schedule send"
                       aria-label="Schedule send"
                       className="inline-flex h-[30px] w-[30px] items-center justify-center rounded-full border border-hairline text-ink-2 transition-colors duration-calm hover:border-hairline-strong hover:bg-paper-2 hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
@@ -6201,8 +6680,10 @@ export default function ThreadPage() {
                       title={s.reason}
                       onClick={() => {
                         runAction(
-                          apiPost(`/runner/control/thread/${thread.id}/snooze`, { hours: s.hours }),
-                          setError,
+                          postForActiveThread(thread.id, "/snooze", { hours: s.hours }),
+                          (message) => {
+                            if (isActiveThread(thread.id)) setError(message);
+                          },
                           refresh
                         );
                         setSnoozeMenuOpen(false);
@@ -6222,8 +6703,10 @@ export default function ThreadPage() {
                     type="button"
                     onClick={() => {
                       runAction(
-                        apiPost(`/runner/control/thread/${thread.id}/snooze`, { hours: 6 }),
-                        setError,
+                        postForActiveThread(thread.id, "/snooze", { hours: 6 }),
+                        (message) => {
+                          if (isActiveThread(thread.id)) setError(message);
+                        },
                         refresh
                       );
                       setSnoozeMenuOpen(false);
@@ -6236,8 +6719,10 @@ export default function ThreadPage() {
                     type="button"
                     onClick={() => {
                       runAction(
-                        apiPost(`/runner/control/thread/${thread.id}/snooze`, { hours: 24 }),
-                        setError,
+                        postForActiveThread(thread.id, "/snooze", { hours: 24 }),
+                        (message) => {
+                          if (isActiveThread(thread.id)) setError(message);
+                        },
                         refresh
                       );
                       setSnoozeMenuOpen(false);

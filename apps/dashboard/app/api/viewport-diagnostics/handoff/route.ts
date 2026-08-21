@@ -1,6 +1,6 @@
 import { networkInterfaces } from "node:os";
 import QRCode from "qrcode";
-import { buildPhoneAccessUrl } from "@/lib/phone-access-server";
+import { buildPhoneAccessUrl, securePhoneAccessUrl } from "@/lib/phone-access-server";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -16,11 +16,12 @@ function escapeHtml(value: string): string {
 }
 
 export async function GET(request: Request): Promise<Response> {
-  const connectUrl = buildPhoneAccessUrl(
-    networkInterfaces(),
-    process.env.RIOS_PHONE_ACCESS_PORT || "",
-    process.env.RIOS_PHONE_ACCESS_TOKEN || ""
-  );
+  const token = process.env.RIOS_PHONE_ACCESS_TOKEN || "";
+  const secureUrl = securePhoneAccessUrl(process.env.RIOS_PHONE_ACCESS_SECURE_URL || "", token);
+  const fallbackUrl = process.env.RIOS_ALLOW_INSECURE_PHONE_ACCESS === "1"
+    ? buildPhoneAccessUrl(networkInterfaces(), process.env.RIOS_PHONE_ACCESS_PORT || "", token)
+    : null;
+  const connectUrl = secureUrl || fallbackUrl;
   const threadId = new URL(request.url).searchParams.get("threadId") || "";
   if (!connectUrl || !/^[A-Za-z0-9_-]+$/.test(threadId)) {
     return new Response("Diagnostics handoff unavailable.", { status: 400 });

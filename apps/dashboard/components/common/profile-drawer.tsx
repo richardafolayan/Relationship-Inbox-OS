@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { Loader2, Plus, RefreshCw, Star, X } from "lucide-react";
 import { apiGet, apiPost, runAction } from "@/lib/api";
 import { isCurrentDrawerRequest } from "@/lib/drawer-request-guard";
@@ -10,6 +10,7 @@ import type { PersonDetailResponse } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { ProfileSections } from "./profile-sections";
+import { useDialogFocus } from "@/lib/use-dialog-focus";
 
 interface FriendshipSummary {
   how_you_know_each_other: string;
@@ -25,6 +26,8 @@ interface ProfileDrawerProps {
 }
 
 export function ProfileDrawer({ open, personId, onClose }: ProfileDrawerProps) {
+  const titleId = useId();
+  const dialogRef = useDialogFocus<HTMLDivElement>(open, onClose);
   const [detail, setDetail] = useState<PersonDetailResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
@@ -198,11 +201,16 @@ export function ProfileDrawer({ open, personId, onClose }: ProfileDrawerProps) {
       onClick={onClose}
     >
       <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        tabIndex={-1}
         className="absolute inset-0 flex h-full w-full flex-col overflow-hidden bg-paper px-4 pb-[env(safe-area-inset-bottom)] pt-[env(safe-area-inset-top)] sm:inset-y-0 sm:left-auto sm:right-0 sm:max-w-2xl sm:border-l sm:border-hairline sm:p-7 sm:shadow-pop"
         onClick={(event) => event.stopPropagation()}
       >
         <div className="mb-3 flex min-h-[56px] flex-shrink-0 items-center justify-between gap-2 border-b border-hairline sm:mb-4 sm:min-h-0 sm:border-b-0">
-          <p className="font-display text-[20px] font-semibold tracking-[-0.02em] text-ink sm:font-mono sm:text-[11px] sm:font-normal sm:uppercase sm:tracking-[0.08em] sm:text-ink-3">Profile</p>
+          <p id={titleId} className="font-display text-[20px] font-semibold tracking-[-0.02em] text-ink sm:font-mono sm:text-[11px] sm:font-normal sm:uppercase sm:tracking-[0.08em] sm:text-ink-3">Profile</p>
           <div className="flex min-w-0 items-center justify-end gap-1 sm:gap-2">
             {/* Favourite toggle (R-0066 / #483). Pins the contact so their
                 threads float to the top of the Inbox / Today. */}
@@ -229,14 +237,14 @@ export function ProfileDrawer({ open, personId, onClose }: ProfileDrawerProps) {
               )}
               <span className="hidden sm:inline">{refreshing ? "Rescanning…" : "Rescan"}</span>
             </Button>
-            <Button variant="ghost" onClick={onClose} aria-label="Close">
+            <Button variant="ghost" onClick={onClose} aria-label="Close" data-dialog-initial-focus>
               <X className="h-4 w-4" />
             </Button>
           </div>
         </div>
 
         {error ? (
-          <p className="mb-4 rounded-row border border-hairline bg-paper-2 px-3 py-2 text-[12px] leading-[1.45] text-ink-2">{error}</p>
+          <p role="alert" className="mb-4 rounded-row border border-hairline bg-paper-2 px-3 py-2 text-[12px] leading-[1.45] text-ink-2">{error}</p>
         ) : null}
 
         <div className="app-main-scroll min-h-0 flex-1 overflow-y-auto pb-8">
@@ -281,6 +289,7 @@ export function ProfileDrawer({ open, personId, onClose }: ProfileDrawerProps) {
                 <div className="flex flex-wrap items-center gap-2">
                   <input
                     type="text"
+                    aria-label="New group"
                     value={groupInput}
                     onChange={(event) => setGroupInput(event.target.value)}
                     onKeyDown={(event) => {
@@ -306,6 +315,7 @@ export function ProfileDrawer({ open, personId, onClose }: ProfileDrawerProps) {
                 <div className="mt-6 flex flex-wrap items-center gap-2">
                   <input
                     type="url"
+                    aria-label="LinkedIn profile URL"
                     value={profileUrlInput}
                     onChange={(event) => setProfileUrlInput(event.target.value)}
                     placeholder="https://www.linkedin.com/in/…"

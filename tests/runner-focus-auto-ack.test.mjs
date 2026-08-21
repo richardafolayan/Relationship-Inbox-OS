@@ -67,7 +67,7 @@ function thread(overrides = {}) {
   };
 }
 
-function harness({ profileValue = profile(), threadValue = thread() } = {}) {
+function harness({ profileValue = profile(), threadValue = thread(), sendRequestValue = null } = {}) {
   let current = structuredClone(profileValue);
   const queued = [];
   const writes = [];
@@ -86,6 +86,9 @@ function harness({ profileValue = profile(), threadValue = thread() } = {}) {
     async loadThread() {
       return threadValue;
     },
+    async loadSendRequest() {
+      return sendRequestValue;
+    },
     sendQueue: {
       async enqueueAndKick(input) {
         queued.push(input);
@@ -102,17 +105,116 @@ function harness({ profileValue = profile(), threadValue = thread() } = {}) {
   return { service, queued, writes, current: () => current };
 }
 
-test("explicit focus opt-in queues the operator's note once and records the person", async () => {
+test("focus note is acknowledged only after its deterministic send is delivered", async () => {
   const h = harness();
   const result = await h.service.handleThread("thread-1");
   assert.equal(result.type, "queued");
   assert.equal(h.queued.length, 1);
   assert.equal(h.queued[0].text, "Hey Lanre, I'm in class till 1:30pm. I'll reply properly after.");
+  assert.deepEqual(h.current().focusWindow.ackedPersonIds, []);
+
+  const delivered = await h.service.handleDelivered({
+    threadId: "thread-1",
+    clientSendId: result.clientSendId
+  });
+  assert.deepEqual(delivered, { type: "acknowledged", personId: "person-1" });
   assert.deepEqual(h.current().focusWindow.ackedPersonIds, ["person-1"]);
 
   const repeated = await h.service.handleThread("thread-1");
   assert.deepEqual(repeated, { type: "skipped", reason: "already_acknowledged" });
   assert.equal(h.queued.length, 1);
+});
+
+test("enqueue success and unrelated delivery events never acknowledge a focus candidate", async () => {
+  const h = harness();
+  const first = await h.service.handleThread("thread-1");
+  const second = await h.service.handleThread("thread-1");
+  assert.equal(first.type, "queued");
+  assert.equal(second.type, "queued");
+  assert.equal(first.clientSendId, second.clientSendId, "tabs reuse one person/window idempotency key");
+  assert.deepEqual(h.current().focusWindow.ackedPersonIds, []);
+
+  assert.deepEqual(
+    await h.service.handleDelivered({
+      threadId: "thread-1",
+      clientSendId: "00000000-0000-4000-8000-000000000000"
+    }),
+    { type: "skipped", reason: "not_focus_note" }
+  );
+  assert.deepEqual(h.current().focusWindow.ackedPersonIds, []);
+});
+
+test("persisted focus attempts dedupe after restart and restore acknowledgement only from SENT", async () => {
+  const pending = harness({
+    sendRequestValue: { threadId: "thread-1", status: "PENDING" }
+  });
+  assert.deepEqual(await pending.service.handleThread("thread-1"), {
+    type: "skipped",
+    reason: "already_queued"
+  });
+  assert.equal(pending.queued.length, 0);
+  assert.deepEqual(pending.current().focusWindow.ackedPersonIds, []);
+
+  const sent = harness({
+    sendRequestValue: { threadId: "thread-1", status: "SENT" }
+  });
+  assert.deepEqual(await sent.service.handleThread("thread-1"), {
+    type: "skipped",
+    reason: "already_delivered"
+  });
+  assert.equal(sent.queued.length, 0);
+  assert.deepEqual(sent.current().focusWindow.ackedPersonIds, ["person-1"]);
+});
+
+test("simultaneous confirmed notes for different people merge acknowledgement state", async () => {
+  let current = structuredClone(profile());
+  const queued = [];
+  const threads = {
+    "thread-1": thread(),
+    "thread-2": thread({
+      threadId: "thread-2",
+      person: {
+        id: "person-2",
+        displayName: "Maya Patel",
+        birthday: null,
+        favouritedAt: new Date("2026-07-01T00:00:00.000Z")
+      }
+    })
+  };
+  const service = createFocusAutoAckService({
+    now: () => now,
+    settingsStore: {
+      async getOperatorProfile() {
+        return structuredClone(current);
+      },
+      async updateOperatorProfile(partial) {
+        await Promise.resolve();
+        current = { ...current, ...structuredClone(partial) };
+        return structuredClone(current);
+      }
+    },
+    loadThread: async (threadId) => threads[threadId] ?? null,
+    loadSendRequest: async () => null,
+    sendQueue: {
+      async enqueueAndKick(input) {
+        queued.push(input);
+        return {
+          clientSendId: input.clientSendId,
+          status: "PENDING",
+          replayed: false,
+          queuePosition: 0,
+          activeCount: 1
+        };
+      }
+    }
+  });
+  await Promise.all([service.handleThread("thread-1"), service.handleThread("thread-2")]);
+  await Promise.all(
+    queued.map((send) =>
+      service.handleDelivered({ threadId: send.threadId, clientSendId: send.clientSendId })
+    )
+  );
+  assert.deepEqual(current.focusWindow.ackedPersonIds.sort(), ["person-1", "person-2"]);
 });
 
 test("automatic sending stays off unless the active window explicitly opts in", async () => {

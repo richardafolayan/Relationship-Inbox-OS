@@ -35,7 +35,17 @@ function createFakePrisma(overrides = {}) {
   return {
     message: {
       findFirst: overrides.findFirst ?? (async () => null),
-      count: overrides.count ?? (async () => 0)
+      async findMany(args) {
+        if (overrides.findMany) return overrides.findMany(args);
+        const count = overrides.count ? await overrides.count(args) : 0;
+        return Array.from({ length: count }, (_, index) => ({
+          platformMessageKey: `message-${index}`
+        }));
+      }
+    },
+    sendRequest: {
+      findFirst: overrides.receiptFindFirst ?? (async () => null),
+      findMany: overrides.receiptFindMany ?? (async () => [])
     }
   };
 }
@@ -143,6 +153,46 @@ test("ensureConnected is idempotent — second call returns the same in-flight p
   setImmediate(() => client.emit("ready"));
   await Promise.all([a, b]);
   assert.equal(initCount, 1);
+});
+
+test("a runtime disconnect invalidates readiness and reconnects with a fresh client", async () => {
+  let firstDestroyed = false;
+  const firstClient = createFakeClient({
+    destroy: async () => {
+      firstDestroyed = true;
+    }
+  });
+  const secondClient = createFakeClient();
+  const clients = [firstClient, secondClient];
+  const states = [];
+  let createCalls = 0;
+  const adapter = new WhatsAppAdapter({
+    ...baseDeps(),
+    createClient: () => {
+      createCalls += 1;
+      return clients.shift();
+    },
+    onStateChange: (state) => states.push(state)
+  });
+
+  const firstReady = adapter.ensureConnected();
+  setImmediate(() => firstClient.emit("ready"));
+  await firstReady;
+  firstClient.emit("disconnected", "network_lost");
+
+  const secondReady = adapter.ensureConnected();
+  setImmediate(() => secondClient.emit("ready"));
+  await secondReady;
+
+  assert.equal(firstDestroyed, true);
+  assert.equal(createCalls, 2);
+  assert.deepEqual(states, [
+    "connecting",
+    "connected",
+    "disconnected",
+    "connecting",
+    "connected"
+  ]);
 });
 
 test("incoming WhatsApp message includes a targeted thread hint", async () => {

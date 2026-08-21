@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, openSync, rmSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import { basename, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import { performance } from "node:perf_hooks";
@@ -93,7 +93,10 @@ import {
 } from "./services/imessage-voice-store";
 import { createScanQueue, type ScanTrigger } from "./services/scan-queue";
 import { runReassessForThread } from "./services/reassess-thread";
-import { resolveSseResumeCursor } from "./services/sse-resume-cursor";
+import {
+  resolveSseResumeCursor,
+  resolveSseResyncReason
+} from "./services/sse-resume-cursor";
 import { resummarizeThread } from "./services/resummarize-thread";
 import { pickCanonicalThread, canonicalWriteTargetId } from "./services/canonical-thread";
 import { parseAllowedProfileUrl, ProfileUrlPolicyError } from "./services/profile-url-policy";
@@ -107,11 +110,7 @@ import {
 import { createSendService } from "./services/send";
 import { createSendQueue } from "./services/send-queue";
 import { createFocusAutoAckService } from "./services/focus-auto-ack";
-import {
-  classifySendFailureKind,
-  consumerSendFailure,
-  parsePersistedSendFailure
-} from "./services/send-failure";
+import { parsePersistedSendFailure } from "./services/send-failure";
 import { createReassessOnSendHandler } from "./services/reassess-on-send";
 import { createScheduledSendPromoter } from "./services/scheduled-send-promoter";
 import {
@@ -176,6 +175,11 @@ import {
   createCompressedJsonCacheEntry,
   type CompressedJsonCacheEntry
 } from "./services/compressed-json-cache";
+import {
+  BoundedLruCache,
+  createInboxCacheKey,
+  createSingleFlight
+} from "./services/inbox-response-cache";
 import {
   createLinkedInSmokeLogger,
   writeLatestLinkedInSmokePointer
@@ -350,13 +354,17 @@ const selectorReports = createSelectorTestStore();
 // snooze expiry) honest even if some future write path forgets to signal.
 // ---------------------------------------------------------------------------
 const INBOX_CACHE_TTL_MS = 20_000;
-const inboxResponseCache = new Map<string, CompressedJsonCacheEntry>();
+const inboxResponseCache = new BoundedLruCache<CompressedJsonCacheEntry>(8);
+const inboxResponseFlight = createSingleFlight<{
+  response: CompressedJsonCacheEntry;
+  versionAtStart: number;
+}>();
 
 function sendCachedInboxResponse(
   req: express.Request,
   res: express.Response,
   cached: CompressedJsonCacheEntry,
-  cacheStatus: "hit" | "miss",
+  cacheStatus: "hit" | "miss" | "coalesced",
   startedAt: number
 ): void {
   res.setHeader("X-RIOS-Cache", cacheStatus);
@@ -1232,6 +1240,11 @@ const focusAutoAck = createFocusAutoAckService({
   settingsStore,
   sendQueue,
   auditLog: (input) => auditService.log(input),
+  loadSendRequest: (clientSendId) =>
+    prisma.sendRequest.findUnique({
+      where: { clientSendId },
+      select: { threadId: true, status: true }
+    }),
   loadThread: async (threadId) => {
     const [thread, latestInbound, latestOutbound] = await Promise.all([
       prisma.thread.findUnique({
@@ -1283,6 +1296,18 @@ eventBus.subscribe((event) => {
       }`
     );
   });
+});
+eventBus.subscribe((event) => {
+  if (event.type !== "MESSAGE_SENT" || !event.clientSendId) return;
+  void focusAutoAck
+    .handleDelivered({ threadId: event.threadId, clientSendId: event.clientSendId })
+    .catch((error) => {
+      console.warn(
+        `[focus-auto-ack] delivery acknowledgement failed for threadId=${event.threadId}: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    });
 });
 // Pick up any SendRequests left in PENDING from a previous runner process
 // (e.g. crashed mid-send, or restarted while a send was queued behind a
@@ -1933,7 +1958,21 @@ app.post("/admin/reset", asyncRoute(async (req, res) => {
         await operationMutex.runExclusive(platformLockKey(platform), async () => undefined);
       }
 
-      const result = await resetPlatformInboxGraph(payload.platform);
+      const platformCacheRoot: Partial<Record<PlatformName, string>> = {
+        LINKEDIN: resolve(dataDir, "linkedin-voice-messages"),
+        IMESSAGE: resolve(dataDir, "imessage-voice-snapshots"),
+        WHATSAPP: runnerConfig.whatsapp.mediaDir,
+        GOOGLE_MESSAGES: runnerConfig.googleMessages.mediaDir
+      };
+      const result = await operationMutex.runExclusive(
+        platformLockKey(payload.platform),
+        () =>
+          resetPlatformInboxGraph(payload.platform, undefined, {
+            dataRoot: dataDir,
+            outgoingAttachmentsRoot,
+            platformCacheRoot: platformCacheRoot[payload.platform]
+          })
+      );
       await auditService.log({
         platform: payload.platform,
         stage: "System",
@@ -1943,7 +1982,8 @@ app.post("/admin/reset", asyncRoute(async (req, res) => {
           requestId,
           platform: payload.platform,
           matchedThreadCount: result.matchedThreadCount,
-          deleted: result.deleted
+          deleted: result.deleted,
+          privateMedia: result.privateMedia
         }
       });
 
@@ -2157,6 +2197,7 @@ app.get("/events", (req, res) => {
   // buffered window on every reconnect (see resolveSseResumeCursor).
   const sinceEventId = resolveSseResumeCursor(req.query.sinceEventId, req.header("last-event-id"));
   const oldest = eventBus.oldestEventId();
+  const newest = eventBus.newestEventId();
 
   // Immediate comment frame: EventSource fires `open` only once response
   // bytes arrive, and the dashboard's /events-proxy (and `next start`'s
@@ -2183,11 +2224,16 @@ app.get("/events", (req, res) => {
     res.write(`data: ${JSON.stringify(event)}\n\n`);
   }
 
-  if (sinceEventId > 0 && oldest > 0 && sinceEventId < oldest - 1) {
+  const resyncReason = resolveSseResyncReason({
+    sinceEventId,
+    oldestEventId: oldest,
+    newestEventId: newest
+  });
+  if (resyncReason) {
     const resyncEvent = eventBus.emit({
       type: "RESYNC_REQUIRED",
       jobId: uuid(),
-      reason: "Event replay window exceeded"
+      reason: resyncReason
     });
     writeEvent(resyncEvent, resyncEvent.eventId);
   }
@@ -3896,7 +3942,7 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
       return;
     } catch (error) {
       await auditService.log({
-        platform: "LINKEDIN",
+        platform: target.platform,
         stage: "Send",
         action: "SEND_SCHEDULE_FAIL",
         status: "FAIL",
@@ -3932,7 +3978,7 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
     res.json(queueResult);
   } catch (error) {
     await auditService.log({
-      platform: "LINKEDIN",
+      platform: target.platform,
       stage: "Send",
       action: "SEND_ENQUEUE_FAIL",
       status: "FAIL",
@@ -3958,7 +4004,7 @@ app.post("/control/thread/:threadId/send-poll", asyncRoute(async (req, res) => {
         .max(12)
         .transform((options) => Array.from(new Set(options))),
       allowMultipleAnswers: z.boolean().optional().default(false),
-      clientSendId: z.string().uuid().optional()
+      clientSendId: z.string().uuid()
     })
     .parse(req.body ?? {});
   if (payload.options.length < 2) {
@@ -3972,133 +4018,38 @@ app.post("/control/thread/:threadId/send-poll", asyncRoute(async (req, res) => {
     res.status(400).json({ error: `${target.platform} adapter does not support sending polls` });
     return;
   }
-  const threadRow = await prisma.thread.findUnique({
-    where: { id: threadId },
-    include: { person: true }
+  const clientSendId = payload.clientSendId;
+  const text = renderWhatsAppPollText(payload);
+  const result = await sendService.enqueuePoll({
+    threadId,
+    text,
+    clientSendId,
+    poll: {
+      question: payload.question,
+      options: payload.options,
+      allowMultipleAnswers: payload.allowMultipleAnswers
+    }
   });
-  if (!threadRow) {
-    res.status(404).json({ error: "thread not found" });
+  const queueResult = await sendQueue.describeAndKick(result);
+  if (result.status === "FAILED") {
+    res.status(409).json({
+      error: result.errorMessage ?? "The poll was not sent.",
+      clientSendId,
+      status: result.status,
+      replayed: result.replayed,
+      queuePosition: queueResult.queuePosition,
+      activeCount: queueResult.activeCount
+    });
     return;
   }
-
-  const threadStub: ThreadStub = {
-    platformThreadId: target.platformThreadId,
-    displayName: target.displayName,
-    threadUrl: target.threadUrl,
-    lastMessagePreview: ""
-  };
-  const clientSendId = payload.clientSendId ?? uuid();
-  const text = renderWhatsAppPollText(payload);
-
-  await withPlatformControlLock(target.platform, async () => {
-    try {
-      const receipt = await adapter.sendPoll!(threadStub, {
-        question: payload.question,
-        options: payload.options,
-        allowMultipleAnswers: payload.allowMultipleAnswers
-      });
-      const sentAt = new Date(receipt.sentAt);
-      const settings = await settingsStore.getSettings();
-      const platformMessageKey =
-        receipt.platformMessageKey ??
-        stableHash(`${threadId}|${receipt.sentAt}|OUT|${text}|poll`);
-      const attachmentsJson =
-        receipt.attachments && receipt.attachments.length > 0
-          ? JSON.stringify(receipt.attachments)
-          : null;
-      const rawJson = receipt.raw ? JSON.stringify(receipt.raw) : null;
-
-      const message = await prisma.message.upsert({
-        where: {
-          threadId_platformMessageKey: {
-            threadId,
-            platformMessageKey
-          }
-        },
-        update: {
-          text,
-          direction: "OUT",
-          timestamp: sentAt,
-          sentVia: "automation",
-          attachmentsJson,
-          rawJson
-        },
-        create: {
-          threadId,
-          platformMessageKey,
-          direction: "OUT",
-          timestamp: sentAt,
-          text,
-          sentVia: "automation",
-          attachmentsJson,
-          rawJson
-        }
-      });
-
-      const risk = calculateRisk({
-        lastInboundAt: threadRow.lastInboundAt,
-        lastOutboundAt: sentAt,
-        amberHours: settings.amberHours,
-        redHours: settings.redHours
-      });
-      await prisma.thread.update({
-        where: { id: threadId },
-        data: {
-          needsReply: risk.needsReply,
-          riskLevel: risk.level,
-          riskReason: risk.riskReason,
-          slaDueAt: risk.slaDueAt,
-          snoozedUntil: null,
-          lastOutboundAt: sentAt,
-          lastMessageAt: sentAt,
-          unreadCount: 0,
-          lastMessageDirection: "OUT",
-          lastMessageText: text
-        }
-      });
-
-      await auditService.log({
-        platform: target.platform,
-        stage: "Send",
-        action: "POLL_SEND",
-        status: "OK",
-        details: {
-          threadId,
-          clientSendId,
-          optionCount: payload.options.length,
-          allowMultipleAnswers: payload.allowMultipleAnswers
-        }
-      });
-      eventBus.emit({
-        type: "MESSAGE_SENT",
-        jobId: "poll-send",
-        threadId,
-        platform: target.platform,
-        clientSendId
-      });
-      res.json({
-        status: "ok",
-        clientSendId,
-        messageId: message.id,
-        platformMessageKey,
-        sentAt: sentAt.toISOString()
-      });
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      const errorKind = classifySendFailureKind({ message: errorMessage });
-      const consumerFailure = consumerSendFailure(errorKind);
-      await auditService.log({
-        platform: target.platform,
-        stage: "Send",
-        action: "POLL_SEND_FAIL",
-        status: "FAIL",
-        details: { threadId, clientSendId, errorKind, ...summarizeError(error) }
-      });
-      res.status(errorKind === "DELIVERY_UNCERTAIN" ? 409 : 502).json({
-        error: consumerFailure.message,
-        failure: consumerFailure
-      });
-    }
+  res.status(result.status === "PENDING" ? 202 : 200).json({
+    status: result.status === "SENT" ? "ok" : "queued",
+    clientSendId,
+    replayed: result.replayed,
+    queuePosition: queueResult.queuePosition,
+    activeCount: queueResult.activeCount,
+    sentAt: result.result?.sentAt,
+    verifiedBy: result.result?.verifiedBy
   });
 }));
 
@@ -4182,51 +4133,24 @@ app.post("/control/thread/:threadId/retry-send", asyncRoute(async (req, res) => 
   const retryTarget = await getThreadStub(threadId);
   requireAdapter(retryTarget.platform);
 
-  // Look up the failed SendRequest row and re-queue under a fresh
-  // clientSendId. Original row stays in FAILED for receipts; the new
-  // row carries the same text so the operator never has to retype.
-  const original = await prisma.sendRequest.findUnique({
-    where: { clientSendId: payload.clientSendId }
-  });
-  if (!original) {
-    res.status(404).json({ error: "send_request_not_found" });
-    return;
-  }
-  if (original.threadId !== threadId) {
-    res.status(400).json({ error: "thread_mismatch" });
-    return;
-  }
-
-  // Preserve the original send's attachments and reply-threading so a retry
-  // re-sends the same message, not a text-only stub. Staged attachment files
-  // persist after a FAILED send (the send service doesn't unlink them), so the
-  // original absolutePath references are still valid.
-  let retryAttachments:
-    | Array<{ absolutePath: string; displayName: string; mimeType?: string; kind?: string }>
-    | undefined;
-  if (original.attachmentsJson) {
-    try {
-      const parsed = JSON.parse(original.attachmentsJson);
-      if (Array.isArray(parsed) && parsed.length > 0) {
-        retryAttachments = parsed;
-      }
-    } catch {
-      retryAttachments = undefined;
-    }
-  }
-  const newClientSendId = randomUUID();
   try {
-    const queueResult = await sendQueue.enqueueAndKick({
+    const reservation = await sendService.reserveRetry({
       threadId,
-      text: original.requestText,
-      clientSendId: newClientSendId,
-      attachments: retryAttachments,
-      replyToMessageId: original.replyToMessageId ?? undefined
+      clientSendId: payload.clientSendId
     });
-    res.json({ ...queueResult, clientSendId: newClientSendId });
+    if (!reservation.accepted) {
+      const status = reservation.reason === "not_found"
+        ? 404
+        : reservation.reason === "thread_mismatch"
+          ? 400
+          : 409;
+      res.status(status).json({ error: reservation.reason });
+      return;
+    }
+    res.json(await sendQueue.describeAndKick(reservation.result));
   } catch (error) {
     await auditService.log({
-      platform: "LINKEDIN",
+      platform: retryTarget.platform,
       stage: "Send",
       action: "SEND_RETRY_FAIL",
       status: "FAIL",
@@ -5290,16 +5214,28 @@ app.get("/data/inbox", asyncRoute(async (req, res) => {
   const view = typeof req.query.view === "string" ? req.query.view : undefined;
   const archivedView = view === "archived";
 
-  // Serve the last computed response while nothing has changed (see
-  // inboxResponseCache above). Polls land every few seconds from multiple
-  // components; between data changes they are byte-identical.
-  const cacheKey = req.originalUrl;
-  const cached = inboxResponseCache.get(cacheKey);
-  if (cached && Date.now() < cached.expires) {
-    sendCachedInboxResponse(req, res, cached, "hit", startedAt);
-    return;
+  const bypassCache = /(?:^|,)\s*no-cache\s*(?:,|$)/i.test(req.get("cache-control") ?? "");
+  const cacheKey = createInboxCacheKey({
+    archived: archivedView,
+    needsReply: needsReplyOnly,
+    platform,
+    risk,
+    search: search?.toLowerCase() || undefined,
+    unread: unreadOnly
+  });
+  if (!bypassCache) {
+    const cached = inboxResponseCache.get(cacheKey);
+    if (cached && Date.now() < cached.expires) {
+      sendCachedInboxResponse(req, res, cached, "hit", startedAt);
+      return;
+    }
   }
-  const versionAtStart = dataVersion;
+
+  const computeResponse = async (): Promise<{
+    response: CompressedJsonCacheEntry;
+    versionAtStart: number;
+  }> => {
+    const versionAtStart = dataVersion;
 
   const today = new Date();
   const todayStart = new Date(today.getFullYear(), today.getMonth(), today.getDate());
@@ -5408,15 +5344,20 @@ app.get("/data/inbox", asyncRoute(async (req, res) => {
 
   const body = { rows, summary };
   const response = createCompressedJsonCacheEntry(body, Date.now() + INBOX_CACHE_TTL_MS);
+    return { response, versionAtStart };
+  };
+
+  const flightKey = `${dataVersion}:${cacheKey}`;
+  const joinedFlight = !bypassCache && inboxResponseFlight.has(flightKey);
+  const { response, versionAtStart } = bypassCache
+    ? await computeResponse()
+    : await inboxResponseFlight.run(flightKey, computeResponse);
   // Only cache if no write/event landed while we were computing — otherwise
   // this response may already be missing that change.
-  if (dataVersion === versionAtStart) {
-    if (inboxResponseCache.size > 50) {
-      inboxResponseCache.clear();
-    }
+  if (!bypassCache && dataVersion === versionAtStart) {
     inboxResponseCache.set(cacheKey, response);
   }
-  sendCachedInboxResponse(req, res, response, "miss", startedAt);
+  sendCachedInboxResponse(req, res, response, joinedFlight ? "coalesced" : "miss", startedAt);
 }));
 
 app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
@@ -8083,21 +8024,14 @@ app.post("/control/thread/:threadId/draft", asyncRoute(async (req, res) => {
   if (await checkPresenterGuard(res, settingsStore, { threadId, action: "save a draft", kind: "thread-mutation" })) return;
   const payload = z.object({ text: z.string().max(5000) }).parse(req.body);
 
-  const existingDraft = await prisma.draft.findFirst({ where: { threadId } });
-
-  if (existingDraft) {
-    await prisma.draft.update({
-      where: { id: existingDraft.id },
-      data: { text: payload.text }
-    });
-  } else {
-    await prisma.draft.create({
-      data: {
-        threadId,
-        text: payload.text
-      }
-    });
-  }
+  await prisma.draft.upsert({
+    where: { threadId },
+    update: { text: payload.text },
+    create: {
+      threadId,
+      text: payload.text
+    }
+  });
 
   res.json({ status: "ok" });
 }));

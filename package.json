@@ -32,7 +32,11 @@
     "build": "turbo run build",
     "lint": "npm run build --workspace @inbox-os/core && turbo run lint",
     "test": "npm run test:all",
-    "test:all": "npm run build --workspace @inbox-os/core && npm run build --workspace @inbox-os/runner && node --import tsx --test tests/*.test.mjs",
+    "test:all": "npm run build --workspace @inbox-os/core && npm run build --workspace @inbox-os/runner && npm run test:unit && npm run test:browser:fixtures",
+    "test:unit": "node scripts/testing/run-tests.mjs unit",
+    "test:browser:fixtures": "node scripts/testing/run-tests.mjs browser",
+    "pretest:smoke": "npm run build --workspace @inbox-os/core && npm run build --workspace @inbox-os/runner && node scripts/testing/build-smoke-dashboard.mjs",
+    "test:smoke": "playwright test -c playwright.config.ts",
     "audit:mobile": "node scripts/mobile-pilot-audit.mjs",
     "move-on": "npm run test:all",
     "db:generate": "prisma generate --schema packages/core/prisma/schema.prisma",
@@ -50,6 +54,7 @@
     "seed:operator-profile": "npm run seed:operator-profile --workspace @inbox-os/runner"
   },
   "devDependencies": {
+    "@playwright/test": "^1.62.1",
     "electron": "^39.2.6",
     "electron-builder": "^26.15.3",
     "turbo": "^2.3.3",
@@ -127,6 +132,6 @@
     "postcss": "^8.5.10"
   },
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=22.0.0 <23"
   }
 }

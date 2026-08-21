@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { resolveSseResumeCursor } from "../apps/runner/dist/services/sse-resume-cursor.js";
+import {
+  resolveSseResumeCursor,
+  resolveSseResyncReason
+} from "../apps/runner/dist/services/sse-resume-cursor.js";
 
 // Regression for SSEREPLAY: the /events handler used to resolve the SSE resume
 // cursor as `Number(req.query.sinceEventId ?? req.header("last-event-id") ?? 0)`,
@@ -41,4 +44,19 @@ test("header wins even when it is lower than the stale query param", () => {
 
 test("a non-numeric header yields NaN (listSince treats NaN as replay-from-start)", () => {
   assert.ok(Number.isNaN(resolveSseResumeCursor("10", "not-a-number")));
+});
+
+test("a cursor ahead of this runner explicitly requests a client resync", () => {
+  assert.equal(
+    resolveSseResyncReason({ sinceEventId: 900, oldestEventId: 20, newestEventId: 40 }),
+    "Event cursor is ahead of this runner"
+  );
+  assert.equal(
+    resolveSseResyncReason({ sinceEventId: 3, oldestEventId: 20, newestEventId: 40 }),
+    "Event replay window exceeded"
+  );
+  assert.equal(
+    resolveSseResyncReason({ sinceEventId: 40, oldestEventId: 20, newestEventId: 40 }),
+    null
+  );
 });

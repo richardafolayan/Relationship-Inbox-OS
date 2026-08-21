@@ -4,7 +4,9 @@ import {
   enqueueScanJobByPriority,
   jobCoversTriggeredScan,
   promoteQueuedJob,
-  resolveEnqueueStatus
+  resolveEnqueueStatus,
+  resolveScheduledScanPlatforms,
+  shouldDelayBetweenThreadScans
 } from "../apps/runner/dist/services/scan-queue.js";
 
 // Regression for P1-L3: enqueueScan must report "running" for the job that
@@ -38,6 +40,28 @@ test("a coalesced live scan is promoted without duplicating it", () => {
 test("resolveEnqueueStatus reports queued when a job is already in flight", () => {
   // processing was true before enqueue -> this job waits behind the active one.
   assert.equal(resolveEnqueueStatus(true), "queued");
+});
+
+test("scheduled scans include only enabled platforms with adapters", () => {
+  const platforms = ["LINKEDIN", "IMESSAGE", "WHATSAPP"];
+  const adapters = { LINKEDIN: {}, IMESSAGE: {}, WHATSAPP: {} };
+  assert.deepEqual(
+    resolveScheduledScanPlatforms(platforms, ["IMESSAGE", "WHATSAPP"], adapters),
+    ["IMESSAGE", "WHATSAPP"]
+  );
+  assert.deepEqual(
+    resolveScheduledScanPlatforms(platforms, ["LINKEDIN", "WHATSAPP"], {
+      LINKEDIN: {}
+    }),
+    ["LINKEDIN"]
+  );
+});
+
+test("human pacing applies only to LinkedIn browser scans", () => {
+  assert.equal(shouldDelayBetweenThreadScans("LINKEDIN"), true);
+  for (const platform of ["IMESSAGE", "WHATSAPP", "GOOGLE_MESSAGES", "INSTAGRAM", "TIKTOK"]) {
+    assert.equal(shouldDelayBetweenThreadScans(platform), false, platform);
+  }
 });
 
 test("platform-wide queued scans cover targeted change triggers", () => {

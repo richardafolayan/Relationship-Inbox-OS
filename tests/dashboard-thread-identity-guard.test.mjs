@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 
 // The dashboard ships ESM TypeScript. This test must be invoked with
 // `node --import tsx --test ...` so the tsx hook resolves the .ts import below.
-const { shouldApplyThreadScopedResult } = await import(
+const { isActiveThreadIdentity, shouldApplyThreadScopedResult } = await import(
   "../apps/dashboard/lib/thread-identity-guard.ts"
 );
 
@@ -62,4 +62,11 @@ test("guards are symmetric for null / undefined ids without false positives", ()
   assert.equal(shouldApplyThreadScopedResult(null, "thread-A"), false);
   assert.equal(shouldApplyThreadScopedResult("thread-A", null), false);
   assert.equal(shouldApplyThreadScopedResult(undefined, "thread-A"), false);
+});
+
+test("active thread identity requires the route and loaded payload to match the action owner", () => {
+  assert.equal(isActiveThreadIdentity("A", "A", "A"), true);
+  assert.equal(isActiveThreadIdentity("A", "B", "A"), false);
+  assert.equal(isActiveThreadIdentity("A", "A", "B"), false);
+  assert.equal(isActiveThreadIdentity("A", "B", "B"), false);
 });

@@ -1,6 +1,6 @@
 import { prisma } from "../db";
 import type { EventBus } from "../types/runtime";
-import type { SendService } from "./send";
+import type { EnqueueSendResult, SendService } from "./send";
 
 interface SendQueueDeps {
   sendService: SendService;
@@ -43,6 +43,14 @@ export interface SendQueueService {
      */
     replyToMessageId?: string;
   }): Promise<{
+    clientSendId: string;
+    status: "PENDING" | "SENT" | "FAILED";
+    replayed: boolean;
+    queuePosition: number;
+    activeCount: number;
+    errorMessage?: string;
+  }>;
+  describeAndKick(result: EnqueueSendResult): Promise<{
     clientSendId: string;
     status: "PENDING" | "SENT" | "FAILED";
     replayed: boolean;
@@ -173,12 +181,23 @@ export function createSendQueue(deps: SendQueueDeps): SendQueueService {
     errorMessage?: string;
   }> {
     const result = await deps.sendService.enqueueSend(input);
+    return describeAndKick(result);
+  }
+
+  async function describeAndKick(result: EnqueueSendResult): Promise<{
+    clientSendId: string;
+    status: "PENDING" | "SENT" | "FAILED";
+    replayed: boolean;
+    queuePosition: number;
+    activeCount: number;
+    errorMessage?: string;
+  }> {
     const activeRows = await prisma.sendRequest.findMany({
       where: { status: "PENDING" },
       orderBy: { createdAt: "asc" },
       select: { id: true, clientSendId: true }
     });
-    const queuePosition = activeRows.findIndex((row) => row.clientSendId === input.clientSendId);
+    const queuePosition = activeRows.findIndex((row) => row.clientSendId === result.clientSendId);
     deps.eventBus.emit({
       type: "SEND_QUEUE_UPDATED",
       jobId: "send-queue",
@@ -203,5 +222,5 @@ export function createSendQueue(deps: SendQueueDeps): SendQueueService {
     return prisma.sendRequest.count({ where: { status: "PENDING" } });
   }
 
-  return { enqueueAndKick, kick, resume, getActiveCount };
+  return { enqueueAndKick, describeAndKick, kick, resume, getActiveCount };
 }

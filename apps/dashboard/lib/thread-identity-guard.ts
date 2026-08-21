@@ -17,6 +17,18 @@ export function shouldApplyThreadScopedResult(
   return startThreadId === currentThreadId;
 }
 
+export function isActiveThreadIdentity(
+  expectedThreadId: string | null | undefined,
+  routeThreadId: string | null | undefined,
+  loadedThreadId: string | null | undefined
+): boolean {
+  return Boolean(
+    expectedThreadId &&
+    expectedThreadId === routeThreadId &&
+    expectedThreadId === loadedThreadId
+  );
+}
+
 // SSE refetch routing for an iMessage Person split across handle-specific
 // sibling threads. A new inbound (or a reassess / scan) that lands on the OTHER
 // handle emits its event with the SIBLING's thread id, not the one the operator

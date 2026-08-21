@@ -276,6 +276,7 @@ export default function TodayPage() {
       // refreshes), so it's intentionally not listed here — otherwise a
       // single send triggers two refreshes.
       if (
+        type === "MESSAGES_PERSISTED" ||
         type === "MESSAGE_SEND_FAILED" ||
         type === "THREAD_UPDATED" ||
         type === "SCAN_FINISHED"
