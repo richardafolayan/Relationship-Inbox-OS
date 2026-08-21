@@ -302,7 +302,11 @@ export async function reclaimPortConflict(conflict, { graceMs = 2500 } = {}) {
     return { status: "refused", stopped: [] };
   }
   const roots = [...new Set(conflict.owners.map((owner) => toviProcessRoot(owner.pid)).filter(Boolean))];
-  if (roots.length === 0) return { status: "refused", stopped: [] };
+  if (roots.length === 0) {
+    return listeningPids(conflict.port).length === 0
+      ? { status: "recovered", stopped: [] }
+      : { status: "refused", stopped: [] };
+  }
 
   if (process.platform === "win32") {
     for (const pid of roots) {
@@ -332,6 +336,6 @@ export async function stopChildGroups(children, { graceMs = 4000 } = {}) {
   for (const record of records) signal(record, "SIGTERM");
   await delay(graceMs);
   for (const record of records) {
-    if (processIsAlive(record.pid)) signal(record, "SIGKILL");
+    if (process.platform !== "win32" || processIsAlive(record.pid)) signal(record, "SIGKILL");
   }
 }

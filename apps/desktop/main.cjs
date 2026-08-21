@@ -68,7 +68,6 @@ let permissionPromptShown = false;
 let quitInProgress = false;
 let quitReady = false;
 let recoveryDialogOpen = false;
-let reclaimPortConflictsOnce = false;
 let restartHistory = [];
 let shuttingDown = false;
 let favouriteContacts = [];
@@ -357,9 +356,6 @@ function startLocalApp() {
     nativeUpdateRequest
   });
   rmSync(startupConflictPath(), { force: true });
-  if (reclaimPortConflictsOnce) environment.RIOS_RECLAIM_PORT_CONFLICTS = "1";
-  else delete environment.RIOS_RECLAIM_PORT_CONFLICTS;
-  reclaimPortConflictsOnce = false;
   writeLog(`Starting local app from ${APP_DIR}`);
   const child = spawn(node, startAppArgs(APP_DIR), {
     cwd: APP_DIR,
@@ -493,7 +489,6 @@ async function showPortConflictRecovery(conflict) {
       noLink: true
     });
     if (result.response === 0) {
-      reclaimPortConflictsOnce = recoverable;
       await restartLocalApp();
     } else if (result.response === 1) {
       if (currentLogPath) shell.showItemInFolder(currentLogPath);

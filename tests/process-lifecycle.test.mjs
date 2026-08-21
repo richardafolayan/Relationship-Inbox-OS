@@ -14,6 +14,7 @@ import {
   readRuntimeState,
   recoverPriorRuntime,
   removeRuntimeState,
+  stopChildGroups,
   writeRuntimeState
 } from "../scripts/lib/process-lifecycle.mjs";
 
@@ -181,4 +182,48 @@ test("reclaimPortConflict refuses unverified owners", async () => {
   });
   assert.equal(result.status, "refused");
   assert.equal(processIsAlive(process.pid), true);
+});
+
+test("reclaimPortConflict accepts a verified owner that exited during recovery", async () => {
+  const result = await reclaimPortConflict({
+    port: "64999",
+    owners: [{ pid: 999999, toviOwned: true }]
+  });
+  assert.deepEqual(result, { status: "recovered", stopped: [] });
+});
+
+test("stopChildGroups kills descendants after their group leader exits", {
+  skip: process.platform === "win32"
+}, async () => {
+  const descendantScript = [
+    "process.on('SIGTERM', () => {})",
+    "process.stdout.write(String(process.pid))",
+    "setInterval(() => {}, 1000)"
+  ].join(";");
+  const leaderScript = [
+    'const { spawn } = require("node:child_process")',
+    `spawn(process.execPath, ["-e", ${JSON.stringify(descendantScript)}], { stdio: ["ignore", "inherit", "ignore"] })`,
+    'process.on("SIGTERM", () => process.exit(0))',
+    "setInterval(() => {}, 1000)"
+  ].join(";");
+  const leader = spawn(process.execPath, ["-e", leaderScript], {
+    detached: true,
+    stdio: ["ignore", "pipe", "ignore"]
+  });
+  let descendantPid;
+  try {
+    descendantPid = Number(await new Promise((resolvePid) => {
+      leader.stdout.once("data", (chunk) => resolvePid(chunk.toString()));
+    }));
+    assert.equal(processIsAlive(descendantPid), true);
+    await stopChildGroups([{ name: "service", pid: leader.pid }], { graceMs: 100 });
+    const deadline = Date.now() + 1000;
+    while (processIsAlive(descendantPid) && Date.now() < deadline) {
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 25));
+    }
+    assert.equal(processIsAlive(descendantPid), false);
+  } finally {
+    if (processIsAlive(leader.pid)) process.kill(-leader.pid, "SIGKILL");
+    if (processIsAlive(descendantPid)) process.kill(descendantPid, "SIGKILL");
+  }
 });
