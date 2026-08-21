@@ -143,12 +143,20 @@ export function DictationMessageReview({
     if (!ready.length) return;
     setView("sending");
     setError(null);
+    const sentTexts: string[] = [];
     for (let index = 0; index < ready.length; index += 1) {
       try {
         const message = ready[index]!;
-        await onSendMessage(message.text.trim());
+        const text = message.text.trim();
+        await onSendMessage(text);
+        sentTexts.push(text);
         setSentMessageIds((current) => new Set(current).add(message.id));
       } catch (sendError) {
+        if (sentTexts.length) {
+          void apiPost(`/runner/control/thread/${threadId}/dictation-message-example`, {
+            messages: sentTexts
+          }).catch(() => undefined);
+        }
         const remaining = ready.length - index;
         setError(
           `${sendError instanceof Error ? sendError.message : "Sending stopped."} ${remaining} ${remaining === 1 ? "message is" : "messages are"} still here.`
@@ -157,6 +165,9 @@ export function DictationMessageReview({
         return;
       }
     }
+    void apiPost(`/runner/control/thread/${threadId}/dictation-message-example`, {
+      messages: sentTexts
+    }).catch(() => undefined);
     onDone();
   };
 
@@ -169,6 +180,9 @@ export function DictationMessageReview({
       await onSendMessage(text);
       setSentMessageIds((current) => new Set(current).add(message.id));
       onMessageSent();
+      void apiPost(`/runner/control/thread/${threadId}/dictation-message-example`, {
+        messages: [text]
+      }).catch(() => undefined);
     } catch (sendError) {
       setError(sendError instanceof Error ? sendError.message : "This message was not sent. Try again.");
     } finally {
@@ -210,7 +224,7 @@ export function DictationMessageReview({
             <p className="mt-1 text-[13px] leading-relaxed text-ink-2">
               {reviewVisible
                 ? "Edit anything you want. Nothing sends until you choose Send messages."
-                : "Keep the exact transcript, or lightly format it into natural message bubbles."}
+                : "Keep the exact transcript, or turn it into natural messages that preserve your final meaning and voice."}
             </p>
           </div>
           <button
@@ -245,7 +259,7 @@ export function DictationMessageReview({
               <Loader2 className="h-6 w-6 animate-spin text-ink-2" strokeWidth={1.6} />
               <p className="mt-4 text-[15px] font-medium text-ink">Turning this into messages…</p>
               <p className="mt-1 max-w-[340px] text-[13px] leading-relaxed text-ink-3">
-                Keeping your tone, slang, filler, and rhythm intact.
+                Working out your final meaning and keeping it in your voice.
               </p>
             </div>
           ) : null}
@@ -265,6 +279,11 @@ export function DictationMessageReview({
 
           {reviewVisible ? (
             <div className="space-y-3">
+              {result?.source ? (
+                <p className="text-[11px] leading-relaxed text-ink-3">
+                  Formatted with {result.source.providerDisplayName}, model {result.source.model}
+                </p>
+              ) : null}
               {messages.map((message, index) => {
                 const messageSending = sendingMessageIds.has(message.id);
                 const messageSent = sentMessageIds.has(message.id);

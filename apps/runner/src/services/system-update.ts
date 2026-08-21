@@ -13,7 +13,7 @@ export interface AppVersion {
   commit?: string;
   channel?: string;
   releaseNotes?: string[];
-  /** Dev-channel builds bake the feed they self-update from into release.json. */
+  /** Signed rolling-channel builds bake their own feed into release.json. */
   updateFeedUrl?: string;
   updateMode?: string;
 }
@@ -64,27 +64,30 @@ export function readAppVersion(projectRoot: string): AppVersion {
 }
 
 /**
- * The feed this install self-updates from. A dev-channel build bakes its feed
- * into release.json (paired atomically with the code). A dev install uses ONLY
- * that baked feed and never the env-configured URL: RIOS_UPDATE_FEED_URL is the
- * pilot Dropbox link that .env reconcile always maintains, so falling back to it
- * would silently point a dev install at a stale pilot version (a wrong-channel
- * feed). If a dev install somehow has no baked feed, return undefined ("updates
- * not configured") rather than the misleading pilot feed. Non-dev installs use
- * the configured URL as before.
+ * The feed this install self-updates from. Signed packaged builds carry the
+ * exact feed for their release track in release.json and use only that feed.
+ * This keeps a dev install on develop and a pilot install on main even though
+ * both are the same Tovi.app with the same signing identity.
+ *
+ * Legacy dev builds are also pinned to their baked feed even if they predate
+ * updateMode=squirrel-mac. If a pinned install has no baked feed, return
+ * undefined rather than silently crossing to RIOS_UPDATE_FEED_URL. Older
+ * source/student installs without the signed updater keep using the configured
+ * Dropbox feed as before.
  */
 export function resolveUpdateFeedUrl(projectRoot: string, configuredUrl?: string): string | undefined {
   const app = readAppVersion(projectRoot);
-  if (app.channel === "dev") return app.updateFeedUrl;
+  if (app.updateMode === "squirrel-mac" || app.channel === "dev") {
+    return app.updateFeedUrl;
+  }
   return configuredUrl;
 }
 
 /**
  * Whether this install may swap its own code in place. Zip installs always
- * could; a PACKAGED app (code inside Tovi.app) only on the dev channel, where
- * the detached helper quits the app, swaps Contents/Resources/app, re-signs
- * the bundle, and relaunches. Student packaged installs keep the calmer
- * "install the new DMG" path.
+ * could; a PACKAGED app (code inside Tovi.app) may do so only when it carries
+ * the native signed updater mode. The helper quits the app, replaces the full
+ * signed bundle, and relaunches it without changing the app identity.
  */
 export function canSelfUpdateInPlace(projectRoot: string, packaged: boolean): boolean {
   if (!packaged) return true;

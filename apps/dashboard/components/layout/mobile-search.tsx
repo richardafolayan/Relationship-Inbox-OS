@@ -5,9 +5,11 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { ChevronLeft, Search, X } from "lucide-react";
 import { apiGet, apiPost } from "@/lib/api";
-import type { HealthResponse, InboxResponse, PlatformCard } from "@/lib/types";
+import type { HealthResponse, PlatformCard } from "@/lib/types";
 import { openPilotFeedback } from "@/lib/pilot";
 import { visibleImplementedPlatforms } from "@/lib/risk";
+import { shouldShowSearchInboxEmptyState } from "@/lib/search-inbox-state";
+import { useSearchInbox } from "@/lib/use-search-inbox";
 import { useVisiblePolling } from "@/lib/use-visible-polling";
 import { PersonAvatar } from "@/components/common/person-avatar";
 import {
@@ -48,7 +50,8 @@ export function MobileSearchScreen() {
   const resultsRef = useRef<HTMLDivElement>(null);
   // Query lives in /search?q= so result → browser Back restores prior results.
   const [query, setQuery] = useState(() => readSearchQueryParam(searchParams));
-  const [threads, setThreads] = useState<InboxResponse["rows"]>([]);
+  const searchInbox = useSearchInbox();
+  const threads = searchInbox.rows;
   const [recentThreads, setRecentThreads] = useState<RecentSearchThread[]>([]);
   const [recentQueries, setRecentQueries] = useState<string[]>([]);
   const [viewportHeight, setViewportHeight] = useState<number | null>(null);
@@ -58,12 +61,6 @@ export function MobileSearchScreen() {
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [platforms, setPlatforms] = useState<PlatformCard[] | null>(null);
   const [runnerStartState, setRunnerStartState] = useState<"idle" | "starting" | "started">("idle");
-
-  useEffect(() => {
-    void apiGet<InboxResponse>("/runner/data/inbox")
-      .then((data) => setThreads(data.rows))
-      .catch(() => undefined);
-  }, []);
 
   useEffect(() => {
     try {
@@ -384,6 +381,39 @@ export function MobileSearchScreen() {
         }}
         className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-2 pb-[max(16px,env(safe-area-inset-bottom))] pt-2"
       >
+        {searchInbox.phase === "loading" || searchInbox.phase === "refreshing" ? (
+          <div
+            role="status"
+            aria-live="polite"
+            className="mx-1 mb-2 rounded-[12px] bg-paper-2 px-3 py-3 text-[14px] text-ink-3"
+          >
+            {searchInbox.phase === "refreshing"
+              ? "Refreshing conversations…"
+              : "Loading conversations…"}
+          </div>
+        ) : null}
+
+        {searchInbox.phase === "error" ? (
+          <div
+            role="status"
+            aria-live="polite"
+            className="mx-1 mb-2 flex items-center gap-3 rounded-[12px] bg-paper-2 px-3 py-3 text-[14px] text-ink-3"
+          >
+            <span className="flex-1">
+              {searchInbox.rows.length > 0
+                ? "Conversation results may be out of date."
+                : "Conversations are temporarily unavailable."}
+            </span>
+            <button
+              type="button"
+              onClick={() => void searchInbox.refresh()}
+              className="min-h-11 shrink-0 rounded-full px-3 font-medium text-ink-2 hover:bg-paper-3 hover:text-ink"
+            >
+              {searchInbox.rows.length > 0 ? "Refresh" : "Try again"}
+            </button>
+          </div>
+        ) : null}
+
         {sections.conversations.length > 0 ? (
           <section aria-label={conversationHeading} className="mb-4">
             <h2 className="px-3 pb-1 pt-2 font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3">
@@ -410,7 +440,7 @@ export function MobileSearchScreen() {
           </section>
         ) : null}
 
-        {!hasAny ? (
+        {shouldShowSearchInboxEmptyState(searchInbox, hasAny) ? (
           <p className="px-3 py-4 text-[14px] text-ink-3">
             No matching conversations. A contact appears after a conversation is synced.
           </p>

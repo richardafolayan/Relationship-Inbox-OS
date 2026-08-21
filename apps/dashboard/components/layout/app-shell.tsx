@@ -188,12 +188,20 @@ export function AppShell({ children }: { children: ReactNode }) {
   const [recovering, setRecovering] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const closePalette = useCallback(() => setPaletteOpen(false), []);
-  usePrimaryOverlay({
+  const { prepareNavigation: preparePaletteNavigation } = usePrimaryOverlay({
     kind: "search",
     id: "command-palette",
     open: paletteOpen,
     onRequestClose: closePalette
   });
+  const navigateFromPalette = useCallback(
+    (href: string) => {
+      if (href === pathname) return;
+      const mode = preparePaletteNavigation();
+      router[mode](href);
+    },
+    [pathname, preparePaletteNavigation, router]
+  );
   const [tourSurfaceActive, setTourSurfaceActive] = useState(false);
   const [autoScanEnabled, setAutoScanEnabled] = useState(false);
   const [attentionCount, setAttentionCount] = useState(0);
@@ -944,7 +952,11 @@ export function AppShell({ children }: { children: ReactNode }) {
             the sidebar owns navigation; returns null inside /thread. */}
         <MobileDock attentionCount={sidebarAttention} />
       </div>
-      <CommandPalette open={paletteOpen && !tourSurfaceActive} onClose={() => setPaletteOpen(false)} />
+      <CommandPalette
+        open={paletteOpen && !tourSurfaceActive}
+        onClose={closePalette}
+        onNavigate={navigateFromPalette}
+      />
       <ToastHost />
       <PilotFeedbackModal />
       <PilotTour />

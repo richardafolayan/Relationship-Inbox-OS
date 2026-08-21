@@ -106,6 +106,17 @@ import {
   type DictationCaptureUnavailableReason
 } from "@/lib/dictation-capture";
 import {
+  dictationInterruptionMessage,
+  recoverInterruptedDictationCapture,
+  removePersistedDictationCapture,
+  type RecoveredDictationCapture
+} from "@/lib/dictation-chunk-store";
+import {
+  nativeDictationCaptureAvailable,
+  startNativeDictationCapture,
+  type NativeDictationCaptureSession
+} from "@/lib/native-dictation-capture";
+import {
   prepareDictationAudio,
   type DictationUploadMode,
   type PreparedDictationAudio
@@ -721,8 +732,12 @@ export default function ThreadPage() {
   const [dictationAvailable, setDictationAvailable] = useState(false);
   const [dictationUploadMode, setDictationUploadMode] = useState<DictationUploadMode>("wav");
   const [dictationTranscript, setDictationTranscript] = useState<string | null>(null);
-  const dictationSessionRef = useRef<DictationCaptureSession | null>(null);
+  const dictationSessionRef = useRef<
+    DictationCaptureSession | NativeDictationCaptureSession | null
+  >(null);
   const dictationStartGenerationRef = useRef(0);
+  const [dictationRecovery, setDictationRecovery] =
+    useState<RecoveredDictationCapture | null>(null);
   // #462 follow-up: when a dictation transcription fails for a *transient*
   // reason (lost connection to the runner, a proxy hiccup, or a runner-side
   // timeout), keep the already-prepared WAV in memory so the operator can
@@ -843,7 +858,8 @@ export default function ThreadPage() {
     const availability = dictationCaptureAvailability({
       isSecureContext: window.isSecureContext,
       mediaDevices: navigator.mediaDevices,
-      MediaRecorderClass: typeof MediaRecorder === "undefined" ? undefined : MediaRecorder
+      MediaRecorderClass: typeof MediaRecorder === "undefined" ? undefined : MediaRecorder,
+      nativeAvailable: nativeDictationCaptureAvailable()
     });
     setBrowserAudioCaptureAvailable(availability.available);
     setDictationCaptureUnavailableReason(availability.reason);
@@ -2119,19 +2135,34 @@ export default function ThreadPage() {
       stopRecorderAndStream(recorderRef.current, recordingStreamRef.current);
       recorderRef.current = null;
       recordingStreamRef.current = null;
-      dictationSessionRef.current?.cancel();
+      const dictationSession = dictationSessionRef.current;
+      if (dictationSession?.native) dictationSession.stop();
+      else dictationSession?.interrupt("pagehide");
       dictationSessionRef.current = null;
     },
     []
   );
   useEffect(() => {
-    const releaseForNavigation = () => {
-      dictationStartGenerationRef.current += 1;
-      dictationSessionRef.current?.cancel();
-      dictationSessionRef.current = null;
+    const onVisibilityChange = () => {
+      const session = dictationSessionRef.current;
+      if (!session) return;
+      if (document.visibilityState === "hidden") session.interrupt("backgrounded");
+      else session.resume();
     };
-    window.addEventListener("pagehide", releaseForNavigation);
-    return () => window.removeEventListener("pagehide", releaseForNavigation);
+    const onPageHide = () => {
+      dictationSessionRef.current?.interrupt("pagehide");
+    };
+    const onFreeze = () => {
+      dictationSessionRef.current?.interrupt("frozen");
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    document.addEventListener("freeze", onFreeze);
+    window.addEventListener("pagehide", onPageHide);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      document.removeEventListener("freeze", onFreeze);
+      window.removeEventListener("pagehide", onPageHide);
+    };
   }, []);
 
   const startRecording = useCallback(async () => {
@@ -2293,7 +2324,8 @@ export default function ThreadPage() {
     const availability = dictationCaptureAvailability({
       isSecureContext: window.isSecureContext,
       mediaDevices: navigator.mediaDevices,
-      MediaRecorderClass: typeof MediaRecorder === "undefined" ? undefined : MediaRecorder
+      MediaRecorderClass: typeof MediaRecorder === "undefined" ? undefined : MediaRecorder,
+      nativeAvailable: nativeDictationCaptureAvailable()
     });
     if (!availability.available) {
       setBrowserAudioCaptureAvailable(false);
@@ -2304,20 +2336,28 @@ export default function ThreadPage() {
     const generation = ++dictationStartGenerationRef.current;
     try {
       const standalone = window.matchMedia("(display-mode: standalone)").matches;
-      const session = await startDictationCapture({
+      const captureOptions = {
         onCancel: () => {
           if (dictationStartGenerationRef.current === generation) setDictationStatus("idle");
         },
-        onError: (captureError) => {
+        onError: (captureError: unknown) => {
           dictationSessionRef.current = null;
           setError(microphoneAccessMessage(captureError, standalone));
           setDictationStatus("idle");
         },
-        onRecorded: async (raw) => {
+        onInterrupted: (capture: RecoveredDictationCapture) => {
+          dictationSessionRef.current = null;
+          setDictationRecovery(capture);
+          setDictationStatus("idle");
+        },
+        onRecorded: async (raw: Blob) => {
           dictationSessionRef.current = null;
           await prepareAndSubmitDictation(raw, "live-recording");
         }
-      });
+      };
+      const session = nativeDictationCaptureAvailable()
+        ? await startNativeDictationCapture(captureOptions)
+        : await startDictationCapture(captureOptions);
       if (dictationStartGenerationRef.current !== generation) {
         session.cancel();
         return;
@@ -2348,6 +2388,31 @@ export default function ThreadPage() {
     dictationSessionRef.current?.cancel();
     dictationSessionRef.current = null;
     setDictationStatus("idle");
+  }, []);
+
+  const recoverDictation = useCallback(async () => {
+    const recovery = dictationRecovery;
+    if (!recovery || dictationStatus !== "idle") return;
+    setError(dictationInterruptionMessage(recovery.interruptionReason));
+    await prepareAndSubmitDictation(recovery.blob, "live-recording");
+    await removePersistedDictationCapture(recovery.id);
+    setDictationRecovery(null);
+  }, [dictationRecovery, dictationStatus, prepareAndSubmitDictation]);
+
+  const dismissDictationRecovery = useCallback(() => {
+    const recovery = dictationRecovery;
+    setDictationRecovery(null);
+    if (recovery) void removePersistedDictationCapture(recovery.id);
+  }, [dictationRecovery]);
+
+  useEffect(() => {
+    let active = true;
+    void recoverInterruptedDictationCapture().then((recovery) => {
+      if (active && recovery) setDictationRecovery(recovery);
+    });
+    return () => {
+      active = false;
+    };
   }, []);
 
   // #462 follow-up: re-submit the last failed clip without re-recording.
@@ -5213,6 +5278,35 @@ export default function ThreadPage() {
           <div className="mx-auto w-full max-w-[820px] px-3 pb-[max(8px,env(safe-area-inset-bottom))] pt-2 sm:px-8 sm:pb-2">
             {error ? (
               <p className="mb-1.5 rounded-[10px] border border-hairline bg-paper-2 px-2.5 py-1.5 text-[12px] leading-[1.45] text-ink-2">{error}</p>
+            ) : null}
+            {dictationRecovery ? (
+              <div
+                data-testid="dictation-recovery"
+                className="mb-1.5 flex items-center gap-2 rounded-[10px] border border-risk-overdue/40 bg-risk-overdue/5 px-2.5 py-2 text-[11px] text-ink-2"
+              >
+                <span className="flex-1 leading-snug">
+                  {dictationInterruptionMessage(dictationRecovery.interruptionReason)}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => void recoverDictation()}
+                  disabled={dictationStatus !== "idle"}
+                  className="shrink-0 rounded-pill border border-hairline-strong bg-paper px-2.5 py-1 font-medium text-ink transition-colors duration-calm hover:bg-paper-2 disabled:opacity-50"
+                >
+                  {dictationStatus === "transcribing"
+                    ? "Recovering..."
+                    : "Recover and transcribe"}
+                </button>
+                <button
+                  type="button"
+                  onClick={dismissDictationRecovery}
+                  disabled={dictationStatus === "transcribing"}
+                  aria-label="Discard recovered dictation"
+                  className="shrink-0 text-ink-3 transition-colors duration-calm hover:text-ink disabled:opacity-50"
+                >
+                  <X className="h-3.5 w-3.5" strokeWidth={2} />
+                </button>
+              </div>
             ) : null}
             {/* #462 follow-up: a transient dictation failure keeps the
                 recorded clip in memory so the operator can retry the same

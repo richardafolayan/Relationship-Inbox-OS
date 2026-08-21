@@ -9,10 +9,11 @@ English and uses no em or en dashes (the repo lints pilot docs for them).
 
 The model is deliberately simple:
 
-1. You merge new code into `v1/strip-back-pr1`.
-2. You build a clean release zip plus a small `latest.json` file.
-3. You upload both to a Dropbox folder.
-4. Pilots already have a one update URL. Their app checks `latest.json`,
+1. You promote the release-ready `develop` state into `main` through a reviewed pull request.
+2. You check out the exact promoted `main` commit.
+3. You build a clean release zip plus a small `latest.json` file.
+4. You upload both to a Dropbox folder.
+5. Pilots already have one update URL. Their app checks `latest.json`,
    sees a newer version, and offers to update.
 
 Nothing about this requires pilots to touch GitHub, git, or the command line
@@ -50,8 +51,7 @@ committed to the repo, and that is the real problem to fix.
 
 ## Option A: build a release locally
 
-From a clean checkout of the branch you are releasing (normally
-`v1/strip-back-pr1`):
+From a clean checkout of the exact release commit promoted to `main`:
 
 ```bash
 npm run build:student-release

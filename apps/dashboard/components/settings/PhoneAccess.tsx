@@ -72,7 +72,7 @@ export function PhoneAccess() {
               </p>
               {info.dictationReady ? (
                 <p className="mt-3 rounded-[10px] border border-hairline bg-paper-2 px-3 py-2 text-[12px] leading-5 text-ink-2">
-                  Full dictation is ready. Connect Tailscale on this Mac and your iPhone, then open this HTTPS link in Safari or from your Home Screen.
+                  Full dictation is ready. For recording that continues while you switch apps or lock the screen, open this HTTPS address in the Tovi iPhone app. Safari stops safely and preserves the audio captured so far when Tovi leaves the screen.
                 </p>
               ) : (
                 <div className="mt-3 rounded-[10px] border border-hairline bg-paper-2 px-3 py-2 text-[12px] leading-5 text-ink-2">

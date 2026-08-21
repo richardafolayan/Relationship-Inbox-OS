@@ -45,3 +45,10 @@ test("raw transcript and formatted messages stay editable without autosend", () 
   assert.match(reviewSource, /onClick=\{\(\) => void sendMessages\(\)\}/);
   assert.doesNotMatch(reviewSource, /useEffect\(\(\) => \{\s*void sendMessages/);
 });
+
+test("successful sends become voice examples and formatter provenance is visible", () => {
+  assert.match(reviewSource, /dictation-message-example/);
+  assert.match(reviewSource, /messages: sentTexts/);
+  assert.match(reviewSource, /messages: \[text\]/);
+  assert.match(reviewSource, /Formatted with \{result\.source\.providerDisplayName\}, model \{result\.source\.model\}/);
+});

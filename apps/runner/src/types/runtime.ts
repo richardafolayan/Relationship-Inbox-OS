@@ -1,4 +1,5 @@
 import type {
+  AiProvider,
   AppSettings,
   PlatformName,
   PlatformStatus,
@@ -301,6 +302,20 @@ export interface DictationMessageFormatting {
   cleanedTranscript: string;
   messages: Array<{ id: string; text: string }>;
   warnings: Array<{ originalText: string; reason: string }>;
+  source?: {
+    providerId: AiProvider;
+    providerDisplayName: string;
+    model: string;
+  };
+}
+
+export interface DictationVoiceProfile {
+  displayName: string;
+  about: string;
+  commonPhrases: string;
+  avoidedPhrases: string;
+  preferredStyle: ReplyStyle | "";
+  acceptedExamples: Array<{ messages: string[] }>;
 }
 
 export interface AiService {
@@ -398,6 +413,12 @@ export interface AiService {
   formatDictationMessages(input: {
     transcript: string;
     contactName?: string | null;
+    operatorProfile?: DictationVoiceProfile | null;
+    recentInbound?: {
+      messageCount: number;
+      totalCharacters: number;
+      averageCharacters: number;
+    } | null;
   }): Promise<DictationMessageFormatting | null>;
   /**
    * Coarsely classify a thread as either "outreach" (cold pitches, sales,

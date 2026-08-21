@@ -795,10 +795,10 @@ export function resolveRunnerConfig(env: NodeJS.ProcessEnv = process.env): Runne
       token: env.GITHUB_TOKEN?.trim() || env.GH_TOKEN?.trim() || undefined,
       // "owner/name" — defaults to the project's main repo if unset.
       repo: env.GITHUB_REPO?.trim() || "richardafolayan/Relationship-Inbox-OS",
-      // Where to commit the screenshot file. Defaults to the v1
-      // integration branch; operators can pin a different branch
-      // (e.g. "main" once v1 lands) without touching code.
-      attachmentsBranch: env.GITHUB_ATTACHMENTS_BRANCH?.trim() || "v1/strip-back-pr1"
+      // Where to commit the screenshot file. Defaults to the develop
+      // integration branch; operators can pin a different branch without
+      // touching code.
+      attachmentsBranch: env.GITHUB_ATTACHMENTS_BRANCH?.trim() || "develop"
     }
   };
 }

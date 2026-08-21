@@ -7,6 +7,11 @@ export interface DictationFormattingResult {
   cleanedTranscript: string;
   messages: FormattedDictationMessage[];
   warnings: Array<{ originalText: string; reason: string }>;
+  source?: {
+    providerId: "openai" | "glm" | "gemini";
+    providerDisplayName: string;
+    model: string;
+  };
 }
 
 function nearestSplitPoint(text: string, requestedIndex: number): number | null {
