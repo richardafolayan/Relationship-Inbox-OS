@@ -6,6 +6,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   portConflict,
+  portConflictIsStaleTovi,
   processBelongsToApp,
   processBelongsToTovi,
   processIsAlive,
@@ -14,6 +15,7 @@ import {
   readRuntimeState,
   recoverPriorRuntime,
   removeRuntimeState,
+  runtimeRootIsOrphaned,
   stopChildGroups,
   writeRuntimeState
 } from "../scripts/lib/process-lifecycle.mjs";
@@ -182,6 +184,46 @@ test("reclaimPortConflict refuses unverified owners", async () => {
   });
   assert.equal(result.status, "refused");
   assert.equal(processIsAlive(process.pid), true);
+});
+
+test("runtimeRootIsOrphaned distinguishes an orphan from a live parent", () => {
+  assert.equal(runtimeRootIsOrphaned(10, {
+    platform: "darwin",
+    parentPidFor: () => 1
+  }), true);
+  assert.equal(runtimeRootIsOrphaned(10, {
+    platform: "win32",
+    parentPidFor: () => 20,
+    isAlive: () => false
+  }), true);
+  assert.equal(runtimeRootIsOrphaned(10, {
+    platform: "darwin",
+    parentPidFor: () => 20,
+    isAlive: () => true
+  }), false);
+  assert.equal(runtimeRootIsOrphaned(10, {
+    platform: "darwin",
+    parentPidFor: () => null
+  }), false);
+});
+
+test("portConflictIsStaleTovi protects a verified process with a live parent", async () => {
+  const appDir = mkdtempSync(join(tmpdir(), "rios-product-"));
+  mkdirSync(join(appDir, "scripts"));
+  writeFileSync(join(appDir, "package.json"), JSON.stringify({ name: "relationship-inbox-os" }));
+  writeFileSync(join(appDir, "scripts", "start-app.mjs"), "");
+  const child = spawn(process.execPath, ["-e", "const s=require('node:http').createServer();s.listen(0,'127.0.0.1',()=>console.log(s.address().port))"], {
+    cwd: appDir,
+    stdio: ["ignore", "pipe", "ignore"]
+  });
+  try {
+    const port = await new Promise((resolvePort) => child.stdout.once("data", (chunk) => resolvePort(chunk.toString().trim())));
+    const conflict = portConflict(port, "/another/tovi/install");
+    assert.equal(portConflictIsStaleTovi(conflict), false);
+  } finally {
+    child.kill("SIGKILL");
+    rmSync(appDir, { recursive: true, force: true });
+  }
 });
 
 test("reclaimPortConflict accepts a verified owner that exited during recovery", async () => {

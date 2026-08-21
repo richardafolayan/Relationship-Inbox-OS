@@ -36,7 +36,7 @@ test("startAppEnvironment pins desktop ports and marks desktop mode", () => {
   assert.equal(env.RUNNER_PORT, "4555");
   assert.equal(env.RIOS_DESKTOP, "1");
   assert.equal(env.RIOS_RECLAIM_EXISTING, "1");
-  assert.equal(env.RIOS_RECLAIM_PORT_CONFLICTS, "1");
+  assert.equal(env.RIOS_RECLAIM_STALE_PORT_CONFLICTS, "1");
   assert.equal(env.OTHER, "keep");
   // The bundled Node must win, the caller's PATH stays, and the GUI-launch
   // fallback system paths come last so a terminal PATH is never shadowed.
@@ -168,7 +168,8 @@ test("rebrand pins storage and permissions to the pre-Tovi identifiers", () => {
   );
 });
 
-test("desktop startup automatically reclaims verified app port conflicts", () => {
+test("desktop startup automatically reclaims only stale app port conflicts", () => {
   const environment = launcher.startAppEnvironment({}, "node");
-  assert.equal(environment.RIOS_RECLAIM_PORT_CONFLICTS, "1");
+  assert.equal(environment.RIOS_RECLAIM_STALE_PORT_CONFLICTS, "1");
+  assert.equal(environment.RIOS_RECLAIM_PORT_CONFLICTS, undefined);
 });
