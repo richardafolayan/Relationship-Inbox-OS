@@ -17,6 +17,13 @@ import { fileURLToPath } from "node:url";
 import { loadAppEnv } from "./lib/env-file.mjs";
 import { resolveAppName } from "./lib/branding.mjs";
 import { reconcileEnvWithExample } from "./lib/release-manifest.mjs";
+import {
+  acquireInstallOperation,
+  acquireInstallPreparation,
+  releaseInstallOperation,
+  releaseInstallPreparation
+} from "./lib/install-maintenance.mjs";
+import { readInstallTransaction, recoverInstallTransaction } from "./lib/install-transaction.mjs";
 
 const APP_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const APP_NAME = resolveAppName();
@@ -31,6 +38,21 @@ const C = process.stdout.isTTY
 
 function say(msg) {
   process.stdout.write(msg + "\n");
+}
+
+function recoverInterruptedInstall() {
+  if (!readInstallTransaction(APP_DIR)) return;
+  let operationToken = "";
+  let preparationToken = "";
+  try {
+    operationToken = acquireInstallOperation(APP_DIR);
+    preparationToken = acquireInstallPreparation(APP_DIR);
+    const recovered = recoverInstallTransaction(APP_DIR);
+    say(`  Recovered an interrupted update (${recovered.status}).`);
+  } finally {
+    if (preparationToken) releaseInstallPreparation(APP_DIR, preparationToken);
+    if (operationToken) releaseInstallOperation(APP_DIR, operationToken);
+  }
 }
 
 async function dashboardUp() {
@@ -135,6 +157,7 @@ function reconcileEnvFile() {
   }
 }
 
+recoverInterruptedInstall();
 await applyPendingUpdate();
 reconcileEnvFile();
 

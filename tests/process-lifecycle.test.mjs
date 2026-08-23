@@ -10,6 +10,7 @@ import {
   processBelongsToApp,
   processBelongsToTovi,
   processIsAlive,
+  processStartIdentity,
   processSnapshot,
   reclaimPortConflict,
   readRuntimeState,
@@ -27,12 +28,17 @@ test("runtime state round-trips and rejects unknown shapes", () => {
   const dir = mkdtempSync(join(tmpdir(), "rios-lifecycle-"));
   const statePath = join(dir, "processes.json");
   try {
-    const state = { version: 1, parentPid: process.pid, children: [{ name: "runner", pid: 1234 }] };
+    const state = {
+      version: 2,
+      parentPid: process.pid,
+      parentIdentity: processStartIdentity(process.pid),
+      children: [{ name: "runner", pid: 1234, identity: "test-child" }]
+    };
     writeRuntimeState(statePath, state);
     assert.deepEqual(readRuntimeState(statePath).children, state.children);
     assert.match(readFileSync(statePath, "utf8"), /"parentPid"/);
 
-    writeRuntimeState(statePath, { version: 2, parentPid: process.pid });
+    writeRuntimeState(statePath, { version: 3, parentPid: process.pid });
     assert.equal(readRuntimeState(statePath), null);
     writeRuntimeState(statePath, { version: 1, parentPid: "not a pid" });
     assert.equal(readRuntimeState(statePath), null);
@@ -108,7 +114,12 @@ test("recoverPriorRuntime cleans stale state and reclaims owned processes", asyn
     // stopped with reclaim so a fresh launch can proceed.
     const child = spawn("sleep", ["30"], { cwd: appDir, stdio: "ignore" });
     await new Promise((resolveSpawn) => child.once("spawn", resolveSpawn));
-    writeRuntimeState(statePath, { version: 1, parentPid: child.pid, children: [] });
+    writeRuntimeState(statePath, {
+      version: 2,
+      parentPid: child.pid,
+      parentIdentity: processStartIdentity(child.pid),
+      children: []
+    });
 
     const refused = await recoverPriorRuntime({ statePath, appDir, reclaim: false });
     assert.equal(refused.status, "already_running");
@@ -142,6 +153,27 @@ test("recoverPriorRuntime does not reclaim a foreign process with a recycled pid
     child.kill("SIGKILL");
     rmSync(appDir, { recursive: true, force: true });
     rmSync(foreignDir, { recursive: true, force: true });
+  }
+});
+
+test("recoverPriorRuntime does not kill a reused pid even when its cwd is the app", async () => {
+  const appDir = mkdtempSync(join(tmpdir(), "rios-reused-appdir-"));
+  const statePath = join(appDir, "processes.json");
+  const child = spawn("sleep", ["30"], { cwd: appDir, stdio: "ignore" });
+  try {
+    await new Promise((resolveSpawn) => child.once("spawn", resolveSpawn));
+    writeRuntimeState(statePath, {
+      version: 2,
+      parentPid: child.pid,
+      parentIdentity: "identity-from-the-crashed-launcher",
+      children: []
+    });
+    const result = await recoverPriorRuntime({ statePath, appDir, reclaim: true, graceMs: 100 });
+    assert.equal(result.status, "stale");
+    assert.equal(processIsAlive(child.pid), true);
+  } finally {
+    child.kill("SIGKILL");
+    rmSync(appDir, { recursive: true, force: true });
   }
 });
 
@@ -267,5 +299,32 @@ test("stopChildGroups kills descendants after their group leader exits", {
   } finally {
     if (processIsAlive(leader.pid)) process.kill(-leader.pid, "SIGKILL");
     if (processIsAlive(descendantPid)) process.kill(descendantPid, "SIGKILL");
+  }
+});
+
+test("stopChildGroups never signals a reused runtime identity", {
+  skip: process.platform === "win32"
+}, async () => {
+  const appDir = mkdtempSync(join(tmpdir(), "rios-child-identity-"));
+  const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+    cwd: appDir,
+    detached: true,
+    stdio: "ignore"
+  });
+  try {
+    await new Promise((resolveSpawn, rejectSpawn) => {
+      child.once("spawn", resolveSpawn);
+      child.once("error", rejectSpawn);
+    });
+    await stopChildGroups([{
+      name: "reused",
+      pid: child.pid,
+      identity: "identity-from-the-prior-process",
+      appDir
+    }], { graceMs: 50 });
+    assert.equal(processIsAlive(child.pid), true);
+  } finally {
+    try { process.kill(-child.pid, "SIGKILL"); } catch {}
+    rmSync(appDir, { recursive: true, force: true });
   }
 });

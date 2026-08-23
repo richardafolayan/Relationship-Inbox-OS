@@ -1,16 +1,18 @@
 export class SchemaRestoreError extends Error {
-  constructor(message, { backupPath = null, cause } = {}) {
+  constructor(message, { backupPath = null, databaseExisted = true, cause } = {}) {
     super(message, cause ? { cause } : undefined);
     this.name = "SchemaRestoreError";
     this.backupPath = backupPath;
+    this.databaseExisted = databaseExisted;
   }
 }
 
 export class SchemaChangeRestoredError extends Error {
-  constructor(message, { backupPath = null, cause } = {}) {
+  constructor(message, { backupPath = null, databaseExisted = true, cause } = {}) {
     super(message, cause ? { cause } : undefined);
     this.name = "SchemaChangeRestoredError";
     this.backupPath = backupPath;
+    this.databaseExisted = databaseExisted;
   }
 }
 
@@ -29,21 +31,24 @@ export function applyRecoverableSchemaChange({ backup, repair, sync, restore }) 
 
   let restored = false;
   try {
-    restored = restore(backupResult.backupPath);
+    restored = restore(backupResult.backupPath, backupResult);
   } catch (cause) {
-    throw new SchemaRestoreError("The database backup could not be restored", {
+    throw new SchemaRestoreError("The prior database state could not be restored", {
       backupPath: backupResult.backupPath,
+      databaseExisted: backupResult.databaseExisted !== false,
       cause
     });
   }
   if (!restored) {
-    throw new SchemaRestoreError("The database backup could not be restored", {
-      backupPath: backupResult.backupPath
+    throw new SchemaRestoreError("The prior database state could not be restored", {
+      backupPath: backupResult.backupPath,
+      databaseExisted: backupResult.databaseExisted !== false
     });
   }
   if (failure) {
-    throw new SchemaChangeRestoredError("The database change failed after its backup was restored", {
+    throw new SchemaChangeRestoredError("The database change failed after its prior state was restored", {
       backupPath: backupResult.backupPath,
+      databaseExisted: backupResult.databaseExisted !== false,
       cause: failure
     });
   }

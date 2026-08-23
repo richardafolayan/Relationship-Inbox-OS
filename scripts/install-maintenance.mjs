@@ -5,8 +5,10 @@ import { fileURLToPath } from "node:url";
 import { realpathSync } from "node:fs";
 import {
   acquireInstallOperation,
+  acquireInstallPreparation,
   acquireInstallMaintenance,
   releaseInstallOperation,
+  releaseInstallPreparation,
   releaseInstallMaintenance
 } from "./lib/install-maintenance.mjs";
 
@@ -34,6 +36,10 @@ function main() {
     process.stdout.write(`${acquireInstallOperation(appDir, options)}\n`);
     return;
   }
+  if (options.command === "acquire-preparation") {
+    process.stdout.write(`${acquireInstallPreparation(appDir, options)}\n`);
+    return;
+  }
   if (options.command === "release") {
     if (!options.token || !releaseInstallMaintenance(appDir, options.token)) {
       throw new Error("The installation lock belongs to another process");
@@ -46,8 +52,14 @@ function main() {
     }
     return;
   }
+  if (options.command === "release-preparation") {
+    if (!options.token || !releaseInstallPreparation(appDir, options.token)) {
+      throw new Error("The app preparation lock belongs to another process");
+    }
+    return;
+  }
   throw new Error(
-    "Usage: install-maintenance.mjs <acquire|release|acquire-operation|release-operation> --app-dir <absolute path>"
+    "Usage: install-maintenance.mjs <acquire|release|acquire-operation|release-operation|acquire-preparation|release-preparation> --app-dir <absolute path>"
   );
 }
 

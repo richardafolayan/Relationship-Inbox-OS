@@ -18,7 +18,14 @@ function positivePid(value) {
 export function readRuntimeState(path) {
   try {
     const parsed = JSON.parse(readFileSync(path, "utf8"));
-    if (parsed?.version !== 1 || !positivePid(parsed.parentPid)) return null;
+    if (![1, 2].includes(parsed?.version) || !positivePid(parsed.parentPid)) return null;
+    if (parsed.version === 2) {
+      if (typeof parsed.parentIdentity !== "string" || !parsed.parentIdentity) return null;
+      if (!Array.isArray(parsed.children)) return null;
+      if (parsed.children.some((child) =>
+        !positivePid(child?.pid) || typeof child?.identity !== "string" || !child.identity
+      )) return null;
+    }
     return parsed;
   } catch {
     return null;
@@ -134,7 +141,10 @@ export function processBelongsToApp(snapshot, appDir) {
     const normalizedCandidate = candidate.replaceAll("\\", "/");
     const path = process.platform === "win32" ? normalizedCandidate.toLowerCase() : normalizedCandidate;
     const escaped = path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    return new RegExp(`(?:^|[\\s\"'=(:,])${escaped}(?=$|[/\\s\"'),:])`).test(normalizedCommand);
+    const prefix = `(?:^|[\\s\"'=(:,])`;
+    return new RegExp(`${prefix}${escaped}(?:/|$)`).test(normalizedCommand) ||
+      normalizedCommand.includes(`\"${path}\"`) ||
+      normalizedCommand.includes(`'${path}'`);
   });
 }
 
@@ -222,6 +232,25 @@ export function listeningPids(port, exec = execFileSync) {
 function signal(record, signalName, kill = process.kill) {
   const pid = positivePid(record?.pid);
   if (!pid) return;
+  const rootAlive = processIsAlive(pid, kill);
+  if (!rootAlive && record.group && process.platform !== "win32" && record.identity && record.appDir) {
+    for (const memberPid of processGroupMemberPids(pid)) {
+      const identity = processStartIdentity(memberPid);
+      if (!identity) continue;
+      if (!processBelongsToApp(processSnapshot(memberPid), record.appDir)) continue;
+      if (processStartIdentity(memberPid) !== identity) continue;
+      try {
+        kill(memberPid, signalName);
+      } catch (error) {
+        if (error?.code !== "ESRCH") throw error;
+      }
+    }
+    return;
+  }
+  if (!rootAlive && !(record.group && process.platform !== "win32" && !record.identity)) return;
+  if (rootAlive && record.identity && processStartIdentity(pid) !== record.identity) return;
+  if (rootAlive && record.appDir && !processBelongsToApp(processSnapshot(pid), record.appDir)) return;
+  if (rootAlive && record.toviOwned && !processBelongsToTovi(processSnapshot(pid))) return;
   const target = record.group && process.platform !== "win32" ? -pid : pid;
   try {
     kill(target, signalName);
@@ -243,12 +272,24 @@ export async function recoverPriorRuntime({ statePath, appDir, reclaim = false, 
   }
 
   const records = [
-    ...(Array.isArray(state.children) ? state.children.map((child) => ({ ...child, group: true })) : []),
-    { name: "launcher", pid: state.parentPid, group: false }
+    ...(state.version === 2
+      ? state.children.map((child) => ({ ...child, group: true, appDir }))
+      : []),
+    ...(state.version === 2
+      ? [{
+          name: "launcher",
+          pid: state.parentPid,
+          identity: state.parentIdentity,
+          group: false,
+          appDir
+        }]
+      : [])
   ];
-  const liveOwned = records.filter((record) =>
-    processIsAlive(record.pid) && processBelongsToApp(processSnapshot(record.pid), appDir)
-  );
+  const liveOwned = records.filter((record) => {
+    if (!processIsAlive(record.pid)) return false;
+    const identity = processStartIdentity(record.pid);
+    return identity === record.identity && processBelongsToApp(processSnapshot(record.pid), appDir);
+  });
   if (liveOwned.length === 0) {
     rmSync(statePath, { force: true });
     return { status: "stale", recovered: [] };
@@ -340,6 +381,33 @@ function processTreePids(rootPid, exec = execFileSync) {
   return ordered;
 }
 
+export function processGroupMemberPids(groupId, exec = execFileSync) {
+  const normalized = positivePid(groupId);
+  if (!normalized || process.platform === "win32") return [];
+  try {
+    return exec("ps", ["-axo", "pid=,pgid="], { encoding: "utf8" })
+      .split("\n")
+      .map((line) => line.trim().split(/\s+/).map(positivePid))
+      .filter(([pid, pgid]) => pid && pgid === normalized)
+      .map(([pid]) => pid);
+  } catch {
+    return [];
+  }
+}
+
+export function processGroupIsAlive(groupId, exec = execFileSync) {
+  const normalized = positivePid(groupId);
+  if (!normalized || process.platform === "win32") return false;
+  try {
+    return exec("ps", ["-axo", "pgid="], { encoding: "utf8" })
+      .split(/\s+/)
+      .map(positivePid)
+      .some((pid) => pid === normalized);
+  } catch {
+    return true;
+  }
+}
+
 function toviProcessRoot(pid) {
   let current = positivePid(pid);
   const identity = toviIdentity(processSnapshot(current));
@@ -376,20 +444,33 @@ export async function reclaimPortConflict(conflict, { graceMs = 2500 } = {}) {
       : { status: "refused", stopped: [] };
   }
 
+  const rootRecords = roots.map((pid) => ({
+    pid,
+    identity: processStartIdentity(pid),
+    toviOwned: true
+  })).filter((record) => record.identity && processBelongsToTovi(processSnapshot(record.pid)));
+
   if (process.platform === "win32") {
-    for (const pid of roots) {
+    for (const record of rootRecords) {
+      if (processStartIdentity(record.pid) !== record.identity) continue;
+      if (!processBelongsToTovi(processSnapshot(record.pid))) continue;
       try {
-        execFileSync("taskkill.exe", ["/PID", String(pid), "/T"], { stdio: "ignore" });
+        execFileSync("taskkill.exe", ["/PID", String(record.pid), "/T"], { stdio: "ignore" });
       } catch {
         // A process can finish while the recovery action is running.
       }
     }
   } else {
-    const pids = [...new Set(roots.flatMap((pid) => processTreePids(pid)))];
-    for (const pid of pids) signal({ pid, group: false }, "SIGTERM");
+    const records = [...new Set(roots.flatMap((pid) => processTreePids(pid)))].map((pid) => ({
+      pid,
+      identity: processStartIdentity(pid),
+      group: false,
+      toviOwned: true
+    })).filter((record) => record.identity && processBelongsToTovi(processSnapshot(record.pid)));
+    for (const record of records) signal(record, "SIGTERM");
     await delay(graceMs);
-    for (const pid of pids) {
-      if (processIsAlive(pid)) signal({ pid, group: false }, "SIGKILL");
+    for (const record of records) {
+      if (processIsAlive(record.pid)) signal(record, "SIGKILL");
     }
   }
 

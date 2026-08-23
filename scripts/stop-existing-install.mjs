@@ -2,7 +2,7 @@
 
 import { execFileSync } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
-import { isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { loadAppEnv } from "./lib/env-file.mjs";
@@ -26,12 +26,40 @@ function runtimeCommand(command) {
     "scripts/start-app.mjs",
     "/scripts/start-student.mjs",
     "scripts/start-student.mjs",
+    "/apps/desktop/main.cjs",
+    "apps/desktop/main.cjs",
     "/apps/runner/",
     "/apps/dashboard/",
     "next-server",
     "/next/dist/bin/next",
     "start:student"
   ].some((marker) => normalized.includes(marker));
+}
+
+function packagedContainer(appDir) {
+  const resources = dirname(appDir);
+  if (resolve(resources, "app") !== resolve(appDir) || dirname(resources) === resources) return "";
+  if (resources.toLowerCase().endsWith(`${sep}contents${sep}resources`)) {
+    return dirname(dirname(resources));
+  }
+  if (resources.toLowerCase().endsWith(`${sep}resources`)) {
+    return dirname(resources);
+  }
+  return "";
+}
+
+function processBelongsToInstall(snapshot, appDir) {
+  if (processBelongsToApp(snapshot, appDir)) return true;
+  const container = packagedContainer(appDir);
+  return Boolean(container) && processBelongsToApp(snapshot, container);
+}
+
+function packagedDesktopCommand(command, appDir) {
+  const container = packagedContainer(appDir);
+  if (!container) return false;
+  const normalizedCommand = String(command || "").replaceAll("\\", "/").toLowerCase();
+  const normalizedContainer = resolve(container).replaceAll("\\", "/").toLowerCase();
+  return normalizedCommand.includes(`${normalizedContainer}/`);
 }
 
 function processRows(exec = execFileSync) {
@@ -149,32 +177,49 @@ export function discoverInstallRuntime({
   statePath,
   ports = configuredPorts(appDir),
   preservePids = [],
+  includePackagedContainer = true,
   exec = execFileSync
 } = {}) {
   const candidates = new Map();
   const preserved = new Set(preservePids.map(positivePid).filter(Boolean));
-  const add = (pid, reason, group = false) => {
+  const add = (pid, reason, group = false, stateIdentity = "") => {
     if (!pid || pid === process.pid || preserved.has(pid)) return;
     const record = candidates.get(pid) || { pid, reasons: new Set(), group: false };
     record.reasons.add(reason);
     record.group ||= group;
+    if (stateIdentity) record.stateIdentity = stateIdentity;
     candidates.set(pid, record);
   };
 
   const state = existsSync(statePath) ? readRuntimeState(statePath) : null;
-  for (const child of Array.isArray(state?.children) ? state.children : []) {
-    add(positivePid(child.pid), "runtime-state", true);
+  for (const child of state?.version === 2 ? state.children : []) {
+    add(positivePid(child.pid), "runtime-state", true, child.identity);
   }
-  add(positivePid(state?.parentPid), "runtime-state", false);
+  if (state?.version === 2) {
+    add(positivePid(state.parentPid), "runtime-state", false, state.parentIdentity);
+  }
 
   for (const row of processRows(exec)) {
-    if (runtimeCommand(row.command)) add(row.pid, "runtime-command", false);
+    if (runtimeCommand(row.command) || (includePackagedContainer && packagedDesktopCommand(row.command, appDir))) {
+      add(row.pid, "runtime-command", false);
+    }
   }
   for (const pid of listeningPids(ports, exec)) add(pid, "listener", false);
 
   const owned = [];
   for (const record of candidates.values()) {
     if (!processIsActive(record.pid, exec)) continue;
+    if (record.reasons.has("runtime-state")) {
+      const identity = processStartIdentity(record.pid, exec);
+      if (!identity && processIsActive(record.pid, exec)) {
+        throw new Error(`Could not identify saved runtime process ${record.pid}`);
+      }
+      if (identity !== record.stateIdentity) {
+        record.reasons.delete("runtime-state");
+        record.group = false;
+        if (record.reasons.size === 0) continue;
+      }
+    }
     const snapshot = processSnapshot(record.pid, exec);
     if (
       record.reasons.has("listener") &&
@@ -183,7 +228,7 @@ export function discoverInstallRuntime({
       if (!processIsActive(record.pid, exec)) continue;
       throw new Error(`Could not inspect listener process ${record.pid}`);
     }
-    if (processBelongsToApp(snapshot, appDir)) {
+    if (processBelongsToInstall(snapshot, appDir)) {
       const identity = processStartIdentity(record.pid, exec);
       if (!identity && processIsActive(record.pid, exec)) {
         throw new Error(`Could not identify runtime process ${record.pid}`);
@@ -215,7 +260,7 @@ function currentOwnedProcesses(record, exec = execFileSync) {
   const rootActive = processIsActive(record.pid, exec);
   if (rootActive) {
     if (!record.identity || processStartIdentity(record.pid, exec) !== record.identity) return [];
-    if (!processBelongsToApp(processSnapshot(record.pid, exec), record.appDir)) return [];
+    if (!processBelongsToInstall(processSnapshot(record.pid, exec), record.appDir)) return [];
   }
   const pids = new Set(rootActive ? [record.pid] : []);
   if (record.group) {
@@ -225,7 +270,7 @@ function currentOwnedProcesses(record, exec = execFileSync) {
   for (const pid of pids) {
     if (!processIsActive(pid, exec)) continue;
     const snapshot = processSnapshot(pid, exec);
-    if (!processBelongsToApp(snapshot, record.appDir)) {
+    if (!processBelongsToInstall(snapshot, record.appDir)) {
       if (!processIsActive(pid, exec)) continue;
       throw new Error(`Could not verify runtime process ${pid} in group ${record.pid}`);
     }
@@ -270,7 +315,7 @@ function signal(record, signalName, kill = process.kill, exec = execFileSync) {
   for (const member of current) {
     if (!processIsActive(member.pid, exec)) continue;
     if (processStartIdentity(member.pid, exec) !== member.identity) continue;
-    if (!processBelongsToApp(processSnapshot(member.pid, exec), member.appDir)) continue;
+    if (!processBelongsToInstall(processSnapshot(member.pid, exec), member.appDir)) continue;
     try {
       kill(member.pid, signalName);
     } catch (error) {
@@ -301,14 +346,29 @@ export async function stopExistingInstallRuntime({
   forceMs = 2_000,
   ports = configuredPorts(appDir),
   preservePids = [],
+  includePackagedContainer = true,
   exec = execFileSync,
   kill = process.kill
 } = {}) {
   for (let pass = 0; pass < 3; pass += 1) {
-    const records = discoverInstallRuntime({ appDir, statePath, ports, preservePids, exec });
+    const records = discoverInstallRuntime({
+      appDir,
+      statePath,
+      ports,
+      preservePids,
+      includePackagedContainer,
+      exec
+    });
     if (records.length === 0) {
       await delay(100);
-      if (discoverInstallRuntime({ appDir, statePath, ports, preservePids, exec }).length === 0) return [];
+      if (discoverInstallRuntime({
+        appDir,
+        statePath,
+        ports,
+        preservePids,
+        includePackagedContainer,
+        exec
+      }).length === 0) return [];
       continue;
     }
 
@@ -324,10 +384,12 @@ export async function stopExistingInstallRuntime({
 }
 
 function parseArgs(argv) {
-  const options = {};
+  const options = { preservePids: [], includePackagedContainer: true };
   for (let index = 0; index < argv.length; index += 1) {
     if (argv[index] === "--app-dir") options.appDir = argv[++index];
     else if (argv[index] === "--grace-ms") options.graceMs = Number(argv[++index]);
+    else if (argv[index] === "--preserve-pid") options.preservePids.push(Number(argv[++index]));
+    else if (argv[index] === "--backend-only") options.includePackagedContainer = false;
   }
   return options;
 }
@@ -337,7 +399,12 @@ async function main() {
   if (!options.appDir || !isAbsolute(options.appDir)) {
     throw new Error("Usage: stop-existing-install.mjs --app-dir <absolute path>");
   }
-  await stopExistingInstallRuntime({ appDir: resolve(options.appDir), graceMs: options.graceMs });
+  await stopExistingInstallRuntime({
+    appDir: resolve(options.appDir),
+    graceMs: options.graceMs,
+    preservePids: options.preservePids,
+    includePackagedContainer: options.includePackagedContainer
+  });
 }
 
 function canonical(path) {

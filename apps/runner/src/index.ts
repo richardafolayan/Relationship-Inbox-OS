@@ -2826,6 +2826,10 @@ async function checkAndStartAvailableUpdate(): Promise<UpdateStartResult> {
 }
 
 async function startAvailableUpdate(): Promise<UpdateStartResult> {
+  if (updateLaunchInProgress && process.env.RIOS_PACKAGED_APP === "1") {
+    const nativeRequestPath = process.env.RIOS_NATIVE_UPDATE_REQUEST?.trim() || "";
+    if (nativeRequestPath && !existsSync(nativeRequestPath)) updateLaunchInProgress = false;
+  }
   if (updateLaunchInProgress || updateStartInProgress) return { status: "already_starting" };
   updateStartInProgress = true;
   try {

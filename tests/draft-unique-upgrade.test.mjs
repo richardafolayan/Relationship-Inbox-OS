@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -136,14 +137,17 @@ test("schema backup is readable and can restore an already-modified database", (
     database = new Database(databasePath);
     database.prepare("UPDATE pilot SET id = ?").run("modified");
     database.close();
+    writeFileSync(`${databasePath}-journal`, "stale rollback journal");
     execFileSync(process.execPath, [backupScript, backupPath, databasePath], {
       cwd: appDir,
       stdio: "pipe"
     });
     if (process.platform !== "win32") assert.equal(statSync(databasePath).mode & 0o777, 0o600);
+    assert.equal(existsSync(`${databasePath}-journal`), false);
 
     database = new Database(databasePath, { readonly: true, fileMustExist: true });
     assert.deepEqual(database.prepare("SELECT id FROM pilot").all(), [{ id: "preserved" }]);
+    assert.deepEqual(database.pragma("quick_check"), [{ quick_check: "ok" }]);
     database.close();
   } finally {
     cleanup();
@@ -477,6 +481,108 @@ test("database-only exits 42 when a recovery marker cannot be verified", () => {
   }
 });
 
+function assertFailedFirstDatabaseSyncIsRemoved({ withCurrentStamp = false } = {}) {
+  const { directory, databasePath, cleanup } = fixture();
+  const fakeBin = join(directory, "fake-bin");
+  const fakeNpm = join(fakeBin, "npm");
+  try {
+    mkdirSync(fakeBin, { recursive: true });
+    writeFileSync(fakeNpm, `#!/bin/sh
+if [ "$1" = "exec" ]; then
+  printf 'partial database' > "$TEST_DATABASE_PATH"
+  printf 'partial wal' > "$TEST_DATABASE_PATH-wal"
+  printf 'partial shm' > "$TEST_DATABASE_PATH-shm"
+  printf 'partial journal' > "$TEST_DATABASE_PATH-journal"
+  exit 1
+fi
+exit 0
+`);
+    chmodSync(fakeNpm, 0o755);
+    if (withCurrentStamp) {
+      writeFileSync(
+        join(directory, "app-prepare-stamps.json"),
+        `${JSON.stringify({ schemaHash: currentSchemaHash() })}\n`
+      );
+    }
+    const result = runDatabaseOnly(directory, databasePath, {
+      PATH: `${fakeBin}:${process.env.PATH || ""}`,
+      TEST_DATABASE_PATH: databasePath
+    });
+    assert.equal(result.status, 43, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+    assert.match(result.stdout, /prior database state was restored|incomplete newly created database/i);
+    for (const suffix of ["", "-wal", "-shm", "-journal"]) {
+      assert.equal(existsSync(`${databasePath}${suffix}`), false, `partial database${suffix} survived`);
+    }
+    assert.equal(
+      existsSync(join(directory, "runtime", "database-recovery-required.json")),
+      false,
+      "successful absence restoration must clear its recovery marker"
+    );
+  } finally {
+    cleanup();
+  }
+}
+
+test("a failed first database sync removes every partial SQLite file before reporting safe recovery", () => {
+  assertFailedFirstDatabaseSyncIsRemoved();
+});
+
+test("a missing database with a current schema stamp still uses recoverable creation", () => {
+  assertFailedFirstDatabaseSyncIsRemoved({ withCurrentStamp: true });
+});
+
+test("a killed schema sync restores the pre-repair database on the next launch", { skip: process.platform === "win32" }, () => {
+  const { directory, databasePath, cleanup } = fixture();
+  const fakeBin = join(directory, "fake-bin");
+  const fakeNpm = join(fakeBin, "npm");
+  try {
+    let database = new Database(databasePath);
+    createLegacyDraftTable(database);
+    insertDraft(database, "old", "thread-1", "older", "2026-08-20T10:00:00.000Z");
+    insertDraft(database, "new", "thread-1", "newer", "2026-08-21T10:00:00.000Z");
+    database.close();
+
+    mkdirSync(fakeBin, { recursive: true });
+    writeFileSync(fakeNpm, `#!/bin/sh
+if [ "$1" = "exec" ]; then
+  kill -KILL "$PPID"
+  exit 137
+fi
+exit 0
+`);
+    chmodSync(fakeNpm, 0o755);
+    const killed = runDatabaseOnly(directory, databasePath, {
+      PATH: `${fakeBin}:${process.env.PATH || ""}`
+    });
+    assert.equal(killed.signal, "SIGKILL", `stdout:\n${killed.stdout}\nstderr:\n${killed.stderr}`);
+    assert.equal(
+      existsSync(join(directory, "runtime", "database-recovery-required.json")),
+      true,
+      "the recovery intent must predate repair and sync"
+    );
+    database = new Database(databasePath, { readonly: true });
+    assert.deepEqual(database.prepare("SELECT id FROM drafts").all(), [{ id: "new" }]);
+    database.close();
+
+    writeFileSync(fakeNpm, "#!/bin/sh\nexit 1\n");
+    chmodSync(fakeNpm, 0o755);
+    const recovered = runDatabaseOnly(directory, databasePath, {
+      PATH: `${fakeBin}:${process.env.PATH || ""}`
+    });
+    assert.equal(recovered.status, 1, `stdout:\n${recovered.stdout}\nstderr:\n${recovered.stderr}`);
+    database = new Database(databasePath, { readonly: true });
+    assert.deepEqual(
+      database.prepare("SELECT id FROM drafts ORDER BY id").all(),
+      [{ id: "new" }, { id: "old" }],
+      "the verified pre-repair database must be restored before any retry work"
+    );
+    database.close();
+    assert.equal(existsSync(join(directory, "runtime", "database-recovery-required.json")), false);
+  } finally {
+    cleanup();
+  }
+});
+
 test("the exact launcher Prisma command upgrades a repaired legacy database unattended", () => {
   const { directory, databasePath, cleanup } = fixture();
   try {
@@ -543,8 +649,33 @@ test("schema, launcher order, and save route share one Draft invariant", () => {
   assert.match(backupHelper, /database\.backup\(temporary\)/);
   assert.match(backupHelper, /pragma\("quick_check"\)/);
   assert.match(backupHelper, /rename\(temporary, destination\)/);
+  assert.match(backupHelper, /rename\(temporary, destination\)[\s\S]*restoredFile\.sync\(\)[\s\S]*destinationDirectory\.sync\(\)/);
   assert.doesNotMatch(backupHelper, /copyFile\(temporary, destination\)/);
   const preparation = launcher.slice(launcher.indexOf("function prepare()"), launcher.indexOf("function delay("));
+  const restoreHelper = launcher.slice(
+    launcher.indexOf("function restoreDatabaseAfterFailedSchemaChange"),
+    launcher.indexOf("function packagedArtifactsReady")
+  );
+  const backupRestore = restoreHelper.slice(restoreHelper.indexOf("if (!backupPath) return false;"));
+  assert.ok(
+    backupRestore.indexOf('recordDatabaseRecoveryFailure(backupPath, "restore-backup")') <
+      backupRestore.indexOf("backup-sqlite.mjs"),
+    "the durable recovery marker must exist before SQLite replacement begins"
+  );
+  assert.ok(
+    backupRestore.indexOf("clearDatabaseRecoveryFailure()") >
+      backupRestore.indexOf("result.status !== 0"),
+    "the recovery marker is cleared only after a successful restore"
+  );
+  assert.match(
+    launcher,
+    /function clearDatabaseRecoveryFailure\(\)[\s\S]*rmSync\(DATABASE_RECOVERY_REQUIRED_PATH\);[\s\S]*fsyncDirectory\(directory\);/
+  );
+  assert.match(launcher, /function fsyncDirectory\(path\) \{\s*if \(process\.platform === "win32"\) return;/);
+  assert.match(
+    launcher,
+    /if \(existsSync\(DATABASE_RECOVERY_REQUIRED_PATH\)\)[\s\S]*sameLegacyRestore[\s\S]*sameCurrentRecovery[\s\S]*fsyncSync\(existingDescriptor\)/
+  );
   const backupAt = preparation.indexOf("backupDatabaseBeforeSchemaChange(schemaHash)");
   const repairAt = preparation.indexOf("repairDatabaseBeforeSchemaChange");
   const syncAt = preparation.indexOf("syncDatabase");
@@ -554,8 +685,11 @@ test("schema, launcher order, and save route share one Draft invariant", () => {
 
   const updater = readFileSync("scripts/update-student.mjs", "utf8");
   const dependencyStep = updater.slice(
-    updater.indexOf('execFileSync("npm", ["run", "db:generate"]'),
-    updater.indexOf("if (!RESIGN_BUNDLE)", updater.indexOf('execFileSync("npm", ["run", "db:generate"]'))
+    updater.indexOf('execWithPreparationLease("npm", ["run", "db:generate"]'),
+    updater.indexOf(
+      "if (!RESIGN_BUNDLE)",
+      updater.indexOf('execWithPreparationLease("npm", ["run", "db:generate"]')
+    )
   );
   const buildOnlyAt = dependencyStep.indexOf('start-app.mjs", "--build-only"');
   const databaseOnlyAt = dependencyStep.indexOf('start-app.mjs", "--database-only"');
@@ -564,7 +698,7 @@ test("schema, launcher order, and save route share one Draft invariant", () => {
 
   const installer = readFileSync("scripts/install-student-macos.sh", "utf8");
   const installDatabaseStep = installer.slice(
-    installer.indexOf('run "Preparing the local database..."'),
+    installer.indexOf('run_prepared "Preparing the local database..."'),
     installer.indexOf('ok "Local database ready"')
   );
   assert.match(installDatabaseStep, /start-app\.mjs --database-only/);

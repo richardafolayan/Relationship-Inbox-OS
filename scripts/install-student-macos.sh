@@ -83,6 +83,15 @@ MAINTENANCE_HELPER=""
 OPERATION_TOKEN=""
 OPERATION_ROOT=""
 OPERATION_HELPER=""
+PREPARATION_TOKEN=""
+PREPARATION_ROOT=""
+PREPARATION_HELPER=""
+INSTALL_BACKUP_DIR=""
+INSTALL_BACKUP_PENDING=false
+INSTALL_TRANSACTION_ID=""
+INSTALL_TRANSACTION_HELPER=""
+INSTALL_KEEP_RECOVERY_CODE=false
+PREPARED_COMMAND_ACTIVE=false
 
 for arg in "$@"; do
   case "$arg" in
@@ -130,21 +139,110 @@ die() {
   exit 1
 }
 
+die_recovery() {
+  INSTALL_KEEP_RECOVERY_CODE=true
+  printf '\n  %s✗ %s%s\n' "$RED" "$*" "$RESET"
+  printf '  %sThe full log is at:%s %s\n' "$DIM" "$RESET" "$LOG_FILE"
+  log "RECOVERY REQUIRED: $*"
+  exit 42
+}
+
 # run "human description" command args...  → runs quietly, log captures output.
 run() {
   local desc="$1"; shift
   info "$desc"
   log "RUN: $*"
-  if "$@" >>"$LOG_FILE" 2>&1; then
-    return 0
-  fi
+  "$@" >>"$LOG_FILE" 2>&1
   local code=$?
+  [ "$code" -eq 0 ] && return 0
   log "EXIT $code: $*"
-  return $code
+  return "$code"
+}
+
+run_prepared() {
+  local desc="$1" code; shift
+  [ -n "$PREPARATION_TOKEN" ] || return 1
+  PREPARED_COMMAND_ACTIVE=true
+  run "$desc" node "$APP_DIR/scripts/lib/run-with-install-lease.mjs" \
+    --app-dir "$APP_DIR" --token "$PREPARATION_TOKEN" -- "$@"
+  code=$?
+  PREPARED_COMMAND_ACTIVE=false
+  return "$code"
+}
+
+recover_install_transaction() {
+  local source="$1" helper
+  [ "$DRY_RUN" = true ] && return 0
+  helper="$source/scripts/lib/install-transaction.mjs"
+  [ -f "$helper" ] || return 1
+  node "$helper" recover --app-dir "$INSTALL_DIR" >>"$LOG_FILE" 2>&1
+}
+
+begin_install_transaction() {
+  local source="$1" staging="$2" backup="$3" helper output
+  [ "$DRY_RUN" = true ] && return 0
+  helper="$source/scripts/lib/install-transaction.mjs"
+  [ -f "$helper" ] || return 1
+  output="$(node "$helper" begin \
+    --app-dir "$INSTALL_DIR" \
+    --backup-dir "$backup" \
+    --backup-root "$(dirname "$INSTALL_DIR")" \
+    --kind macos-install \
+    --staged-app "$staging" \
+    --staging-root "$staging" 2>>"$LOG_FILE")" || return 1
+  INSTALL_TRANSACTION_ID="$(printf '%s' "$output" | sed -n 's/.*"operationId":"\([^"]*\)".*/\1/p')"
+  [ -n "$INSTALL_TRANSACTION_ID" ] || return 1
+  INSTALL_TRANSACTION_HELPER="$helper"
+}
+
+move_install_transaction() {
+  local action="$1"
+  [ -n "$INSTALL_TRANSACTION_ID" ] || return 1
+  node "$INSTALL_TRANSACTION_HELPER" "$action" \
+    --app-dir "$INSTALL_DIR" --operation-id "$INSTALL_TRANSACTION_ID" >>"$LOG_FILE" 2>&1
+}
+
+checkpoint_install_transaction() {
+  local phase="$1"
+  [ -n "$INSTALL_TRANSACTION_ID" ] || return 0
+  node "$INSTALL_TRANSACTION_HELPER" checkpoint \
+    --app-dir "$INSTALL_DIR" --operation-id "$INSTALL_TRANSACTION_ID" --phase "$phase" >>"$LOG_FILE" 2>&1
+}
+
+clear_install_transaction() {
+  [ -n "$INSTALL_TRANSACTION_ID" ] || return 0
+  node "$INSTALL_TRANSACTION_HELPER" clear \
+    --app-dir "$INSTALL_DIR" --operation-id "$INSTALL_TRANSACTION_ID" >>"$LOG_FILE" 2>&1 || return 1
+  INSTALL_TRANSACTION_ID=""
+  INSTALL_TRANSACTION_HELPER=""
+}
+
+commit_install_transaction() {
+  [ -n "$INSTALL_TRANSACTION_ID" ] || return 0
+  node "$INSTALL_TRANSACTION_HELPER" commit \
+    --app-dir "$INSTALL_DIR" --operation-id "$INSTALL_TRANSACTION_ID" >>"$LOG_FILE" 2>&1 || return 1
+  clear_install_transaction
+}
+
+rollback_install_transaction() {
+  [ -n "$INSTALL_TRANSACTION_ID" ] || return 1
+  node "$INSTALL_TRANSACTION_HELPER" rollback \
+    --app-dir "$INSTALL_DIR" --operation-id "$INSTALL_TRANSACTION_ID" >>"$LOG_FILE" 2>&1 || return 1
+  INSTALL_TRANSACTION_ID=""
+  INSTALL_TRANSACTION_HELPER=""
+  INSTALL_BACKUP_DIR=""
+  INSTALL_BACKUP_PENDING=false
+  ok "Restored the previous installation"
 }
 
 # Show a path with the home directory shortened to ~ for friendlier output.
 display_path() { printf '%s' "${1/#$HOME/~}"; }
+
+canonicalize_install_dir() {
+  [ -d "$INSTALL_DIR" ] || return 0
+  INSTALL_DIR="$(cd "$INSTALL_DIR" 2>/dev/null && pwd -P)" \
+    || die "Couldn't resolve the existing installation path."
+}
 
 # --------------------------------------------------------------------------
 # Pre-flight environment checks
@@ -326,6 +424,110 @@ end_install_operation() {
   unset RIOS_INSTALL_OPERATION_TOKEN
 }
 
+begin_install_preparation() {
+  local root="$1" source="$2" helper token attempt
+  [ "$DRY_RUN" = true ] && return 0
+  [ -n "$PREPARATION_TOKEN" ] && return 0
+  helper="$source/scripts/install-maintenance.mjs"
+  [ -f "$helper" ] || return 1
+  attempt=0
+  while [ "$attempt" -lt 720 ]; do
+    attempt=$((attempt + 1))
+    token="$(node "$helper" acquire-preparation --app-dir "$root" --owner-pid "$$" 2>>"$LOG_FILE")" && [ -n "$token" ] && break
+    token=""
+    sleep 0.25
+  done
+  [ -n "$token" ] || return 1
+  PREPARATION_TOKEN="$token"
+  PREPARATION_ROOT="$root"
+  PREPARATION_HELPER="$helper"
+  export RIOS_INSTALL_PREPARATION_TOKEN="$token"
+}
+
+end_install_preparation() {
+  [ -n "$PREPARATION_TOKEN" ] || return 0
+  local helper="$PREPARATION_HELPER"
+  if [ ! -f "$helper" ] && [ -n "${APP_DIR:-}" ]; then
+    helper="$APP_DIR/scripts/install-maintenance.mjs"
+  fi
+  if [ -f "$helper" ]; then
+    node "$helper" release-preparation --app-dir "$PREPARATION_ROOT" --token "$PREPARATION_TOKEN" >>"$LOG_FILE" 2>&1 || true
+  fi
+  PREPARATION_TOKEN=""
+  PREPARATION_ROOT=""
+  PREPARATION_HELPER=""
+  unset RIOS_INSTALL_PREPARATION_TOKEN
+}
+
+begin_install_backup() {
+  local source="$1" backup
+  [ "$DRY_RUN" = true ] && return 0
+  backup="${INSTALL_DIR}.previous-$(date +%Y%m%d-%H%M%S)-$$"
+  [ ! -e "$backup" ] || return 1
+  cp -R "$source" "$backup" || { rm -rf "$backup"; return 1; }
+  INSTALL_BACKUP_DIR="$backup"
+  INSTALL_BACKUP_PENDING=true
+}
+
+track_moved_install_backup() {
+  INSTALL_BACKUP_DIR="$1"
+  INSTALL_BACKUP_PENDING=true
+}
+
+finalize_install_backup() {
+  [ "$INSTALL_BACKUP_PENDING" = true ] || return 0
+  rm -rf "$INSTALL_BACKUP_DIR"
+  INSTALL_BACKUP_DIR=""
+  INSTALL_BACKUP_PENDING=false
+}
+
+restore_install_backup() {
+  [ "$INSTALL_BACKUP_PENDING" = true ] || return 0
+  [ -d "$INSTALL_BACKUP_DIR" ] || {
+    warn "The previous installation backup is missing. Leave the current files in place and send the install log to Richard."
+    return 1
+  }
+  local failed="${INSTALL_DIR}.failed-install-$$"
+  cd "$(dirname "$INSTALL_DIR")" || {
+    warn "Could not open the installation folder. The previous version remains at $(display_path "$INSTALL_BACKUP_DIR")."
+    return 1
+  }
+  warn "Installation did not finish. Restoring the previous version."
+  if [ -e "$INSTALL_DIR" ] && ! mv "$INSTALL_DIR" "$failed"; then
+    warn "The new installation could not be moved aside. The previous version remains at $(display_path "$INSTALL_BACKUP_DIR")."
+    return 1
+  fi
+  if ! mv "$INSTALL_BACKUP_DIR" "$INSTALL_DIR"; then
+    [ -e "$failed" ] && mv "$failed" "$INSTALL_DIR" 2>/dev/null
+    warn "Automatic restore did not complete. The previous version remains at $(display_path "$INSTALL_BACKUP_DIR")."
+    return 1
+  fi
+  rm -rf "$failed"
+  INSTALL_BACKUP_DIR=""
+  INSTALL_BACKUP_PENDING=false
+  ok "Restored the previous installation"
+}
+
+handle_install_exit() {
+  local code=$?
+  trap - EXIT
+  if [ "$code" -ne 0 ]; then
+    if [ "$PREPARED_COMMAND_ACTIVE" = true ]; then
+      warn "Installation was interrupted while a protected setup worker was still running. The durable transaction was left for the next installer run to recover safely."
+    elif [ "$INSTALL_KEEP_RECOVERY_CODE" = true ]; then
+      commit_install_transaction || true
+    elif [ -n "$INSTALL_TRANSACTION_ID" ]; then
+      rollback_install_transaction || true
+    else
+      restore_install_backup || true
+    fi
+  fi
+  end_install_maintenance
+  end_install_preparation
+  end_install_operation
+  exit "$code"
+}
+
 # Install Node 22 into a user-owned folder ($RIOS_NODE_DIR) from Node's
 # official macOS tarball. No sudo, no admin rights, no Mac password — so it
 # works on managed / non-admin accounts (e.g. university Macs). curl
@@ -434,18 +636,6 @@ resolve_app_dir() {
   fi
 
   if [ -n "$source" ]; then
-    if [ "$source" = "$INSTALL_DIR" ]; then
-      # Already running from the install location — nothing to relocate.
-      begin_install_operation "$INSTALL_DIR" "$source" \
-        || die "Another installer or update is already changing $APP_NAME. Try again when it finishes."
-      stop_existing_install "$source"
-      begin_install_maintenance "$INSTALL_DIR" "$source" \
-        || die "Couldn't reserve the app for installation. Quit $APP_NAME and try again."
-      stop_existing_install "$source"
-      APP_DIR="$INSTALL_DIR"
-      ok "Using the app at $(display_path "$APP_DIR")"
-      return 0
-    fi
     ok "Found the app to install from: $(display_path "$source")"
     install_from_source "$source"
     return 0
@@ -464,13 +654,21 @@ resolve_app_dir() {
 #   SRC is only ever read, never moved or deleted (it may hold the running
 #   script), so the app never ends up running from Downloads.
 install_from_source() {
-  local source="$1"
+  local source="$1" staging backup helper_source item had_existing
 
   begin_install_operation "$INSTALL_DIR" "$source" \
     || die "Another installer or update is already changing $APP_NAME. Try again when it finishes."
+  begin_install_preparation "$INSTALL_DIR" "$source" \
+    || die "The app is still preparing data. Wait for it to finish, then run the installer again."
+
+  recover_install_transaction "$source" \
+    || die "An interrupted installation could not be recovered safely. Leave the app and its backup in place and send the install log to Richard."
 
   if is_app_root "$INSTALL_DIR"; then
+    had_existing=true
     stop_existing_install "$source"
+  else
+    had_existing=false
   fi
 
   if [ "$DRY_RUN" = true ]; then
@@ -481,33 +679,30 @@ install_from_source() {
 
   mkdir -p "$(dirname "$INSTALL_DIR")" || die "Couldn't create $(dirname "$INSTALL_DIR")."
 
-  if [ ! -e "$INSTALL_DIR" ]; then
-    step "Installing into $(display_path "$INSTALL_DIR")"
-    cp -R "$source" "$INSTALL_DIR" || die "Couldn't copy the app into $INSTALL_DIR."
-    begin_install_maintenance "$INSTALL_DIR" "$source" \
-      || die "Couldn't reserve the new app for installation."
-    ok "Installed into $(display_path "$INSTALL_DIR")"
-  elif is_app_root "$INSTALL_DIR"; then
+  staging="${INSTALL_DIR}.new-$(date +%Y%m%d-%H%M%S)-$$"
+  backup="${INSTALL_DIR}.previous-$(date +%Y%m%d-%H%M%S)-$$"
+  [ ! -e "$staging" ] && [ ! -e "$backup" ] \
+    || die "A unique installation staging path could not be reserved. Run the installer again."
+  cp -R "$source" "$staging" || { rm -rf "$staging"; die "Couldn't stage the new app version."; }
+  helper_source="$source"
+  [ "$source" = "$INSTALL_DIR" ] && helper_source="$staging"
+  begin_install_transaction "$helper_source" "$staging" "$backup" \
+    || { rm -rf "$staging"; die "Couldn't create a durable installation recovery record. Nothing was changed."; }
+
+  if [ "$had_existing" = true ]; then
     step "Updating your existing install at $(display_path "$INSTALL_DIR")"
     info "Your settings (.env), data, and logs are kept"
-
-    local staging backup item
-    staging="${INSTALL_DIR}.new-$$"
-    backup="${INSTALL_DIR}.previous"
-
-    rm -rf "$staging"
-    cp -R "$source" "$staging" || { rm -rf "$staging"; die "Couldn't stage the new app version."; }
 
     # Move the old app out of its launch path before reading any live data.
     # A second shutdown pass closes the tiny stop-to-rename race and verifies
     # the complete launcher/process tree under its new canonical path.
-    rm -rf "$backup"
-    mv "$INSTALL_DIR" "$backup" || { rm -rf "$staging"; die "Couldn't set aside the previous version — nothing was changed."; }
+    move_install_transaction move-old \
+      || { rm -rf "$staging"; die "Couldn't set aside the previous version. The installer will recover it from the durable transaction."; }
+    track_moved_install_backup "$backup"
     if ! run "Confirming the old app is fully stopped..." \
-         node "$source/scripts/stop-existing-install.mjs" --app-dir "$backup"; then
-      mv "$backup" "$INSTALL_DIR" 2>/dev/null
+         node "$helper_source/scripts/stop-existing-install.mjs" --app-dir "$backup"; then
       rm -rf "$staging"
-      die "Couldn't stop $APP_NAME safely; restored your previous install."
+      die "Couldn't stop $APP_NAME safely. The installer will restore your previous version."
     fi
 
     # With the old launch path absent and its full runtime stopped, the
@@ -517,24 +712,29 @@ install_from_source() {
         rm -rf "$staging/$item"
         if ! cp -R "$backup/$item" "$staging/$item"; then
           rm -rf "$staging"
-          mv "$backup" "$INSTALL_DIR" 2>/dev/null
-          die "Couldn't preserve your existing $item; restored your previous install."
+          die "Couldn't preserve your existing $item. The installer will restore your previous version."
         fi
       fi
     done
 
-    if ! begin_install_maintenance "$INSTALL_DIR" "$source"; then
+    if ! begin_install_maintenance "$INSTALL_DIR" "$helper_source"; then
       rm -rf "$staging"
-      mv "$backup" "$INSTALL_DIR" 2>/dev/null
-      die "Couldn't reserve the new app for installation; restored your previous install."
+      die "Couldn't reserve the new app for installation. The installer will restore your previous version."
     fi
-    if ! mv "$staging" "$INSTALL_DIR"; then
+    if ! move_install_transaction publish; then
       end_install_maintenance
-      mv "$backup" "$INSTALL_DIR" 2>/dev/null
-      die "Couldn't put the new version in place; restored your previous install."
+      die "Couldn't put the new version in place. The installer will restore your previous version."
     fi
-    rm -rf "$backup"
+    INSTALL_TRANSACTION_HELPER="$INSTALL_DIR/scripts/lib/install-transaction.mjs"
     ok "Updated $(display_path "$INSTALL_DIR") (your data was kept)"
+  elif [ ! -e "$INSTALL_DIR" ]; then
+    step "Installing into $(display_path "$INSTALL_DIR")"
+    begin_install_maintenance "$INSTALL_DIR" "$helper_source" \
+      || die "Couldn't reserve the new app for installation."
+    move_install_transaction publish \
+      || die "Couldn't publish the new app. The durable transaction was kept for recovery."
+    INSTALL_TRANSACTION_HELPER="$INSTALL_DIR/scripts/lib/install-transaction.mjs"
+    ok "Installed into $(display_path "$INSTALL_DIR")"
   else
     die "$(display_path "$INSTALL_DIR") already exists but doesn't look like $APP_NAME. Move it aside and run the installer again."
   fi
@@ -665,23 +865,35 @@ install_app() {
 
   if [ "$SKIP_DEPS" = true ]; then
     warn "[skip-deps] skipping npm install and database setup"
+    commit_install_transaction || die "Couldn't finalize the installation transaction."
+    INSTALL_KEEP_RECOVERY_CODE=true
     return 0
   fi
 
-  run "Installing app dependencies (npm install)..." npm install --include=dev \
+  run_prepared "Installing app dependencies (npm install)..." npm install --include=dev \
     || die "Installing dependencies failed. The log has the details: $LOG_FILE"
   ok "Dependencies installed"
 
-  run "Preparing the local database..." npm run db:generate \
+  run_prepared "Preparing the local database..." npm run db:generate \
     || die "Database setup (generate) failed. The log has the details: $LOG_FILE"
-  run "Creating the local database..." node scripts/start-app.mjs --database-only \
-    || die "Database setup (create) failed. The log has the details: $LOG_FILE"
+  checkpoint_install_transaction ready \
+    || die "Couldn't record that the new app is ready for database recovery."
+  run_prepared "Creating the local database..." node scripts/start-app.mjs --database-only
+  local database_code=$?
+  if [ "$database_code" -ne 0 ]; then
+    if [ "$database_code" -eq 43 ]; then
+      die "Database setup failed after the prior database was verified as restored. The installer will restore the previous app version."
+    fi
+    die_recovery "Database setup stopped without a verified restoration. The new recovery-capable app and the previous app backup were kept. Do not delete data/backups; run the installer again."
+  fi
   ok "Local database ready"
+  commit_install_transaction || die_recovery "The database is ready, but the installation transaction could not be finalized. Keep the current app and backup in place."
+  INSTALL_KEEP_RECOVERY_CODE=true
 
   # Build the optimised (production) dashboard now so the first launch is
   # instant instead of compiling pages on demand. Non-fatal: the launcher
   # rebuilds (or falls back to dev mode) if this step didn't finish.
-  if run "Optimising the app for speed (one-time, about a minute)..." node scripts/start-app.mjs --prepare-only; then
+  if run_prepared "Optimising the app for speed (one-time, about a minute)..." node scripts/start-app.mjs --prepare-only; then
     ok "App optimised"
   else
     warn "Couldn't pre-build the app now — the first launch will do it instead."
@@ -724,7 +936,7 @@ create_app_bundle() {
     return 0
   }
 
-  if run "Creating $APP_NAME.app..." \
+  if run_prepared "Creating $APP_NAME.app..." \
        node "$script" --app-dir "$APP_DIR" --out "$APP_BUNDLE_DIR" --node-dir "$RIOS_NODE_DIR"; then
     ok "Created $(display_path "$APP_BUNDLE_DIR")/$APP_NAME.app"
   else
@@ -772,6 +984,7 @@ start_app() {
     if ! open \
       --env "RIOS_INSTALL_MAINTENANCE_TOKEN=$MAINTENANCE_TOKEN" \
       --env "RIOS_INSTALL_OPERATION_TOKEN=$OPERATION_TOKEN" \
+      --env "RIOS_INSTALL_PREPARATION_TOKEN=$PREPARATION_TOKEN" \
       "$app_bundle" >>"$LOG_FILE" 2>&1; then
       warn "Couldn't open the Mac app. Falling back to Terminal start."
     else
@@ -785,6 +998,7 @@ start_app() {
         say "  doctor check:  ${BOLD}cd $disp && npm run doctor${RESET}"
       fi
       end_install_maintenance
+      end_install_preparation
       end_install_operation
       return 0
     fi
@@ -800,12 +1014,14 @@ start_app() {
 
   if wait_for_dashboard; then
     end_install_maintenance
+    end_install_preparation
     end_install_operation
     ok "The app is up"
     open "$DASHBOARD_URL" >/dev/null 2>&1 || true
     print_success terminal
   else
     end_install_maintenance
+    end_install_preparation
     end_install_operation
     warn "The app is taking longer than usual to start."
     say "  Try opening $DASHBOARD_URL in Chrome. If it doesn't load, run the"
@@ -875,11 +1091,12 @@ EOF
 # --------------------------------------------------------------------------
 
 main() {
-  trap 'end_install_maintenance; end_install_operation' EXIT
+  trap handle_install_exit EXIT
   printf '\n%s%s%s installer%s\n' "$BOLD" "$BLUE" "$APP_NAME" "$RESET"
   printf '%sLog: %s%s\n' "$DIM" "$LOG_FILE" "$RESET"
   [ "$DRY_RUN" = true ] && printf '%s(dry run — nothing will be changed)%s\n' "$YELLOW" "$RESET"
 
+  canonicalize_install_dir
   check_macos
   check_disk
   ensure_node
@@ -887,8 +1104,10 @@ main() {
   ensure_env
   install_app
   create_app_bundle
+  finalize_install_backup
   start_app
   end_install_maintenance
+  end_install_preparation
   end_install_operation
 }
 

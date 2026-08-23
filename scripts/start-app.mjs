@@ -3,10 +3,14 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+  closeSync,
   existsSync,
+  fsyncSync,
   mkdirSync,
+  openSync,
   readFileSync,
   readdirSync,
+  renameSync,
   rmSync,
   statSync,
   writeFileSync
@@ -17,9 +21,13 @@ import { fileURLToPath } from "node:url";
 import { loadAppEnv } from "./lib/env-file.mjs";
 import {
   acquireProcessLock,
+  acquireProcessLockLease,
+  inspectProcessLock,
   inspectInstallMaintenance,
   inspectInstallOperation,
-  releaseProcessLock
+  installPreparationPath,
+  releaseProcessLock,
+  releaseProcessLockLease
 } from "./lib/install-maintenance.mjs";
 import { packagedDashboardArgs } from "./lib/dashboard-command.mjs";
 import { prismaDbPushInvocation } from "./lib/prisma-command.mjs";
@@ -29,13 +37,17 @@ import {
   SchemaRestoreError
 } from "./lib/recoverable-schema-change.mjs";
 import { resolveAppName } from "./lib/branding.mjs";
-import { discoverInstallRuntime } from "./stop-existing-install.mjs";
+import {
+  discoverInstallRuntime,
+  stopExistingInstallRuntime
+} from "./stop-existing-install.mjs";
 import { prepareSqliteDatabaseFile } from "./lib/sqlite-database.mjs";
 import {
   portConflict,
   portConflictIsStaleTovi,
   reclaimPortConflict,
   recoverPriorRuntime,
+  processStartIdentity,
   removeRuntimeState,
   stopChildGroups,
   writeRuntimeState
@@ -58,7 +70,7 @@ const STATE_DIR = resolve(process.env.RIOS_STATE_DIR || join(DATA_DIR, "runtime"
 const STAMPS_PATH = join(DATA_DIR, "app-prepare-stamps.json");
 const RUNTIME_STATE_PATH = join(STATE_DIR, "processes.json");
 const STARTUP_CONFLICT_PATH = join(STATE_DIR, "startup-conflict.json");
-const PREPARATION_LOCK_PATH = join(STATE_DIR, "preparation.lock");
+const PREPARATION_LOCK_PATH = installPreparationPath(APP_DIR);
 const DATABASE_RECOVERY_REQUIRED_PATH = join(STATE_DIR, "database-recovery-required.json");
 const PACKAGED = process.env.RIOS_PACKAGED_APP === "1";
 const args = new Set(process.argv.slice(2));
@@ -102,24 +114,95 @@ function saveStamps(stamps) {
   }
 }
 
-function recordDatabaseRecoveryFailure(backupPath) {
-  mkdirSync(dirname(DATABASE_RECOVERY_REQUIRED_PATH), { recursive: true });
-  writeFileSync(
-    DATABASE_RECOVERY_REQUIRED_PATH,
-    `${JSON.stringify({ version: 1, backupPath, failedAt: new Date().toISOString() }, null, 2)}\n`,
-    { mode: 0o600 }
-  );
+function fsyncDirectory(path) {
+  if (process.platform === "win32") return;
+  const descriptor = openSync(path, "r");
+  try {
+    fsyncSync(descriptor);
+  } finally {
+    closeSync(descriptor);
+  }
+}
+
+function recordDatabaseRecoveryFailure(backupPath, mode = "restore-backup") {
+  const directory = dirname(DATABASE_RECOVERY_REQUIRED_PATH);
+  const temporary = `${DATABASE_RECOVERY_REQUIRED_PATH}.${process.pid}.${Date.now()}.tmp`;
+  const databasePath = resolvedDatabaseFile();
+  const value = {
+    version: 2,
+    mode,
+    databasePath,
+    ...(backupPath ? { backupPath } : {}),
+    failedAt: new Date().toISOString()
+  };
+  mkdirSync(directory, { recursive: true });
+  if (existsSync(DATABASE_RECOVERY_REQUIRED_PATH)) {
+    const existing = readJson(DATABASE_RECOVERY_REQUIRED_PATH);
+    const sameLegacyRestore = existing?.version === 1 &&
+      mode === "restore-backup" &&
+      backupPath &&
+      resolve(existing.backupPath || "") === resolve(backupPath);
+    const sameCurrentRecovery = existing?.version === 2 &&
+      existing.mode === mode &&
+      resolve(existing.databasePath || "") === resolve(databasePath) &&
+      resolve(existing.backupPath || "") === resolve(backupPath || "");
+    if (!sameLegacyRestore && !sameCurrentRecovery) {
+      throw new Error("A different database recovery is already pending");
+    }
+    const existingDescriptor = openSync(DATABASE_RECOVERY_REQUIRED_PATH, "r+");
+    try {
+      fsyncSync(existingDescriptor);
+    } finally {
+      closeSync(existingDescriptor);
+    }
+    fsyncDirectory(directory);
+    return;
+  }
+  let descriptor;
+  try {
+    descriptor = openSync(temporary, "wx", 0o600);
+    writeFileSync(
+      descriptor,
+      `${JSON.stringify(value, null, 2)}\n`
+    );
+    fsyncSync(descriptor);
+    closeSync(descriptor);
+    descriptor = undefined;
+    renameSync(temporary, DATABASE_RECOVERY_REQUIRED_PATH);
+    fsyncDirectory(directory);
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor);
+    rmSync(temporary, { force: true });
+  }
+}
+
+function clearDatabaseRecoveryFailure() {
+  if (!existsSync(DATABASE_RECOVERY_REQUIRED_PATH)) return;
+  const directory = dirname(DATABASE_RECOVERY_REQUIRED_PATH);
+  rmSync(DATABASE_RECOVERY_REQUIRED_PATH);
+  fsyncDirectory(directory);
 }
 
 function pendingDatabaseRecovery() {
   if (!existsSync(DATABASE_RECOVERY_REQUIRED_PATH)) return null;
   try {
     const value = JSON.parse(readFileSync(DATABASE_RECOVERY_REQUIRED_PATH, "utf8"));
+    const databasePath = typeof value?.databasePath === "string" ? resolve(value.databasePath) : "";
+    if (
+      value?.version === 2 &&
+      value.mode === "remove-created-database" &&
+      databasePath === resolve(resolvedDatabaseFile())
+    ) {
+      return { ok: true, mode: value.mode, backupPath: "" };
+    }
     const backupPath = typeof value?.backupPath === "string" ? resolve(value.backupPath) : "";
     const backupRoot = join(dirname(resolvedDatabaseFile()), "backups");
     const fromBackupRoot = backupPath ? relative(backupRoot, backupPath) : "";
     if (
-      value?.version !== 1 ||
+      !(
+        value?.version === 1 ||
+        (value?.version === 2 && value.mode === "restore-backup" && databasePath === resolve(resolvedDatabaseFile()))
+      ) ||
       !backupPath ||
       isAbsolute(fromBackupRoot) ||
       fromBackupRoot === ".." ||
@@ -128,7 +211,7 @@ function pendingDatabaseRecovery() {
     ) {
       return { ok: false, backupPath: "" };
     }
-    return { ok: true, backupPath };
+    return { ok: true, mode: "restore-backup", backupPath };
   } catch {
     return { ok: false, backupPath: "" };
   }
@@ -141,8 +224,10 @@ function recoverPendingDatabase() {
     say(`  ${C.yellow}Database recovery is required, but its private backup could not be verified. Do not start the app.${C.reset}`);
     return false;
   }
-  if (!restoreDatabaseAfterFailedSchemaChange(pending.backupPath)) return false;
-  rmSync(DATABASE_RECOVERY_REQUIRED_PATH, { force: true });
+  if (!restoreDatabaseAfterFailedSchemaChange(pending.backupPath, {
+    databaseExisted: pending.mode !== "remove-created-database"
+  })) return false;
+  clearDatabaseRecoveryFailure();
   return true;
 }
 
@@ -287,7 +372,15 @@ function syncDatabase() {
 
 function backupDatabaseBeforeSchemaChange(schemaHash) {
   const source = resolvedDatabaseFile();
-  if (!existsSync(source)) return { ok: true, backupPath: null };
+  if (!existsSync(source)) {
+    try {
+      recordDatabaseRecoveryFailure(null, "remove-created-database");
+    } catch (error) {
+      say(`  ${C.yellow}The database recovery marker could not be made durable. No schema change was applied: ${error.message}${C.reset}`);
+      return { ok: false, backupPath: null, databaseExisted: false };
+    }
+    return { ok: true, backupPath: null, databaseExisted: false };
+  }
   const backupDir = join(dirname(source), "backups");
   mkdirSync(backupDir, { recursive: true });
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
@@ -303,10 +396,16 @@ function backupDatabaseBeforeSchemaChange(schemaHash) {
   if (result.status !== 0) {
     say(`  ${C.yellow}The existing database could not be backed up. No schema change was applied.${C.reset}`);
     if (result.stderr) say(result.stderr.trim());
-    return { ok: false, backupPath: null };
+    return { ok: false, backupPath: null, databaseExisted: true };
+  }
+  try {
+    recordDatabaseRecoveryFailure(destination, "restore-backup");
+  } catch (error) {
+    say(`  ${C.yellow}The database backup was verified, but its recovery marker could not be made durable. No schema change was applied: ${error.message}${C.reset}`);
+    return { ok: false, backupPath: destination, databaseExisted: true };
   }
   say(`  Backed up the existing database to ${destination}.`);
-  return { ok: true, backupPath: destination };
+  return { ok: true, backupPath: destination, databaseExisted: true };
 }
 
 function repairDatabaseBeforeSchemaChange() {
@@ -341,9 +440,33 @@ function requiredSchemaState() {
   return "error";
 }
 
-function restoreDatabaseAfterFailedSchemaChange(backupPath) {
-  if (!backupPath) return true;
+function restoreDatabaseAfterFailedSchemaChange(backupPath, { databaseExisted = true } = {}) {
   const destination = resolvedDatabaseFile();
+  if (!databaseExisted) {
+    try {
+      recordDatabaseRecoveryFailure(null, "remove-created-database");
+      for (const suffix of ["", "-wal", "-shm", "-journal"]) {
+        rmSync(`${destination}${suffix}`, { force: true });
+      }
+      fsyncDirectory(dirname(destination));
+      if (["", "-wal", "-shm", "-journal"].some((suffix) => existsSync(`${destination}${suffix}`))) {
+        return false;
+      }
+      clearDatabaseRecoveryFailure();
+      say("  Removed the incomplete newly created database.");
+      return true;
+    } catch (error) {
+      say(`  ${C.yellow}Automatic cleanup of the incomplete database failed: ${error.message}${C.reset}`);
+      return false;
+    }
+  }
+  if (!backupPath) return false;
+  try {
+    recordDatabaseRecoveryFailure(backupPath, "restore-backup");
+  } catch (error) {
+    say(`  ${C.yellow}Restoration was not attempted because its recovery marker could not be made durable: ${error.message}${C.reset}`);
+    return false;
+  }
   const result = spawnSync(
     process.execPath,
     [join(APP_DIR, "scripts", "lib", "backup-sqlite.mjs"), backupPath, destination],
@@ -355,6 +478,7 @@ function restoreDatabaseAfterFailedSchemaChange(backupPath) {
     if (!result.stderr && result.error) say(result.error.message);
     return false;
   }
+  clearDatabaseRecoveryFailure();
   say(`  Restored the database from ${backupPath}.`);
   return true;
 }
@@ -383,7 +507,10 @@ function prepare() {
   const schemaHash = hashPaths([join(APP_DIR, "packages/core/prisma/schema.prisma")]);
   const requiredSchema = BUILD_ONLY ? "ready" : requiredSchemaState();
   if (requiredSchema === "error") return { ok: false, databaseFailureSafe: true };
-  const schemaChanged = stamps.schemaHash !== schemaHash || requiredSchema === "needs-sync";
+  const schemaChanged =
+    stamps.schemaHash !== schemaHash ||
+    requiredSchema === "needs-sync" ||
+    requiredSchema === "missing";
   if (!PACKAGED && (schemaChanged || !canResolve("@prisma/client"))) {
     if (!run("Updating the database client...", NPM_COMMAND, ["run", "db:generate"])) return { ok: false };
   }
@@ -400,7 +527,10 @@ function prepare() {
       } catch (error) {
         if (error instanceof SchemaRestoreError) {
           try {
-            recordDatabaseRecoveryFailure(error.backupPath);
+            recordDatabaseRecoveryFailure(
+              error.backupPath,
+              error.databaseExisted ? "restore-backup" : "remove-created-database"
+            );
           } catch (markerError) {
             say(`  ${C.yellow}Could not record the recovery marker: ${markerError.message}${C.reset}`);
           }
@@ -408,7 +538,7 @@ function prepare() {
           return { ok: false, databaseRecoveryFailed: true };
         }
         if (error instanceof SchemaChangeRestoredError) {
-          say(`  ${C.yellow}The database change failed, and the verified backup was restored. No app processes were started.${C.reset}`);
+          say(`  ${C.yellow}The database change failed, and the prior database state was restored. No app processes were started.${C.reset}`);
           if (error.cause?.message) say(`  ${error.cause.message}`);
           return { ok: false, databaseFailureSafe: true };
         }
@@ -420,7 +550,7 @@ function prepare() {
     }
     next.schemaHash = schemaHash;
     saveStamps(next);
-    rmSync(DATABASE_RECOVERY_REQUIRED_PATH, { force: true });
+    clearDatabaseRecoveryFailure();
   }
 
   if (DATABASE_ONLY) return { ok: true, prod: PACKAGED };
@@ -513,17 +643,20 @@ async function startApp(prod, onRuntimeRegistered) {
   let shuttingDown = false;
   let phoneProxy = null;
   let securePhoneAccess = null;
+  const parentIdentity = processStartIdentity(process.pid);
+  if (!parentIdentity) throw new Error("Could not identify the app launcher process");
   const state = {
-    version: 1,
+    version: 2,
     appDir: APP_DIR,
     dataDir: DATA_DIR,
     parentPid: process.pid,
+    parentIdentity,
     startedAt: new Date().toISOString(),
     children: []
   };
 
   const persistState = () => {
-    state.children = children.map(({ name, child }) => ({ name, pid: child.pid }));
+    state.children = children.map(({ name, child, identity }) => ({ name, pid: child.pid, identity }));
     writeRuntimeState(RUNTIME_STATE_PATH, state);
   };
 
@@ -531,7 +664,12 @@ async function startApp(prod, onRuntimeRegistered) {
     if (shuttingDown) return;
     shuttingDown = true;
     await Promise.all([
-      stopChildGroups(children.map(({ name, child }) => ({ name, pid: child.pid }))),
+      stopChildGroups(children.map(({ name, child, identity }) => ({
+        name,
+        pid: child.pid,
+        identity,
+        appDir: APP_DIR
+      }))),
       stopPhoneAccessProxy(phoneProxy?.server),
       Promise.resolve(stopSecurePhoneAccess(securePhoneAccess))
     ]);
@@ -539,23 +677,46 @@ async function startApp(prod, onRuntimeRegistered) {
     process.exit(code);
   };
 
-  const launch = (name, command, commandArgs) => {
+  const launch = async (name, command, commandArgs) => {
     const child = spawn(command, commandArgs, {
       cwd: APP_DIR,
       detached: process.platform !== "win32",
       stdio: "inherit"
     });
-    children.push({ name, child });
-    persistState();
+    let registered = false;
+    let startupFailure = null;
     child.on("error", (error) => {
+      if (!registered) {
+        startupFailure = error;
+        return;
+      }
       say(`Could not start the ${name}: ${error.message}`);
       void shutdown(1);
     });
     child.on("exit", (code, signalName) => {
+      if (!registered) {
+        startupFailure = new Error(
+          `${name} stopped during launch (code=${code ?? ""} signal=${signalName ?? ""})`
+        );
+        return;
+      }
       if (shuttingDown) return;
       say(`${name} stopped unexpectedly (code=${code ?? ""} signal=${signalName ?? ""}).`);
       void shutdown(code || 1);
     });
+
+    let identity = "";
+    for (let attempt = 0; attempt < 10 && !identity && !startupFailure; attempt += 1) {
+      identity = processStartIdentity(child.pid);
+      if (!identity) await delay(25);
+    }
+    if (!identity || startupFailure) {
+      await stopExistingInstallRuntime({ appDir: APP_DIR, graceMs: 500 });
+      throw startupFailure || new Error(`Could not identify the ${name} process`);
+    }
+    children.push({ name, child, identity });
+    registered = true;
+    persistState();
     return child;
   };
 
@@ -602,9 +763,9 @@ async function startApp(prod, onRuntimeRegistered) {
   }
 
   if (prod) {
-    launch("runner", process.execPath, [join(APP_DIR, "apps", "runner", "dist", "index.js")]);
+    await launch("runner", process.execPath, [join(APP_DIR, "apps", "runner", "dist", "index.js")]);
   } else {
-    launch("runner", NPM_COMMAND, ["run", "dev", "--workspace", "@inbox-os/runner"]);
+    await launch("runner", NPM_COMMAND, ["run", "dev", "--workspace", "@inbox-os/runner"]);
   }
   if (!(await waitFor("The local service", runnerReady, 120_000))) {
     await shutdown(1);
@@ -612,9 +773,9 @@ async function startApp(prod, onRuntimeRegistered) {
   }
 
   if (prod) {
-    launch("dashboard", process.execPath, packagedDashboardArgs(APP_DIR, DASHBOARD_PORT));
+    await launch("dashboard", process.execPath, packagedDashboardArgs(APP_DIR, DASHBOARD_PORT));
   } else {
-    launch("dashboard", NPM_COMMAND, [
+    await launch("dashboard", NPM_COMMAND, [
       "run",
       "dev",
       "--workspace",
@@ -632,32 +793,45 @@ async function startApp(prod, onRuntimeRegistered) {
 }
 
 async function main() {
-  const maintenance = inspectInstallMaintenance(
-    APP_DIR,
-    process.env.RIOS_INSTALL_MAINTENANCE_TOKEN || ""
-  );
-  const operation = inspectInstallOperation(
-    APP_DIR,
-    process.env.RIOS_INSTALL_OPERATION_TOKEN || ""
-  );
-  if (
-    maintenance.status === "active" ||
-    maintenance.status === "invalid" ||
-    operation.status === "active" ||
-    operation.status === "invalid"
-  ) {
-    say(`${APP_NAME} is being installed or updated. Try again when that finishes.`);
-    process.exitCode = 3;
-    return;
-  }
-
   let preparationToken = "";
+  let preparationLeasePath = "";
+  let releasePreparation = false;
   try {
     try {
-      preparationToken = acquireProcessLock(PREPARATION_LOCK_PATH);
+      const inheritedToken = process.env.RIOS_INSTALL_PREPARATION_TOKEN || "";
+      const inheritedState = inheritedToken
+        ? inspectProcessLock(PREPARATION_LOCK_PATH, inheritedToken)
+        : { status: "none" };
+      preparationToken = acquireProcessLock(
+        PREPARATION_LOCK_PATH,
+        inheritedToken ? { token: inheritedToken } : {}
+      );
+      releasePreparation = inheritedState.status !== "owner";
+      if (!releasePreparation) {
+        preparationLeasePath = acquireProcessLockLease(PREPARATION_LOCK_PATH, preparationToken);
+      }
     } catch {
       say(`${APP_NAME} is already being prepared by another process.`);
       process.exitCode = 2;
+      return;
+    }
+
+    const maintenance = inspectInstallMaintenance(
+      APP_DIR,
+      process.env.RIOS_INSTALL_MAINTENANCE_TOKEN || ""
+    );
+    const operation = inspectInstallOperation(
+      APP_DIR,
+      process.env.RIOS_INSTALL_OPERATION_TOKEN || ""
+    );
+    if (
+      maintenance.status === "active" ||
+      maintenance.status === "invalid" ||
+      operation.status === "active" ||
+      operation.status === "invalid"
+    ) {
+      say(`${APP_NAME} is being installed or updated. Try again when that finishes.`);
+      process.exitCode = 3;
       return;
     }
 
@@ -727,12 +901,30 @@ async function main() {
       say(`  ${C.green}The app is ready to start.${C.reset}`);
       return;
     }
+    const latestOperation = inspectInstallOperation(
+      APP_DIR,
+      process.env.RIOS_INSTALL_OPERATION_TOKEN || ""
+    );
+    if (latestOperation.status === "active" || latestOperation.status === "invalid") {
+      say(`${APP_NAME} is being installed or updated. Try again when that finishes.`);
+      process.exitCode = 3;
+      return;
+    }
     await startApp(result.prod, () => {
-      if (preparationToken) releaseProcessLock(PREPARATION_LOCK_PATH, preparationToken);
+      if (preparationLeasePath) {
+        releaseProcessLockLease(preparationLeasePath);
+        preparationLeasePath = "";
+      } else if (preparationToken && releasePreparation) {
+        releaseProcessLock(PREPARATION_LOCK_PATH, preparationToken);
+      }
       preparationToken = "";
     });
   } finally {
-    if (preparationToken) releaseProcessLock(PREPARATION_LOCK_PATH, preparationToken);
+    if (preparationLeasePath) {
+      releaseProcessLockLease(preparationLeasePath);
+    } else if (preparationToken && releasePreparation) {
+      releaseProcessLock(PREPARATION_LOCK_PATH, preparationToken);
+    }
   }
 }
 

@@ -3,7 +3,29 @@ import { chmod, mkdir, open, rename, rm } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import Database from "better-sqlite3";
 
-const [sourceArgument, destinationArgument] = process.argv.slice(2);
+function verifyDatabase(path) {
+  const database = new Database(path, { fileMustExist: true, readonly: true });
+  try {
+    const rows = database.pragma("quick_check");
+    if (rows.length !== 1 || rows[0]?.quick_check !== "ok") {
+      throw new Error("SQLite backup verification failed");
+    }
+  } finally {
+    database.close();
+  }
+}
+
+const input = process.argv.slice(2);
+if (input[0] === "--verify") {
+  if (!input[1] || !isAbsolute(input[1])) {
+    throw new Error("Usage: backup-sqlite.mjs --verify <database.sqlite>");
+  }
+  verifyDatabase(resolve(input[1]));
+  process.stdout.write("ok\n");
+  process.exit(0);
+}
+
+const [sourceArgument, destinationArgument] = input;
 if (!sourceArgument || !destinationArgument) {
   throw new Error("Usage: backup-sqlite.mjs <source.sqlite> <destination.sqlite>");
 }
@@ -30,21 +52,28 @@ try {
   } finally {
     database.close();
   }
-  const verification = new Database(temporary, { fileMustExist: true, readonly: true });
-  try {
-    const rows = verification.pragma("quick_check");
-    if (rows.length !== 1 || rows[0]?.quick_check !== "ok") {
-      throw new Error("SQLite backup verification failed");
-    }
-  } finally {
-    verification.close();
-  }
+  verifyDatabase(temporary);
   await Promise.all([
     rm(`${destination}-wal`, { force: true }),
-    rm(`${destination}-shm`, { force: true })
+    rm(`${destination}-shm`, { force: true }),
+    rm(`${destination}-journal`, { force: true })
   ]);
   await rename(temporary, destination);
   await chmod(destination, 0o600);
+  const restoredFile = await open(destination, "r+");
+  try {
+    await restoredFile.sync();
+  } finally {
+    await restoredFile.close();
+  }
+  if (process.platform !== "win32") {
+    const destinationDirectory = await open(dirname(destination), "r");
+    try {
+      await destinationDirectory.sync();
+    } finally {
+      await destinationDirectory.close();
+    }
+  }
 } finally {
   await rm(temporary, { force: true });
 }

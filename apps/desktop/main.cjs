@@ -3,13 +3,11 @@ const { spawn, spawnSync } = require("node:child_process");
 const {
   chmodSync,
   closeSync,
-  cpSync,
   createWriteStream,
   existsSync,
   mkdirSync,
   openSync,
   readFileSync,
-  readdirSync,
   rmSync,
   writeFileSync
 } = require("node:fs");
@@ -38,13 +36,19 @@ const {
   startAppEnvironment
 } = require("./launcher.cjs");
 const {
-  consumeNativeUpdateRequest,
+  acknowledgeNativeUpdateRequest,
+  beginNativeReplacement,
+  claimNativeUpdateRequest,
   isSigningCertificateTrusted,
   nativeUpdateRequestPath,
   nativeUpdaterConfiguration,
   signingCertificatePath,
   trustSigningCertificate
 } = require("./updater.cjs");
+const {
+  prepareLegacyStorageMigration,
+  writePrivateTextAtomically
+} = require("./legacy-storage-migration.cjs");
 
 const APP_DIR = resolveAppDir(__dirname);
 const START_TIMEOUT_MS = 180_000;
@@ -75,8 +79,44 @@ let favouriteContacts = [];
 let currentTextSize = "normal";
 let menuRefreshTimer = null;
 let nativeUpdateInProgress = false;
+let nativeUpdateClaim = null;
 let nativeUpdateRequest = "";
 let nativeUpdateTimer = null;
+
+function startMenuRefreshTimer() {
+  if (menuRefreshTimer || shuttingDown) return;
+  menuRefreshTimer = setInterval(() => {
+    if (!shuttingDown && appProcess && mainWindow && !mainWindow.isDestroyed()) {
+      void refreshFavourites();
+    }
+  }, MENU_REFRESH_INTERVAL_MS);
+  menuRefreshTimer.unref?.();
+}
+
+function startNativeUpdateTimer() {
+  if (nativeUpdateTimer || !nativeUpdateRequest || shuttingDown) return;
+  nativeUpdateTimer = setInterval(() => {
+    if (nativeUpdateInProgress) return;
+    const claim = claimNativeUpdateRequest(nativeUpdateRequest);
+    if (!claim) return;
+    nativeUpdateClaim = claim;
+    const request = claim.request;
+    nativeUpdateInProgress = true;
+    writeLog(`Downloading signed update ${request.fromVersion || ""} -> ${request.toVersion}.`);
+    try {
+      autoUpdater.checkForUpdates();
+    } catch (error) {
+      if (!acknowledgeNativeUpdateRequest(claim)) {
+        writeLog("Could not clear the native update request after startup failed; the desktop will retry it.");
+      } else {
+        nativeUpdateClaim = null;
+      }
+      nativeUpdateInProgress = false;
+      writeLog(`Could not start native update: ${error.message}`);
+    }
+  }, 500);
+  nativeUpdateTimer.unref?.();
+}
 
 app.setName(APP_NAME);
 if (process.platform === "win32") app.setAppUserModelId(APP_ID);
@@ -146,24 +186,6 @@ function pickNodeExecutable() {
   return "";
 }
 
-function copyDirectoryContents(source, destination) {
-  mkdirSync(destination, { recursive: true });
-  for (const entry of readdirSync(source)) {
-    const target = join(destination, entry);
-    if (existsSync(target)) continue;
-    cpSync(join(source, entry), target, { recursive: true, errorOnExist: true });
-  }
-}
-
-function writeMigrationMarker(paths, decision) {
-  mkdirSync(paths.stateDir, { recursive: true });
-  writeFileSync(
-    join(paths.stateDir, "legacy-migration-v1.json"),
-    `${JSON.stringify({ decision, recordedAt: new Date().toISOString() }, null, 2)}\n`,
-    { mode: 0o600 }
-  );
-}
-
 async function preparePackagedStorage() {
   const paths = storagePaths();
   mkdirSync(paths.configDir, { recursive: true });
@@ -172,35 +194,36 @@ async function preparePackagedStorage() {
   mkdirSync(paths.logsDir, { recursive: true });
   if (!app.isPackaged) return true;
 
-  const marker = join(paths.stateDir, "legacy-migration-v1.json");
-  const legacyData = join(paths.legacyDir, "data");
-  const newDatabase = join(paths.dataDir, "inbox-os.sqlite");
-  const canMigrate = !existsSync(marker) && !existsSync(newDatabase) && existsSync(legacyData);
-  if (canMigrate) {
-    const result = await showMessageBox({
-      type: "question",
-      title: APP_NAME,
-      message: `Existing ${APP_NAME} (${STORAGE_DIR_NAME}) data was found.`,
-      detail:
-        `Import your existing settings, message database and browser sessions into ${APP_NAME}? The original folder will remain unchanged, so you can return to it if needed.`,
-      buttons: ["Import existing data", "Start fresh", "Quit"],
-      defaultId: 0,
-      cancelId: 2,
-      noLink: true
-    });
-    if (result.response === 2) return false;
-    if (result.response === 0) {
-      copyDirectoryContents(legacyData, paths.dataDir);
-      const legacyEnv = join(paths.legacyDir, ".env");
-      if (existsSync(legacyEnv) && !existsSync(join(paths.configDir, ".env"))) {
-        cpSync(legacyEnv, join(paths.configDir, ".env"), { errorOnExist: true });
-      }
-      writeMigrationMarker(paths, "imported");
-      writeLog(`Imported legacy data from ${paths.legacyDir}; the source was preserved.`);
-    } else {
-      writeMigrationMarker(paths, "fresh");
-      writeLog(`Started fresh; legacy data remains at ${paths.legacyDir}.`);
+  const nodeExecutable = pickNodeExecutable();
+  if (!nodeExecutable) {
+    throw new Error(`Node.js ${REQUIRED_NODE_MAJOR} is required to verify existing message data`);
+  }
+  const migration = await prepareLegacyStorageMigration({
+    paths,
+    nodeExecutable,
+    backupScript: join(APP_DIR, "scripts", "lib", "backup-sqlite.mjs"),
+    lockScript: join(APP_DIR, "scripts", "install-maintenance.mjs"),
+    stopScript: join(APP_DIR, "scripts", "stop-existing-install.mjs"),
+    decide: async () => {
+      const result = await showMessageBox({
+        type: "question",
+        title: APP_NAME,
+        message: `Existing ${APP_NAME} (${STORAGE_DIR_NAME}) data was found.`,
+        detail:
+          `Import your existing settings and message database into ${APP_NAME}? The original folder will remain unchanged, so you can return to it if needed.`,
+        buttons: ["Import existing data", "Start fresh", "Quit"],
+        defaultId: 0,
+        cancelId: 2,
+        noLink: true
+      });
+      return result.response === 0 ? "import" : result.response === 1 ? "fresh" : "quit";
     }
+  });
+  if (!migration.proceed) return false;
+  if (migration.decision === "imported" && migration.migrated) {
+    writeLog(`Imported legacy data from ${paths.legacyDir}; the source was preserved.`);
+  } else if (migration.decision === "fresh") {
+    writeLog(`Started fresh; legacy data remains at ${paths.legacyDir}.`);
   }
 
   const envPath = join(paths.configDir, ".env");
@@ -232,8 +255,7 @@ async function preparePackagedStorage() {
       ? { GOOGLE_MESSAGES_ENABLED: featureDefaults.GOOGLE_MESSAGES_ENABLED }
       : {})
   }, { keepExisting: true });
-  writeFileSync(envPath, envText, { mode: 0o600 });
-  chmodSync(envPath, 0o600);
+  writePrivateTextAtomically(envPath, envText);
   return true;
 }
 
@@ -441,38 +463,65 @@ async function configureNativeUpdater() {
   autoUpdater.setFeedURL({ url: configuration.feedUrl, serverType: "json" });
   autoUpdater.on("error", (error) => {
     writeLog(`Native update failed: ${error.message}`);
+    if (nativeUpdateClaim && !acknowledgeNativeUpdateRequest(nativeUpdateClaim)) {
+      writeLog("Could not clear the failed native update request; the desktop will retry it.");
+    } else {
+      nativeUpdateClaim = null;
+    }
     nativeUpdateInProgress = false;
   });
   autoUpdater.on("update-not-available", () => {
+    if (nativeUpdateClaim && !acknowledgeNativeUpdateRequest(nativeUpdateClaim)) {
+      writeLog("Could not clear the no-update request; the desktop will retry it.");
+    } else {
+      nativeUpdateClaim = null;
+    }
     nativeUpdateInProgress = false;
   });
   autoUpdater.on("update-downloaded", () => {
-    if (nativeUpdateTimer) {
-      clearInterval(nativeUpdateTimer);
-      nativeUpdateTimer = null;
-    }
     shuttingDown = true;
     ++lifecycleGeneration;
-    void stopLocalApp().finally(() => {
-      quitReady = true;
-      autoUpdater.quitAndInstall();
-    });
+    void stopLocalApp({ verifyRuntimeTree: true })
+      .then(() => {
+        quitReady = true;
+        try {
+          if (!beginNativeReplacement(autoUpdater, nativeUpdateClaim)) {
+            writeLog("Could not clear the completed native update request after replacement started.");
+          } else {
+            nativeUpdateClaim = null;
+          }
+        } catch (error) {
+          quitReady = false;
+          shuttingDown = false;
+          nativeUpdateInProgress = false;
+          writeLog(`Native replacement could not start: ${error.message}`);
+          startMenuRefreshTimer();
+          startNativeUpdateTimer();
+          const generation = startLocalApp();
+          if (generation) void loadDashboardWhenReady(mainWindow, dashboardUrl(process.env), generation);
+          void showMessageBox({
+            type: "warning",
+            title: `${APP_NAME} updates`,
+            message: "The update was downloaded, but macOS could not start the replacement.",
+            detail: "Tovi restarted its local services and kept the update ready to retry. Quit Tovi completely, reopen it, then try the update again.",
+            buttons: ["OK"]
+          });
+        }
+      })
+      .catch(async (error) => {
+        shuttingDown = false;
+        nativeUpdateInProgress = false;
+        writeLog(`Refused native replacement because the local runtime did not stop: ${error.message}`);
+        await showMessageBox({
+          type: "warning",
+          title: `${APP_NAME} updates`,
+          message: "The update was downloaded, but the running app could not be stopped safely.",
+          detail: "Quit Tovi completely and try the update again. No app files were replaced.",
+          buttons: ["OK"]
+        });
+      });
   });
-
-  nativeUpdateTimer = setInterval(() => {
-    if (nativeUpdateInProgress) return;
-    const request = consumeNativeUpdateRequest(nativeUpdateRequest);
-    if (!request) return;
-    nativeUpdateInProgress = true;
-    writeLog(`Downloading signed update ${request.fromVersion || ""} -> ${request.toVersion}.`);
-    try {
-      autoUpdater.checkForUpdates();
-    } catch (error) {
-      nativeUpdateInProgress = false;
-      writeLog(`Could not start native update: ${error.message}`);
-    }
-  }, 500);
-  nativeUpdateTimer.unref?.();
+  startNativeUpdateTimer();
 }
 
 async function showPortConflictRecovery(conflict) {
@@ -504,43 +553,106 @@ async function showPortConflictRecovery(conflict) {
   }
 }
 
-async function stopLocalApp() {
-  const child = appProcess;
-  if (!child) return;
-  expectedProcessExits.add(child);
-  await new Promise((resolveStop) => {
-    let settled = false;
-    const finish = () => {
-      if (settled) return;
-      settled = true;
-      resolveStop();
-    };
-    child.once("exit", finish);
-    try {
-      child.kill("SIGTERM");
-    } catch {
-      finish();
-      return;
-    }
-    setTimeout(() => {
-      if (settled) return;
-      writeLog(`Local app did not stop within ${STOP_TIMEOUT_MS}ms; forcing it to close.`);
-      try {
-        child.kill("SIGKILL");
-      } catch {
-        // It exited between the timeout and the signal.
-      }
-      finish();
-    }, STOP_TIMEOUT_MS).unref();
+async function stopVerifiedRuntimeTree() {
+  const node = pickNodeExecutable();
+  if (!node) throw new Error("The bundled Node.js runtime is unavailable");
+  const paths = storagePaths();
+  const environment = startAppEnvironment(process.env, node, {
+    appDir: APP_DIR,
+    configDir: paths.configDir,
+    dataDir: paths.dataDir,
+    packaged: app.isPackaged,
+    stateDir: paths.stateDir,
+    nativeUpdateRequest
   });
-  if (appProcess === child) appProcess = null;
+  await new Promise((resolveStop, rejectStop) => {
+    const stopper = spawn(node, [
+      join(APP_DIR, "scripts", "stop-existing-install.mjs"),
+      "--app-dir",
+      APP_DIR,
+      "--backend-only",
+      "--preserve-pid",
+      String(process.pid)
+    ], {
+      cwd: APP_DIR,
+      env: environment,
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    let stderr = "";
+    stopper.stderr.on("data", (chunk) => (stderr += chunk));
+    const timeout = setTimeout(() => {
+      try { stopper.kill("SIGKILL"); } catch {}
+      rejectStop(new Error("Timed out while verifying that the local runtime stopped"));
+    }, 20_000);
+    stopper.once("error", (error) => {
+      clearTimeout(timeout);
+      rejectStop(error);
+    });
+    stopper.once("exit", (code) => {
+      clearTimeout(timeout);
+      if (code === 0) resolveStop();
+      else rejectStop(new Error(stderr.trim() || `Runtime stopper exited with code ${code}`));
+    });
+  });
+}
+
+async function stopLocalApp({ verifyRuntimeTree = false } = {}) {
+  const child = appProcess;
+  if (child) {
+    expectedProcessExits.add(child);
+    await new Promise((resolveStop, rejectStop) => {
+      let settled = false;
+      let forceTimer = null;
+      const finish = (error) => {
+        if (settled) return;
+        settled = true;
+        if (forceTimer) clearTimeout(forceTimer);
+        if (error) rejectStop(error);
+        else resolveStop();
+      };
+      child.once("exit", () => finish());
+      try {
+        child.kill("SIGTERM");
+      } catch {
+        finish();
+        return;
+      }
+      setTimeout(() => {
+        if (settled) return;
+        writeLog(`Local app did not stop within ${STOP_TIMEOUT_MS}ms; forcing it to close.`);
+        try {
+          child.kill("SIGKILL");
+        } catch {
+          finish();
+          return;
+        }
+        forceTimer = setTimeout(() => {
+          finish(new Error("The local app process did not exit after it was force-stopped"));
+        }, 2_000);
+      }, STOP_TIMEOUT_MS).unref();
+    });
+    if (appProcess === child) appProcess = null;
+  }
+  if (verifyRuntimeTree) await stopVerifiedRuntimeTree();
 }
 
 async function restartLocalApp() {
   if (shuttingDown) return;
   ++lifecycleGeneration;
   showLoading(`Restarting ${APP_NAME}...`);
-  await stopLocalApp();
+  try {
+    await stopLocalApp({ verifyRuntimeTree: true });
+  } catch (error) {
+    writeLog(`Refused restart because the local runtime did not stop: ${error.message}`);
+    await showMessageBox({
+      type: "warning",
+      title: APP_NAME,
+      message: `${APP_NAME} could not stop its running services safely.`,
+      detail: "The restart was cancelled so a second copy could not start. Quit the app completely, then open it again.",
+      buttons: ["OK"]
+    });
+    return;
+  }
   restartHistory = [];
   const generation = startLocalApp();
   if (generation) void loadDashboardWhenReady(mainWindow, dashboardUrl(process.env), generation);
@@ -1020,12 +1132,7 @@ if (!gotLock) {
     createMenu();
     createWindow();
     await configureNativeUpdater();
-    menuRefreshTimer = setInterval(() => {
-      if (!shuttingDown && appProcess && mainWindow && !mainWindow.isDestroyed()) {
-        void refreshFavourites();
-      }
-    }, MENU_REFRESH_INTERVAL_MS);
-    menuRefreshTimer.unref?.();
+    startMenuRefreshTimer();
     const generation = startLocalApp();
     if (generation) void loadDashboardWhenReady(mainWindow, dashboardUrl(process.env), generation);
   }).catch((error) => {
@@ -1060,13 +1167,29 @@ if (!gotLock) {
       clearInterval(nativeUpdateTimer);
       nativeUpdateTimer = null;
     }
-    void stopLocalApp().finally(() => {
-      quitReady = true;
-      if (logStream) {
-        logStream.end();
-        logStream = null;
-      }
-      app.quit();
-    });
+    void stopLocalApp({ verifyRuntimeTree: true })
+      .then(() => {
+        quitReady = true;
+        if (logStream) {
+          logStream.end();
+          logStream = null;
+        }
+        app.quit();
+      })
+      .catch(async (error) => {
+        quitInProgress = false;
+        shuttingDown = false;
+        writeLog(`Refused quit because the local runtime did not stop: ${error.message}`);
+        startMenuRefreshTimer();
+        startNativeUpdateTimer();
+        if (!mainWindow || mainWindow.isDestroyed()) createWindow();
+        await showMessageBox({
+          type: "warning",
+          title: APP_NAME,
+          message: `${APP_NAME} could not stop its running services safely.`,
+          detail: "The desktop app remains open so background work is not hidden. Try quitting again. If this keeps happening, restart the computer before reopening Tovi.",
+          buttons: ["OK"]
+        });
+      });
   });
 }
