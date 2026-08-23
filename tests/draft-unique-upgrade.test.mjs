@@ -139,6 +139,64 @@ test("a failed schema sync always restores the verified backup", () => {
   ]);
 });
 
+test("a thrown schema sync restores the backup before propagating", () => {
+  const calls = [];
+  const failure = new Error("filesystem unavailable");
+
+  assert.throws(
+    () => applyRecoverableSchemaChange({
+      backup() {
+        calls.push("backup");
+        return { ok: true, backupPath: "/verified/before.sqlite" };
+      },
+      repair() {
+        calls.push("repair");
+        return true;
+      },
+      sync() {
+        calls.push("sync");
+        throw failure;
+      },
+      restore(backupPath) {
+        calls.push(`restore:${backupPath}`);
+        return true;
+      }
+    }),
+    (error) => error === failure
+  );
+  assert.deepEqual(calls, [
+    "backup",
+    "repair",
+    "sync",
+    "restore:/verified/before.sqlite"
+  ]);
+});
+
+test("a failed repair restores the backup without attempting synchronization", () => {
+  const calls = [];
+  const changed = applyRecoverableSchemaChange({
+    backup() {
+      calls.push("backup");
+      return { ok: true, backupPath: "/verified/before.sqlite" };
+    },
+    repair() {
+      calls.push("repair");
+      return false;
+    },
+    sync() {
+      calls.push("sync");
+      return true;
+    },
+    restore(backupPath) {
+      calls.push(`restore:${backupPath}`);
+      return true;
+    }
+  });
+
+  assert.equal(changed, false);
+  assert.deepEqual(calls, ["backup", "repair", "restore:/verified/before.sqlite"]);
+});
+
 test("repair is a no-op before the drafts table exists", () => {
   const { databasePath, cleanup } = fixture();
   try {
