@@ -168,8 +168,8 @@ test("closeTop and close(id) invoke onRequestClose unless silent", () => {
 });
 
 /** Session-history stack with deferred traversal (models real browsers). */
-function createAsyncHistoryStack(initialState = null) {
-  const stack = [{ state: initialState }];
+function createAsyncHistoryStack(initialState = null, initialHref = "/today") {
+  const stack = [{ state: initialState, href: initialHref }];
   let index = 0;
   const listeners = new Set();
   let backCalls = 0;
@@ -196,6 +196,9 @@ function createAsyncHistoryStack(initialState = null) {
     get length() {
       return stack.length;
     },
+    get href() {
+      return stack[index]?.href ?? initialHref;
+    },
     get backCalls() {
       return backCalls;
     },
@@ -205,15 +208,15 @@ function createAsyncHistoryStack(initialState = null) {
     get replaceCalls() {
       return replaceCalls;
     },
-    pushState(data) {
+    pushState(data, _unused, href) {
       pushCalls += 1;
       stack.splice(index + 1);
-      stack.push({ state: data });
+      stack.push({ state: data, href: href ?? stack[index]?.href ?? initialHref });
       index = stack.length - 1;
     },
-    replaceState(data) {
+    replaceState(data, _unused, href) {
       replaceCalls += 1;
-      stack[index] = { state: data };
+      stack[index] = { state: data, href: href ?? stack[index]?.href ?? initialHref };
     },
     back() {
       backCalls += 1;
@@ -310,6 +313,15 @@ function createProviderHistoryLifecycle(history, controller) {
     sync,
     getBinding: () => binding,
     getActiveId: () => activeId,
+    prepareNavigation(overlayId) {
+      const top = controller.getTop();
+      if (!top || top.id !== overlayId || !binding?.consumeForNavigation()) {
+        return "push";
+      }
+      binding = null;
+      activeId = null;
+      return "replace";
+    },
     forceRelease() {
       if (releaseTimer != null) {
         clearTimeout(releaseTimer);
@@ -369,6 +381,83 @@ test("programmatic history release calls history.back without re-dismissing", as
   await waitForMacrotask();
   assert.equal(onBackCalls, 0, "UI close must not re-fire onBack via popstate");
   assert.equal(history.state?.prior, true);
+});
+
+test("navigation consumption detaches the marker without traversing history", () => {
+  const history = createAsyncHistoryStack({ page: "today" }, "/today");
+  const binding = bindOverlayHistory({
+    history,
+    overlayId: "command-palette",
+    onBack: () => true
+  });
+
+  assert.equal(binding.consumeForNavigation(), true);
+  assert.equal(binding.isActive(), false);
+  assert.equal(history.backCalls, 0);
+  assert.equal(history.state?.[MOBILE_OVERLAY_HISTORY_KEY], undefined);
+
+  binding.release();
+  assert.equal(history.backCalls, 0, "consumed markers must not release a second time");
+});
+
+test("navigation while Search is active is not undone when Search closes", async () => {
+  const history = createAsyncHistoryStack({ page: "today" }, "/today");
+  const c = createMobileOverlayController();
+  const lifecycle = createProviderHistoryLifecycle(history, c);
+
+  c.open({
+    kind: "search",
+    id: "command-palette",
+    onRequestClose: () => undefined
+  });
+  lifecycle.sync();
+
+  const mode = lifecycle.prepareNavigation("command-palette");
+  assert.equal(mode, "replace");
+  history.replaceState({ page: "thread" }, "", "/thread/B");
+  c.close("command-palette", { silent: true });
+  lifecycle.sync();
+  await waitForMacrotask();
+
+  assert.equal(history.href, "/thread/B");
+  assert.equal(history.length, 2, "the destination replaces the synthetic overlay frame");
+  assert.equal(history.index, 1);
+  assert.equal(history.backCalls, 0, "closing after navigation must not traverse backwards");
+  assert.equal(history.state?.[MOBILE_OVERLAY_HISTORY_KEY], undefined);
+
+  history.userBack();
+  await waitForMacrotask();
+
+  assert.equal(history.href, "/today");
+  assert.equal(history.index, 0, "one Back returns directly to page A");
+  assert.equal(c.isPrimaryActive(), false, "Back must not expose a dead overlay");
+  assert.equal(history.state?.[MOBILE_OVERLAY_HISTORY_KEY], undefined);
+});
+
+test("Escape still closes Search in place and drains its marker", async () => {
+  const history = createAsyncHistoryStack({ page: "today" }, "/today");
+  const c = createMobileOverlayController();
+  const lifecycle = createProviderHistoryLifecycle(history, c);
+  let closed = 0;
+
+  c.open({
+    kind: "search",
+    id: "command-palette",
+    onRequestClose: () => {
+      closed += 1;
+    }
+  });
+  lifecycle.sync();
+
+  assert.equal(c.handleDismiss(), true);
+  lifecycle.sync();
+  await waitForMacrotask();
+
+  assert.equal(closed, 1);
+  assert.equal(history.href, "/today");
+  assert.equal(history.index, 0);
+  assert.equal(history.backCalls, 1);
+  assert.equal(c.isPrimaryActive(), false);
 });
 
 test("replace retargets history in place and does not auto-dismiss the new primary", async () => {

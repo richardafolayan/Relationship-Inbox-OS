@@ -143,6 +143,7 @@ test("primary nav stays same-origin so standalone PWA scope is preserved", () =>
   const sidebar = read("apps/dashboard/components/layout/sidebar.tsx");
   const row = read("apps/dashboard/components/common/thread-row.tsx");
   const palette = read("apps/dashboard/components/layout/command-palette.tsx");
+  const appShell = read("apps/dashboard/components/layout/app-shell.tsx");
 
   assert.match(dock, /href:\s*["']\/today["']/);
   assert.match(dock, /href:\s*["']\/inbox["']/);
@@ -158,8 +159,9 @@ test("primary nav stays same-origin so standalone PWA scope is preserved", () =>
   assert.match(row, /href=\{`\/thread\/\$\{row\.id\}`\}/);
   assert.doesNotMatch(row, /target=["']_blank["']/);
 
-  assert.match(palette, /router\.push\(["']\/today["']\)/);
-  assert.match(palette, /router\.push\(["']\/inbox["']\)/);
-  assert.match(palette, /router\.push\(`\/thread\/\$\{thread\.id\}`\)/);
+  assert.match(palette, /label:\s*["']Go to Today["'][\s\S]*?href:\s*["']\/today["']/);
+  assert.match(palette, /label:\s*["']Go to Inbox["'][\s\S]*?href:\s*["']\/inbox["']/);
+  assert.match(palette, /href:\s*`\/thread\/\$\{thread\.id\}`/);
   assert.doesNotMatch(palette, /window\.open/);
+  assert.match(appShell, /router\[mode\]\(href\)/);
 });
