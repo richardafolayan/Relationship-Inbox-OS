@@ -33,7 +33,7 @@ function read(p) {
 // in scripts/ so BASH_SOURCE resolves to an app root).
 function makeSource(root, codeVersion) {
   const src = path.join(root, "download", "relationship-inbox-os");
-  fs.mkdirSync(path.join(src, "scripts"), { recursive: true });
+  fs.mkdirSync(path.join(src, "scripts", "lib"), { recursive: true });
   fs.writeFileSync(
     path.join(src, "package.json"),
     JSON.stringify({ name: "relationship-inbox-os", version: "0.0.0-test" }, null, 2),
@@ -41,6 +41,17 @@ function makeSource(root, codeVersion) {
   fs.writeFileSync(path.join(src, ".env.example"), "NEXT_PUBLIC_APP_VERSION=0.0.0-test\nAI_PROVIDER=openai\n");
   fs.writeFileSync(path.join(src, "CODE_VERSION.txt"), codeVersion);
   fs.copyFileSync(INSTALLER, path.join(src, "scripts", "install-student-macos.sh"));
+  fs.copyFileSync(
+    path.join(REPO_ROOT, "scripts", "stop-existing-install.mjs"),
+    path.join(src, "scripts", "stop-existing-install.mjs"),
+  );
+  fs.copyFileSync(
+    path.join(REPO_ROOT, "scripts", "install-maintenance.mjs"),
+    path.join(src, "scripts", "install-maintenance.mjs"),
+  );
+  for (const file of ["env-file.mjs", "install-maintenance.mjs", "process-lifecycle.mjs"]) {
+    fs.copyFileSync(path.join(REPO_ROOT, "scripts", "lib", file), path.join(src, "scripts", "lib", file));
+  }
   return src;
 }
 
@@ -75,6 +86,44 @@ function startOwnedListener(installDir, databasePath) {
   });
 }
 
+function startUnboundRuntime(installDir, markerPath) {
+  const runtimeScript = path.join(installDir, "scripts", "start-app.mjs");
+  fs.mkdirSync(path.dirname(runtimeScript), { recursive: true });
+  fs.writeFileSync(
+    runtimeScript,
+    `import fs from "node:fs";
+     process.on("SIGTERM", () => {
+       fs.writeFileSync(${JSON.stringify(markerPath)}, "STOPPED-BEFORE-COPY");
+       process.exit(0);
+     });
+     process.send({ ready: true });
+     setInterval(() => {}, 1000);`,
+  );
+  const child = spawn(process.execPath, [runtimeScript], {
+    cwd: installDir,
+    stdio: ["ignore", "ignore", "inherit", "ipc"],
+  });
+  return new Promise((resolve, reject) => {
+    child.once("error", reject);
+    child.once("exit", (code, signal) => reject(new Error(`runtime exited early (${code ?? signal})`)));
+    child.once("message", () => resolve(child));
+  });
+}
+
+function waitForExit(child) {
+  return new Promise((resolve, reject) => {
+    if (child.exitCode !== null || child.signalCode !== null) {
+      resolve();
+      return;
+    }
+    const timeout = setTimeout(() => reject(new Error(`process ${child.pid} did not exit`)), 2_000);
+    child.once("exit", () => {
+      clearTimeout(timeout);
+      resolve();
+    });
+  });
+}
+
 test("fresh ZIP install lands in the install dir, leaves the source in place", { skip }, () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "rios-install-fresh-"));
   try {
@@ -88,6 +137,7 @@ test("fresh ZIP install lands in the install dir, leaves the source in place", {
     assert.ok(fs.existsSync(installDir), "install dir was created");
     assert.equal(read(path.join(installDir, "CODE_VERSION.txt")), "v1-fresh", "app code copied in");
     assert.ok(fs.existsSync(path.join(installDir, "package.json")), "package.json copied in");
+    assert.equal(fs.existsSync(path.join(installDir, ".tovi-installing")), false, "install lock released");
 
     // The source (e.g. Downloads) is only read, never moved/deleted.
     assert.ok(fs.existsSync(path.join(src, "CODE_VERSION.txt")), "source folder left intact");
@@ -139,6 +189,7 @@ test("re-install over an existing install keeps .env and data, refreshes code", 
 
     // Source still intact (never the live copy).
     assert.ok(fs.existsSync(path.join(src, "CODE_VERSION.txt")), "source folder left intact");
+    assert.equal(fs.existsSync(path.join(installDir, ".tovi-installing")), false, "update lock released");
   } finally {
     fs.rmSync(home, { recursive: true, force: true });
   }
@@ -148,11 +199,13 @@ test("re-install stops the owned runtime before preserving its database", { skip
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "rios-install-running-"));
   let child;
   let foreignChild;
+  let startupChild;
   try {
     const installDir = path.join(home, "RelationshipInboxOS");
     const databasePath = path.join(installDir, "data", "inbox-os.sqlite");
     const foreignDir = `${installDir}-other`;
     const foreignMarker = path.join(foreignDir, "stopped.txt");
+    const startupMarker = path.join(installDir, "data", "startup-stopped.txt");
     fs.mkdirSync(path.dirname(databasePath), { recursive: true });
     fs.mkdirSync(foreignDir, { recursive: true });
     fs.writeFileSync(
@@ -163,29 +216,25 @@ test("re-install stops the owned runtime before preserving its database", { skip
 
     const owned = await startOwnedListener(installDir, databasePath);
     child = owned.child;
+    fs.writeFileSync(
+      path.join(installDir, ".env"),
+      `DASHBOARD_PORT=${owned.port}\nRUNNER_PORT=43199\n`
+    );
     const foreign = await startOwnedListener(foreignDir, foreignMarker);
     foreignChild = foreign.child;
+    startupChild = await startUnboundRuntime(installDir, startupMarker);
 
     const src = makeSource(home, "v2-new");
     const r = runInstaller(src, installDir, home);
     assert.equal(r.status, 0, `installer failed:\n${r.stdout}\n${r.stderr}`);
-    await new Promise((resolve, reject) => {
-      if (child.exitCode !== null || child.signalCode !== null) {
-        resolve();
-        return;
-      }
-      const timeout = setTimeout(() => reject(new Error("owned listener did not exit")), 2_000);
-      child.once("exit", () => {
-        clearTimeout(timeout);
-        resolve();
-      });
-    });
+    await Promise.all([waitForExit(child), waitForExit(startupChild)]);
     assert.equal(
       read(databasePath),
       "LIVE-DATABASE\nSTOPPED-BEFORE-COPY",
       "the runtime must finish shutting down before data is copied",
     );
     assert.equal(child.signalCode, null, "listener handled SIGTERM and exited cleanly");
+    assert.equal(read(startupMarker), "STOPPED-BEFORE-COPY", "pre-bind launcher stopped before data copy");
     assert.doesNotThrow(
       () => process.kill(foreignChild.pid, 0),
       "a listener from a similarly named directory must not be stopped",
@@ -197,6 +246,9 @@ test("re-install stops the owned runtime before preserving its database", { skip
     }
     if (foreignChild?.pid) {
       try { process.kill(foreignChild.pid, "SIGKILL"); } catch {}
+    }
+    if (startupChild?.pid) {
+      try { process.kill(startupChild.pid, "SIGKILL"); } catch {}
     }
     fs.rmSync(home, { recursive: true, force: true });
   }

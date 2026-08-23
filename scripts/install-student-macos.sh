@@ -77,6 +77,8 @@ SKIP_DEPS=false
 [ "${RIOS_NO_START:-}" = "1" ] && NO_START=true
 NO_APP_BUNDLE=false
 [ "${RIOS_NO_APP_BUNDLE:-}" = "1" ] && NO_APP_BUNDLE=true
+MAINTENANCE_TOKEN=""
+MAINTENANCE_ROOT=""
 
 for arg in "$@"; do
   case "$arg" in
@@ -240,11 +242,11 @@ ensure_node() {
   install_node_local
 }
 
-# A repeat install preserves data/, which includes SQLite's main database and
-# WAL files. Stop only listeners owned by this exact install before copying
-# those files or running recovery. If ownership cannot be checked, fail closed
-# instead of risking a torn database copy.
+# A repeat install preserves data/, which includes SQLite's main database,
+# WAL, browser profiles, and runtime state. The helper comes from the incoming
+# source so even an older installed copy receives the current shutdown logic.
 stop_existing_install() {
+  local source="$1" helper
   [ -d "$INSTALL_DIR" ] || return 0
   is_app_root "$INSTALL_DIR" || return 0
 
@@ -255,78 +257,39 @@ stop_existing_install() {
     return 0
   fi
 
-  local lsof_bin install_root listener_pids pid cwd owned_pids="" waited=0
-  local still_running process_state
-  if [ -x /usr/sbin/lsof ]; then
-    lsof_bin=/usr/sbin/lsof
-  elif command -v lsof >/dev/null 2>&1; then
-    lsof_bin="$(command -v lsof)"
-  else
-    die "Couldn't check whether $APP_NAME is running. Quit the app and run the installer again."
-  fi
-
-  install_root="$(cd "$INSTALL_DIR" 2>/dev/null && pwd -P)" \
-    || die "Couldn't inspect the existing app at $(display_path "$INSTALL_DIR")."
-
-  listener_pids="$("$lsof_bin" -nP -iTCP -sTCP:LISTEN -t 2>/dev/null | sort -u || true)"
-  for pid in $listener_pids; do
-    cwd="$("$lsof_bin" -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)"
-    case "$cwd" in
-      "$install_root"|"$install_root"/*)
-        if kill -TERM "$pid" 2>/dev/null; then
-          owned_pids="$owned_pids $pid"
-          info "Stopping the running app (process $pid)..."
-        else
-          die "Couldn't stop $APP_NAME safely. Quit the app and run the installer again."
-        fi
-        ;;
-    esac
-  done
-
-  [ -n "$owned_pids" ] || { ok "$APP_NAME is not running"; return 0; }
-
-  while [ "$waited" -lt 50 ]; do
-    still_running=false
-    for pid in $owned_pids; do
-      process_state="$(ps -o stat= -p "$pid" 2>/dev/null | awk 'NR == 1 { print $1 }')"
-      case "$process_state" in
-        ""|Z*) ;;
-        *) still_running=true; break ;;
-      esac
-    done
-    [ "$still_running" = false ] && break
-    sleep 0.1
-    waited=$((waited + 1))
-  done
-
-  for pid in $owned_pids; do
-    process_state="$(ps -o stat= -p "$pid" 2>/dev/null | awk 'NR == 1 { print $1 }')"
-    case "$process_state" in
-      ""|Z*) ;;
-      *) kill -KILL "$pid" 2>/dev/null || true ;;
-    esac
-  done
-
-  sleep 0.1
-  for pid in $owned_pids; do
-    process_state="$(ps -o stat= -p "$pid" 2>/dev/null | awk 'NR == 1 { print $1 }')"
-    case "$process_state" in
-      ""|Z*) ;;
-      *) die "Couldn't stop $APP_NAME safely. Quit the app and run the installer again." ;;
-    esac
-  done
-
-  listener_pids="$("$lsof_bin" -nP -iTCP -sTCP:LISTEN -t 2>/dev/null | sort -u || true)"
-  for pid in $listener_pids; do
-    cwd="$("$lsof_bin" -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)"
-    case "$cwd" in
-      "$install_root"|"$install_root"/*)
-        die "$APP_NAME started again while the installer was waiting. Quit the app and run the installer again."
-        ;;
-    esac
-  done
-
+  helper="$source/scripts/stop-existing-install.mjs"
+  [ -f "$helper" ] \
+    || die "The installer is missing its safe shutdown helper. Download a fresh copy and try again."
+  run "Stopping the existing app safely..." node "$helper" --app-dir "$INSTALL_DIR" \
+    || die "Couldn't stop $APP_NAME safely. Quit the app and run the installer again."
   ok "Stopped the running app before updating its data"
+}
+
+begin_install_maintenance() {
+  local root="$1" source="$2" helper token
+  [ "$DRY_RUN" = true ] && return 0
+  helper="$source/scripts/install-maintenance.mjs"
+  [ -f "$helper" ] || return 1
+  token="$(node "$helper" acquire --app-dir "$root" --owner-pid "$$" 2>>"$LOG_FILE")" || return 1
+  [ -n "$token" ] || return 1
+  MAINTENANCE_TOKEN="$token"
+  MAINTENANCE_ROOT="$root"
+  export RIOS_INSTALL_MAINTENANCE_TOKEN="$token"
+}
+
+adopt_install_maintenance() {
+  MAINTENANCE_ROOT="$1"
+}
+
+end_install_maintenance() {
+  [ -n "$MAINTENANCE_TOKEN" ] || return 0
+  local helper="$MAINTENANCE_ROOT/scripts/install-maintenance.mjs"
+  if [ -f "$helper" ]; then
+    node "$helper" release --app-dir "$MAINTENANCE_ROOT" --token "$MAINTENANCE_TOKEN" >>"$LOG_FILE" 2>&1 || true
+  fi
+  MAINTENANCE_TOKEN=""
+  MAINTENANCE_ROOT=""
+  unset RIOS_INSTALL_MAINTENANCE_TOKEN
 }
 
 # Install Node 22 into a user-owned folder ($RIOS_NODE_DIR) from Node's
@@ -439,6 +402,10 @@ resolve_app_dir() {
   if [ -n "$source" ]; then
     if [ "$source" = "$INSTALL_DIR" ]; then
       # Already running from the install location — nothing to relocate.
+      stop_existing_install "$source"
+      begin_install_maintenance "$INSTALL_DIR" "$source" \
+        || die "Couldn't reserve the app for installation. Quit $APP_NAME and try again."
+      stop_existing_install "$source"
       APP_DIR="$INSTALL_DIR"
       ok "Using the app at $(display_path "$APP_DIR")"
       return 0
@@ -463,6 +430,10 @@ resolve_app_dir() {
 install_from_source() {
   local source="$1"
 
+  if is_app_root "$INSTALL_DIR"; then
+    stop_existing_install "$source"
+  fi
+
   if [ "$DRY_RUN" = true ]; then
     APP_DIR="$INSTALL_DIR"
     warn "[dry-run] would install into $(display_path "$INSTALL_DIR") (keeping any existing .env, data, logs)"
@@ -474,6 +445,8 @@ install_from_source() {
   if [ ! -e "$INSTALL_DIR" ]; then
     step "Installing into $(display_path "$INSTALL_DIR")"
     cp -R "$source" "$INSTALL_DIR" || die "Couldn't copy the app into $INSTALL_DIR."
+    begin_install_maintenance "$INSTALL_DIR" "$source" \
+      || die "Couldn't reserve the new app for installation."
     ok "Installed into $(display_path "$INSTALL_DIR")"
   elif is_app_root "$INSTALL_DIR"; then
     step "Updating your existing install at $(display_path "$INSTALL_DIR")"
@@ -486,24 +459,42 @@ install_from_source() {
     rm -rf "$staging"
     cp -R "$source" "$staging" || { rm -rf "$staging"; die "Couldn't stage the new app version."; }
 
-    # Carry the user's data forward into the new copy (replacing the fresh
-    # code's copies, if any).
+    # Move the old app out of its launch path before reading any live data.
+    # A second shutdown pass closes the tiny stop-to-rename race and verifies
+    # the complete launcher/process tree under its new canonical path.
+    rm -rf "$backup"
+    mv "$INSTALL_DIR" "$backup" || { rm -rf "$staging"; die "Couldn't set aside the previous version — nothing was changed."; }
+    if ! run "Confirming the old app is fully stopped..." \
+         node "$source/scripts/stop-existing-install.mjs" --app-dir "$backup"; then
+      mv "$backup" "$INSTALL_DIR" 2>/dev/null
+      rm -rf "$staging"
+      die "Couldn't stop $APP_NAME safely; restored your previous install."
+    fi
+
+    # With the old launch path absent and its full runtime stopped, the
+    # preserved database, WAL, profiles, settings, and logs are stable.
     for item in "${PRESERVE_ITEMS[@]}"; do
-      if [ -e "$INSTALL_DIR/$item" ]; then
+      if [ -e "$backup/$item" ]; then
         rm -rf "$staging/$item"
-        cp -R "$INSTALL_DIR/$item" "$staging/$item" \
-          || { rm -rf "$staging"; die "Couldn't preserve your existing $item — nothing was changed."; }
+        if ! cp -R "$backup/$item" "$staging/$item"; then
+          rm -rf "$staging"
+          mv "$backup" "$INSTALL_DIR" 2>/dev/null
+          die "Couldn't preserve your existing $item; restored your previous install."
+        fi
       fi
     done
 
-    # Swap: old → backup, new → live. Keep the backup until the new copy is
-    # confirmed in place, then remove it. User data is never deleted.
-    rm -rf "$backup"
-    mv "$INSTALL_DIR" "$backup" || { rm -rf "$staging"; die "Couldn't set aside the previous version — nothing was changed."; }
+    if ! begin_install_maintenance "$staging" "$source"; then
+      rm -rf "$staging"
+      mv "$backup" "$INSTALL_DIR" 2>/dev/null
+      die "Couldn't reserve the new app for installation; restored your previous install."
+    fi
     if ! mv "$staging" "$INSTALL_DIR"; then
+      end_install_maintenance
       mv "$backup" "$INSTALL_DIR" 2>/dev/null
       die "Couldn't put the new version in place; restored your previous install."
     fi
+    adopt_install_maintenance "$INSTALL_DIR"
     rm -rf "$backup"
     ok "Updated $(display_path "$INSTALL_DIR") (your data was kept)"
   else
@@ -740,7 +731,7 @@ start_app() {
 
   if [ "$NO_APP_BUNDLE" != true ] && [ -d "$app_bundle" ]; then
     info "Opening the Mac app..."
-    if ! open "$app_bundle" >>"$LOG_FILE" 2>&1; then
+    if ! open --env "RIOS_INSTALL_MAINTENANCE_TOKEN=$MAINTENANCE_TOKEN" "$app_bundle" >>"$LOG_FILE" 2>&1; then
       warn "Couldn't open the Mac app. Falling back to Terminal start."
     else
       if wait_for_dashboard; then
@@ -765,10 +756,12 @@ start_app() {
   trap 'printf "\n  Stopping the app...\n"; kill "$dev_pid" 2>/dev/null; wait "$dev_pid" 2>/dev/null; exit 0' INT TERM
 
   if wait_for_dashboard; then
+    end_install_maintenance
     ok "The app is up"
     open "$DASHBOARD_URL" >/dev/null 2>&1 || true
     print_success terminal
   else
+    end_install_maintenance
     warn "The app is taking longer than usual to start."
     say "  Try opening $DASHBOARD_URL in Chrome. If it doesn't load, run the"
     say "  doctor check:  ${BOLD}cd $disp && npm run doctor${RESET}"
@@ -837,6 +830,7 @@ EOF
 # --------------------------------------------------------------------------
 
 main() {
+  trap 'end_install_maintenance' EXIT
   printf '\n%s%s%s installer%s\n' "$BOLD" "$BLUE" "$APP_NAME" "$RESET"
   printf '%sLog: %s%s\n' "$DIM" "$LOG_FILE" "$RESET"
   [ "$DRY_RUN" = true ] && printf '%s(dry run — nothing will be changed)%s\n' "$YELLOW" "$RESET"
@@ -844,12 +838,12 @@ main() {
   check_macos
   check_disk
   ensure_node
-  stop_existing_install
   resolve_app_dir
   ensure_env
   install_app
   create_app_bundle
   start_app
+  end_install_maintenance
 }
 
 main "$@"

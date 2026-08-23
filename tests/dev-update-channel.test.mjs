@@ -375,9 +375,12 @@ test("apply helper in --bundle mode quits the app, clears the intent, and reopen
   writeFileSync(join(appDir, "release.json"), JSON.stringify({ version: "0.1.0-dev.2", channel: "dev" }));
   mkdirSync(join(appDir, "scripts", "lib"), { recursive: true });
   cpSync(UPDATER, join(appDir, "scripts", "update-student.mjs"));
+  cpSync(join(ROOT, "scripts", "stop-existing-install.mjs"), join(appDir, "scripts", "stop-existing-install.mjs"));
   cpSync(join(ROOT, "scripts", "lib", "release-manifest.mjs"), join(appDir, "scripts", "lib", "release-manifest.mjs"));
   cpSync(join(ROOT, "scripts", "lib", "env-file.mjs"), join(appDir, "scripts", "lib", "env-file.mjs"));
   cpSync(join(ROOT, "scripts", "lib", "branding.mjs"), join(appDir, "scripts", "lib", "branding.mjs"));
+  cpSync(join(ROOT, "scripts", "lib", "install-maintenance.mjs"), join(appDir, "scripts", "lib", "install-maintenance.mjs"));
+  cpSync(join(ROOT, "scripts", "lib", "process-lifecycle.mjs"), join(appDir, "scripts", "lib", "process-lifecycle.mjs"));
   writeFileSync(join(dataDir, "pending-update.json"), JSON.stringify({ toVersion: "0.1.0-dev.2" }));
 
   // Shims: no real quit/kill/open, just a call log.

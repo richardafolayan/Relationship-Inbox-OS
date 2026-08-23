@@ -26,6 +26,17 @@ function runUpdater(args, options = {}) {
   });
 }
 
+function waitForExit(child) {
+  return new Promise((resolve, reject) => {
+    if (child.exitCode !== null || child.signalCode !== null) return resolve();
+    const timeout = setTimeout(() => reject(new Error(`process ${child.pid} did not exit`)), 3_000);
+    child.once("exit", () => {
+      clearTimeout(timeout);
+      resolve();
+    });
+  });
+}
+
 test("student updater: check, apply+preserve, rollback-on-bad-checksum", async (t) => {
   const work = mkdtempSync(join(tmpdir(), "rios-updater-test-"));
   const appDir = join(work, "RelationshipInboxOS");
@@ -101,15 +112,49 @@ test("student updater: check, apply+preserve, rollback-on-bad-checksum", async (
     });
 
     await t.test("apply swaps in new code and preserves .env + data/", async () => {
-      const { code } = await runUpdater([
-        "--apply", "--no-deps", "--dir", appDir, "--url", url("/latest.json")
-      ]);
-      assert.equal(code, 0);
-      assert.equal(JSON.parse(readFileSync(join(appDir, "package.json"), "utf8")).version, "0.2.0");
-      assert.ok(existsSync(join(appDir, "NEWCODE.txt")), "new code missing");
-      assert.match(readFileSync(join(appDir, ".env"), "utf8"), /KEEP_ME/);
-      assert.equal(readFileSync(join(appDir, "data", "inbox-os.sqlite"), "utf8"), "USER_DATA");
-      assert.ok(readdirSync(work).some((n) => n.startsWith(".rios-backup-")), "no backup was made");
+      const runtimeScript = join(appDir, "scripts", "start-app.mjs");
+      mkdirSync(join(appDir, "scripts"), { recursive: true });
+      writeFileSync(
+        runtimeScript,
+        `import fs from "node:fs";
+         process.on("SIGTERM", () => {
+           fs.appendFileSync(${JSON.stringify(join(appDir, "data", "inbox-os.sqlite"))}, "\\nSTOPPED-BEFORE-COPY");
+           process.exit(0);
+         });
+         process.send("ready");
+         setInterval(() => {}, 1000);`
+      );
+      const runtime = spawn(process.execPath, [runtimeScript], {
+        cwd: appDir,
+        stdio: ["ignore", "ignore", "inherit", "ipc"]
+      });
+      try {
+        await new Promise((resolveReady, reject) => {
+          runtime.once("message", resolveReady);
+          runtime.once("error", reject);
+          runtime.once("exit", (code, signal) => reject(new Error(`runtime exited early (${code ?? signal})`)));
+        });
+        const { code, stdout, stderr } = await runUpdater([
+          "--apply", "--no-deps", "--dir", appDir, "--url", url("/latest.json")
+        ]);
+        assert.equal(code, 0, `${stdout}\n${stderr}`);
+        await waitForExit(runtime);
+        assert.equal(JSON.parse(readFileSync(join(appDir, "package.json"), "utf8")).version, "0.2.0");
+        assert.ok(existsSync(join(appDir, "NEWCODE.txt")), "new code missing");
+        assert.match(readFileSync(join(appDir, ".env"), "utf8"), /KEEP_ME/);
+        assert.equal(
+          readFileSync(join(appDir, "data", "inbox-os.sqlite"), "utf8"),
+          "USER_DATA\nSTOPPED-BEFORE-COPY"
+        );
+        assert.equal(existsSync(join(appDir, ".tovi-installing")), false, "update lock released");
+        assert.ok(readdirSync(work).some((n) => n.startsWith(".rios-backup-")), "no backup was made");
+      } finally {
+        if (runtime.pid) {
+          try {
+            process.kill(runtime.pid, "SIGKILL");
+          } catch {}
+        }
+      }
     });
 
     await t.test("a bad checksum aborts and leaves the install untouched", async () => {
@@ -172,6 +217,63 @@ exit 0
         "npm run db:generate",
         "node scripts/start-app.mjs --build-only"
       ]);
+    });
+
+    await t.test("an unrecovered database keeps the new code and never claims rollback safety", async () => {
+      const fakeBin = join(work, "fake-database-bin");
+      const commandLog = join(work, "database-recovery-command.log");
+      const appBundle = join(work, "Recovery-Tovi.app");
+      mkdirSync(fakeBin, { recursive: true });
+      mkdirSync(appBundle, { recursive: true });
+
+      const fakeNpm = join(fakeBin, "npm");
+      writeFileSync(fakeNpm, `#!/bin/sh\nprintf 'npm %s\\n' "$*" >> "$TEST_COMMAND_LOG"\nexit 0\n`);
+      chmodSync(fakeNpm, 0o755);
+      const fakeNode = join(fakeBin, "node");
+      writeFileSync(fakeNode, `#!/bin/sh
+printf 'node %s\\n' "$*" >> "$TEST_COMMAND_LOG"
+case " $* " in
+  *" --build-only "*)
+    mkdir -p packages/core/dist apps/runner/dist apps/dashboard/.next
+    : > packages/core/dist/index.js
+    : > apps/runner/dist/index.js
+    : > apps/dashboard/.next/BUILD_ID
+    ;;
+  *" --database-only "*) exit 42 ;;
+esac
+exit 0
+`);
+      chmodSync(fakeNode, 0o755);
+
+      const { code, stdout, stderr } = await runUpdater([
+        "--apply", "--dir", appDir, "--url", url("/latest.json"), "--resign", appBundle
+      ], {
+        env: {
+          ...process.env,
+          PATH: `${fakeBin}:${process.env.PATH || ""}`,
+          TEST_COMMAND_LOG: commandLog
+        }
+      });
+
+      assert.notEqual(code, 0);
+      assert.match(stderr, /could not be recovered automatically/i);
+      assert.doesNotMatch(`${stdout}\n${stderr}`, /Your data is safe/i);
+      assert.equal(JSON.parse(readFileSync(join(appDir, "package.json"), "utf8")).version, "0.2.0");
+      assert.ok(existsSync(join(appDir, "NEWCODE.txt")), "new recovery-capable code must be kept");
+      assert.equal(existsSync(join(appDir, ".tovi-installing")), false, "maintenance lock released");
+      assert.deepEqual(readFileSync(commandLog, "utf8").trim().split("\n"), [
+        "npm install --include=dev",
+        "npm run db:generate",
+        "node scripts/start-app.mjs --build-only",
+        "node scripts/start-app.mjs --database-only"
+      ]);
+
+      rmSync(appDir, { recursive: true, force: true });
+      mkdirSync(join(appDir, "data"), { recursive: true });
+      writeFileSync(join(appDir, "package.json"), JSON.stringify({ name: "relationship-inbox-os", version: "0.1.0" }));
+      writeFileSync(join(appDir, "release.json"), JSON.stringify({ version: "0.1.0" }));
+      writeFileSync(join(appDir, ".env"), "OPENAI_API_KEY=KEEP_ME\n");
+      writeFileSync(join(appDir, "data", "inbox-os.sqlite"), "USER_DATA");
     });
 
     await t.test("an equal version is a no-op (nothing to apply)", async () => {

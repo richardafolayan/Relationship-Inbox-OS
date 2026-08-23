@@ -1,12 +1,24 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
 import Database from "better-sqlite3";
 import { prismaDbPushInvocation } from "../scripts/lib/prisma-command.mjs";
-import { applyRecoverableSchemaChange } from "../scripts/lib/recoverable-schema-change.mjs";
+import {
+  applyRecoverableSchemaChange,
+  SchemaRestoreError
+} from "../scripts/lib/recoverable-schema-change.mjs";
 
 const appDir = resolve(".");
 const backupScript = resolve("scripts/lib/backup-sqlite.mjs");
@@ -73,6 +85,32 @@ function assertUniqueDraftIndex(database) {
     database.prepare('PRAGMA index_info("drafts_threadId_key")').all().map((column) => column.name),
     ["threadId"]
   );
+}
+
+function currentSchemaHash() {
+  const schemaPath = join(appDir, "packages/core/prisma/schema.prisma");
+  return createHash("sha256")
+    .update(schemaPath.slice(appDir.length))
+    .update("\0")
+    .update(readFileSync(schemaPath))
+    .update("\0")
+    .digest("hex");
+}
+
+function runDatabaseOnly(directory, databasePath, extraEnv = {}) {
+  return spawnSync(process.execPath, [join(appDir, "scripts/start-app.mjs"), "--database-only"], {
+    cwd: appDir,
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      DASHBOARD_PORT: "43111",
+      RUNNER_PORT: "43112",
+      DATABASE_URL: `file:${databasePath}`,
+      RIOS_DATA_DIR: directory,
+      RIOS_STATE_DIR: join(directory, "runtime"),
+      ...extraEnv
+    }
+  });
 }
 
 test("schema backup is readable and can restore an already-modified database", () => {
@@ -199,6 +237,54 @@ test("a failed repair restores the backup without attempting synchronization", (
   assert.deepEqual(calls, ["backup", "repair", "restore:/verified/before.sqlite"]);
 });
 
+test("a false restore result becomes an explicit unrecovered-database error", () => {
+  assert.throws(
+    () => applyRecoverableSchemaChange({
+      backup: () => ({ ok: true, backupPath: "/verified/before.sqlite" }),
+      repair: () => true,
+      sync: () => false,
+      restore: () => false
+    }),
+    (error) => error instanceof SchemaRestoreError &&
+      error.backupPath === "/verified/before.sqlite"
+  );
+});
+
+test("a thrown restore keeps its cause and verified backup path", () => {
+  const restoreFailure = new Error("disk full");
+  assert.throws(
+    () => applyRecoverableSchemaChange({
+      backup: () => ({ ok: true, backupPath: "/verified/before.sqlite" }),
+      repair: () => false,
+      sync: () => true,
+      restore: () => {
+        throw restoreFailure;
+      }
+    }),
+    (error) => error instanceof SchemaRestoreError &&
+      error.backupPath === "/verified/before.sqlite" &&
+      error.cause === restoreFailure
+  );
+});
+
+test("backup verification rejects a copied database with a malformed schema", () => {
+  const { directory, databasePath, cleanup } = fixture();
+  try {
+    const destination = join(directory, "backups", "malformed.sqlite");
+    mkdirSync(join(directory, "backups"), { recursive: true });
+    writeFileSync(databasePath, "not-a-sqlite-database");
+
+    const result = spawnSync(process.execPath, [backupScript, databasePath, destination], {
+      cwd: appDir,
+      encoding: "utf8"
+    });
+    assert.notEqual(result.status, 0, "a malformed backup must never be reported as verified");
+    assert.match(readFileSync("scripts/lib/backup-sqlite.mjs", "utf8"), /pragma\("quick_check"\)/);
+  } finally {
+    cleanup();
+  }
+});
+
 test("repair is a no-op before the drafts table exists", () => {
   const { databasePath, cleanup } = fixture();
   try {
@@ -270,6 +356,124 @@ test("repair is deterministic when meaningful timestamps match", () => {
   }
 });
 
+test("schema readiness check distinguishes legacy and repaired draft indexes", () => {
+  const { databasePath, cleanup } = fixture();
+  try {
+    let database = new Database(databasePath);
+    createLegacyDraftTable(database);
+    database.close();
+    const legacy = spawnSync(process.execPath, [repairScript, "--check", databasePath], {
+      cwd: appDir,
+      encoding: "utf8"
+    });
+    assert.equal(legacy.status, 2);
+
+    runRepair(databasePath);
+    const ready = spawnSync(process.execPath, [repairScript, "--check", databasePath], {
+      cwd: appDir,
+      encoding: "utf8"
+    });
+    assert.equal(ready.status, 0, ready.stderr);
+  } finally {
+    cleanup();
+  }
+});
+
+test("database-only repairs a legacy database even when the schema stamp is current", () => {
+  const { directory, databasePath, cleanup } = fixture();
+  try {
+    const currentSchema = readFileSync("packages/core/prisma/schema.prisma", "utf8");
+    const legacySchema = currentSchema.replace(
+      /threadId\s+String\s+@unique([\s\S]*?thread Thread @relation\([^\n]+\)\n)\n  @@map\("drafts"\)/,
+      'threadId  String$1\n  @@index([threadId])\n  @@map("drafts")'
+    );
+    const legacySchemaPath = join(directory, "legacy.prisma");
+    writeFileSync(legacySchemaPath, legacySchema);
+    writeFileSync(databasePath, "", { mode: 0o600 });
+    const prismaCli = join(appDir, "node_modules", "prisma", "build", "index.js");
+    const legacyPush = spawnSync(
+      process.execPath,
+      [prismaCli, "db", "push", "--schema", legacySchemaPath, "--skip-generate"],
+      {
+        cwd: appDir,
+        encoding: "utf8",
+        env: { ...process.env, DATABASE_URL: `file:${databasePath}` }
+      }
+    );
+    assert.equal(legacyPush.status, 0, `${legacyPush.stdout}\n${legacyPush.stderr}`);
+
+    let database = new Database(databasePath);
+    database.pragma("foreign_keys = OFF");
+    insertDraft(database, "old", "thread-1", "older", "2026-08-20T10:00:00.000Z");
+    insertDraft(database, "new", "thread-1", "newer", "2026-08-21T10:00:00.000Z");
+    database.close();
+    writeFileSync(
+      join(directory, "app-prepare-stamps.json"),
+      `${JSON.stringify({ schemaHash: currentSchemaHash() })}\n`
+    );
+
+    const result = runDatabaseOnly(directory, databasePath);
+    assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+    database = new Database(databasePath);
+    assert.deepEqual(database.prepare("SELECT id FROM drafts").all(), [{ id: "new" }]);
+    assertUniqueDraftIndex(database);
+    database.close();
+  } finally {
+    cleanup();
+  }
+});
+
+test("database-only retries a pending verified restore before schema checks", () => {
+  const { directory, databasePath, cleanup } = fixture();
+  try {
+    let database = new Database(databasePath);
+    createLegacyDraftTable(database);
+    database.exec('CREATE UNIQUE INDEX "drafts_threadId_key" ON "drafts"("threadId")');
+    database.exec("CREATE TABLE pilot (id TEXT PRIMARY KEY)");
+    database.prepare("INSERT INTO pilot (id) VALUES ('preserved')").run();
+    database.close();
+
+    const backupPath = join(directory, "backups", "verified.sqlite");
+    mkdirSync(join(directory, "backups"), { recursive: true });
+    execFileSync(process.execPath, [backupScript, databasePath, backupPath], { cwd: appDir });
+    writeFileSync(databasePath, "not-a-database");
+    const stateDir = join(directory, "runtime");
+    mkdirSync(stateDir, { recursive: true });
+    const markerPath = join(stateDir, "database-recovery-required.json");
+    writeFileSync(markerPath, JSON.stringify({ version: 1, backupPath }));
+    writeFileSync(
+      join(directory, "app-prepare-stamps.json"),
+      `${JSON.stringify({ schemaHash: currentSchemaHash() })}\n`
+    );
+
+    const result = runDatabaseOnly(directory, databasePath);
+    assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+    assert.equal(existsSync(markerPath), false);
+    database = new Database(databasePath, { readonly: true });
+    assert.deepEqual(database.prepare("SELECT id FROM pilot").all(), [{ id: "preserved" }]);
+    database.close();
+  } finally {
+    cleanup();
+  }
+});
+
+test("database-only exits 42 when a recovery marker cannot be verified", () => {
+  const { directory, databasePath, cleanup } = fixture();
+  try {
+    const stateDir = join(directory, "runtime");
+    mkdirSync(stateDir, { recursive: true });
+    writeFileSync(
+      join(stateDir, "database-recovery-required.json"),
+      JSON.stringify({ version: 1, backupPath: join(directory, "outside-backups.sqlite") })
+    );
+    const result = runDatabaseOnly(directory, databasePath);
+    assert.equal(result.status, 42, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+    assert.match(result.stdout, /Database recovery is required/);
+  } finally {
+    cleanup();
+  }
+});
+
 test("the exact launcher Prisma command upgrades a repaired legacy database unattended", () => {
   const { directory, databasePath, cleanup } = fixture();
   try {
@@ -332,7 +536,10 @@ test("schema, launcher order, and save route share one Draft invariant", () => {
   assert.doesNotMatch(draftModel, /@@index\(\[threadId\]\)/);
 
   const launcher = readFileSync("scripts/start-app.mjs", "utf8");
-  assert.match(readFileSync("scripts/lib/backup-sqlite.mjs", "utf8"), /database\.backup\(destination\)/);
+  const backupHelper = readFileSync("scripts/lib/backup-sqlite.mjs", "utf8");
+  assert.match(backupHelper, /database\.backup\(temporary\)/);
+  assert.match(backupHelper, /pragma\("quick_check"\)/);
+  assert.match(backupHelper, /copyFile\(temporary, destination\)/);
   const preparation = launcher.slice(launcher.indexOf("function prepare()"), launcher.indexOf("function delay("));
   const backupAt = preparation.indexOf("backupDatabaseBeforeSchemaChange(schemaHash)");
   const repairAt = preparation.indexOf("repairDatabaseBeforeSchemaChange");

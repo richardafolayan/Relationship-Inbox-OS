@@ -7,17 +7,27 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  rmSync,
   statSync,
   writeFileSync
 } from "node:fs";
 import { createRequire } from "node:module";
-import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
+import { delimiter, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadAppEnv } from "./lib/env-file.mjs";
+import {
+  acquireProcessLock,
+  inspectInstallMaintenance,
+  releaseProcessLock
+} from "./lib/install-maintenance.mjs";
 import { packagedDashboardArgs } from "./lib/dashboard-command.mjs";
 import { prismaDbPushInvocation } from "./lib/prisma-command.mjs";
-import { applyRecoverableSchemaChange } from "./lib/recoverable-schema-change.mjs";
+import {
+  applyRecoverableSchemaChange,
+  SchemaRestoreError
+} from "./lib/recoverable-schema-change.mjs";
 import { resolveAppName } from "./lib/branding.mjs";
+import { discoverInstallRuntime } from "./stop-existing-install.mjs";
 import { prepareSqliteDatabaseFile } from "./lib/sqlite-database.mjs";
 import {
   portConflict,
@@ -46,6 +56,8 @@ const STATE_DIR = resolve(process.env.RIOS_STATE_DIR || join(DATA_DIR, "runtime"
 const STAMPS_PATH = join(DATA_DIR, "app-prepare-stamps.json");
 const RUNTIME_STATE_PATH = join(STATE_DIR, "processes.json");
 const STARTUP_CONFLICT_PATH = join(STATE_DIR, "startup-conflict.json");
+const PREPARATION_LOCK_PATH = join(STATE_DIR, "preparation.lock");
+const DATABASE_RECOVERY_REQUIRED_PATH = join(STATE_DIR, "database-recovery-required.json");
 const PACKAGED = process.env.RIOS_PACKAGED_APP === "1";
 const args = new Set(process.argv.slice(2));
 const DATABASE_ONLY = args.has("--database-only");
@@ -86,6 +98,50 @@ function saveStamps(stamps) {
   } catch {
     // The next launch can safely repeat preparation when this cache cannot be saved.
   }
+}
+
+function recordDatabaseRecoveryFailure(backupPath) {
+  mkdirSync(dirname(DATABASE_RECOVERY_REQUIRED_PATH), { recursive: true });
+  writeFileSync(
+    DATABASE_RECOVERY_REQUIRED_PATH,
+    `${JSON.stringify({ version: 1, backupPath, failedAt: new Date().toISOString() }, null, 2)}\n`,
+    { mode: 0o600 }
+  );
+}
+
+function pendingDatabaseRecovery() {
+  if (!existsSync(DATABASE_RECOVERY_REQUIRED_PATH)) return null;
+  try {
+    const value = JSON.parse(readFileSync(DATABASE_RECOVERY_REQUIRED_PATH, "utf8"));
+    const backupPath = typeof value?.backupPath === "string" ? resolve(value.backupPath) : "";
+    const backupRoot = join(dirname(resolvedDatabaseFile()), "backups");
+    const fromBackupRoot = backupPath ? relative(backupRoot, backupPath) : "";
+    if (
+      value?.version !== 1 ||
+      !backupPath ||
+      isAbsolute(fromBackupRoot) ||
+      fromBackupRoot === ".." ||
+      fromBackupRoot.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`) ||
+      !existsSync(backupPath)
+    ) {
+      return { ok: false, backupPath: "" };
+    }
+    return { ok: true, backupPath };
+  } catch {
+    return { ok: false, backupPath: "" };
+  }
+}
+
+function recoverPendingDatabase() {
+  const pending = pendingDatabaseRecovery();
+  if (!pending) return true;
+  if (!pending.ok) {
+    say(`  ${C.yellow}Database recovery is required, but its private backup could not be verified. Do not start the app.${C.reset}`);
+    return false;
+  }
+  if (!restoreDatabaseAfterFailedSchemaChange(pending.backupPath)) return false;
+  rmSync(DATABASE_RECOVERY_REQUIRED_PATH, { force: true });
+  return true;
 }
 
 function writeStartupConflict(label, conflict) {
@@ -268,6 +324,21 @@ function repairDatabaseBeforeSchemaChange() {
   return true;
 }
 
+function requiredSchemaState() {
+  const source = resolvedDatabaseFile();
+  if (!existsSync(source)) return "missing";
+  const result = spawnSync(
+    process.execPath,
+    [join(APP_DIR, "scripts", "lib", "repair-schema-data.mjs"), "--check", source],
+    { cwd: APP_DIR, encoding: "utf8", env: runtimeCommandEnv() }
+  );
+  if (result.status === 0) return "ready";
+  if (result.status === 2) return "needs-sync";
+  if (result.stderr) say(result.stderr.trim());
+  if (!result.stderr && result.error) say(result.error.message);
+  return "error";
+}
+
 function restoreDatabaseAfterFailedSchemaChange(backupPath) {
   if (!backupPath) return true;
   const destination = resolvedDatabaseFile();
@@ -303,26 +374,42 @@ function prepare() {
   const next = { ...stamps };
   if (!ensureNativeModules()) return { ok: false };
   if (PACKAGED && !packagedArtifactsReady()) return { ok: false };
+  if (!BUILD_ONLY && !recoverPendingDatabase()) {
+    return { ok: false, databaseRecoveryFailed: true };
+  }
 
   const schemaHash = hashPaths([join(APP_DIR, "packages/core/prisma/schema.prisma")]);
-  const schemaChanged = stamps.schemaHash !== schemaHash;
+  const requiredSchema = BUILD_ONLY ? "ready" : requiredSchemaState();
+  if (requiredSchema === "error") return { ok: false };
+  const schemaChanged = stamps.schemaHash !== schemaHash || requiredSchema === "needs-sync";
   if (!PACKAGED && (schemaChanged || !canResolve("@prisma/client"))) {
     if (!run("Updating the database client...", NPM_COMMAND, ["run", "db:generate"])) return { ok: false };
   }
   if (!BUILD_ONLY) {
     if (schemaChanged) {
-      const changed = applyRecoverableSchemaChange({
-        backup: () => backupDatabaseBeforeSchemaChange(schemaHash),
-        repair: repairDatabaseBeforeSchemaChange,
-        sync: syncDatabase,
-        restore: restoreDatabaseAfterFailedSchemaChange
-      });
+      let changed;
+      try {
+        changed = applyRecoverableSchemaChange({
+          backup: () => backupDatabaseBeforeSchemaChange(schemaHash),
+          repair: repairDatabaseBeforeSchemaChange,
+          sync: syncDatabase,
+          restore: restoreDatabaseAfterFailedSchemaChange
+        });
+      } catch (error) {
+        if (error instanceof SchemaRestoreError) {
+          recordDatabaseRecoveryFailure(error.backupPath);
+          say(`  ${C.yellow}The database could not be restored automatically. Do not start the app; the private backup remains in data/backups.${C.reset}`);
+          return { ok: false, databaseRecoveryFailed: true };
+        }
+        throw error;
+      }
       if (!changed) return { ok: false };
     } else if (!existsSync(resolvedDatabaseFile()) && !syncDatabase()) {
       return { ok: false };
     }
     next.schemaHash = schemaHash;
     saveStamps(next);
+    rmSync(DATABASE_RECOVERY_REQUIRED_PATH, { force: true });
   }
 
   if (DATABASE_ONLY) return { ok: true, prod: PACKAGED };
@@ -410,7 +497,7 @@ function dashboardReady() {
   return probe(DASHBOARD_URL);
 }
 
-async function startApp(prod) {
+async function startApp(prod, onRuntimeRegistered) {
   const children = [];
   let shuttingDown = false;
   let phoneProxy = null;
@@ -473,6 +560,9 @@ async function startApp(prod) {
     void shutdown(1);
   });
 
+  persistState();
+  onRuntimeRegistered?.();
+
   try {
     const token = readOrCreateAccessToken(STATE_DIR);
     phoneProxy = await startPhoneAccessProxy({
@@ -531,9 +621,26 @@ async function startApp(prod) {
 }
 
 async function main() {
-  // Preparing binds no ports and starts no processes, so the installer can
-  // run --prepare-only while an older install is still open.
-  if (!PREPARE_ONLY) {
+  const maintenance = inspectInstallMaintenance(
+    APP_DIR,
+    process.env.RIOS_INSTALL_MAINTENANCE_TOKEN || ""
+  );
+  if (maintenance.status === "active" || maintenance.status === "invalid") {
+    say(`${APP_NAME} is being installed or updated. Try again when that finishes.`);
+    process.exitCode = 3;
+    return;
+  }
+
+  let preparationToken = "";
+  try {
+    try {
+      preparationToken = acquireProcessLock(PREPARATION_LOCK_PATH);
+    } catch {
+      say(`${APP_NAME} is already being prepared by another process.`);
+      process.exitCode = 2;
+      return;
+    }
+
     const recovery = await recoverPriorRuntime({
       statePath: RUNTIME_STATE_PATH,
       appDir: APP_DIR,
@@ -541,46 +648,75 @@ async function main() {
     });
     if (recovery.status === "already_running") {
       say(`${APP_NAME} is already running.`);
-      process.exit(2);
+      process.exitCode = 2;
+      return;
     }
     if (recovery.status === "recovered") {
       say(`  Recovered a previous partial start (${recovery.recovered.join(", ")}).`);
     }
 
-    for (const [label, port] of [["dashboard", DASHBOARD_PORT], ["local service", RUNNER_PORT]]) {
-      const conflict = portConflict(port, APP_DIR);
-      if (!conflict) continue;
-      const reclaimConfirmed = process.env.RIOS_RECLAIM_PORT_CONFLICTS === "1";
-      const reclaimStale = process.env.RIOS_RECLAIM_STALE_PORT_CONFLICTS === "1" &&
-        portConflictIsStaleTovi(conflict);
-      if (reclaimConfirmed || reclaimStale) {
-        const reclaimed = await reclaimPortConflict(conflict);
-        if (reclaimed.status === "recovered") {
-          say(`  Stopped an older ${APP_NAME} process that was using port ${port}.`);
-          continue;
-        }
+    if (PREPARE_ONLY) {
+      let existingRuntime;
+      try {
+        existingRuntime = discoverInstallRuntime({ appDir: APP_DIR, statePath: RUNTIME_STATE_PATH });
+      } catch (error) {
+        say(`Could not verify that ${APP_NAME} is stopped: ${error.message}`);
+        process.exitCode = 2;
+        return;
       }
-      writeStartupConflict(label, conflict);
-      say(`Could not start because port ${port} for the ${label} is already in use.`);
-      say(
-        conflict.owners.every((owner) => owner.toviOwned)
-          ? `Choose Stop old ${APP_NAME} and retry in the recovery dialog.`
-          : `Close the other application using that port, then choose Retry in ${APP_NAME}.`
-      );
-      process.exit(1);
+      if (existingRuntime.length > 0) {
+        say(`${APP_NAME} is still running. Quit it before preparing the database.`);
+        process.exitCode = 2;
+        return;
+      }
     }
-  }
 
-  const result = prepare();
-  if (!result.ok) {
-    say(`${C.yellow}Could not prepare the app. Reinstall it, then try again. The desktop log has details.${C.reset}`);
-    process.exit(1);
+    if (!PREPARE_ONLY) {
+      for (const [label, port] of [["dashboard", DASHBOARD_PORT], ["local service", RUNNER_PORT]]) {
+        const conflict = portConflict(port, APP_DIR);
+        if (!conflict) continue;
+        const reclaimConfirmed = process.env.RIOS_RECLAIM_PORT_CONFLICTS === "1";
+        const reclaimStale = process.env.RIOS_RECLAIM_STALE_PORT_CONFLICTS === "1" &&
+          portConflictIsStaleTovi(conflict);
+        if (reclaimConfirmed || reclaimStale) {
+          const reclaimed = await reclaimPortConflict(conflict);
+          if (reclaimed.status === "recovered") {
+            say(`  Stopped an older ${APP_NAME} process that was using port ${port}.`);
+            continue;
+          }
+        }
+        writeStartupConflict(label, conflict);
+        say(`Could not start because port ${port} for the ${label} is already in use.`);
+        say(
+          conflict.owners.every((owner) => owner.toviOwned)
+            ? `Choose Stop old ${APP_NAME} and retry in the recovery dialog.`
+            : `Close the other application using that port, then choose Retry in ${APP_NAME}.`
+        );
+        process.exitCode = 1;
+        return;
+      }
+    }
+
+    const result = prepare();
+    if (!result.ok) {
+      say(`${C.yellow}Could not prepare the app. Reinstall it, then try again. The desktop log has details.${C.reset}`);
+      process.exitCode = result.databaseRecoveryFailed ? 42 : 1;
+      return;
+    }
+    if (PREPARE_ONLY) {
+      say(`  ${C.green}The app is ready to start.${C.reset}`);
+      return;
+    }
+    await startApp(result.prod, () => {
+      if (preparationToken) releaseProcessLock(PREPARATION_LOCK_PATH, preparationToken);
+      preparationToken = "";
+    });
+  } finally {
+    if (preparationToken) releaseProcessLock(PREPARATION_LOCK_PATH, preparationToken);
   }
-  if (PREPARE_ONLY) {
-    say(`  ${C.green}The app is ready to start.${C.reset}`);
-    process.exit(0);
-  }
-  await startApp(result.prod);
 }
 
-void main();
+void main().catch((error) => {
+  say(`Could not prepare ${APP_NAME}: ${error instanceof Error ? error.message : String(error)}`);
+  process.exitCode = 1;
+});

@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 
 import { isAbsolute, resolve } from "node:path";
+import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 
 const DRAFT_THREAD_INDEX = "drafts_threadId_key";
 
-function hasCorrectDraftThreadIndex(database) {
+export function hasCorrectDraftThreadIndex(database) {
   const index = database
     .prepare('PRAGMA index_list("drafts")')
     .all()
@@ -80,16 +81,32 @@ export function repairDraftUniqueness(database) {
 }
 
 function runCli() {
-  const databasePath = process.argv[2];
+  const checkOnly = process.argv[2] === "--check";
+  const databasePath = process.argv[checkOnly ? 3 : 2];
   if (!databasePath) throw new Error("Usage: repair-schema-data.mjs <database.sqlite>");
   if (!isAbsolute(databasePath)) throw new Error("SQLite database path must be absolute");
 
   const database = new Database(databasePath, { fileMustExist: true });
   try {
-    repairDraftUniqueness(database);
+    if (checkOnly) {
+      const draftsTable = database
+        .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'drafts'")
+        .get();
+      if (!draftsTable || !hasCorrectDraftThreadIndex(database)) process.exitCode = 2;
+    } else {
+      repairDraftUniqueness(database);
+    }
   } finally {
     database.close();
   }
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) runCli();
+function canonical(path) {
+  try {
+    return realpathSync.native(path);
+  } catch {
+    return resolve(path);
+  }
+}
+
+if (process.argv[1] && canonical(process.argv[1]) === canonical(fileURLToPath(import.meta.url))) runCli();

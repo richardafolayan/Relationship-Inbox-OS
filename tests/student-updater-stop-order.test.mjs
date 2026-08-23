@@ -6,15 +6,19 @@ import { dirname, join } from "node:path";
 
 // Regression for #554: applyUpdate copied the preserved data/ dir (the live
 // SQLite DB) BEFORE stopping the running app, so a concurrent write could yield
-// a torn DB copy the pilot then boots on. stopAppProcesses must run BEFORE the
-// PRESERVE cpSync loop.
+// a torn DB copy the pilot then boots on. Full runtime shutdown and the atomic
+// rename must both happen before the PRESERVE cpSync loop.
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SRC = readFileSync(join(__dirname, "..", "scripts", "update-student.mjs"), "utf8");
 
-test("stopAppProcesses runs before the PRESERVE copy loop", () => {
-  const stopIdx = SRC.indexOf("stopAppProcesses(APP_DIR);");
+test("full runtime shutdown and rename run before the PRESERVE copy loop", () => {
+  const stopIdx = SRC.indexOf("await stopExistingInstallRuntime({ appDir: APP_DIR });");
+  const renameIdx = SRC.indexOf("renameSync(APP_DIR, backupDir);");
+  const secondStopIdx = SRC.indexOf("await stopExistingInstallRuntime({ appDir: backupDir });");
   const copyIdx = SRC.indexOf("cpSync(from, join(appNew, item)");
-  assert.ok(stopIdx > 0, "stopAppProcesses call present");
+  assert.ok(stopIdx > 0, "full shutdown call present");
+  assert.ok(renameIdx > stopIdx, "old launch path is removed after first shutdown");
+  assert.ok(secondStopIdx > renameIdx, "rename race is closed under the backup path");
   assert.ok(copyIdx > 0, "PRESERVE cpSync present");
-  assert.ok(stopIdx < copyIdx, "the app must be stopped BEFORE the live DB is copied");
+  assert.ok(secondStopIdx < copyIdx, "the app must be fully stopped BEFORE the live DB is copied");
 });

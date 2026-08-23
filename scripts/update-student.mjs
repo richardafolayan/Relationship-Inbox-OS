@@ -49,7 +49,12 @@ import { fileURLToPath } from "node:url";
 import {
   compareVersions, isAllowedRemoteUpdateUrl, isNewer, sha256Buffer, validateLatestJson
 } from "./lib/release-manifest.mjs";
+import {
+  acquireInstallMaintenance,
+  releaseInstallMaintenance
+} from "./lib/install-maintenance.mjs";
 import { resolveAppName } from "./lib/branding.mjs";
+import { stopExistingInstallRuntime } from "./stop-existing-install.mjs";
 
 const APP_NAME = resolveAppName();
 
@@ -231,26 +236,6 @@ function enforceMinimumInstallerVersion(current, manifest) {
   );
 }
 
-function stopAppProcesses(dir) {
-  // Best-effort: stop a dev server still serving THIS install so files aren't
-  // held open during the swap. Only kills processes whose cwd is under `dir`.
-  const ports = [process.env.DASHBOARD_PORT || "3100", process.env.RUNNER_PORT || "4001"];
-  for (const port of ports) {
-    let pids = "";
-    try { pids = execFileSync("lsof", ["-ti", `tcp:${port}`], { encoding: "utf8" }); } catch { continue; }
-    for (const pid of pids.split("\n").map((p) => p.trim()).filter(Boolean)) {
-      let cwd = "";
-      try {
-        cwd = execFileSync("lsof", ["-a", "-p", pid, "-d", "cwd", "-Fn"], { encoding: "utf8" })
-          .split("\n").find((l) => l.startsWith("n"))?.slice(1) || "";
-      } catch { /* ignore */ }
-      if (cwd === dir || cwd.startsWith(dir + "/")) {
-        try { process.kill(Number(pid)); say(`  Stopped the running app (pid ${pid}).`); } catch { /* ignore */ }
-      }
-    }
-  }
-}
-
 function pruneBackups(parent, keep) {
   const backups = readdirSync(parent)
     .filter((n) => n.startsWith(".rios-backup-"))
@@ -321,34 +306,36 @@ async function applyUpdate(current, manifest) {
     die("The downloaded update didn't contain the app. Aborted with nothing changed.");
   }
 
-  // 4. Stop the app FIRST — before copying data/. The preserved data/ dir holds
-  //    the live SQLite DB (main file + -wal/-shm). A non-atomic cpSync while the
-  //    runner is mid-write/checkpoint can produce a copy whose WAL is
-  //    inconsistent with the main file, and the pilot then boots on that
-  //    torn/corrupt DB (rollback only fires on a deps-step throw, not on a
-  //    silently-corrupt-but-openable DB). Stopping first closes the DB handles.
-  stopAppProcesses(APP_DIR);
-
-  // 5. Preserve personal data into the new copy.
-  for (const item of PRESERVE) {
-    const from = join(APP_DIR, item);
-    if (existsSync(from)) {
-      rmSync(join(appNew, item), { recursive: true, force: true });
-      cpSync(from, join(appNew, item), { recursive: true });
-    }
+  // 4. Stop the full owned runtime, then atomically remove the old app from
+  // its launch path. A second pass under the backup path closes the narrow
+  // stop-to-rename race before SQLite/WAL/profile data is copied.
+  try {
+    await stopExistingInstallRuntime({ appDir: APP_DIR });
+  } catch (err) {
+    cleanup(stagingRoot);
+    die(`Could not stop the running app safely.\n  ${err.message}`);
   }
-
-  // 6. Swap (rename within the same parent = atomic-ish).
   try {
     renameSync(APP_DIR, backupDir);
   } catch (err) {
     cleanup(stagingRoot);
     die(`Could not back up the current app (nothing changed).\n  ${err.message}`);
   }
+  let maintenanceToken = "";
   try {
+    await stopExistingInstallRuntime({ appDir: backupDir });
+    for (const item of PRESERVE) {
+      const from = join(backupDir, item);
+      if (existsSync(from)) {
+        rmSync(join(appNew, item), { recursive: true, force: true });
+        cpSync(from, join(appNew, item), { recursive: true });
+      }
+    }
+    maintenanceToken = acquireInstallMaintenance(appNew);
+    process.env.RIOS_INSTALL_MAINTENANCE_TOKEN = maintenanceToken;
     renameSync(appNew, APP_DIR);
   } catch (err) {
-    // Roll back the backup immediately.
+    if (maintenanceToken) releaseInstallMaintenance(appNew, maintenanceToken);
     try { renameSync(backupDir, APP_DIR); } catch { /* leave backup for manual restore */ }
     cleanup(stagingRoot);
     die(`Could not put the new app in place — rolled back.\n  ${err.message}`);
@@ -365,6 +352,7 @@ async function applyUpdate(current, manifest) {
     const childEnv = { ...process.env };
     if (RESIGN_BUNDLE) delete childEnv.RIOS_PACKAGED_APP;
     const opts = { cwd: APP_DIR, stdio: "inherit", env: childEnv };
+    let runningDatabaseStep = false;
     try {
       say(`  Installing dependencies (a few minutes)…`);
       execFileSync("npm", ["install", "--include=dev"], opts);
@@ -385,8 +373,20 @@ async function applyUpdate(current, manifest) {
           throw new Error(`packaged build artifacts missing after prepare: ${missing.join(", ")}`);
         }
       }
+      runningDatabaseStep = true;
       execFileSync("node", ["scripts/start-app.mjs", "--database-only"], opts);
+      runningDatabaseStep = false;
     } catch (err) {
+      if (runningDatabaseStep && err?.status === 42) {
+        releaseInstallMaintenance(APP_DIR, maintenanceToken);
+        delete process.env.RIOS_INSTALL_MAINTENANCE_TOKEN;
+        die(
+          `The database could not be recovered automatically. The new app and private database backup were kept. ` +
+          `Do not replace or delete data/backups; free disk space, then run the installer again.\n  ${err.message}`
+        );
+      }
+      releaseInstallMaintenance(APP_DIR, maintenanceToken);
+      delete process.env.RIOS_INSTALL_MAINTENANCE_TOKEN;
       say(`  ${C.y}Dependency step failed — rolling back.${C.reset}`);
       rollback(APP_DIR, backupDir);
       die(`Update rolled back to ${current}. Your data is safe.\n  ${err.message}`);
@@ -416,6 +416,8 @@ async function applyUpdate(current, manifest) {
   } else {
     refreshMacAppBundle();
   }
+  releaseInstallMaintenance(APP_DIR, maintenanceToken);
+  delete process.env.RIOS_INSTALL_MAINTENANCE_TOKEN;
   pruneBackups(BACKUP_ROOT, Math.max(0, args.keepBackups));
   say(`\n  ${C.g}${C.b}Updated to ${manifest.version}.${C.reset}`);
   if (RESIGN_BUNDLE) {
