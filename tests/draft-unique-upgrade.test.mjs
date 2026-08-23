@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
@@ -88,6 +88,7 @@ test("schema backup is readable and can restore an already-modified database", (
       cwd: appDir,
       stdio: "pipe"
     });
+    if (process.platform !== "win32") assert.equal(statSync(backupPath).mode & 0o777, 0o600);
 
     database = new Database(backupPath, { readonly: true, fileMustExist: true });
     assert.deepEqual(database.prepare("SELECT id FROM pilot").all(), [{ id: "preserved" }]);
@@ -100,6 +101,7 @@ test("schema backup is readable and can restore an already-modified database", (
       cwd: appDir,
       stdio: "pipe"
     });
+    if (process.platform !== "win32") assert.equal(statSync(databasePath).mode & 0o777, 0o600);
 
     database = new Database(databasePath, { readonly: true, fileMustExist: true });
     assert.deepEqual(database.prepare("SELECT id FROM pilot").all(), [{ id: "preserved" }]);
