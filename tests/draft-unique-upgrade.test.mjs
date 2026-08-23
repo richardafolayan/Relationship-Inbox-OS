@@ -1,17 +1,19 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
 import Database from "better-sqlite3";
 import { prismaDbPushInvocation } from "../scripts/lib/prisma-command.mjs";
+import { applyRecoverableSchemaChange } from "../scripts/lib/recoverable-schema-change.mjs";
 
 const appDir = resolve(".");
 const backupScript = resolve("scripts/lib/backup-sqlite.mjs");
 const repairScript = resolve("scripts/lib/repair-schema-data.mjs");
 
 function fixture() {
-  const directory = mkdtempSync(join("/private/tmp", "tovi-draft-unique-upgrade-"));
+  const directory = mkdtempSync(join(tmpdir(), "tovi-draft-unique-upgrade-"));
   return {
     directory,
     databasePath: join(directory, "legacy.sqlite"),
@@ -73,7 +75,7 @@ function assertUniqueDraftIndex(database) {
   );
 }
 
-test("schema backup is a readable SQLite snapshot before repair", () => {
+test("schema backup is readable and can restore an already-modified database", () => {
   const { directory, databasePath, cleanup } = fixture();
   try {
     let database = new Database(databasePath);
@@ -90,9 +92,51 @@ test("schema backup is a readable SQLite snapshot before repair", () => {
     database = new Database(backupPath, { readonly: true, fileMustExist: true });
     assert.deepEqual(database.prepare("SELECT id FROM pilot").all(), [{ id: "preserved" }]);
     database.close();
+
+    database = new Database(databasePath);
+    database.prepare("UPDATE pilot SET id = ?").run("modified");
+    database.close();
+    execFileSync(process.execPath, [backupScript, backupPath, databasePath], {
+      cwd: appDir,
+      stdio: "pipe"
+    });
+
+    database = new Database(databasePath, { readonly: true, fileMustExist: true });
+    assert.deepEqual(database.prepare("SELECT id FROM pilot").all(), [{ id: "preserved" }]);
+    database.close();
   } finally {
     cleanup();
   }
+});
+
+test("a failed schema sync always restores the verified backup", () => {
+  const calls = [];
+  const changed = applyRecoverableSchemaChange({
+    backup() {
+      calls.push("backup");
+      return { ok: true, backupPath: "/verified/before.sqlite" };
+    },
+    repair() {
+      calls.push("repair");
+      return true;
+    },
+    sync() {
+      calls.push("sync");
+      return false;
+    },
+    restore(backupPath) {
+      calls.push(`restore:${backupPath}`);
+      return true;
+    }
+  });
+
+  assert.equal(changed, false);
+  assert.deepEqual(calls, [
+    "backup",
+    "repair",
+    "sync",
+    "restore:/verified/before.sqlite"
+  ]);
 });
 
 test("repair is a no-op before the drafts table exists", () => {
@@ -120,6 +164,7 @@ test("repair keeps the newest meaningful draft and creates the invariant", () =>
     createLegacyDraftTable(database);
     insertDraft(database, "older-meaningful", "thread-1", "Keep this", "2026-08-21T10:00:00.000Z");
     insertDraft(database, "newer-empty", "thread-1", "   ", "2026-08-23T10:00:00.000Z");
+    insertDraft(database, "newest-tab-empty", "thread-1", "\t\n", "2026-08-24T10:00:00.000Z");
     insertDraft(database, "newest-meaningful", "thread-1", "Keep this instead", "2026-08-22T10:00:00.000Z");
     insertDraft(database, "only-empty", "thread-2", "", "2026-08-20T10:00:00.000Z");
     database.close();
@@ -230,9 +275,19 @@ test("schema, launcher order, and save route share one Draft invariant", () => {
   assert.match(readFileSync("scripts/lib/backup-sqlite.mjs", "utf8"), /database\.backup\(destination\)/);
   const preparation = launcher.slice(launcher.indexOf("function prepare()"), launcher.indexOf("function delay("));
   const backupAt = preparation.indexOf("backupDatabaseBeforeSchemaChange(schemaHash)");
-  const repairAt = preparation.indexOf("repairDatabaseBeforeSchemaChange()");
-  const syncAt = preparation.indexOf("syncDatabase()");
+  const repairAt = preparation.indexOf("repairDatabaseBeforeSchemaChange");
+  const syncAt = preparation.indexOf("syncDatabase");
+  const restoreAt = preparation.indexOf("restoreDatabaseAfterFailedSchemaChange");
   assert.ok(backupAt >= 0 && repairAt > backupAt && syncAt > repairAt);
+  assert.ok(restoreAt > syncAt);
+
+  const updater = readFileSync("scripts/update-student.mjs", "utf8");
+  const dependencyStep = updater.slice(
+    updater.indexOf('execFileSync("npm", ["run", "db:generate"]'),
+    updater.indexOf("if (RESIGN_BUNDLE)", updater.indexOf('execFileSync("npm", ["run", "db:generate"]'))
+  );
+  assert.match(dependencyStep, /start-app\.mjs", "--database-only"/);
+  assert.doesNotMatch(dependencyStep, /db:push/);
 
   const runner = readFileSync("apps/runner/src/index.ts", "utf8");
   const draftRoute = runner.slice(

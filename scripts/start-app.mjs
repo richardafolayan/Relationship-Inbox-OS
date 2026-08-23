@@ -16,6 +16,7 @@ import { fileURLToPath } from "node:url";
 import { loadAppEnv } from "./lib/env-file.mjs";
 import { packagedDashboardArgs } from "./lib/dashboard-command.mjs";
 import { prismaDbPushInvocation } from "./lib/prisma-command.mjs";
+import { applyRecoverableSchemaChange } from "./lib/recoverable-schema-change.mjs";
 import { resolveAppName } from "./lib/branding.mjs";
 import { prepareSqliteDatabaseFile } from "./lib/sqlite-database.mjs";
 import {
@@ -47,7 +48,8 @@ const RUNTIME_STATE_PATH = join(STATE_DIR, "processes.json");
 const STARTUP_CONFLICT_PATH = join(STATE_DIR, "startup-conflict.json");
 const PACKAGED = process.env.RIOS_PACKAGED_APP === "1";
 const args = new Set(process.argv.slice(2));
-const PREPARE_ONLY = args.has("--prepare-only");
+const DATABASE_ONLY = args.has("--database-only");
+const PREPARE_ONLY = args.has("--prepare-only") || DATABASE_ONLY;
 const FORCE_DEV = args.has("--dev") || process.env.RIOS_DEV === "1";
 const FORCE_REBUILD = process.env.RIOS_REBUILD === "1";
 const DASHBOARD_PORT = String(process.env.DASHBOARD_PORT || "3100");
@@ -226,7 +228,7 @@ function syncDatabase() {
 
 function backupDatabaseBeforeSchemaChange(schemaHash) {
   const source = resolvedDatabaseFile();
-  if (!existsSync(source)) return true;
+  if (!existsSync(source)) return { ok: true, backupPath: null };
   const backupDir = join(dirname(source), "backups");
   mkdirSync(backupDir, { recursive: true });
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
@@ -242,10 +244,10 @@ function backupDatabaseBeforeSchemaChange(schemaHash) {
   if (result.status !== 0) {
     say(`  ${C.yellow}The existing database could not be backed up. No schema change was applied.${C.reset}`);
     if (result.stderr) say(result.stderr.trim());
-    return false;
+    return { ok: false, backupPath: null };
   }
   say(`  Backed up the existing database to ${destination}.`);
-  return true;
+  return { ok: true, backupPath: destination };
 }
 
 function repairDatabaseBeforeSchemaChange() {
@@ -262,6 +264,24 @@ function repairDatabaseBeforeSchemaChange() {
     if (!result.stderr && result.error) say(result.error.message);
     return false;
   }
+  return true;
+}
+
+function restoreDatabaseAfterFailedSchemaChange(backupPath) {
+  if (!backupPath) return true;
+  const destination = resolvedDatabaseFile();
+  const result = spawnSync(
+    process.execPath,
+    [join(APP_DIR, "scripts", "lib", "backup-sqlite.mjs"), backupPath, destination],
+    { cwd: APP_DIR, encoding: "utf8", env: runtimeCommandEnv() }
+  );
+  if (result.status !== 0) {
+    say(`  ${C.yellow}Automatic database restore failed. The verified backup remains at ${backupPath}.${C.reset}`);
+    if (result.stderr) say(result.stderr.trim());
+    if (!result.stderr && result.error) say(result.error.message);
+    return false;
+  }
+  say(`  Restored the database from ${backupPath}.`);
   return true;
 }
 
@@ -289,15 +309,20 @@ function prepare() {
     if (!run("Updating the database client...", NPM_COMMAND, ["run", "db:generate"])) return { ok: false };
   }
   if (schemaChanged) {
-    if (!backupDatabaseBeforeSchemaChange(schemaHash)) return { ok: false };
-    if (!repairDatabaseBeforeSchemaChange()) return { ok: false };
-  }
-  if (schemaChanged || !existsSync(resolvedDatabaseFile())) {
-    if (!syncDatabase()) return { ok: false };
+    const changed = applyRecoverableSchemaChange({
+      backup: () => backupDatabaseBeforeSchemaChange(schemaHash),
+      repair: repairDatabaseBeforeSchemaChange,
+      sync: syncDatabase,
+      restore: restoreDatabaseAfterFailedSchemaChange
+    });
+    if (!changed) return { ok: false };
+  } else if (!existsSync(resolvedDatabaseFile()) && !syncDatabase()) {
+    return { ok: false };
   }
   next.schemaHash = schemaHash;
   saveStamps(next);
 
+  if (DATABASE_ONLY) return { ok: true, prod: PACKAGED };
   if (PACKAGED) return { ok: true, prod: true };
 
   const coreHash = hashPaths([

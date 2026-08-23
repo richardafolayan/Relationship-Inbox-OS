@@ -34,17 +34,18 @@ export function repairDraftUniqueness(database) {
 
   return database.transaction(() => {
     const drafts = database
-      .prepare(`
-        SELECT "id", "threadId"
-        FROM "drafts"
-        ORDER BY
-          "threadId" ASC,
-          CASE WHEN length(trim("text")) > 0 THEN 0 ELSE 1 END ASC,
-          "updatedAt" DESC,
-          "createdAt" DESC,
-          "id" ASC
-      `)
-      .all();
+      .prepare('SELECT "id", "threadId", "text", "updatedAt", "createdAt" FROM "drafts"')
+      .all()
+      .sort((left, right) => {
+        if (left.threadId !== right.threadId) return left.threadId < right.threadId ? -1 : 1;
+        const leftMeaningful = left.text.trim().length > 0;
+        const rightMeaningful = right.text.trim().length > 0;
+        if (leftMeaningful !== rightMeaningful) return leftMeaningful ? -1 : 1;
+        if (left.updatedAt !== right.updatedAt) return left.updatedAt > right.updatedAt ? -1 : 1;
+        if (left.createdAt !== right.createdAt) return left.createdAt > right.createdAt ? -1 : 1;
+        if (left.id === right.id) return 0;
+        return left.id < right.id ? -1 : 1;
+      });
     const deleteDraft = database.prepare('DELETE FROM "drafts" WHERE "id" = ?');
     let previousThreadId;
     let deletedDrafts = 0;

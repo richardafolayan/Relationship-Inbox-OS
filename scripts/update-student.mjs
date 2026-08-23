@@ -369,7 +369,7 @@ async function applyUpdate(current, manifest) {
       say(`  Installing dependencies (a few minutes)…`);
       execFileSync("npm", ["install", "--include=dev"], opts);
       execFileSync("npm", ["run", "db:generate"], opts);
-      execFileSync("npm", ["run", "db:push"], opts);
+      execFileSync("node", ["scripts/start-app.mjs", "--database-only"], opts);
       if (RESIGN_BUNDLE) {
         // Fatal for packaged installs: without these artifacts the packaged
         // launcher cannot boot (it never builds), so a failed build must roll
