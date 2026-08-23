@@ -13,11 +13,16 @@ Original report: `docs/qa/2026-08-21-full-product-hardening.md` on the milestone
 ## Purpose
 
 The milestone report is immutable evidence of what the first audit concluded.
-This document is its authoritative errata layer. It does not rewrite the
+This document is its dated errata layer. It does not rewrite the
 milestone, erase the fixes that remain valid, or manufacture a new aggregate
 count. It records where the adversarial review disproved a claimed disposition,
 found an interaction bug, or established a release gate that the original
 report did not cross.
+
+The live release gate and current execution state belong in
+`docs/strategy/current-product-direction.md` and
+`docs/strategy/current-build-status.md`. If those documents later differ from
+this one, their newer live state controls.
 
 The correct integration decision is **NO MERGE**. Treat
 `chore/full-product-hardening` as evidence and source material for smaller
@@ -86,23 +91,23 @@ primitives themselves.
 These no-finding areas are not a clean bill of health. They mean the review did
 not find a new source-backed defect in the stated path.
 
-## Corrective branch sequence
+## Corrective priority and execution dependency
 
-1. External-action safety: classification-gated auto-ack and reset/send fencing.
-2. Scheduled-send completion and captured-version reconciliation.
-3. Clean packaged first launch.
-4. Complete composer-intent recovery: text, reply parent, attachments, source,
-   and relevant scheduling state.
-5. Setup latest-wins persistence with visible failure and no false advancement.
-6. Deterministic legacy Draft repair followed by an exact, validated invariant
-   application.
-7. Instagram integration and re-verification of every shared path.
-8. Physical iPhone/PWA critical flows.
-9. Only then begin resume-to-trustworthy-fresh-state work.
+The safety priority is external-action safety first, then scheduled-send
+correctness, clean packaged first launch, complete composer-intent recovery,
+setup latest-wins persistence, and the existing-database Draft invariant.
 
-Focus/send/thread/setup work must use the intended post-Instagram integration
-state or wait for that state to stabilise. The packaged-first-launch correction
-does not meaningfully overlap Instagram and can proceed independently.
+That priority is not permission to create competing shared-path implementations.
+Work without meaningful Instagram overlap can proceed independently. The clean
+packaged-first-launch correction and Draft upgrade path are examples. Focus,
+send, thread, and setup corrections must wait for Instagram's intended shared
+path to stabilise or be explicitly based on that post-Instagram integration
+state. Once that base exists, implement the conflicting corrections in the
+safety order above and adversarially review each branch.
+
+After the corrective branches, reverify every Instagram-shared path and run the
+physical iPhone/PWA critical flows. Only after the pilot release gate is clear
+should resume-to-trustworthy-fresh-state work begin.
 
 ## Pilot release gate
 
@@ -115,4 +120,3 @@ Tovi is not pilot-ready until all of the following are true:
 - Existing databases upgrade through every new integrity constraint.
 - Instagram integration is resolved and the shared paths are reverified.
 - Physical iPhone/PWA critical flows have been checked.
-

@@ -1,6 +1,6 @@
 # Current Build Status
 
-_Volatile. Update this whenever branches, commits, or build state change. Last updated: 2026-07-30._
+_Volatile. Update this whenever branches, commits, or build state change. Last updated: 2026-08-23._
 
 This file holds fast-moving build state on purpose. Branch tips and commit
 hashes go stale quickly, so verify live refs before starting work rather than
@@ -59,6 +59,26 @@ wrong. Fetch first, then compare the live refs.
   [`docs/developer/features.md`](../developer/features.md); this page only tracks
   the moving branch and verification state.
 
+## Current hardening state
+
+- `chore/full-product-hardening` is preserved remotely with immutable tag
+  `qa/full-product-hardening-2026-08-21`. Do not merge it or add unrelated work.
+  It is evidence and source material for smaller corrective branches.
+- The adversarial review reopened stop-ship external-action, scheduled-send,
+  setup-ordering, recovery-fidelity, existing-database-upgrade, and clean-install
+  findings. The dated evidence is in
+  [`2026-08-23-full-product-hardening-adversarial-review.md`](../qa/2026-08-23-full-product-hardening-adversarial-review.md).
+- PR #1053 records that errata and the focused ONNX Runtime/node-tar reachability
+  assessment. PR #1054 is the independent clean packaged-first-launch fix.
+- Instagram PR #1045 remains a shared-path dependency. Focus, send, thread, and
+  setup corrections must use its intended integrated state or wait for that
+  state to stabilise. Independent corrections may proceed now.
+- After the shared base stabilises, the correction order is external-action
+  safety, scheduled-send reconciliation, composer recovery, then setup ordering.
+  Each corrective branch requires adversarial review.
+- Do not start resume-to-trustworthy-fresh-state work until the pilot release
+  gate in `current-product-direction.md` is clear.
+
 ## Last recorded live verification
 
 The following checks were recorded before the branch-policy migration and remain
@@ -83,6 +103,8 @@ before claiming those guarantees still hold.
 - Keep feature work based on `develop` and PRs targeted to `develop`.
 - Complete the explicitly authorised Instagram implementation without reviving
   the retired v1 branch.
+- Merge only sharply scoped corrective branches, not the full hardening branch.
+- Clear the current pilot release gate before performance or feature work.
 - Verify setup, connection, scanning, exact-thread opening, deduplication,
   user-triggered sending, reconnect/reset, UI states, tests, and browser smoke
   behaviour.

@@ -1,6 +1,6 @@
 # Current Product Direction
 
-_Living document. Keep this updated as the direction changes. Last updated: 2026-07-30._
+_Living document. Keep this updated as the direction changes. Last updated: 2026-08-23._
 
 Tovi is being prepared for a small 3-5 student pilot. It should
 feel like a calm place to reply properly, not a dashboard, CRM, marketing tool,
@@ -45,6 +45,23 @@ exception. Prepare and run the 3-5 student pilot.
 
 Only build small operational improvements that reduce pilot friction, for
 example direct feedback submission, install/readme clarity, or setup hardening.
+
+Correctness currently takes priority over performance and feature work. Tovi is
+not pilot-ready until all of the following are true:
+
+- No known path can unexpectedly send or duplicate a real message.
+- A completely clean signed install launches successfully.
+- Failed or reordered setup writes cannot create false state.
+- Recovered composer state faithfully represents the user's intended send.
+- Existing databases upgrade through every new integrity constraint.
+- Instagram integration is resolved and its shared paths are reverified.
+- Physical iPhone/PWA critical flows have been checked.
+
+Treat `chore/full-product-hardening` and its immutable
+`qa/full-product-hardening-2026-08-21` tag as evidence, not an integration
+branch. Use the adversarial errata under `docs/qa/` to drive small corrective
+branches. Do not begin the broad resume-to-trustworthy-fresh-state programme
+until this gate is clear.
 
 ## Windows pilot parity
 
