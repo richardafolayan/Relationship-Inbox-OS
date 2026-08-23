@@ -11,7 +11,7 @@ import {
   writeFileSync
 } from "node:fs";
 import { createRequire } from "node:module";
-import { delimiter, dirname, join, resolve } from "node:path";
+import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadAppEnv } from "./lib/env-file.mjs";
 import { packagedDashboardArgs } from "./lib/dashboard-command.mjs";
@@ -200,6 +200,11 @@ function databaseFile() {
   return url.slice("file:".length).split("?", 1)[0] || join(DATA_DIR, "inbox-os.sqlite");
 }
 
+function resolvedDatabaseFile() {
+  const path = databaseFile();
+  return isAbsolute(path) ? path : resolve(APP_DIR, path);
+}
+
 function syncDatabase() {
   const prepared = prepareSqliteDatabaseFile(process.env.DATABASE_URL, {
     appDir: APP_DIR,
@@ -217,6 +222,47 @@ function syncDatabase() {
     invocation.args,
     { env: { ...process.env, DATABASE_URL: process.env.DATABASE_URL } }
   );
+}
+
+function backupDatabaseBeforeSchemaChange(schemaHash) {
+  const source = resolvedDatabaseFile();
+  if (!existsSync(source)) return true;
+  const backupDir = join(dirname(source), "backups");
+  mkdirSync(backupDir, { recursive: true });
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const destination = join(
+    backupDir,
+    `inbox-os-before-schema-${schemaHash.slice(0, 12)}-${timestamp}.sqlite`
+  );
+  const result = spawnSync(
+    process.execPath,
+    [join(APP_DIR, "scripts", "lib", "backup-sqlite.mjs"), source, destination],
+    { cwd: APP_DIR, encoding: "utf8", env: runtimeCommandEnv() }
+  );
+  if (result.status !== 0) {
+    say(`  ${C.yellow}The existing database could not be backed up. No schema change was applied.${C.reset}`);
+    if (result.stderr) say(result.stderr.trim());
+    return false;
+  }
+  say(`  Backed up the existing database to ${destination}.`);
+  return true;
+}
+
+function repairDatabaseBeforeSchemaChange() {
+  const source = resolvedDatabaseFile();
+  if (!existsSync(source)) return true;
+  const result = spawnSync(
+    process.execPath,
+    [join(APP_DIR, "scripts", "lib", "repair-schema-data.mjs"), source],
+    { cwd: APP_DIR, encoding: "utf8", env: runtimeCommandEnv() }
+  );
+  if (result.status !== 0) {
+    say(`  ${C.yellow}The existing database could not be repaired. No schema change was applied.${C.reset}`);
+    if (result.stderr) say(result.stderr.trim());
+    if (!result.stderr && result.error) say(result.error.message);
+    return false;
+  }
+  return true;
 }
 
 function packagedArtifactsReady() {
@@ -242,7 +288,11 @@ function prepare() {
   if (!PACKAGED && (schemaChanged || !canResolve("@prisma/client"))) {
     if (!run("Updating the database client...", NPM_COMMAND, ["run", "db:generate"])) return { ok: false };
   }
-  if (schemaChanged || !existsSync(databaseFile())) {
+  if (schemaChanged) {
+    if (!backupDatabaseBeforeSchemaChange(schemaHash)) return { ok: false };
+    if (!repairDatabaseBeforeSchemaChange()) return { ok: false };
+  }
+  if (schemaChanged || !existsSync(resolvedDatabaseFile())) {
     if (!syncDatabase()) return { ok: false };
   }
   next.schemaHash = schemaHash;
