@@ -56,6 +56,7 @@ const PLATFORM_FILTERS: { key: PlatformFilter; label: string }[] = [
   { key: "all", label: "All" },
   { key: "IMESSAGE", label: "iMessage" },
   { key: "LINKEDIN", label: "LinkedIn" },
+  { key: "INSTAGRAM", label: "Instagram" },
   { key: "WHATSAPP", label: "WhatsApp" },
   { key: "GOOGLE_MESSAGES", label: "Google Messages" }
 ];

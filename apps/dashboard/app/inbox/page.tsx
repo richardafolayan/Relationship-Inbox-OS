@@ -91,6 +91,7 @@ const CATEGORY_FILTERS: { key: CategoryFilter; label: string }[] = [
 const PLATFORM_FILTERS: { key: PlatformFilter; label: string }[] = [
   { key: "all", label: "All" },
   { key: "LINKEDIN", label: "LinkedIn" },
+  { key: "INSTAGRAM", label: "Instagram" },
   { key: "IMESSAGE", label: "iMessage" },
   { key: "WHATSAPP", label: "WhatsApp" },
   { key: "GOOGLE_MESSAGES", label: "Google Messages" }
