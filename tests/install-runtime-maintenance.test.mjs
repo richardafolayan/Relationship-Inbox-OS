@@ -5,7 +5,9 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  renameSync,
   rmSync,
+  utimesSync,
   writeFileSync
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -13,10 +15,18 @@ import { join, resolve } from "node:path";
 import test from "node:test";
 import {
   acquireProcessLock,
+  acquireInstallOperation,
+  inspectInstallOperation,
   inspectProcessLock,
+  releaseInstallOperation,
   releaseProcessLock
 } from "../scripts/lib/install-maintenance.mjs";
-import { stopExistingInstallRuntime } from "../scripts/stop-existing-install.mjs";
+import { processBelongsToApp } from "../scripts/lib/process-lifecycle.mjs";
+import {
+  discoverInstallRuntime,
+  stopExistingInstallRuntime,
+  windowsTreeTerminationArgs
+} from "../scripts/stop-existing-install.mjs";
 
 function fixture(prefix) {
   const directory = mkdtempSync(join(tmpdir(), prefix));
@@ -44,16 +54,92 @@ test("process locks are exclusive, token-owned, and self-clean stale owners", ()
     assert.equal(releaseProcessLock(lockPath, token), true);
     assert.equal(existsSync(lockPath), false);
 
-    acquireProcessLock(lockPath, { ownerPid: 2_147_483_647, token: "stale-token" });
+    acquireProcessLock(lockPath, {
+      ownerPid: 2_147_483_647,
+      ownerIdentity: "stale-owner",
+      token: "stale-token"
+    });
     assert.equal(inspectProcessLock(lockPath).status, "stale");
     assert.equal(existsSync(lockPath), false);
+
+    acquireProcessLock(lockPath, {
+      ownerPid: process.pid,
+      ownerIdentity: "identity-from-reused-pid",
+      token: "reused-token"
+    });
+    assert.equal(inspectProcessLock(lockPath).status, "stale");
+    assert.equal(existsSync(lockPath), false, "a reused owner PID must not pin the lock");
 
     writeFileSync(lockPath, "not-json");
     assert.equal(inspectProcessLock(lockPath).status, "invalid");
     assert.equal(existsSync(lockPath), true, "an invalid lock must fail closed");
+    const old = new Date(Date.now() - 60_000);
+    utimesSync(lockPath, old, old);
+    assert.equal(inspectProcessLock(lockPath).status, "stale");
+    assert.equal(existsSync(lockPath), false, "an abandoned partial lock must self-heal");
   } finally {
     cleanup();
   }
+});
+
+test("the install-operation lock stays stable while the app directory is renamed", () => {
+  const { directory, cleanup } = fixture("tovi-operation-lock-");
+  const appDir = join(directory, "Tovi");
+  const movedDir = join(directory, "Tovi.previous");
+  mkdirSync(appDir);
+  const token = acquireInstallOperation(appDir);
+  try {
+    assert.equal(inspectInstallOperation(appDir).status, "active");
+    renameSync(appDir, movedDir);
+    assert.equal(inspectInstallOperation(appDir).status, "active");
+    assert.throws(() => acquireInstallOperation(appDir), /already changing/i);
+  } finally {
+    assert.equal(releaseInstallOperation(appDir, token), true);
+    cleanup();
+  }
+});
+
+test("runtime discovery finds the real pre-bind start-student launcher", () => {
+  const command = "/usr/bin/node /Applications/Tovi-test/scripts/start-student.mjs";
+  const fakeExec = (executable, args) => {
+    if (executable === "ps" && commandMatches(args, "pid=,command=")) return `4244 ${command}\n`;
+    if (executable === "lsof" && commandMatches(args, "-iTCP:")) return "";
+    if (executable === "ps" && commandMatches(args, "stat=")) return "S\n";
+    if (executable === "lsof" && commandMatches(args, "cwd")) return "n/Applications/Tovi-test\n";
+    if (executable === "ps" && commandMatches(args, "command=")) return `${command}\n`;
+    if (executable === "ps" && commandMatches(args, "lstart=")) return "launcher-identity\n";
+    throw new Error(`Unexpected command: ${executable} ${args.join(" ")}`);
+  };
+
+  const discovered = discoverInstallRuntime({
+    appDir: "/Applications/Tovi-test",
+    statePath: "/nonexistent/processes.json",
+    ports: [43106],
+    exec: fakeExec
+  });
+  assert.deepEqual(discovered.map(({ pid }) => pid), [4244]);
+});
+
+test("command ownership uses path-component boundaries", () => {
+  assert.equal(
+    processBelongsToApp(
+      { pid: 4245, cwd: "", command: "/usr/bin/node /private/tmp/Tovi-old/scripts/start-app.mjs" },
+      "/private/tmp/Tovi"
+    ),
+    false
+  );
+  assert.equal(
+    processBelongsToApp(
+      { pid: 4246, cwd: "", command: "/usr/bin/node /private/tmp/Tovi/scripts/start-app.mjs" },
+      "/private/tmp/Tovi"
+    ),
+    true
+  );
+});
+
+test("Windows shutdown targets the complete process tree", () => {
+  assert.deepEqual(windowsTreeTerminationArgs(4247, "SIGTERM"), ["/PID", "4247", "/T"]);
+  assert.deepEqual(windowsTreeTerminationArgs(4247, "SIGKILL"), ["/PID", "4247", "/T", "/F"]);
 });
 
 test("shutdown fails closed without signalling when listener ownership is unreadable", async () => {

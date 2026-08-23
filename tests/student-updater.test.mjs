@@ -10,6 +10,11 @@ import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  acquireInstallOperation,
+  installOperationPath,
+  releaseInstallOperation
+} from "../scripts/lib/install-maintenance.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const UPDATER = join(ROOT, "scripts", "update-student.mjs");
@@ -111,6 +116,21 @@ test("student updater: check, apply+preserve, rollback-on-bad-checksum", async (
       assert.equal(parsed.latestVersion, "0.2.0");
     });
 
+    await t.test("an active install operation blocks a concurrent updater before swap", async () => {
+      const token = acquireInstallOperation(appDir);
+      try {
+        const { code, stderr } = await runUpdater([
+          "--apply", "--no-deps", "--dir", appDir, "--url", url("/latest.json")
+        ]);
+        assert.notEqual(code, 0);
+        assert.match(stderr, /already changing|another installation/i);
+        assert.equal(JSON.parse(readFileSync(join(appDir, "package.json"), "utf8")).version, "0.1.0");
+        assert.ok(!existsSync(join(appDir, "NEWCODE.txt")));
+      } finally {
+        assert.equal(releaseInstallOperation(appDir, token), true);
+      }
+    });
+
     await t.test("apply swaps in new code and preserves .env + data/", async () => {
       const runtimeScript = join(appDir, "scripts", "start-app.mjs");
       mkdirSync(join(appDir, "scripts"), { recursive: true });
@@ -147,6 +167,7 @@ test("student updater: check, apply+preserve, rollback-on-bad-checksum", async (
           "USER_DATA\nSTOPPED-BEFORE-COPY"
         );
         assert.equal(existsSync(join(appDir, ".tovi-installing")), false, "update lock released");
+        assert.equal(existsSync(installOperationPath(appDir)), false, "operation lock released");
         assert.ok(readdirSync(work).some((n) => n.startsWith(".rios-backup-")), "no backup was made");
       } finally {
         if (runtime.pid) {
@@ -239,7 +260,7 @@ case " $* " in
     : > apps/runner/dist/index.js
     : > apps/dashboard/.next/BUILD_ID
     ;;
-  *" --database-only "*) exit 42 ;;
+  *" --database-only "*) exit 1 ;;
 esac
 exit 0
 `);
@@ -255,12 +276,13 @@ exit 0
         }
       });
 
-      assert.notEqual(code, 0);
-      assert.match(stderr, /could not be recovered automatically/i);
+      assert.equal(code, 42);
+      assert.match(stderr, /without a verified restoration/i);
       assert.doesNotMatch(`${stdout}\n${stderr}`, /Your data is safe/i);
       assert.equal(JSON.parse(readFileSync(join(appDir, "package.json"), "utf8")).version, "0.2.0");
       assert.ok(existsSync(join(appDir, "NEWCODE.txt")), "new recovery-capable code must be kept");
       assert.equal(existsSync(join(appDir, ".tovi-installing")), false, "maintenance lock released");
+      assert.equal(existsSync(installOperationPath(appDir)), false, "operation lock released");
       assert.deepEqual(readFileSync(commandLog, "utf8").trim().split("\n"), [
         "npm install --include=dev",
         "npm run db:generate",

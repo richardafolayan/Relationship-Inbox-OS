@@ -198,9 +198,9 @@ function runUpdater() {
     );
     child.on("error", (error) => {
       say(`Could not start updater: ${error.message}`);
-      resolveRun(false);
+      resolveRun(null);
     });
-    child.on("close", (code) => resolveRun(code === 0));
+    child.on("close", (code) => resolveRun(code));
   });
 }
 
@@ -220,18 +220,25 @@ async function main() {
       say("The app is still running, so the in-place update was NOT applied. Try again from Settings.");
       process.exit(1);
     }
-    const ok = await runUpdater();
-    if (ok) removePendingIntent();
-    else say("Updater failed or rolled back; reopening the previous version.");
+    const code = await runUpdater();
+    if (code === 0 || code === 42) removePendingIntent();
+    if (code === 42) {
+      say("Database recovery is required. The new recovery-capable version was kept and will reopen with recovery guidance.");
+    } else if (code !== 0) {
+      say("The update did not complete. Reopening the installed app so it can report its current state.");
+    }
     relaunchBundle();
     return;
   }
 
-  const ok = await runUpdater();
-  if (ok) {
+  const code = await runUpdater();
+  if (code === 0 || code === 42) {
     removePendingIntent();
-  } else {
-    say("Updater failed or rolled back. Checking whether the app is still running.");
+  }
+  if (code === 42) {
+    say("Database recovery is required. The new recovery-capable version was kept; starting it to continue recovery.");
+  } else if (code !== 0) {
+    say("The update did not complete. Checking the installed app's current state.");
   }
 
   if (!(await dashboardUp()) && !(await runnerUp())) {

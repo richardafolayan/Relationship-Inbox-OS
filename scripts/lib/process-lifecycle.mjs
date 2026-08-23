@@ -50,6 +50,32 @@ export function processIsAlive(pid, kill = process.kill) {
   }
 }
 
+export function processStartIdentity(pid, exec = execFileSync) {
+  const normalized = positivePid(pid);
+  if (!normalized) return "";
+  if (process.platform === "win32") {
+    try {
+      return exec(
+        "powershell.exe",
+        [
+          "-NoProfile",
+          "-NonInteractive",
+          "-Command",
+          `(Get-Process -Id ${normalized} -ErrorAction Stop).StartTime.ToUniversalTime().Ticks`
+        ],
+        { encoding: "utf8" }
+      ).trim();
+    } catch {
+      return "";
+    }
+  }
+  try {
+    return exec("ps", ["-p", String(normalized), "-o", "lstart="], { encoding: "utf8" }).trim();
+  } catch {
+    return "";
+  }
+}
+
 export function processSnapshot(pid, exec = execFileSync) {
   const normalized = positivePid(pid);
   if (!normalized) return { pid: null, cwd: "", command: "" };
@@ -99,8 +125,17 @@ export function processBelongsToApp(snapshot, appDir) {
   // sides must be canonicalized before comparing.
   const root = canonicalPath(appDir);
   const cwd = snapshot.cwd ? canonicalPath(snapshot.cwd) : "";
-  if (cwd === root || cwd.startsWith(`${root}${sep}`)) return true;
-  return snapshot.command.includes(root) || snapshot.command.includes(resolve(appDir));
+  const comparableRoot = process.platform === "win32" ? root.toLowerCase() : root;
+  const comparableCwd = process.platform === "win32" ? cwd.toLowerCase() : cwd;
+  if (comparableCwd === comparableRoot || comparableCwd.startsWith(`${comparableRoot}${sep}`)) return true;
+  const command = String(snapshot.command || "").replaceAll("\\", "/");
+  const normalizedCommand = process.platform === "win32" ? command.toLowerCase() : command;
+  return [...new Set([root, resolve(appDir)])].some((candidate) => {
+    const normalizedCandidate = candidate.replaceAll("\\", "/");
+    const path = process.platform === "win32" ? normalizedCandidate.toLowerCase() : normalizedCandidate;
+    const escaped = path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return new RegExp(`(?:^|[\\s\"'=(:,])${escaped}(?=$|[/\\s\"'),:])`).test(normalizedCommand);
+  });
 }
 
 function productRootFromDirectory(path) {

@@ -4,7 +4,9 @@ import { isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { realpathSync } from "node:fs";
 import {
+  acquireInstallOperation,
   acquireInstallMaintenance,
+  releaseInstallOperation,
   releaseInstallMaintenance
 } from "./lib/install-maintenance.mjs";
 
@@ -28,13 +30,25 @@ function main() {
     process.stdout.write(`${acquireInstallMaintenance(appDir, options)}\n`);
     return;
   }
+  if (options.command === "acquire-operation") {
+    process.stdout.write(`${acquireInstallOperation(appDir, options)}\n`);
+    return;
+  }
   if (options.command === "release") {
     if (!options.token || !releaseInstallMaintenance(appDir, options.token)) {
       throw new Error("The installation lock belongs to another process");
     }
     return;
   }
-  throw new Error("Usage: install-maintenance.mjs <acquire|release> --app-dir <absolute path>");
+  if (options.command === "release-operation") {
+    if (!options.token || !releaseInstallOperation(appDir, options.token)) {
+      throw new Error("The installation operation lock belongs to another process");
+    }
+    return;
+  }
+  throw new Error(
+    "Usage: install-maintenance.mjs <acquire|release|acquire-operation|release-operation> --app-dir <absolute path>"
+  );
 }
 
 function canonical(path) {

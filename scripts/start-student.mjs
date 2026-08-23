@@ -74,8 +74,8 @@ function runUpdaterApply(feedUrl) {
       [resolve(APP_DIR, "scripts/update-student.mjs"), "--apply", "--url", feedUrl, "--dir", APP_DIR],
       { cwd: APP_DIR, stdio: "inherit" }
     );
-    child.on("error", () => doneResolve(false));
-    child.on("close", (code) => doneResolve(code === 0));
+    child.on("error", () => doneResolve(null));
+    child.on("close", (code) => doneResolve(code));
   });
 }
 
@@ -100,11 +100,13 @@ async function applyPendingUpdate() {
     return;
   }
   say(`\n${C.bold}Applying a prepared update before starting…${C.reset}`);
-  const ok = await runUpdaterApply(feedUrl);
+  const code = await runUpdaterApply(feedUrl);
   say(
-    ok
+    code === 0
       ? `  ${C.green}Update applied.${C.reset}`
-      : `  The update could not be applied and was rolled back; starting your current version.`
+      : code === 42
+        ? `  Database recovery is required. The new recovery-capable version was kept and will continue recovery now.`
+        : `  The update did not complete. Starting the installed app so it can report its current state.`
   );
 }
 

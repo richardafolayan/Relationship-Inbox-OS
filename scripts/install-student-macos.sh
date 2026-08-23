@@ -79,6 +79,9 @@ NO_APP_BUNDLE=false
 [ "${RIOS_NO_APP_BUNDLE:-}" = "1" ] && NO_APP_BUNDLE=true
 MAINTENANCE_TOKEN=""
 MAINTENANCE_ROOT=""
+OPERATION_TOKEN=""
+OPERATION_ROOT=""
+OPERATION_HELPER=""
 
 for arg in "$@"; do
   case "$arg" in
@@ -277,6 +280,20 @@ begin_install_maintenance() {
   export RIOS_INSTALL_MAINTENANCE_TOKEN="$token"
 }
 
+begin_install_operation() {
+  local root="$1" source="$2" helper token
+  [ "$DRY_RUN" = true ] && return 0
+  [ -n "$OPERATION_TOKEN" ] && return 0
+  helper="$source/scripts/install-maintenance.mjs"
+  [ -f "$helper" ] || return 1
+  token="$(node "$helper" acquire-operation --app-dir "$root" --owner-pid "$$" 2>>"$LOG_FILE")" || return 1
+  [ -n "$token" ] || return 1
+  OPERATION_TOKEN="$token"
+  OPERATION_ROOT="$root"
+  OPERATION_HELPER="$helper"
+  export RIOS_INSTALL_OPERATION_TOKEN="$token"
+}
+
 adopt_install_maintenance() {
   MAINTENANCE_ROOT="$1"
 }
@@ -290,6 +307,21 @@ end_install_maintenance() {
   MAINTENANCE_TOKEN=""
   MAINTENANCE_ROOT=""
   unset RIOS_INSTALL_MAINTENANCE_TOKEN
+}
+
+end_install_operation() {
+  [ -n "$OPERATION_TOKEN" ] || return 0
+  local helper="$OPERATION_HELPER"
+  if [ ! -f "$helper" ] && [ -n "${APP_DIR:-}" ]; then
+    helper="$APP_DIR/scripts/install-maintenance.mjs"
+  fi
+  if [ -f "$helper" ]; then
+    node "$helper" release-operation --app-dir "$OPERATION_ROOT" --token "$OPERATION_TOKEN" >>"$LOG_FILE" 2>&1 || true
+  fi
+  OPERATION_TOKEN=""
+  OPERATION_ROOT=""
+  OPERATION_HELPER=""
+  unset RIOS_INSTALL_OPERATION_TOKEN
 }
 
 # Install Node 22 into a user-owned folder ($RIOS_NODE_DIR) from Node's
@@ -402,6 +434,8 @@ resolve_app_dir() {
   if [ -n "$source" ]; then
     if [ "$source" = "$INSTALL_DIR" ]; then
       # Already running from the install location — nothing to relocate.
+      begin_install_operation "$INSTALL_DIR" "$source" \
+        || die "Another installer or update is already changing $APP_NAME. Try again when it finishes."
       stop_existing_install "$source"
       begin_install_maintenance "$INSTALL_DIR" "$source" \
         || die "Couldn't reserve the app for installation. Quit $APP_NAME and try again."
@@ -429,6 +463,9 @@ resolve_app_dir() {
 #   script), so the app never ends up running from Downloads.
 install_from_source() {
   local source="$1"
+
+  begin_install_operation "$INSTALL_DIR" "$source" \
+    || die "Another installer or update is already changing $APP_NAME. Try again when it finishes."
 
   if is_app_root "$INSTALL_DIR"; then
     stop_existing_install "$source"
@@ -830,7 +867,7 @@ EOF
 # --------------------------------------------------------------------------
 
 main() {
-  trap 'end_install_maintenance' EXIT
+  trap 'end_install_maintenance; end_install_operation' EXIT
   printf '\n%s%s%s installer%s\n' "$BOLD" "$BLUE" "$APP_NAME" "$RESET"
   printf '%sLog: %s%s\n' "$DIM" "$LOG_FILE" "$RESET"
   [ "$DRY_RUN" = true ] && printf '%s(dry run — nothing will be changed)%s\n' "$YELLOW" "$RESET"
@@ -844,6 +881,7 @@ main() {
   create_app_bundle
   start_app
   end_install_maintenance
+  end_install_operation
 }
 
 main "$@"

@@ -16,6 +16,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  acquireInstallOperation,
+  installOperationPath,
+  releaseInstallOperation
+} from "../scripts/lib/install-maintenance.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(HERE, "..");
@@ -87,7 +92,7 @@ function startOwnedListener(installDir, databasePath) {
 }
 
 function startUnboundRuntime(installDir, markerPath) {
-  const runtimeScript = path.join(installDir, "scripts", "start-app.mjs");
+  const runtimeScript = path.join(installDir, "scripts", "start-student.mjs");
   fs.mkdirSync(path.dirname(runtimeScript), { recursive: true });
   fs.writeFileSync(
     runtimeScript,
@@ -138,6 +143,7 @@ test("fresh ZIP install lands in the install dir, leaves the source in place", {
     assert.equal(read(path.join(installDir, "CODE_VERSION.txt")), "v1-fresh", "app code copied in");
     assert.ok(fs.existsSync(path.join(installDir, "package.json")), "package.json copied in");
     assert.equal(fs.existsSync(path.join(installDir, ".tovi-installing")), false, "install lock released");
+    assert.equal(fs.existsSync(installOperationPath(installDir)), false, "operation lock released");
 
     // The source (e.g. Downloads) is only read, never moved/deleted.
     assert.ok(fs.existsSync(path.join(src, "CODE_VERSION.txt")), "source folder left intact");
@@ -147,6 +153,28 @@ test("fresh ZIP install lands in the install dir, leaves the source in place", {
     assert.match(env, /^DATABASE_URL=file:.+\/data\/inbox-os\.sqlite$/m, "DATABASE_URL pinned absolute");
     assert.match(env, /^BROWSER_PROFILE_MODE=personal$/m, "personal browser mode set");
   } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("an active install operation blocks a concurrent installer before swap", { skip }, () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "rios-install-serialized-"));
+  const installDir = path.join(home, "RelationshipInboxOS");
+  fs.mkdirSync(path.join(installDir, "data"), { recursive: true });
+  fs.writeFileSync(
+    path.join(installDir, "package.json"),
+    JSON.stringify({ name: "relationship-inbox-os", version: "0.0.0-old" }),
+  );
+  fs.writeFileSync(path.join(installDir, "CODE_VERSION.txt"), "v1-old");
+  const source = makeSource(home, "v2-new");
+  const token = acquireInstallOperation(installDir);
+  try {
+    const result = runInstaller(source, installDir, home);
+    assert.notEqual(result.status, 0);
+    assert.match(`${result.stdout}\n${result.stderr}`, /another installer|already changing/i);
+    assert.equal(read(path.join(installDir, "CODE_VERSION.txt")), "v1-old");
+  } finally {
+    assert.equal(releaseInstallOperation(installDir, token), true);
     fs.rmSync(home, { recursive: true, force: true });
   }
 });

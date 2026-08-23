@@ -9,6 +9,7 @@ import { loadAppEnv } from "./lib/env-file.mjs";
 import {
   processBelongsToApp,
   processIsAlive,
+  processStartIdentity,
   processSnapshot,
   readRuntimeState
 } from "./lib/process-lifecycle.mjs";
@@ -23,6 +24,8 @@ function runtimeCommand(command) {
   return [
     "/scripts/start-app.mjs",
     "scripts/start-app.mjs",
+    "/scripts/start-student.mjs",
+    "scripts/start-student.mjs",
     "/apps/runner/",
     "/apps/dashboard/",
     "next-server",
@@ -113,30 +116,6 @@ function processState(pid, exec = execFileSync) {
   }
 }
 
-function processIdentity(pid, exec = execFileSync) {
-  if (process.platform === "win32") {
-    try {
-      return exec(
-        "powershell.exe",
-        [
-          "-NoProfile",
-          "-NonInteractive",
-          "-Command",
-          `(Get-Process -Id ${Number(pid)} -ErrorAction Stop).StartTime.ToUniversalTime().Ticks`
-        ],
-        { encoding: "utf8" }
-      ).trim();
-    } catch {
-      return "";
-    }
-  }
-  try {
-    return exec("ps", ["-p", String(pid), "-o", "lstart="], { encoding: "utf8" }).trim();
-  } catch {
-    return "";
-  }
-}
-
 function processIsActive(pid, exec = execFileSync) {
   const state = processState(pid, exec);
   return Boolean(state) && !state.startsWith("Z");
@@ -196,7 +175,7 @@ export function discoverInstallRuntime({
       throw new Error(`Could not inspect listener process ${record.pid}`);
     }
     if (processBelongsToApp(snapshot, appDir)) {
-      const identity = processIdentity(record.pid, exec);
+      const identity = processStartIdentity(record.pid, exec);
       if (!identity && processIsActive(record.pid, exec)) {
         throw new Error(`Could not identify runtime process ${record.pid}`);
       }
@@ -226,7 +205,7 @@ export function discoverInstallRuntime({
 function currentOwnedProcesses(record, exec = execFileSync) {
   const rootActive = processIsActive(record.pid, exec);
   if (rootActive) {
-    if (!record.identity || processIdentity(record.pid, exec) !== record.identity) return [];
+    if (!record.identity || processStartIdentity(record.pid, exec) !== record.identity) return [];
     if (!processBelongsToApp(processSnapshot(record.pid, exec), record.appDir)) return [];
   }
   const pids = new Set(rootActive ? [record.pid] : []);
@@ -241,7 +220,7 @@ function currentOwnedProcesses(record, exec = execFileSync) {
       if (!processIsActive(pid, exec)) continue;
       throw new Error(`Could not verify runtime process ${pid} in group ${record.pid}`);
     }
-    const identity = processIdentity(pid, exec);
+    const identity = processStartIdentity(pid, exec);
     if (!identity) {
       if (!processIsActive(pid, exec)) continue;
       throw new Error(`Could not identify runtime process ${pid}`);
@@ -259,6 +238,18 @@ function processRecordIsCurrent(record, exec = execFileSync) {
 function signal(record, signalName, kill = process.kill, exec = execFileSync) {
   const current = currentOwnedProcesses(record, exec);
   if (current.length === 0) return;
+  if (process.platform === "win32") {
+    for (const member of current) {
+      if (processStartIdentity(member.pid, exec) !== member.identity) continue;
+      const args = windowsTreeTerminationArgs(member.pid, signalName);
+      try {
+        exec("taskkill.exe", args, { stdio: "ignore" });
+      } catch (error) {
+        if (processIsActive(member.pid, exec)) throw error;
+      }
+    }
+    return;
+  }
   if (record.group && process.platform !== "win32" && current.some(({ pid }) => pid === record.pid)) {
     try {
       kill(-record.pid, signalName);
@@ -269,7 +260,7 @@ function signal(record, signalName, kill = process.kill, exec = execFileSync) {
   }
   for (const member of current) {
     if (!processIsActive(member.pid, exec)) continue;
-    if (processIdentity(member.pid, exec) !== member.identity) continue;
+    if (processStartIdentity(member.pid, exec) !== member.identity) continue;
     if (!processBelongsToApp(processSnapshot(member.pid, exec), member.appDir)) continue;
     try {
       kill(member.pid, signalName);
@@ -277,6 +268,12 @@ function signal(record, signalName, kill = process.kill, exec = execFileSync) {
       if (error?.code !== "ESRCH") throw error;
     }
   }
+}
+
+export function windowsTreeTerminationArgs(pid, signalName) {
+  const args = ["/PID", String(pid), "/T"];
+  if (signalName === "SIGKILL") args.push("/F");
+  return args;
 }
 
 async function waitUntilExited(records, timeoutMs, exec) {

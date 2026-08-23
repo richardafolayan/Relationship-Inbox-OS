@@ -50,7 +50,9 @@ import {
   compareVersions, isAllowedRemoteUpdateUrl, isNewer, sha256Buffer, validateLatestJson
 } from "./lib/release-manifest.mjs";
 import {
+  acquireInstallOperation,
   acquireInstallMaintenance,
+  releaseInstallOperation,
   releaseInstallMaintenance
 } from "./lib/install-maintenance.mjs";
 import { resolveAppName } from "./lib/branding.mjs";
@@ -104,7 +106,16 @@ const C = process.stdout.isTTY
   : { b: "", d: "", g: "", y: "", r: "", reset: "" };
 
 function say(m) { process.stdout.write(m + "\n"); }
-function die(m) { process.stderr.write(`\n  ${C.r}✗ ${m}${C.reset}\n\n`); process.exit(1); }
+function die(m, code = 1) { process.stderr.write(`\n  ${C.r}✗ ${m}${C.reset}\n\n`); process.exit(code); }
+
+let activeOperationToken = "";
+function releaseUpdateOperation() {
+  if (!activeOperationToken) return;
+  releaseInstallOperation(APP_DIR, activeOperationToken);
+  activeOperationToken = "";
+  delete process.env.RIOS_INSTALL_OPERATION_TOKEN;
+}
+process.on("exit", releaseUpdateOperation);
 
 function macAppBundleDir() {
   return process.env.RIOS_APP_BUNDLE_DIR || join(process.env.HOME || "", "Applications");
@@ -306,6 +317,14 @@ async function applyUpdate(current, manifest) {
     die("The downloaded update didn't contain the app. Aborted with nothing changed.");
   }
 
+  try {
+    activeOperationToken = acquireInstallOperation(APP_DIR);
+    process.env.RIOS_INSTALL_OPERATION_TOKEN = activeOperationToken;
+  } catch (err) {
+    cleanup(stagingRoot);
+    die(`Another installation or update is already changing this app.\n  ${err.message}`);
+  }
+
   // 4. Stop the full owned runtime, then atomically remove the old app from
   // its launch path. A second pass under the backup path closes the narrow
   // stop-to-rename race before SQLite/WAL/profile data is copied.
@@ -377,19 +396,28 @@ async function applyUpdate(current, manifest) {
       execFileSync("node", ["scripts/start-app.mjs", "--database-only"], opts);
       runningDatabaseStep = false;
     } catch (err) {
-      if (runningDatabaseStep && err?.status === 42) {
+      if (runningDatabaseStep && err?.status !== 43) {
         releaseInstallMaintenance(APP_DIR, maintenanceToken);
         delete process.env.RIOS_INSTALL_MAINTENANCE_TOKEN;
         die(
-          `The database could not be recovered automatically. The new app and private database backup were kept. ` +
-          `Do not replace or delete data/backups; free disk space, then run the installer again.\n  ${err.message}`
+          `The database step stopped without a verified restoration. The new recovery-capable app and private database backups were kept. ` +
+          `Do not replace or delete data/backups; free disk space, then run the installer again.\n  ${err.message}`,
+          42
         );
       }
       releaseInstallMaintenance(APP_DIR, maintenanceToken);
       delete process.env.RIOS_INSTALL_MAINTENANCE_TOKEN;
       say(`  ${C.y}Dependency step failed — rolling back.${C.reset}`);
-      rollback(APP_DIR, backupDir);
-      die(`Update rolled back to ${current}. Your data is safe.\n  ${err.message}`);
+      if (!rollback(APP_DIR, backupDir)) {
+        die(
+          `Automatic rollback did not complete. The previous version remains at ${backupDir}; do not delete it.\n  ${err.message}`
+        );
+      }
+      die(
+        runningDatabaseStep
+          ? `Update rolled back to ${current} after the database backup was verified as restored.\n  ${err.message}`
+          : `Update rolled back to ${current}. The database step was not run.\n  ${err.message}`
+      );
     }
     if (!RESIGN_BUNDLE) {
       // Pre-build the optimised dashboard so the relaunch is instant.
@@ -418,6 +446,7 @@ async function applyUpdate(current, manifest) {
   }
   releaseInstallMaintenance(APP_DIR, maintenanceToken);
   delete process.env.RIOS_INSTALL_MAINTENANCE_TOKEN;
+  releaseUpdateOperation();
   pruneBackups(BACKUP_ROOT, Math.max(0, args.keepBackups));
   say(`\n  ${C.g}${C.b}Updated to ${manifest.version}.${C.reset}`);
   if (RESIGN_BUNDLE) {
@@ -431,16 +460,17 @@ async function applyUpdate(current, manifest) {
 }
 
 function rollback(appDir, backupDir) {
-  const failedDir = `${appDir}.failed-update`;
+  const failedDir = `${appDir}.failed-update-${process.pid}-${Date.now()}`;
   try {
     if (existsSync(appDir)) renameSync(appDir, failedDir);
     renameSync(backupDir, appDir);
   } catch {
     say(`  ${C.r}Automatic rollback hit a snag.${C.reset} Your previous app is at ${backupDir}.`);
-    return;
+    return false;
   }
   // Restore succeeded — drop the broken copy.
   try { if (existsSync(failedDir)) rmSync(failedDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  return true;
 }
 
 function cleanup(dir) {

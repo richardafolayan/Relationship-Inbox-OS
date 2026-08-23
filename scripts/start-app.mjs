@@ -18,6 +18,7 @@ import { loadAppEnv } from "./lib/env-file.mjs";
 import {
   acquireProcessLock,
   inspectInstallMaintenance,
+  inspectInstallOperation,
   releaseProcessLock
 } from "./lib/install-maintenance.mjs";
 import { packagedDashboardArgs } from "./lib/dashboard-command.mjs";
@@ -380,7 +381,7 @@ function prepare() {
 
   const schemaHash = hashPaths([join(APP_DIR, "packages/core/prisma/schema.prisma")]);
   const requiredSchema = BUILD_ONLY ? "ready" : requiredSchemaState();
-  if (requiredSchema === "error") return { ok: false };
+  if (requiredSchema === "error") return { ok: false, databaseFailureSafe: true };
   const schemaChanged = stamps.schemaHash !== schemaHash || requiredSchema === "needs-sync";
   if (!PACKAGED && (schemaChanged || !canResolve("@prisma/client"))) {
     if (!run("Updating the database client...", NPM_COMMAND, ["run", "db:generate"])) return { ok: false };
@@ -397,13 +398,17 @@ function prepare() {
         });
       } catch (error) {
         if (error instanceof SchemaRestoreError) {
-          recordDatabaseRecoveryFailure(error.backupPath);
+          try {
+            recordDatabaseRecoveryFailure(error.backupPath);
+          } catch (markerError) {
+            say(`  ${C.yellow}Could not record the recovery marker: ${markerError.message}${C.reset}`);
+          }
           say(`  ${C.yellow}The database could not be restored automatically. Do not start the app; the private backup remains in data/backups.${C.reset}`);
           return { ok: false, databaseRecoveryFailed: true };
         }
         throw error;
       }
-      if (!changed) return { ok: false };
+      if (!changed) return { ok: false, databaseFailureSafe: true };
     } else if (!existsSync(resolvedDatabaseFile()) && !syncDatabase()) {
       return { ok: false };
     }
@@ -625,7 +630,16 @@ async function main() {
     APP_DIR,
     process.env.RIOS_INSTALL_MAINTENANCE_TOKEN || ""
   );
-  if (maintenance.status === "active" || maintenance.status === "invalid") {
+  const operation = inspectInstallOperation(
+    APP_DIR,
+    process.env.RIOS_INSTALL_OPERATION_TOKEN || ""
+  );
+  if (
+    maintenance.status === "active" ||
+    maintenance.status === "invalid" ||
+    operation.status === "active" ||
+    operation.status === "invalid"
+  ) {
     say(`${APP_NAME} is being installed or updated. Try again when that finishes.`);
     process.exitCode = 3;
     return;
@@ -700,7 +714,7 @@ async function main() {
     const result = prepare();
     if (!result.ok) {
       say(`${C.yellow}Could not prepare the app. Reinstall it, then try again. The desktop log has details.${C.reset}`);
-      process.exitCode = result.databaseRecoveryFailed ? 42 : 1;
+      process.exitCode = result.databaseRecoveryFailed ? 42 : result.databaseFailureSafe ? 43 : 1;
       return;
     }
     if (PREPARE_ONLY) {
