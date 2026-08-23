@@ -70,6 +70,8 @@ wrong. Fetch first, then compare the live refs.
   [`2026-08-23-full-product-hardening-adversarial-review.md`](../qa/2026-08-23-full-product-hardening-adversarial-review.md).
 - PR #1053 records that errata and the focused ONNX Runtime/node-tar reachability
   assessment. PR #1054 is the independent clean packaged-first-launch fix.
+  PR #1055 is stacked on #1054 and adds the guarded existing-database Draft
+  repair, backup, unique invariant, and atomic runner upsert.
 - Instagram PR #1045 remains a shared-path dependency. Focus, send, thread, and
   setup corrections must use its intended integrated state or wait for that
   state to stabilise. Independent corrections may proceed now.
