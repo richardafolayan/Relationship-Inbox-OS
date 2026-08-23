@@ -342,10 +342,23 @@ test("schema, launcher order, and save route share one Draft invariant", () => {
   const updater = readFileSync("scripts/update-student.mjs", "utf8");
   const dependencyStep = updater.slice(
     updater.indexOf('execFileSync("npm", ["run", "db:generate"]'),
-    updater.indexOf("if (RESIGN_BUNDLE)", updater.indexOf('execFileSync("npm", ["run", "db:generate"]'))
+    updater.indexOf("if (!RESIGN_BUNDLE)", updater.indexOf('execFileSync("npm", ["run", "db:generate"]'))
   );
-  assert.match(dependencyStep, /start-app\.mjs", "--database-only"/);
+  const buildOnlyAt = dependencyStep.indexOf('start-app.mjs", "--build-only"');
+  const databaseOnlyAt = dependencyStep.indexOf('start-app.mjs", "--database-only"');
+  assert.ok(buildOnlyAt >= 0 && databaseOnlyAt > buildOnlyAt);
   assert.doesNotMatch(dependencyStep, /db:push/);
+
+  const installer = readFileSync("scripts/install-student-macos.sh", "utf8");
+  const installDatabaseStep = installer.slice(
+    installer.indexOf('run "Preparing the local database..."'),
+    installer.indexOf('ok "Local database ready"')
+  );
+  assert.match(installDatabaseStep, /start-app\.mjs --database-only/);
+  assert.doesNotMatch(installDatabaseStep, /db:push/);
+
+  assert.match(launcher, /const BUILD_ONLY = args\.has\("--build-only"\)/);
+  assert.match(preparation, /if \(!BUILD_ONLY\) \{[\s\S]*applyRecoverableSchemaChange/);
 
   const runner = readFileSync("apps/runner/src/index.ts", "utf8");
   const draftRoute = runner.slice(

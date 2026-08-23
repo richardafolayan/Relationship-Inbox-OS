@@ -541,7 +541,7 @@ install_app() {
 
   if [ "$DRY_RUN" = true ]; then
     warn "[dry-run] would run: npm install --include=dev"
-    warn "[dry-run] would run: npm run db:generate && npm run db:push"
+    warn "[dry-run] would run: npm run db:generate && node scripts/start-app.mjs --database-only"
     return 0
   fi
 
@@ -556,7 +556,7 @@ install_app() {
 
   run "Preparing the local database..." npm run db:generate \
     || die "Database setup (generate) failed. The log has the details: $LOG_FILE"
-  run "Creating the local database..." npm run db:push \
+  run "Creating the local database..." node scripts/start-app.mjs --database-only \
     || die "Database setup (create) failed. The log has the details: $LOG_FILE"
   ok "Local database ready"
 

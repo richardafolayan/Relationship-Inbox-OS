@@ -49,7 +49,8 @@ const STARTUP_CONFLICT_PATH = join(STATE_DIR, "startup-conflict.json");
 const PACKAGED = process.env.RIOS_PACKAGED_APP === "1";
 const args = new Set(process.argv.slice(2));
 const DATABASE_ONLY = args.has("--database-only");
-const PREPARE_ONLY = args.has("--prepare-only") || DATABASE_ONLY;
+const BUILD_ONLY = args.has("--build-only");
+const PREPARE_ONLY = args.has("--prepare-only") || DATABASE_ONLY || BUILD_ONLY;
 const FORCE_DEV = args.has("--dev") || process.env.RIOS_DEV === "1";
 const FORCE_REBUILD = process.env.RIOS_REBUILD === "1";
 const DASHBOARD_PORT = String(process.env.DASHBOARD_PORT || "3100");
@@ -308,19 +309,21 @@ function prepare() {
   if (!PACKAGED && (schemaChanged || !canResolve("@prisma/client"))) {
     if (!run("Updating the database client...", NPM_COMMAND, ["run", "db:generate"])) return { ok: false };
   }
-  if (schemaChanged) {
-    const changed = applyRecoverableSchemaChange({
-      backup: () => backupDatabaseBeforeSchemaChange(schemaHash),
-      repair: repairDatabaseBeforeSchemaChange,
-      sync: syncDatabase,
-      restore: restoreDatabaseAfterFailedSchemaChange
-    });
-    if (!changed) return { ok: false };
-  } else if (!existsSync(resolvedDatabaseFile()) && !syncDatabase()) {
-    return { ok: false };
+  if (!BUILD_ONLY) {
+    if (schemaChanged) {
+      const changed = applyRecoverableSchemaChange({
+        backup: () => backupDatabaseBeforeSchemaChange(schemaHash),
+        repair: repairDatabaseBeforeSchemaChange,
+        sync: syncDatabase,
+        restore: restoreDatabaseAfterFailedSchemaChange
+      });
+      if (!changed) return { ok: false };
+    } else if (!existsSync(resolvedDatabaseFile()) && !syncDatabase()) {
+      return { ok: false };
+    }
+    next.schemaHash = schemaHash;
+    saveStamps(next);
   }
-  next.schemaHash = schemaHash;
-  saveStamps(next);
 
   if (DATABASE_ONLY) return { ok: true, prod: PACKAGED };
   if (PACKAGED) return { ok: true, prod: true };
@@ -359,6 +362,7 @@ function prepare() {
 
   say(`  ${C.bold}Optimising the app for speed (about a minute, once per update)...${C.reset}`);
   if (!run("Building the app...", NPM_COMMAND, ["run", "build", "--workspace", "@inbox-os/dashboard"])) {
+    if (BUILD_ONLY) return { ok: false };
     say(`  ${C.yellow}The optimised build did not complete. Starting in compatibility mode.${C.reset}`);
     return { ok: true, prod: false };
   }

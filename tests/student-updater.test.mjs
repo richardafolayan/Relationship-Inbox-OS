@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { execFileSync, spawn } from "node:child_process";
 import {
-  cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync,
+  chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync,
   rmSync, writeFileSync
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -16,9 +16,9 @@ const UPDATER = join(ROOT, "scripts", "update-student.mjs");
 
 // Spawn the updater async so this process's HTTP server keeps serving while
 // the child fetches from it (execFileSync would deadlock the event loop).
-function runUpdater(args) {
+function runUpdater(args, options = {}) {
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, [UPDATER, ...args]);
+    const child = spawn(process.execPath, [UPDATER, ...args], options);
     let stdout = "", stderr = "";
     child.stdout.on("data", (d) => (stdout += d));
     child.stderr.on("data", (d) => (stderr += d));
@@ -127,6 +127,51 @@ test("student updater: check, apply+preserve, rollback-on-bad-checksum", async (
       assert.equal(JSON.parse(readFileSync(join(appDir, "package.json"), "utf8")).version, "0.1.0");
       assert.ok(!existsSync(join(appDir, "NEWCODE.txt")), "install was modified despite a bad checksum");
       assert.match(readFileSync(join(appDir, ".env"), "utf8"), /KEEP_ME/);
+    });
+
+    await t.test("a packaged build failure cannot reach the external database", async () => {
+      const fakeBin = join(work, "fake-bin");
+      const commandLog = join(work, "packaged-command.log");
+      const externalDatabase = join(work, "external.sqlite");
+      const appBundle = join(work, "Tovi.app");
+      mkdirSync(fakeBin, { recursive: true });
+      mkdirSync(appBundle, { recursive: true });
+      writeFileSync(externalDatabase, "USER_DATA");
+
+      const fakeNpm = join(fakeBin, "npm");
+      writeFileSync(fakeNpm, `#!/bin/sh\nprintf 'npm %s\\n' "$*" >> "$TEST_COMMAND_LOG"\nexit 0\n`);
+      chmodSync(fakeNpm, 0o755);
+
+      const fakeNode = join(fakeBin, "node");
+      writeFileSync(fakeNode, `#!/bin/sh
+printf 'node %s\\n' "$*" >> "$TEST_COMMAND_LOG"
+case " $* " in
+  *" --build-only "*) exit 42 ;;
+  *" --database-only "*) printf 'MUTATED' > "$TEST_DATABASE_MARKER" ;;
+esac
+exit 0
+`);
+      chmodSync(fakeNode, 0o755);
+
+      const { code } = await runUpdater([
+        "--apply", "--dir", appDir, "--url", url("/latest.json"), "--resign", appBundle
+      ], {
+        env: {
+          ...process.env,
+          PATH: `${fakeBin}:${process.env.PATH || ""}`,
+          TEST_COMMAND_LOG: commandLog,
+          TEST_DATABASE_MARKER: externalDatabase
+        }
+      });
+
+      assert.notEqual(code, 0, "a failed packaged build must abort the update");
+      assert.equal(readFileSync(externalDatabase, "utf8"), "USER_DATA");
+      assert.equal(JSON.parse(readFileSync(join(appDir, "package.json"), "utf8")).version, "0.1.0");
+      assert.deepEqual(readFileSync(commandLog, "utf8").trim().split("\n"), [
+        "npm install --include=dev",
+        "npm run db:generate",
+        "node scripts/start-app.mjs --build-only"
+      ]);
     });
 
     await t.test("an equal version is a no-op (nothing to apply)", async () => {
