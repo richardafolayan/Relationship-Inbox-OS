@@ -17,6 +17,7 @@ import { loadAppEnv } from "./lib/env-file.mjs";
 import { packagedDashboardArgs } from "./lib/dashboard-command.mjs";
 import { prismaDbPushInvocation } from "./lib/prisma-command.mjs";
 import { resolveAppName } from "./lib/branding.mjs";
+import { prepareSqliteDatabaseFile } from "./lib/sqlite-database.mjs";
 import {
   portConflict,
   portConflictIsStaleTovi,
@@ -200,8 +201,11 @@ function databaseFile() {
 }
 
 function syncDatabase() {
-  mkdirSync(DATA_DIR, { recursive: true });
-  process.env.DATABASE_URL ||= `file:${join(DATA_DIR, "inbox-os.sqlite")}`;
+  const prepared = prepareSqliteDatabaseFile(process.env.DATABASE_URL, {
+    appDir: APP_DIR,
+    dataDir: DATA_DIR
+  });
+  process.env.DATABASE_URL = prepared.databaseUrl;
   const invocation = prismaDbPushInvocation({
     appDir: APP_DIR,
     packaged: PACKAGED,
