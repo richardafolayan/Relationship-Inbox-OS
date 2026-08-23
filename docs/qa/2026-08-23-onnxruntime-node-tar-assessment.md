@@ -120,4 +120,3 @@ Do not run `npm audit fix` blindly. Use a dedicated dependency branch and requir
 - `package-lock.json`, `apps/runner/package.json`,
   `scripts/build-macos-dmg.mjs`, and the runtime transcription sources in this
   repository.
-
