@@ -240,6 +240,95 @@ ensure_node() {
   install_node_local
 }
 
+# A repeat install preserves data/, which includes SQLite's main database and
+# WAL files. Stop only listeners owned by this exact install before copying
+# those files or running recovery. If ownership cannot be checked, fail closed
+# instead of risking a torn database copy.
+stop_existing_install() {
+  [ -d "$INSTALL_DIR" ] || return 0
+  is_app_root "$INSTALL_DIR" || return 0
+
+  step "Checking for a running $APP_NAME"
+
+  if [ "$DRY_RUN" = true ]; then
+    warn "[dry-run] would stop any running copy at $(display_path "$INSTALL_DIR") before updating it"
+    return 0
+  fi
+
+  local lsof_bin install_root listener_pids pid cwd owned_pids="" waited=0
+  local still_running process_state
+  if [ -x /usr/sbin/lsof ]; then
+    lsof_bin=/usr/sbin/lsof
+  elif command -v lsof >/dev/null 2>&1; then
+    lsof_bin="$(command -v lsof)"
+  else
+    die "Couldn't check whether $APP_NAME is running. Quit the app and run the installer again."
+  fi
+
+  install_root="$(cd "$INSTALL_DIR" 2>/dev/null && pwd -P)" \
+    || die "Couldn't inspect the existing app at $(display_path "$INSTALL_DIR")."
+
+  listener_pids="$("$lsof_bin" -nP -iTCP -sTCP:LISTEN -t 2>/dev/null | sort -u || true)"
+  for pid in $listener_pids; do
+    cwd="$("$lsof_bin" -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)"
+    case "$cwd" in
+      "$install_root"|"$install_root"/*)
+        if kill -TERM "$pid" 2>/dev/null; then
+          owned_pids="$owned_pids $pid"
+          info "Stopping the running app (process $pid)..."
+        else
+          die "Couldn't stop $APP_NAME safely. Quit the app and run the installer again."
+        fi
+        ;;
+    esac
+  done
+
+  [ -n "$owned_pids" ] || { ok "$APP_NAME is not running"; return 0; }
+
+  while [ "$waited" -lt 50 ]; do
+    still_running=false
+    for pid in $owned_pids; do
+      process_state="$(ps -o stat= -p "$pid" 2>/dev/null | awk 'NR == 1 { print $1 }')"
+      case "$process_state" in
+        ""|Z*) ;;
+        *) still_running=true; break ;;
+      esac
+    done
+    [ "$still_running" = false ] && break
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+
+  for pid in $owned_pids; do
+    process_state="$(ps -o stat= -p "$pid" 2>/dev/null | awk 'NR == 1 { print $1 }')"
+    case "$process_state" in
+      ""|Z*) ;;
+      *) kill -KILL "$pid" 2>/dev/null || true ;;
+    esac
+  done
+
+  sleep 0.1
+  for pid in $owned_pids; do
+    process_state="$(ps -o stat= -p "$pid" 2>/dev/null | awk 'NR == 1 { print $1 }')"
+    case "$process_state" in
+      ""|Z*) ;;
+      *) die "Couldn't stop $APP_NAME safely. Quit the app and run the installer again." ;;
+    esac
+  done
+
+  listener_pids="$("$lsof_bin" -nP -iTCP -sTCP:LISTEN -t 2>/dev/null | sort -u || true)"
+  for pid in $listener_pids; do
+    cwd="$("$lsof_bin" -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)"
+    case "$cwd" in
+      "$install_root"|"$install_root"/*)
+        die "$APP_NAME started again while the installer was waiting. Quit the app and run the installer again."
+        ;;
+    esac
+  done
+
+  ok "Stopped the running app before updating its data"
+}
+
 # Install Node 22 into a user-owned folder ($RIOS_NODE_DIR) from Node's
 # official macOS tarball. No sudo, no admin rights, no Mac password — so it
 # works on managed / non-admin accounts (e.g. university Macs). curl
@@ -755,6 +844,7 @@ main() {
   check_macos
   check_disk
   ensure_node
+  stop_existing_install
   resolve_app_dir
   ensure_env
   install_app

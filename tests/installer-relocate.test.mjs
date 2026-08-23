@@ -11,7 +11,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -48,6 +48,30 @@ function runInstaller(src, installDir, home) {
   return spawnSync("bash", [path.join(src, "scripts", "install-student-macos.sh"), "--skip-deps"], {
     encoding: "utf8",
     env: { ...process.env, HOME: home, RIOS_INSTALL_DIR: installDir, RIOS_NO_START: "1" },
+  });
+}
+
+function startOwnedListener(installDir, databasePath) {
+  const child = spawn(
+    process.execPath,
+    [
+      "-e",
+      `const fs = require("node:fs");
+       const net = require("node:net");
+       const server = net.createServer();
+       process.on("SIGTERM", () => {
+         fs.appendFileSync(${JSON.stringify(databasePath)}, "\\nSTOPPED-BEFORE-COPY");
+         server.close(() => process.exit(0));
+       });
+       server.listen(0, "127.0.0.1", () => process.send({ port: server.address().port }));`,
+    ],
+    { cwd: installDir, stdio: ["ignore", "ignore", "inherit", "ipc"] },
+  );
+
+  return new Promise((resolve, reject) => {
+    child.once("error", reject);
+    child.once("exit", (code, signal) => reject(new Error(`listener exited early (${code ?? signal})`)));
+    child.once("message", ({ port }) => resolve({ child, port }));
   });
 }
 
@@ -116,6 +140,64 @@ test("re-install over an existing install keeps .env and data, refreshes code", 
     // Source still intact (never the live copy).
     assert.ok(fs.existsSync(path.join(src, "CODE_VERSION.txt")), "source folder left intact");
   } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("re-install stops the owned runtime before preserving its database", { skip }, async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "rios-install-running-"));
+  let child;
+  let foreignChild;
+  try {
+    const installDir = path.join(home, "RelationshipInboxOS");
+    const databasePath = path.join(installDir, "data", "inbox-os.sqlite");
+    const foreignDir = `${installDir}-other`;
+    const foreignMarker = path.join(foreignDir, "stopped.txt");
+    fs.mkdirSync(path.dirname(databasePath), { recursive: true });
+    fs.mkdirSync(foreignDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(installDir, "package.json"),
+      JSON.stringify({ name: "relationship-inbox-os", version: "0.0.0-old" }, null, 2),
+    );
+    fs.writeFileSync(databasePath, "LIVE-DATABASE");
+
+    const owned = await startOwnedListener(installDir, databasePath);
+    child = owned.child;
+    const foreign = await startOwnedListener(foreignDir, foreignMarker);
+    foreignChild = foreign.child;
+
+    const src = makeSource(home, "v2-new");
+    const r = runInstaller(src, installDir, home);
+    assert.equal(r.status, 0, `installer failed:\n${r.stdout}\n${r.stderr}`);
+    await new Promise((resolve, reject) => {
+      if (child.exitCode !== null || child.signalCode !== null) {
+        resolve();
+        return;
+      }
+      const timeout = setTimeout(() => reject(new Error("owned listener did not exit")), 2_000);
+      child.once("exit", () => {
+        clearTimeout(timeout);
+        resolve();
+      });
+    });
+    assert.equal(
+      read(databasePath),
+      "LIVE-DATABASE\nSTOPPED-BEFORE-COPY",
+      "the runtime must finish shutting down before data is copied",
+    );
+    assert.equal(child.signalCode, null, "listener handled SIGTERM and exited cleanly");
+    assert.doesNotThrow(
+      () => process.kill(foreignChild.pid, 0),
+      "a listener from a similarly named directory must not be stopped",
+    );
+    assert.equal(fs.existsSync(foreignMarker), false, "foreign listener did not receive SIGTERM");
+  } finally {
+    if (child?.pid) {
+      try { process.kill(child.pid, "SIGKILL"); } catch {}
+    }
+    if (foreignChild?.pid) {
+      try { process.kill(foreignChild.pid, "SIGKILL"); } catch {}
+    }
     fs.rmSync(home, { recursive: true, force: true });
   }
 });
