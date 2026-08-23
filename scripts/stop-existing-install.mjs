@@ -140,15 +140,21 @@ function configuredStatePath(appDir) {
   return resolve(appDir, env.RIOS_STATE_DIR || join(dataDir, "runtime"), "processes.json");
 }
 
+export function listenerOwnershipUnreadable(snapshot, platform = process.platform) {
+  return platform === "win32" ? !snapshot.command : !snapshot.cwd;
+}
+
 export function discoverInstallRuntime({
   appDir,
   statePath,
   ports = configuredPorts(appDir),
+  preservePids = [],
   exec = execFileSync
 } = {}) {
   const candidates = new Map();
+  const preserved = new Set(preservePids.map(positivePid).filter(Boolean));
   const add = (pid, reason, group = false) => {
-    if (!pid || pid === process.pid) return;
+    if (!pid || pid === process.pid || preserved.has(pid)) return;
     const record = candidates.get(pid) || { pid, reasons: new Set(), group: false };
     record.reasons.add(reason);
     record.group ||= group;
@@ -170,7 +176,10 @@ export function discoverInstallRuntime({
   for (const record of candidates.values()) {
     if (!processIsActive(record.pid, exec)) continue;
     const snapshot = processSnapshot(record.pid, exec);
-    if (record.reasons.has("listener") && !snapshot.cwd) {
+    if (
+      record.reasons.has("listener") &&
+      listenerOwnershipUnreadable(snapshot)
+    ) {
       if (!processIsActive(record.pid, exec)) continue;
       throw new Error(`Could not inspect listener process ${record.pid}`);
     }
@@ -291,14 +300,15 @@ export async function stopExistingInstallRuntime({
   graceMs = 5_000,
   forceMs = 2_000,
   ports = configuredPorts(appDir),
+  preservePids = [],
   exec = execFileSync,
   kill = process.kill
 } = {}) {
   for (let pass = 0; pass < 3; pass += 1) {
-    const records = discoverInstallRuntime({ appDir, statePath, ports, exec });
+    const records = discoverInstallRuntime({ appDir, statePath, ports, preservePids, exec });
     if (records.length === 0) {
       await delay(100);
-      if (discoverInstallRuntime({ appDir, statePath, ports, exec }).length === 0) return [];
+      if (discoverInstallRuntime({ appDir, statePath, ports, preservePids, exec }).length === 0) return [];
       continue;
     }
 

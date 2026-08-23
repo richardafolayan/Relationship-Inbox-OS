@@ -25,6 +25,7 @@ import { packagedDashboardArgs } from "./lib/dashboard-command.mjs";
 import { prismaDbPushInvocation } from "./lib/prisma-command.mjs";
 import {
   applyRecoverableSchemaChange,
+  SchemaChangeRestoredError,
   SchemaRestoreError
 } from "./lib/recoverable-schema-change.mjs";
 import { resolveAppName } from "./lib/branding.mjs";
@@ -405,6 +406,11 @@ function prepare() {
           }
           say(`  ${C.yellow}The database could not be restored automatically. Do not start the app; the private backup remains in data/backups.${C.reset}`);
           return { ok: false, databaseRecoveryFailed: true };
+        }
+        if (error instanceof SchemaChangeRestoredError) {
+          say(`  ${C.yellow}The database change failed, and the verified backup was restored. No app processes were started.${C.reset}`);
+          if (error.cause?.message) say(`  ${error.cause.message}`);
+          return { ok: false, databaseFailureSafe: true };
         }
         throw error;
       }

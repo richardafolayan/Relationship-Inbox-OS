@@ -12,9 +12,13 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const SRC = readFileSync(join(__dirname, "..", "scripts", "update-student.mjs"), "utf8");
 
 test("full runtime shutdown and rename run before the PRESERVE copy loop", () => {
-  const stopIdx = SRC.indexOf("await stopExistingInstallRuntime({ appDir: APP_DIR });");
+  const stopIdx = SRC.indexOf(
+    "await stopExistingInstallRuntime({ appDir: APP_DIR, preservePids: PRESERVED_UPDATE_PIDS });"
+  );
   const renameIdx = SRC.indexOf("renameSync(APP_DIR, backupDir);");
-  const secondStopIdx = SRC.indexOf("await stopExistingInstallRuntime({ appDir: backupDir });");
+  const secondStopIdx = SRC.indexOf(
+    "await stopExistingInstallRuntime({ appDir: backupDir, preservePids: PRESERVED_UPDATE_PIDS });"
+  );
   const copyIdx = SRC.indexOf("cpSync(from, join(appNew, item)");
   assert.ok(stopIdx > 0, "full shutdown call present");
   assert.ok(renameIdx > stopIdx, "old launch path is removed after first shutdown");

@@ -56,6 +56,7 @@ import {
   releaseInstallMaintenance
 } from "./lib/install-maintenance.mjs";
 import { resolveAppName } from "./lib/branding.mjs";
+import { updateControlAncestorPids } from "./lib/update-ancestors.mjs";
 import { stopExistingInstallRuntime } from "./stop-existing-install.mjs";
 
 const APP_NAME = resolveAppName();
@@ -100,6 +101,8 @@ const FEED_URL = args.url || process.env.RIOS_UPDATE_FEED_URL || "";
 // a rename).
 const BACKUP_ROOT = args.backupRoot ? resolve(process.cwd(), args.backupRoot) : dirname(APP_DIR);
 const RESIGN_BUNDLE = args.resign ? resolve(process.cwd(), args.resign) : "";
+
+const PRESERVED_UPDATE_PIDS = updateControlAncestorPids();
 
 const C = process.stdout.isTTY
   ? { b: "\x1b[1m", d: "\x1b[2m", g: "\x1b[32m", y: "\x1b[33m", r: "\x1b[31m", reset: "\x1b[0m" }
@@ -329,7 +332,7 @@ async function applyUpdate(current, manifest) {
   // its launch path. A second pass under the backup path closes the narrow
   // stop-to-rename race before SQLite/WAL/profile data is copied.
   try {
-    await stopExistingInstallRuntime({ appDir: APP_DIR });
+    await stopExistingInstallRuntime({ appDir: APP_DIR, preservePids: PRESERVED_UPDATE_PIDS });
   } catch (err) {
     cleanup(stagingRoot);
     die(`Could not stop the running app safely.\n  ${err.message}`);
@@ -342,7 +345,7 @@ async function applyUpdate(current, manifest) {
   }
   let maintenanceToken = "";
   try {
-    await stopExistingInstallRuntime({ appDir: backupDir });
+    await stopExistingInstallRuntime({ appDir: backupDir, preservePids: PRESERVED_UPDATE_PIDS });
     for (const item of PRESERVE) {
       const from = join(backupDir, item);
       if (existsSync(from)) {
@@ -350,11 +353,11 @@ async function applyUpdate(current, manifest) {
         cpSync(from, join(appNew, item), { recursive: true });
       }
     }
-    maintenanceToken = acquireInstallMaintenance(appNew);
+    maintenanceToken = acquireInstallMaintenance(APP_DIR);
     process.env.RIOS_INSTALL_MAINTENANCE_TOKEN = maintenanceToken;
     renameSync(appNew, APP_DIR);
   } catch (err) {
-    if (maintenanceToken) releaseInstallMaintenance(appNew, maintenanceToken);
+    if (maintenanceToken) releaseInstallMaintenance(APP_DIR, maintenanceToken);
     try { renameSync(backupDir, APP_DIR); } catch { /* leave backup for manual restore */ }
     cleanup(stagingRoot);
     die(`Could not put the new app in place — rolled back.\n  ${err.message}`);

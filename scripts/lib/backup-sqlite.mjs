@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { chmod, copyFile, mkdir, open, rm } from "node:fs/promises";
+import { chmod, mkdir, open, rename, rm } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import Database from "better-sqlite3";
 
@@ -39,12 +39,12 @@ try {
   } finally {
     verification.close();
   }
-  await copyFile(temporary, destination);
-  await chmod(destination, 0o600);
   await Promise.all([
     rm(`${destination}-wal`, { force: true }),
     rm(`${destination}-shm`, { force: true })
   ]);
+  await rename(temporary, destination);
+  await chmod(destination, 0o600);
 } finally {
   await rm(temporary, { force: true });
 }

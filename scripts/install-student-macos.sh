@@ -79,6 +79,7 @@ NO_APP_BUNDLE=false
 [ "${RIOS_NO_APP_BUNDLE:-}" = "1" ] && NO_APP_BUNDLE=true
 MAINTENANCE_TOKEN=""
 MAINTENANCE_ROOT=""
+MAINTENANCE_HELPER=""
 OPERATION_TOKEN=""
 OPERATION_ROOT=""
 OPERATION_HELPER=""
@@ -277,6 +278,7 @@ begin_install_maintenance() {
   [ -n "$token" ] || return 1
   MAINTENANCE_TOKEN="$token"
   MAINTENANCE_ROOT="$root"
+  MAINTENANCE_HELPER="$helper"
   export RIOS_INSTALL_MAINTENANCE_TOKEN="$token"
 }
 
@@ -294,18 +296,18 @@ begin_install_operation() {
   export RIOS_INSTALL_OPERATION_TOKEN="$token"
 }
 
-adopt_install_maintenance() {
-  MAINTENANCE_ROOT="$1"
-}
-
 end_install_maintenance() {
   [ -n "$MAINTENANCE_TOKEN" ] || return 0
-  local helper="$MAINTENANCE_ROOT/scripts/install-maintenance.mjs"
+  local helper="$MAINTENANCE_HELPER"
+  if [ ! -f "$helper" ] && [ -n "${APP_DIR:-}" ]; then
+    helper="$APP_DIR/scripts/install-maintenance.mjs"
+  fi
   if [ -f "$helper" ]; then
     node "$helper" release --app-dir "$MAINTENANCE_ROOT" --token "$MAINTENANCE_TOKEN" >>"$LOG_FILE" 2>&1 || true
   fi
   MAINTENANCE_TOKEN=""
   MAINTENANCE_ROOT=""
+  MAINTENANCE_HELPER=""
   unset RIOS_INSTALL_MAINTENANCE_TOKEN
 }
 
@@ -521,7 +523,7 @@ install_from_source() {
       fi
     done
 
-    if ! begin_install_maintenance "$staging" "$source"; then
+    if ! begin_install_maintenance "$INSTALL_DIR" "$source"; then
       rm -rf "$staging"
       mv "$backup" "$INSTALL_DIR" 2>/dev/null
       die "Couldn't reserve the new app for installation; restored your previous install."
@@ -531,7 +533,6 @@ install_from_source() {
       mv "$backup" "$INSTALL_DIR" 2>/dev/null
       die "Couldn't put the new version in place; restored your previous install."
     fi
-    adopt_install_maintenance "$INSTALL_DIR"
     rm -rf "$backup"
     ok "Updated $(display_path "$INSTALL_DIR") (your data was kept)"
   else
@@ -768,7 +769,10 @@ start_app() {
 
   if [ "$NO_APP_BUNDLE" != true ] && [ -d "$app_bundle" ]; then
     info "Opening the Mac app..."
-    if ! open --env "RIOS_INSTALL_MAINTENANCE_TOKEN=$MAINTENANCE_TOKEN" "$app_bundle" >>"$LOG_FILE" 2>&1; then
+    if ! open \
+      --env "RIOS_INSTALL_MAINTENANCE_TOKEN=$MAINTENANCE_TOKEN" \
+      --env "RIOS_INSTALL_OPERATION_TOKEN=$OPERATION_TOKEN" \
+      "$app_bundle" >>"$LOG_FILE" 2>&1; then
       warn "Couldn't open the Mac app. Falling back to Terminal start."
     else
       if wait_for_dashboard; then
@@ -780,6 +784,8 @@ start_app() {
         say "  Try opening $DASHBOARD_URL in Chrome. If it doesn't load, run the"
         say "  doctor check:  ${BOLD}cd $disp && npm run doctor${RESET}"
       fi
+      end_install_maintenance
+      end_install_operation
       return 0
     fi
   fi
@@ -794,11 +800,13 @@ start_app() {
 
   if wait_for_dashboard; then
     end_install_maintenance
+    end_install_operation
     ok "The app is up"
     open "$DASHBOARD_URL" >/dev/null 2>&1 || true
     print_success terminal
   else
     end_install_maintenance
+    end_install_operation
     warn "The app is taking longer than usual to start."
     say "  Try opening $DASHBOARD_URL in Chrome. If it doesn't load, run the"
     say "  doctor check:  ${BOLD}cd $disp && npm run doctor${RESET}"

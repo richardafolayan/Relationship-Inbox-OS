@@ -18,6 +18,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   acquireInstallOperation,
+  installMaintenancePath,
   installOperationPath,
   releaseInstallOperation
 } from "../scripts/lib/install-maintenance.mjs";
@@ -143,7 +144,13 @@ test("fresh ZIP install lands in the install dir, leaves the source in place", {
     assert.equal(read(path.join(installDir, "CODE_VERSION.txt")), "v1-fresh", "app code copied in");
     assert.ok(fs.existsSync(path.join(installDir, "package.json")), "package.json copied in");
     assert.equal(fs.existsSync(path.join(installDir, ".tovi-installing")), false, "install lock released");
+    assert.equal(fs.existsSync(installMaintenancePath(installDir)), false, "maintenance lock released");
     assert.equal(fs.existsSync(installOperationPath(installDir)), false, "operation lock released");
+    assert.equal(
+      fs.readdirSync(home).some((name) => name.endsWith(".tovi-maintenance")),
+      false,
+      "no staging maintenance lock leaked"
+    );
 
     // The source (e.g. Downloads) is only read, never moved/deleted.
     assert.ok(fs.existsSync(path.join(src, "CODE_VERSION.txt")), "source folder left intact");
@@ -206,6 +213,12 @@ test("re-install over an existing install keeps .env and data, refreshes code", 
       read(path.join(installDir, "data", "inbox-os.sqlite")),
       "DBDATA-PRESERVE-ME",
       "database preserved byte-for-byte",
+    );
+    assert.equal(fs.existsSync(installMaintenancePath(installDir)), false, "maintenance lock released");
+    assert.equal(
+      fs.readdirSync(home).some((name) => name.endsWith(".tovi-maintenance")),
+      false,
+      "no staging maintenance lock leaked"
     );
 
     // No staging/backup leftovers beside the install dir.

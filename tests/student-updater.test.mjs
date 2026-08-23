@@ -31,6 +31,36 @@ function runUpdater(args, options = {}) {
   });
 }
 
+function runUpdaterThroughStartWrapper(appDir, args, continuationPath, options = {}) {
+  const wrapper = join(appDir, "scripts", "start-student.mjs");
+  writeFileSync(
+    wrapper,
+    `import { spawn } from "node:child_process";
+     import { writeFileSync } from "node:fs";
+     const updater = spawn(process.execPath, ${JSON.stringify([UPDATER, ...args])}, {
+       cwd: ${JSON.stringify(appDir)},
+       env: process.env,
+       stdio: "inherit"
+     });
+     updater.once("close", (code, signal) => {
+       writeFileSync(${JSON.stringify(continuationPath)}, JSON.stringify({ code, signal }));
+       process.exitCode = code ?? 1;
+     });`
+  );
+  return new Promise((resolveResult) => {
+    const child = spawn(process.execPath, [wrapper], {
+      ...options,
+      cwd: appDir,
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => (stdout += chunk));
+    child.stderr.on("data", (chunk) => (stderr += chunk));
+    child.on("close", (code, signal) => resolveResult({ code, signal, stdout, stderr }));
+  });
+}
+
 function waitForExit(child) {
   return new Promise((resolve, reject) => {
     if (child.exitCode !== null || child.signalCode !== null) return resolve();
@@ -154,10 +184,18 @@ test("student updater: check, apply+preserve, rollback-on-bad-checksum", async (
           runtime.once("error", reject);
           runtime.once("exit", (code, signal) => reject(new Error(`runtime exited early (${code ?? signal})`)));
         });
-        const { code, stdout, stderr } = await runUpdater([
+        const continuationPath = join(work, "start-wrapper-continued.json");
+        const updateArgs = [
           "--apply", "--no-deps", "--dir", appDir, "--url", url("/latest.json")
-        ]);
+        ];
+        const { code, signal, stdout, stderr } = await runUpdaterThroughStartWrapper(
+          appDir,
+          updateArgs,
+          continuationPath
+        );
         assert.equal(code, 0, `${stdout}\n${stderr}`);
+        assert.equal(signal, null, "the start wrapper must not be killed by its updater");
+        assert.deepEqual(JSON.parse(readFileSync(continuationPath, "utf8")), { code: 0, signal: null });
         await waitForExit(runtime);
         assert.equal(JSON.parse(readFileSync(join(appDir, "package.json"), "utf8")).version, "0.2.0");
         assert.ok(existsSync(join(appDir, "NEWCODE.txt")), "new code missing");

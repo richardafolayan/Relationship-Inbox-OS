@@ -16,6 +16,8 @@ import test from "node:test";
 import {
   acquireProcessLock,
   acquireInstallOperation,
+  installMaintenancePath,
+  installOperationPath,
   inspectInstallOperation,
   inspectProcessLock,
   releaseInstallOperation,
@@ -23,7 +25,12 @@ import {
 } from "../scripts/lib/install-maintenance.mjs";
 import { processBelongsToApp } from "../scripts/lib/process-lifecycle.mjs";
 import {
+  updateControlAncestorPids,
+  updateControlCommand
+} from "../scripts/lib/update-ancestors.mjs";
+import {
   discoverInstallRuntime,
+  listenerOwnershipUnreadable,
   stopExistingInstallRuntime,
   windowsTreeTerminationArgs
 } from "../scripts/stop-existing-install.mjs";
@@ -82,6 +89,61 @@ test("process locks are exclusive, token-owned, and self-clean stale owners", ()
   }
 });
 
+test("concurrent lock contenders leave exactly one live owner", async () => {
+  const { directory, cleanup } = fixture("tovi-process-lock-race-");
+  const appDir = join(directory, "Tovi");
+  const helper = resolve("scripts/install-maintenance.mjs");
+  mkdirSync(appDir);
+  try {
+    const contenders = Array.from({ length: 12 }, (_, index) => new Promise((resolveResult) => {
+      const token = `contender-${index}`;
+      const child = spawn(process.execPath, [
+        helper,
+        "acquire-operation",
+        "--app-dir",
+        appDir,
+        "--owner-pid",
+        String(process.pid),
+        "--token",
+        token
+      ], { stdio: ["ignore", "pipe", "pipe"] });
+      let stdout = "";
+      let stderr = "";
+      child.stdout.on("data", (chunk) => (stdout += chunk));
+      child.stderr.on("data", (chunk) => (stderr += chunk));
+      child.on("close", (code) => resolveResult({ code, stdout, stderr, token }));
+    }));
+    const results = await Promise.all(contenders);
+    const winners = results.filter(({ code }) => code === 0);
+    assert.equal(winners.length, 1, JSON.stringify(results));
+    assert.equal(winners[0].stdout.trim(), winners[0].token);
+    assert.equal(inspectInstallOperation(appDir).status, "active");
+    assert.equal(releaseInstallOperation(appDir, winners[0].token), true);
+    assert.equal(existsSync(installOperationPath(appDir)), false);
+  } finally {
+    cleanup();
+  }
+});
+
+test("packaged install locks are always outside the signed app bundle", () => {
+  const { directory, cleanup } = fixture("tovi-packaged-lock-path-");
+  try {
+    const bundle = join(directory, "Tovi.app");
+    const appDir = join(bundle, "Contents", "Resources", "app");
+    const configDir = join(directory, "Application Support", "Tovi");
+    const defaultMaintenance = installMaintenancePath(appDir, {});
+    const configuredMaintenance = installMaintenancePath(appDir, { RIOS_CONFIG_DIR: configDir });
+    const configuredOperation = installOperationPath(appDir, { RIOS_CONFIG_DIR: configDir });
+
+    assert.ok(!defaultMaintenance.startsWith(`${bundle}/`));
+    assert.equal(resolve(configuredMaintenance, ".."), join(configDir, "install-locks"));
+    assert.equal(resolve(configuredOperation, ".."), join(configDir, "install-locks"));
+    assert.notEqual(configuredMaintenance, configuredOperation);
+  } finally {
+    cleanup();
+  }
+});
+
 test("the install-operation lock stays stable while the app directory is renamed", () => {
   const { directory, cleanup } = fixture("tovi-operation-lock-");
   const appDir = join(directory, "Tovi");
@@ -118,6 +180,36 @@ test("runtime discovery finds the real pre-bind start-student launcher", () => {
     exec: fakeExec
   });
   assert.deepEqual(discovered.map(({ pid }) => pid), [4244]);
+
+  const preserved = discoverInstallRuntime({
+    appDir: "/Applications/Tovi-test",
+    statePath: "/nonexistent/processes.json",
+    ports: [43106],
+    preservePids: [4244],
+    exec: fakeExec
+  });
+  assert.deepEqual(preserved, []);
+});
+
+test("updater ancestry preserves control wrappers but not app runtimes", () => {
+  const commands = new Map([
+    [4303, "4302 /usr/bin/node /Applications/Tovi/scripts/start-student.mjs"],
+    [4302, "4301 npm run start:student"],
+    [4301, "4300 /usr/bin/node /Applications/Tovi/scripts/start-app.mjs"],
+    [4300, "1 /usr/bin/node /Applications/Tovi/apps/runner/dist/index.js"]
+  ]);
+  const fakeExec = (command, args) => {
+    assert.equal(command, "ps");
+    const pid = Number(args[1]);
+    return `${commands.get(pid) || ""}\n`;
+  };
+
+  assert.equal(updateControlCommand("node C:\\Tovi\\scripts\\apply-update-and-restart.mjs"), true);
+  assert.equal(updateControlCommand("node C:\\Tovi\\scripts\\start-app.mjs"), false);
+  assert.deepEqual(
+    updateControlAncestorPids({ startPid: 4303, platform: "darwin", exec: fakeExec }),
+    [4303, 4302]
+  );
 });
 
 test("command ownership uses path-component boundaries", () => {
@@ -140,6 +232,15 @@ test("command ownership uses path-component boundaries", () => {
 test("Windows shutdown targets the complete process tree", () => {
   assert.deepEqual(windowsTreeTerminationArgs(4247, "SIGTERM"), ["/PID", "4247", "/T"]);
   assert.deepEqual(windowsTreeTerminationArgs(4247, "SIGKILL"), ["/PID", "4247", "/T", "/F"]);
+});
+
+test("listener ownership uses command inspection on Windows", () => {
+  assert.equal(
+    listenerOwnershipUnreadable({ cwd: "", command: "node C:\\Tovi\\scripts\\start-app.mjs" }, "win32"),
+    false
+  );
+  assert.equal(listenerOwnershipUnreadable({ cwd: "", command: "" }, "win32"), true);
+  assert.equal(listenerOwnershipUnreadable({ cwd: "", command: "node /Applications/Tovi/app" }, "darwin"), true);
 });
 
 test("shutdown fails closed without signalling when listener ownership is unreadable", async () => {

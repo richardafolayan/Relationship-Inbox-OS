@@ -17,6 +17,7 @@ import Database from "better-sqlite3";
 import { prismaDbPushInvocation } from "../scripts/lib/prisma-command.mjs";
 import {
   applyRecoverableSchemaChange,
+  SchemaChangeRestoredError,
   SchemaRestoreError
 } from "../scripts/lib/recoverable-schema-change.mjs";
 
@@ -179,7 +180,7 @@ test("a failed schema sync always restores the verified backup", () => {
   ]);
 });
 
-test("a thrown schema sync restores the backup before propagating", () => {
+test("a thrown schema sync reports that the backup was restored", () => {
   const calls = [];
   const failure = new Error("filesystem unavailable");
 
@@ -202,7 +203,9 @@ test("a thrown schema sync restores the backup before propagating", () => {
         return true;
       }
     }),
-    (error) => error === failure
+    (error) => error instanceof SchemaChangeRestoredError &&
+      error.backupPath === "/verified/before.sqlite" &&
+      error.cause === failure
   );
   assert.deepEqual(calls, [
     "backup",
@@ -539,7 +542,8 @@ test("schema, launcher order, and save route share one Draft invariant", () => {
   const backupHelper = readFileSync("scripts/lib/backup-sqlite.mjs", "utf8");
   assert.match(backupHelper, /database\.backup\(temporary\)/);
   assert.match(backupHelper, /pragma\("quick_check"\)/);
-  assert.match(backupHelper, /copyFile\(temporary, destination\)/);
+  assert.match(backupHelper, /rename\(temporary, destination\)/);
+  assert.doesNotMatch(backupHelper, /copyFile\(temporary, destination\)/);
   const preparation = launcher.slice(launcher.indexOf("function prepare()"), launcher.indexOf("function delay("));
   const backupAt = preparation.indexOf("backupDatabaseBeforeSchemaChange(schemaHash)");
   const repairAt = preparation.indexOf("repairDatabaseBeforeSchemaChange");
@@ -568,6 +572,7 @@ test("schema, launcher order, and save route share one Draft invariant", () => {
 
   assert.match(launcher, /const BUILD_ONLY = args\.has\("--build-only"\)/);
   assert.match(preparation, /if \(!BUILD_ONLY\) \{[\s\S]*applyRecoverableSchemaChange/);
+  assert.match(preparation, /error instanceof SchemaChangeRestoredError/);
 
   const runner = readFileSync("apps/runner/src/index.ts", "utf8");
   const draftRoute = runner.slice(
