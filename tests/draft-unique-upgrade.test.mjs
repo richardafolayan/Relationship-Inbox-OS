@@ -7,6 +7,7 @@ import Database from "better-sqlite3";
 import { prismaDbPushInvocation } from "../scripts/lib/prisma-command.mjs";
 
 const appDir = resolve(".");
+const backupScript = resolve("scripts/lib/backup-sqlite.mjs");
 const repairScript = resolve("scripts/lib/repair-schema-data.mjs");
 
 function fixture() {
@@ -71,6 +72,28 @@ function assertUniqueDraftIndex(database) {
     ["threadId"]
   );
 }
+
+test("schema backup is a readable SQLite snapshot before repair", () => {
+  const { directory, databasePath, cleanup } = fixture();
+  try {
+    let database = new Database(databasePath);
+    database.exec("CREATE TABLE pilot (id TEXT PRIMARY KEY)");
+    database.prepare("INSERT INTO pilot (id) VALUES (?)").run("preserved");
+    database.close();
+    const backupPath = join(directory, "backups", "before.sqlite");
+
+    execFileSync(process.execPath, [backupScript, databasePath, backupPath], {
+      cwd: appDir,
+      stdio: "pipe"
+    });
+
+    database = new Database(backupPath, { readonly: true, fileMustExist: true });
+    assert.deepEqual(database.prepare("SELECT id FROM pilot").all(), [{ id: "preserved" }]);
+    database.close();
+  } finally {
+    cleanup();
+  }
+});
 
 test("repair is a no-op before the drafts table exists", () => {
   const { databasePath, cleanup } = fixture();
@@ -204,6 +227,7 @@ test("schema, launcher order, and save route share one Draft invariant", () => {
   assert.doesNotMatch(draftModel, /@@index\(\[threadId\]\)/);
 
   const launcher = readFileSync("scripts/start-app.mjs", "utf8");
+  assert.match(readFileSync("scripts/lib/backup-sqlite.mjs", "utf8"), /database\.backup\(destination\)/);
   const preparation = launcher.slice(launcher.indexOf("function prepare()"), launcher.indexOf("function delay("));
   const backupAt = preparation.indexOf("backupDatabaseBeforeSchemaChange(schemaHash)");
   const repairAt = preparation.indexOf("repairDatabaseBeforeSchemaChange()");
