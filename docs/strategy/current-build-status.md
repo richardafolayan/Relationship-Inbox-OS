@@ -85,8 +85,8 @@ before claiming those guarantees still hold.
 - Reviewed local integration branch: `fix/instagram-integration-gate`.
 - Base: `origin/develop` at
   `ddfba09f44470852c349e0a7f82c12230ba7d32d`.
-- Latest verified corrective commit: `61182465`.
-- The complete repository suite passes under Node 20.20.0: 3,035 tests, zero failures,
+- Latest verified corrective commit: `642cd8d9`.
+- The complete repository suite passes under Node 20.20.0: 3,038 tests, zero failures,
   zero skips, zero cancellations, and zero todos.
 - Dashboard, runner, and core type checks pass. The production dashboard build,
   Prisma generation, documentation checks, schema-upgrade checks, and diff
@@ -204,6 +204,19 @@ before claiming those guarantees still hold.
   puts unread DOM rows first, deduplicates identities, and applies the caller's
   distinct-thread limit only at the end. A production-path Chromium regression
   proves that later unread rows cannot be starved by earlier recent rows.
+- A thirteenth exact-head adversarial review moved the complete bound composer
+  and Send owner within the same conversation subtree and reproduced a click
+  after every child path still matched. Send now binds the verified
+  conversation container and the complete owner-to-document-root path. The
+  synchronous click requires every relationship to remain connected and
+  unchanged. The whole-owner reparent regression performs zero clicks in real
+  Chromium.
+- The same review found that a network-only unread thread could still be cut
+  after earlier DOM candidates filled the limit. DOM and network candidates are
+  now normalized and deduplicated together, unread evidence is combined across
+  sources, every unread thread is prioritized, and the distinct-thread limit is
+  applied last. Network-only unread and cross-source disagreement regressions
+  pass through the production merge path.
 - Scheduled sends, attachments, polls, focus acknowledgements, and other
   automated Instagram sends are rejected at the durable worker boundary. The
   dashboard no longer offers those unsupported actions.
