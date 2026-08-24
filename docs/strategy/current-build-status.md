@@ -85,8 +85,9 @@ before claiming those guarantees still hold.
 - Reviewed local integration branch: `fix/instagram-integration-gate`.
 - Base: `origin/develop` at
   `ddfba09f44470852c349e0a7f82c12230ba7d32d`.
-- Latest verified corrective commit: `6c705162`.
-- The complete bounded-concurrency suite passes: 2,999 tests, zero failures,
+- Latest verified corrective commit: `461bd812`.
+- The complete bounded-concurrency suite passes under Node 20.20.0: 3,010
+  tests, zero failures,
   zero skips, zero cancellations, and zero todos.
 - Dashboard, runner, and core type checks pass. The production dashboard build,
   Prisma generation, documentation checks, schema-upgrade checks, and diff
@@ -159,6 +160,15 @@ before claiming those guarantees still hold.
   removes the complete quarantine namespace, and collector failures, native
   caps, duration or iteration limits, and no-scroll incomplete boundaries all
   preserve degraded freshness instead of certifying a complete scan.
+- A sixth exact-head adversarial review reopened nine boundary claims. The
+  corrected branch rechecks the route after awaited recipient-header reads,
+  binds and measures one nearby Send handle, deduplicates network and DOM
+  threads before limiting them, and treats non-empty Instagram snapshots as
+  bounded rather than fully fresh. The global predecessor sentinel now makes
+  targeted checks incomplete, marker storage failures retain a quarantine
+  floor, and Instagram graph resets remove markers transactionally after graph
+  deletion. LinkedIn hard limits, disabled deep scroll, and unproven
+  no-progress exits retain their causal incomplete stop reasons.
 - Scheduled sends, attachments, polls, focus acknowledgements, and other
   automated Instagram sends are rejected at the durable worker boundary. The
   dashboard no longer offers those unsupported actions.
