@@ -78,10 +78,10 @@ historical evidence rather than a guarantee about the newest `develop` tip:
 Re-run relevant checks against the current feature branch and merged `develop`
 before claiming those guarantees still hold.
 
-## Active Instagram integration gate
+## Merged Instagram integration baseline
 
-- Pull request: [#1045](https://github.com/richardafolayan/Relationship-Inbox-OS/pull/1045),
-  `feat/instagram-platform` into `develop`.
+- Pull request [#1045](https://github.com/richardafolayan/Relationship-Inbox-OS/pull/1045)
+  merged into `develop` as `905103e8`.
 - Reviewed local integration branch: `fix/instagram-integration-gate`.
 - Base: `origin/develop` at
   `ddfba09f44470852c349e0a7f82c12230ba7d32d`.
@@ -271,16 +271,44 @@ before claiming those guarantees still hold.
   standalone-navigation checks still require a real device. Browser viewport
   checks do not replace that native boundary.
 
+## Active external-action safety gate
+
+- Branch: `fix/external-action-safety`.
+- Base: `origin/develop` at
+  `905103e81fe1d5e7edec17c9f681dec0f2f2a0c4`.
+- Latest verified corrective commit: `bde4e842`.
+- The complete repository suite passes under Node 20.20.0: 3,058 tests, zero
+  failures, zero skips, zero cancellations, and zero todos.
+- Runner, dashboard, and core type checks pass. The runner and core production
+  builds and diff whitespace check pass.
+- Focus auto-ack now fails closed until the thread is classified `genuine`,
+  reloads the authoritative thread immediately before queueing, and retries
+  after the post-projection `THREAD_UPDATED` event. Its worker reloads
+  classification inside the platform lease before any adapter call.
+- Send workers claim only after entering the per-platform external-action
+  fence and reloading the request and thread. A reset that enters first can
+  delete the graph without a later stale send. An active send keeps the fence
+  through adapter execution, terminal persistence, audit, and events, so reset
+  cannot delete beneath its terminal writes.
+- Admin reset takes the fixed lock order of global reset, target external
+  action, then platform lease, and holds the target locks through graph
+  deletion. Scan abort state is cleared in `finally` on success or failure.
+- Direct poll sends, reactions, message edits, and poll votes use the same
+  external-action fence and reload their thread and message after entering it.
+- Real keyed-mutex regressions cover reset-first, active-send-first, target
+  deletion, platform changes, concurrent workers, terminal persistence before
+  deletion, and lock release after failure. No live send, reaction, edit, vote,
+  poll, reset, scan, or platform session was performed during verification.
+
 ## Next
 
-- Push the final reviewed Instagram head, require exact-head CI and adversarial
-  review, then merge pull request #1045 into `develop` if every gate remains
-  green.
+- Complete exact-head adversarial review, CI, and merge of the focused
+  external-action safety branch into `develop`.
 - Keep the broad full-product hardening branch as evidence. Move its confirmed
   corrections through focused pull requests based on the new `develop` tip.
-- Finish the external-action safety, scheduled-send correctness, clean first
-  launch, composer recovery, setup ordering, and database-upgrade gates before
-  starting resume-to-fresh-state work.
+- Finish scheduled-send correctness, composer recovery, and setup ordering
+  before starting resume-to-fresh-state work. Clean first launch and the Draft
+  uniqueness upgrade are already complete.
 - Promote `develop` to `main` only when the full combined branch is release-ready.
 - Continue preparing and running the 3-5 student pilot.
 
