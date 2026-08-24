@@ -1525,9 +1525,6 @@ export class InstagramAdapter extends BetaAdapter {
     if (candidates.length === 0) {
       throw new InstagramParsingError("send_button_disabled");
     }
-    if (candidates.length === 1) {
-      return candidates[0]!;
-    }
 
     const composerBox = await composer.boundingBox();
     if (!composerBox) {
@@ -1681,11 +1678,33 @@ export class InstagramAdapter extends BetaAdapter {
       if (existingComposerText === normalizedText) {
         await composer.fill("");
       }
-      await humanClick(page, composer, { timeout: 10_000 });
+      await humanClick(page, composer, {
+        timeout: 10_000,
+        beforeClick: async () => {
+          await this.verifyCurrentThreadIdentity(
+            page,
+            selectors,
+            thread,
+            platformThreadId!,
+            true,
+            "before_send"
+          );
+        }
+      });
       await humanType(page, composer, normalizedText, {
         alreadyFocused: true,
         bindKeystrokesToTarget: true,
-        reading: null
+        reading: null,
+        beforeTypeUnit: async () => {
+          await this.verifyCurrentThreadIdentity(
+            page,
+            selectors,
+            thread,
+            platformThreadId!,
+            true,
+            "before_send"
+          );
+        }
       });
       await this.verifyComposerText(composer, normalizedText);
       await readingPause(500, 1_100);

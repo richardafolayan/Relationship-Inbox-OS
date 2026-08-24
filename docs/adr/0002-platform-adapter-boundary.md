@@ -25,6 +25,11 @@ conversation label when a platform needs recipient verification. It is stored
 separately from the user-facing `Person.displayName`, so an operator rename does
 not become platform identity evidence.
 
+Browser sends bind the exact composer element before recipient verification.
+The adapter revalidates the active thread after humanized pointer movement and
+before every typed unit. A send control must be uniquely associated with the
+bound composer even when the selector returns only one enabled candidate.
+
 Unsupported operations fail clearly and callers check optional capabilities
 before offering them.
 
@@ -33,6 +38,7 @@ before offering them.
 - Scan and send services stay platform-neutral.
 - Platform-specific correctness and verification remain inside the adapter.
 - Platform-specific data repair remains behind an injected generic capability.
+- Humanized browser delays cannot bypass recipient or composer locality checks.
 - UI controls must be capability-aware.
 - A new platform needs an adapter, selector/config wiring where relevant, and
   focused identity, parse, send, and failure tests.

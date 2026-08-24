@@ -26,9 +26,10 @@ import { isAiVisibleMessage, prismaMessageToPrompt } from "./ai";
 import { buildMessageUpsertPayload } from "./message-upsert-payload";
 import {
   PLATFORM_SCAN_IN_PROGRESS_ERROR,
+  preparePlatformScanIdentityFreshness,
+  resolveCollectionBoundaryFreshness,
   resolveMessageIdentityFreshness,
   resolvePlatformScanFreshness,
-  resolvePlatformScanStartFreshness,
   reconcilePlatformMessageIdentity,
   type MessageIdentityReconciler
 } from "./message-identity-reconciliation";
@@ -1461,6 +1462,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
         let messagesParsedCount = 0;
         let messagesPersistedCount = 0;
         let messageIdentityQuarantines = 0;
+        let untrackedIdentityQuarantineFloor = 0;
         let candidatesCount = 0;
         let threadsScannedCount = 0;
         let unreadCandidatesCount = 0;
@@ -1484,6 +1486,8 @@ export function createScanQueue(deps: ScanQueueDeps) {
         // watermark would silently drop those threads' changes).
         let capturedScanWatermark: string | null = null;
         let candidateCapBroke = false;
+        let collectionIncomplete = false;
+        let collectionFailures = 0;
         let runError: unknown;
         let platformStateBeforeScan: {
           status: "CONNECTED" | "NOT_CONNECTED" | "DEGRADED" | "ERROR";
@@ -1598,15 +1602,13 @@ export function createScanQueue(deps: ScanQueueDeps) {
             where: { name: platform },
             select: { status: true, lastError: true }
           });
-          const outstandingIdentityQuarantines =
-            await deps.messageIdentityReconcilers?.[
-              platform
-            ]?.getOutstandingQuarantineCount?.() ?? 0;
-          const scanStartFreshness = resolvePlatformScanStartFreshness({
-            outstandingIdentityQuarantines,
+          const scanStartFreshness = await preparePlatformScanIdentityFreshness({
+            reconciler: deps.messageIdentityReconcilers?.[platform],
             previousStatus: platformStateBeforeScan?.status,
             previousLastError: platformStateBeforeScan?.lastError
           });
+          untrackedIdentityQuarantineFloor =
+            scanStartFreshness.untrackedIdentityQuarantineFloor;
           await setPlatformStatus({
             platform,
             status: scanStartFreshness.status,
@@ -1698,6 +1700,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
               }
 
               fallbackTriggered = true;
+              collectionFailures = 0;
               fallbackTriggerReason = triggerReason;
               collectorMode = fallbackResult.collectorMode;
               selectorThreadItemCount = fallbackResult.selectorThreadItemCount;
@@ -2114,6 +2117,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
                   fallbackTriggered: streamMetrics.fallbackTriggered
                 }
               });
+              collectionFailures = streamMetrics.failures;
 
               if (await markAborted("after_scan_stream", platform)) {
                 runStopReason = "aborted";
@@ -2380,6 +2384,13 @@ export function createScanQueue(deps: ScanQueueDeps) {
                   : null;
             }
           }
+          const collectionBoundary = resolveCollectionBoundaryFreshness(
+            collectionMetrics?.stopReason,
+            collectionFailures
+          );
+          candidateCapBroke ||= collectionBoundary.candidateCapBroke;
+          collectionIncomplete ||= collectionBoundary.collectionIncomplete;
+          collectionFailures = collectionBoundary.collectionFailures;
           if (rawThreadCount > effectiveThreadCount) {
             candidateCapBroke = true;
           }
@@ -2659,12 +2670,15 @@ export function createScanQueue(deps: ScanQueueDeps) {
             await deps.messageIdentityReconcilers?.[
               platform
             ]?.getOutstandingQuarantineCount?.();
-          const freshnessIdentityQuarantines =
-            durableIdentityQuarantines ?? messageIdentityQuarantines;
+          const freshnessIdentityQuarantines = Math.max(
+            durableIdentityQuarantines ?? messageIdentityQuarantines,
+            untrackedIdentityQuarantineFloor
+          );
           const freshness = resolvePlatformScanFreshness({
             quarantinedMessages: freshnessIdentityQuarantines,
-            threadFailures,
-            candidateCapBroke
+            threadFailures: threadFailures + collectionFailures,
+            candidateCapBroke,
+            collectionIncomplete
           });
           const freshnessComplete = freshness.freshnessComplete;
           const publishedFreshness =
@@ -2760,8 +2774,10 @@ export function createScanQueue(deps: ScanQueueDeps) {
               rawCandidateCount,
               effectiveOpenCount,
               threadFailures,
+              collectionFailures,
               threadFailureKinds,
-              candidateCapBroke
+              candidateCapBroke,
+              collectionIncomplete
             }
           });
           if (freshnessComplete) {

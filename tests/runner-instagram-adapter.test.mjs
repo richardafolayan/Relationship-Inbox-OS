@@ -1252,11 +1252,14 @@ function sendTestHarness({
   switchThreadBeforeClick = false,
   switchThreadDuringComposerHandle = false,
   switchThreadAfterComposerBound = false,
+  switchThreadDuringComposerApproach = false,
+  switchThreadAfterFirstTypedUnit = false,
   switchThreadDuringClick = false,
   dropTypedUnit = false,
   failAfterClick = false,
   submitOnTypedNewline = false,
-  headerLabel = "Safe thread"
+  headerLabel = "Safe thread",
+  sendButtonBox = { x: 850, y: 900, width: 80, height: 40 }
 }) {
   let currentUrl = "about:blank";
   let submitted = false;
@@ -1301,6 +1304,9 @@ function sendTestHarness({
       }
       if (dropTypedUnit && typed.length === 0) return;
       typed += unit;
+      if (switchThreadAfterFirstTypedUnit && typedUnits.length === 1) {
+        currentUrl = "https://www.instagram.com/direct/t/wrong-thread/";
+      }
     },
     elementHandle: async () => {
       if (switchThreadDuringComposerHandle) {
@@ -1310,7 +1316,7 @@ function sendTestHarness({
     }
   };
   const boundSendButton = {
-    boundingBox: async () => ({ x: 850, y: 900, width: 80, height: 40 }),
+    boundingBox: async () => sendButtonBox,
     click: async () => {
       if (switchThreadDuringClick) {
         currentUrl = "https://www.instagram.com/direct/t/wrong-thread/";
@@ -1329,6 +1335,7 @@ function sendTestHarness({
     isVisible: async () => true,
     isEnabled: async () => true,
     getAttribute: async () => null,
+    boundingBox: async () => sendButtonBox,
     click: async () => {
       if (switchThreadDuringClick) {
         currentUrl = "https://www.instagram.com/direct/t/wrong-thread/";
@@ -1388,7 +1395,11 @@ function sendTestHarness({
       }
     },
     mouse: {
-      move: async () => undefined
+      move: async () => {
+        if (switchThreadDuringComposerApproach) {
+          currentUrl = "https://www.instagram.com/direct/t/wrong-thread/";
+        }
+      }
     }
   });
   const adapter = new InstagramAdapter({
@@ -1611,6 +1622,72 @@ test("Instagram revalidates after binding and before the first composer mutation
   );
   assert.deepEqual(harness.composerMutations(), []);
   assert.deepEqual(harness.typedUnits(), []);
+  assert.equal(harness.wasSubmitted(), false);
+});
+
+test("Instagram revalidates after the composer pointer approach before clicking", async () => {
+  const harness = sendTestHarness({
+    observeSubmittedBubble: false,
+    switchThreadDuringComposerApproach: true
+  });
+
+  await assert.rejects(
+    () =>
+      harness.adapter.sendMessage(
+        {
+          platformThreadId: "safe-thread",
+          displayName: "Safe thread",
+          recipientVerificationLabel: "Safe thread"
+        },
+        "approved private text"
+      ),
+    (error) => error?.details?.reason === "thread_changed_before_send"
+  );
+  assert.deepEqual(harness.composerMutations(), []);
+  assert.deepEqual(harness.typedUnits(), []);
+  assert.equal(harness.wasSubmitted(), false);
+});
+
+test("Instagram stops bound typing when the active thread changes", async () => {
+  const harness = sendTestHarness({
+    observeSubmittedBubble: false,
+    switchThreadAfterFirstTypedUnit: true
+  });
+
+  await assert.rejects(
+    () =>
+      harness.adapter.sendMessage(
+        {
+          platformThreadId: "safe-thread",
+          displayName: "Safe thread",
+          recipientVerificationLabel: "Safe thread"
+        },
+        "private"
+      ),
+    (error) => error?.details?.reason === "thread_changed_before_send"
+  );
+  assert.deepEqual(harness.typedUnits(), ["p"]);
+  assert.equal(harness.wasSubmitted(), false);
+});
+
+test("Instagram never treats a lone distant submit as the composer Send button", async () => {
+  const harness = sendTestHarness({
+    observeSubmittedBubble: false,
+    sendButtonBox: { x: 850, y: 0, width: 80, height: 40 }
+  });
+
+  await assert.rejects(
+    () =>
+      harness.adapter.sendMessage(
+        {
+          platformThreadId: "safe-thread",
+          displayName: "Safe thread",
+          recipientVerificationLabel: "Safe thread"
+        },
+        "approved"
+      ),
+    (error) => error?.details?.reason === "send_button_not_unique"
+  );
   assert.equal(harness.wasSubmitted(), false);
 });
 

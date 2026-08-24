@@ -203,6 +203,8 @@ export interface HumanTypeOptions {
   noThink?: boolean;
   /** Type through this exact target instead of the page's current keyboard focus. */
   bindKeystrokesToTarget?: boolean;
+  /** Final safety check run immediately before each typed unit. */
+  beforeTypeUnit?: (unit: string, index: number) => Promise<void>;
 }
 
 /**
@@ -247,6 +249,7 @@ export async function humanType(
   const units = toTypingUnits(text);
   for (let i = 0; i < units.length; i += 1) {
     const unit = units[i] ?? "";
+    await options.beforeTypeUnit?.(unit, i);
     if (options.bindKeystrokesToTarget) {
       await (target as Locator | ElementHandle).type(unit);
     } else {

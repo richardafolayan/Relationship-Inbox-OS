@@ -11,6 +11,8 @@ export const PLATFORM_SCAN_THREAD_FAILURE_ERROR =
   "Platform freshness is incomplete because one or more conversations could not be checked.";
 export const PLATFORM_SCAN_CANDIDATE_CAP_ERROR =
   "Platform freshness is incomplete because the scan stopped before every candidate was checked.";
+export const PLATFORM_SCAN_COLLECTION_INCOMPLETE_ERROR =
+  "Platform freshness is incomplete because the scan could not prove it reached the end of the inbox.";
 export const PLATFORM_SCAN_IN_PROGRESS_ERROR =
   "Platform freshness is still being checked.";
 
@@ -40,12 +42,18 @@ export function resolvePlatformScanFreshness(input: {
   quarantinedMessages: number;
   threadFailures: number;
   candidateCapBroke: boolean;
+  collectionIncomplete?: boolean;
 }): {
   freshnessComplete: boolean;
   status: "CONNECTED" | "DEGRADED";
   lastError: string | null;
   advanceLastScanAt: boolean;
-  stopReason: "scan_complete" | "message_identity_quarantine" | "thread_sync_failed" | "candidate_cap_reached";
+  stopReason:
+    | "scan_complete"
+    | "message_identity_quarantine"
+    | "thread_sync_failed"
+    | "candidate_cap_reached"
+    | "collection_incomplete";
 } {
   if (input.quarantinedMessages > 0) {
     return {
@@ -74,6 +82,15 @@ export function resolvePlatformScanFreshness(input: {
       stopReason: "candidate_cap_reached"
     };
   }
+  if (input.collectionIncomplete) {
+    return {
+      freshnessComplete: false,
+      status: "DEGRADED",
+      lastError: PLATFORM_SCAN_COLLECTION_INCOMPLETE_ERROR,
+      advanceLastScanAt: false,
+      stopReason: "collection_incomplete"
+    };
+  }
   return {
     freshnessComplete: true,
     status: "CONNECTED",
@@ -81,6 +98,31 @@ export function resolvePlatformScanFreshness(input: {
     advanceLastScanAt: true,
     stopReason: "scan_complete"
   };
+}
+
+export function resolveCollectionBoundaryFreshness(
+  stopReason: unknown,
+  failures: unknown = 0
+): {
+  candidateCapBroke: boolean;
+  collectionIncomplete: boolean;
+  collectionFailures: number;
+} {
+  const collectionFailures =
+    typeof failures === "number" && Number.isFinite(failures) && failures > 0
+      ? Math.floor(failures)
+      : 0;
+  if (stopReason === "max_threads") {
+    return { candidateCapBroke: true, collectionIncomplete: false, collectionFailures };
+  }
+  if (
+    stopReason === "max_duration" ||
+    stopReason === "max_iterations" ||
+    stopReason === "no_scroll_container"
+  ) {
+    return { candidateCapBroke: false, collectionIncomplete: true, collectionFailures };
+  }
+  return { candidateCapBroke: false, collectionIncomplete: false, collectionFailures };
 }
 
 export function resolvePlatformScanStartFreshness(input: {
@@ -112,6 +154,47 @@ export interface MessageIdentityReconciler {
     currentMessages: NormalizedMessage[];
   }): Promise<MessageIdentityReconciliationResult>;
   getOutstandingQuarantineCount?: () => Promise<number>;
+  preserveUntrackedQuarantine?: () => Promise<void>;
+}
+
+export async function preparePlatformScanIdentityFreshness(input: {
+  reconciler?: Pick<
+    MessageIdentityReconciler,
+    "getOutstandingQuarantineCount" | "preserveUntrackedQuarantine"
+  >;
+  previousStatus?: "CONNECTED" | "NOT_CONNECTED" | "DEGRADED" | "ERROR";
+  previousLastError?: string | null;
+}): Promise<{
+  outstandingIdentityQuarantines: number;
+  untrackedIdentityQuarantineFloor: number;
+  status: "CONNECTED" | "DEGRADED";
+  lastError: string | null;
+}> {
+  let outstandingIdentityQuarantines =
+    await input.reconciler?.getOutstandingQuarantineCount?.() ?? 0;
+  const untrackedIdentityQuarantineFloor =
+    outstandingIdentityQuarantines === 0 &&
+    input.previousLastError === MESSAGE_IDENTITY_FRESHNESS_ERROR
+      ? 1
+      : 0;
+
+  if (untrackedIdentityQuarantineFloor > 0) {
+    await input.reconciler?.preserveUntrackedQuarantine?.();
+    outstandingIdentityQuarantines = Math.max(
+      untrackedIdentityQuarantineFloor,
+      await input.reconciler?.getOutstandingQuarantineCount?.() ?? 0
+    );
+  }
+
+  return {
+    outstandingIdentityQuarantines,
+    untrackedIdentityQuarantineFloor,
+    ...resolvePlatformScanStartFreshness({
+      outstandingIdentityQuarantines,
+      previousStatus: input.previousStatus,
+      previousLastError: input.previousLastError
+    })
+  };
 }
 
 export async function reconcilePlatformMessageIdentity(input: {

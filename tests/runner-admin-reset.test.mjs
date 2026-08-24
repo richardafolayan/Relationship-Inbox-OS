@@ -132,3 +132,42 @@ test("admin reset applies platform-scoped deletes and removes only orphan people
   assert.equal(threadDelete.args.where.platform, "LINKEDIN");
   assert.deepEqual(personDelete.args.where.id.in, ["orphan-person"]);
 });
+
+test("Instagram reset clears identity quarantine before deleting its graph", async () => {
+  const calls = [];
+  const emptyDelete = async () => ({ count: 0 });
+  const mockPrisma = {
+    setting: {
+      deleteMany: async (args) => {
+        calls.push({ model: "setting.deleteMany", args });
+        return { count: 2 };
+      }
+    },
+    thread: {
+      findMany: async () => [{ id: "instagram-thread" }],
+      deleteMany: async (args) => {
+        calls.push({ model: "thread.deleteMany", args });
+        return { count: 1 };
+      }
+    },
+    sendRequest: { deleteMany: emptyDelete },
+    draft: { deleteMany: emptyDelete },
+    message: { deleteMany: emptyDelete },
+    person: {
+      findMany: async () => [],
+      deleteMany: emptyDelete
+    }
+  };
+
+  await resetPlatformInboxGraph("INSTAGRAM", mockPrisma);
+
+  const quarantineDelete = calls.find((entry) => entry.model === "setting.deleteMany");
+  assert.match(
+    quarantineDelete.args.where.key.startsWith,
+    /^instagram_message_identity_quarantine_v1:/
+  );
+  assert.ok(
+    calls.findIndex((entry) => entry.model === "setting.deleteMany") <
+      calls.findIndex((entry) => entry.model === "thread.deleteMany")
+  );
+});

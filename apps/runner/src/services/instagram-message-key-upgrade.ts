@@ -7,8 +7,14 @@ import type { MessageIdentityReconciler } from "./message-identity-reconciliatio
 const STABLE_IDENTITY_VERSION = "instagram_stable_v2";
 const RECEIPT_TIMESTAMP_TOLERANCE_MS = 2 * 60 * 1000;
 const FIRST_SEEN_CLOCK_SKEW_MARGIN_MS = 5 * 60 * 1000;
-const QUARANTINE_SETTING_PREFIX = "instagram_message_identity_quarantine_v1:";
+export const INSTAGRAM_IDENTITY_QUARANTINE_SETTING_PREFIX =
+  "instagram_message_identity_quarantine_v1:";
 const QUARANTINE_VERSION = 1;
+const UNTRACKED_QUARANTINE_SETTING_KEY =
+  `${INSTAGRAM_IDENTITY_QUARANTINE_SETTING_PREFIX}${stableHash("instagram_untracked_identity_quarantine_v1")}`;
+const UNTRACKED_QUARANTINE_MESSAGE_HASH = stableHash(
+  "instagram_untracked_identity_message_v1"
+);
 
 interface InstagramIdentityQuarantineState {
   version: 1;
@@ -56,7 +62,7 @@ export class InstagramMessageKeyUpgradeError extends Error {
 }
 
 function quarantineSettingKey(threadId: string): string {
-  return `${QUARANTINE_SETTING_PREFIX}${stableHash(threadId)}`;
+  return `${INSTAGRAM_IDENTITY_QUARANTINE_SETTING_PREFIX}${stableHash(threadId)}`;
 }
 
 function messageKeyHash(platformMessageKey: string): string {
@@ -73,6 +79,7 @@ function parseQuarantineState(valueJson: string): InstagramIdentityQuarantineSta
     if (
       value.version !== QUARANTINE_VERSION ||
       !Array.isArray(value.messageKeyHashes) ||
+      value.messageKeyHashes.length === 0 ||
       value.messageKeyHashes.some(
         (hash) => typeof hash !== "string" || !/^[a-f0-9]{64}$/.test(hash)
       )
@@ -502,13 +509,30 @@ export function createInstagramMessageIdentityReconciler(
 
   reconciler.getOutstandingQuarantineCount = async () => {
     const records = await database.setting.findMany({
-      where: { key: { startsWith: QUARANTINE_SETTING_PREFIX } },
-      select: { valueJson: true }
+      where: { key: { startsWith: INSTAGRAM_IDENTITY_QUARANTINE_SETTING_PREFIX } },
+      select: { key: true, valueJson: true }
     });
     return records.reduce((count, record) => {
+      const keySuffix = record.key.slice(INSTAGRAM_IDENTITY_QUARANTINE_SETTING_PREFIX.length);
+      if (!/^[a-f0-9]{64}$/.test(keySuffix)) return count + 1;
       const state = parseQuarantineState(record.valueJson);
       return count + (state ? state.messageKeyHashes.length : 1);
     }, 0);
+  };
+
+  reconciler.preserveUntrackedQuarantine = async () => {
+    const state: InstagramIdentityQuarantineState = {
+      version: QUARANTINE_VERSION,
+      messageKeyHashes: [UNTRACKED_QUARANTINE_MESSAGE_HASH]
+    };
+    await database.setting.upsert({
+      where: { key: UNTRACKED_QUARANTINE_SETTING_KEY },
+      update: { valueJson: JSON.stringify(state) },
+      create: {
+        key: UNTRACKED_QUARANTINE_SETTING_KEY,
+        valueJson: JSON.stringify(state)
+      }
+    });
   };
 
   return reconciler;

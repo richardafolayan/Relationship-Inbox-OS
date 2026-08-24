@@ -79,7 +79,11 @@ function inMemoryDatabase(initialRows) {
       async deleteMany(input) {
         let count = 0;
         for (const key of [...settings.keys()]) {
-          if (key === input.where.key) {
+          const keyFilter = input.where.key;
+          if (
+            key === keyFilter ||
+            (typeof keyFilter === "object" && key.startsWith(keyFilter.startsWith))
+          ) {
             settings.delete(key);
             count += 1;
           }
@@ -620,4 +624,90 @@ test("identity quarantine survives a later scan whose sliding window omits the c
   });
   assert.equal(await reconciler.getOutstandingQuarantineCount(), 0);
   assert.equal(database.settings().length, 0);
+});
+
+test("a pre-marker identity failure survives restart and an empty sliding window", async () => {
+  const legacy = existingRow();
+  const canonical = existingRow({
+    id: "canonical",
+    platformMessageKey: "instagram:stable",
+    rawJson: JSON.stringify({
+      timestampSource: "source",
+      contentKind: "text",
+      messageIdentityVersion: "instagram_stable_v2"
+    })
+  });
+  const database = inMemoryDatabase([legacy, canonical]);
+  const reconciler = createInstagramMessageIdentityReconciler(database);
+
+  assert.equal(await reconciler.getOutstandingQuarantineCount(), 0);
+  await reconciler.preserveUntrackedQuarantine();
+  assert.equal(await reconciler.getOutstandingQuarantineCount(), 1);
+
+  const restarted = createInstagramMessageIdentityReconciler(database);
+  const omitted = await restarted({
+    threadId: "thread-1",
+    currentMessages: []
+  });
+  assert.equal(omitted.quarantinedMessageKeys.length, 0);
+  assert.equal(await restarted.getOutstandingQuarantineCount(), 1);
+  assert.doesNotMatch(database.settings()[0].valueJson, /instagram:stable|Hello|thread-1/);
+});
+
+test("an impossible empty quarantine marker fails closed", async () => {
+  const database = inMemoryDatabase([
+    existingRow(),
+    existingRow({
+      id: "canonical",
+      platformMessageKey: "instagram:stable",
+      rawJson: JSON.stringify({
+        timestampSource: "source",
+        contentKind: "text",
+        messageIdentityVersion: "instagram_stable_v2"
+      })
+    })
+  ]);
+  const reconciler = createInstagramMessageIdentityReconciler(database);
+  await reconciler({ threadId: "thread-1", currentMessages: [currentMessage()] });
+  const markerKey = database.settings()[0].key;
+  await database.setting.upsert({
+    where: { key: markerKey },
+    update: { valueJson: JSON.stringify({ version: 1, messageKeyHashes: [] }) },
+    create: { key: markerKey, valueJson: JSON.stringify({ version: 1, messageKeyHashes: [] }) }
+  });
+
+  const result = await createInstagramMessageIdentityReconciler(database)({
+    threadId: "thread-1",
+    currentMessages: []
+  });
+  assert.equal(result.quarantinedMessageKeys.length, 1);
+  assert.equal(
+    await createInstagramMessageIdentityReconciler(database).getOutstandingQuarantineCount(),
+    1
+  );
+});
+
+test("a malformed quarantine setting key fails closed", async () => {
+  const database = inMemoryDatabase([]);
+  await database.setting.upsert({
+    where: { key: "instagram_message_identity_quarantine_v1:not-a-hash" },
+    update: {
+      valueJson: JSON.stringify({
+        version: 1,
+        messageKeyHashes: ["a".repeat(64), "b".repeat(64)]
+      })
+    },
+    create: {
+      key: "instagram_message_identity_quarantine_v1:not-a-hash",
+      valueJson: JSON.stringify({
+        version: 1,
+        messageKeyHashes: ["a".repeat(64), "b".repeat(64)]
+      })
+    }
+  });
+
+  assert.equal(
+    await createInstagramMessageIdentityReconciler(database).getOutstandingQuarantineCount(),
+    1
+  );
 });

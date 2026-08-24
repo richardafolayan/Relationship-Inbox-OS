@@ -1,5 +1,6 @@
 import type { PlatformName } from "@inbox-os/core";
 import { envBool, isDev } from "../dev-flags.js";
+import { INSTAGRAM_IDENTITY_QUARANTINE_SETTING_PREFIX } from "./instagram-message-key-upgrade";
 
 export class AdminResetGuardError extends Error {
   readonly statusCode: number;
@@ -28,6 +29,9 @@ export interface AdminResetResult {
 }
 
 interface AdminResetPrisma {
+  setting?: {
+    deleteMany: (args: unknown) => Promise<{ count: number }>;
+  };
   thread: {
     findMany: (args: unknown) => Promise<Array<{ id: string }>>;
     deleteMany: (args: unknown) => Promise<{ count: number }>;
@@ -101,6 +105,16 @@ export async function resetPlatformInboxGraph(
   prismaClient?: AdminResetPrisma
 ): Promise<AdminResetResult> {
   const client = prismaClient ?? (await resolvePrismaClient());
+  if (platform === "INSTAGRAM") {
+    if (!client.setting) {
+      throw new Error("Instagram identity quarantine storage is unavailable.");
+    }
+    await client.setting.deleteMany({
+      where: {
+        key: { startsWith: INSTAGRAM_IDENTITY_QUARANTINE_SETTING_PREFIX }
+      }
+    });
+  }
   const matchedThreadIds = await client.thread.findMany({
     where: { platform },
     select: { id: true }

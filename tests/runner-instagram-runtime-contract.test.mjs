@@ -89,7 +89,7 @@ test("identity quarantine remains visible and cannot publish a false persisted-m
   assert.match(scanQueueSource, /if \(syncTiming && persistedMessages > 0\)/);
   assert.match(
     scanQueueSource,
-    /resolvePlatformScanFreshness\(\{\s*quarantinedMessages: freshnessIdentityQuarantines,\s*threadFailures,\s*candidateCapBroke/
+    /resolvePlatformScanFreshness\(\{\s*quarantinedMessages: freshnessIdentityQuarantines,\s*threadFailures: threadFailures \+ collectionFailures,\s*candidateCapBroke,\s*collectionIncomplete/
   );
   assert.match(scanQueueSource, /markScanComplete: publishedFreshness\.advanceLastScanAt/);
   assert.match(

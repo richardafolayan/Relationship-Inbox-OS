@@ -58,12 +58,24 @@ marker, but cannot erase the warning. Platform-wide completion consults every
 durable marker, including markers for conversations outside Instagram's current
 sliding DOM window.
 
+A database upgraded from a markerless build may already record the identity
+freshness error. If no marker exists, the first scan adopts that state into a
+privacy-safe untracked marker before connecting can publish freshness. That
+marker is not guessed away from a limited browser window. A destructive
+Instagram graph reset clears all Instagram quarantine markers before rebuilding
+the graph. Empty marker payloads, malformed payloads, and malformed marker keys
+are corrupt state and count as unresolved.
+
 Platform freshness requires more than clean identity reconciliation. Every
 selected candidate must fit within the configured caps and every selected
 conversation must sync successfully. A thread failure or candidate cap keeps
 the platform degraded, retains `lastScanAt`, leaves retry success state uncleared,
 and records an unsuccessful run. Connecting to the browser does not clear an
 existing degraded state before this completion decision.
+Collector-level row failures also count as failed conversations. A collector
+that stops at its own cap, duration, iteration, or scroll-container boundary
+cannot publish full freshness even when its returned candidate array fits the
+queue-level cap.
 
 A verified Instagram rekey preserves the Message ID and changes the message key
 and any embedded audio fingerprint in one database transaction. Message rekeys
