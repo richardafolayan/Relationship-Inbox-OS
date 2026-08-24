@@ -527,14 +527,13 @@ model MessageAudioTranscriptionAttempt {
 
 model Draft {
   id        String   @id @default(cuid())
-  threadId  String
+  threadId  String   @unique
   text      String
   updatedAt DateTime @updatedAt
   createdAt DateTime @default(now())
 
   thread Thread @relation(fields: [threadId], references: [id], onDelete: Cascade)
 
-  @@index([threadId])
   @@map("drafts")
 }
 

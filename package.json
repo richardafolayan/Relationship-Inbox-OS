@@ -79,7 +79,9 @@
       "packages/core/package.json",
       "packages/core/prisma/**/*",
       "packages/core/selectors/**/*",
+      "scripts/install-maintenance.mjs",
       "scripts/start-app.mjs",
+      "scripts/stop-existing-install.mjs",
       "scripts/lib/**/*",
       "node_modules/**/*"
     ],

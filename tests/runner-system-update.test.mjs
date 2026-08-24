@@ -8,7 +8,12 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  createAutomaticUpdateScheduler, pendingUpdatePath, readAppVersion, runUpdateCheck, stagePendingUpdate
+  createAutomaticUpdateScheduler,
+  pendingUpdatePath,
+  readAppVersion,
+  requestNativeUpdate,
+  runUpdateCheck,
+  stagePendingUpdate
 } from "../apps/runner/dist/services/system-update.js";
 import { defaultSettings } from "../packages/core/dist/defaults.js";
 
@@ -106,6 +111,27 @@ test("stagePendingUpdate writes the intent the start wrapper reads", () => {
     assert.equal(path, pendingUpdatePath(join(dir, "data")));
     const written = JSON.parse(readFileSync(path, "utf8"));
     assert.deepEqual(written, intent);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("native update request publication never exposes partial JSON", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rios-native-intent-"));
+  try {
+    const path = join(dir, "native-update-request.json");
+    const previous = { requestedAt: "earlier", fromVersion: "0.1.0", toVersion: "0.2.0", feedUrl: "https://example.com/old" };
+    const next = { requestedAt: "now", fromVersion: "0.2.0", toVersion: "0.3.0", feedUrl: "https://example.com/new" };
+    writeFileSync(path, JSON.stringify(previous));
+    let observedDuringPublish;
+    requestNativeUpdate(path, next, {
+      beforePublish(temporaryPath) {
+        observedDuringPublish = JSON.parse(readFileSync(path, "utf8"));
+        assert.deepEqual(JSON.parse(readFileSync(temporaryPath, "utf8")), next);
+      }
+    });
+    assert.deepEqual(observedDuringPublish, previous);
+    assert.deepEqual(JSON.parse(readFileSync(path, "utf8")), next);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

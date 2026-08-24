@@ -256,8 +256,19 @@ test("dev updater: channel guard, backup root outside the bundle, ad-hoc re-sign
   const bundle = join(work, "Tovi.app");
   const appDir = join(bundle, "Contents", "Resources", "app");
   const backupRoot = join(work, "backups");
+  const bundleExecutable = join(bundle, "Contents", "MacOS", "Tovi");
   mkdirSync(join(appDir, "data"), { recursive: true });
+  mkdirSync(join(bundle, "Contents", "MacOS"), { recursive: true });
   mkdirSync(backupRoot, { recursive: true });
+  writeFileSync(bundleExecutable, "#!/bin/sh\nexit 0\n");
+  chmodSync(bundleExecutable, 0o755);
+  writeFileSync(join(bundle, "Contents", "Info.plist"), `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>com.test.tovi</string>
+<key>CFBundleExecutable</key><string>Tovi</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+</dict></plist>\n`);
 
   const seedInstall = (channel) => {
     writeFileSync(join(appDir, "package.json"), JSON.stringify({ name: "relationship-inbox-os", version: "0.1.0" }));
@@ -276,10 +287,32 @@ test("dev updater: channel guard, backup root outside the bundle, ad-hoc re-sign
     updateFeedUrl: "https://github.com/o/r/releases/download/dev/latest.json"
   }));
   writeFileSync(join(inner, "NEWCODE.txt"), "dev.2");
+  mkdirSync(join(inner, "scripts", "lib"), { recursive: true });
+  for (const file of ["install-maintenance.mjs", "install-transaction.mjs", "process-lifecycle.mjs", "run-with-install-lease.mjs"]) {
+    cpSync(join(ROOT, "scripts", "lib", file), join(inner, "scripts", "lib", file));
+  }
   const zipPath = join(work, "app.zip");
   execFileSync("zip", ["-r", "-q", zipPath, "relationship-inbox-os"], { cwd: stage });
   const zipBuf = readFileSync(zipPath);
   const sha = createHash("sha256").update(zipBuf).digest("hex");
+
+  const channelLessStage = join(work, "channel-less-stage");
+  const channelLessInner = join(channelLessStage, "relationship-inbox-os");
+  mkdirSync(join(channelLessInner, "scripts", "lib"), { recursive: true });
+  writeFileSync(join(channelLessInner, "package.json"), JSON.stringify({
+    name: "relationship-inbox-os",
+    version: "0.1.0-dev.2"
+  }));
+  writeFileSync(join(channelLessInner, "NEWCODE.txt"), "must-not-land");
+  for (const file of ["install-maintenance.mjs", "install-transaction.mjs", "process-lifecycle.mjs", "run-with-install-lease.mjs"]) {
+    cpSync(join(ROOT, "scripts", "lib", file), join(channelLessInner, "scripts", "lib", file));
+  }
+  const channelLessZipPath = join(work, "channel-less.zip");
+  execFileSync("zip", ["-r", "-q", channelLessZipPath, "relationship-inbox-os"], {
+    cwd: channelLessStage
+  });
+  const channelLessZipBuf = readFileSync(channelLessZipPath);
+  const channelLessSha = createHash("sha256").update(channelLessZipBuf).digest("hex");
 
   // PATH shim: record codesign invocations instead of really signing.
   const shims = join(work, "shims");
@@ -288,9 +321,14 @@ test("dev updater: channel guard, backup root outside the bundle, ad-hoc re-sign
   writeFileSync(join(shims, "codesign"), `#!/bin/sh\necho "$@" >> "${codesignLog}"\n`);
   chmodSync(join(shims, "codesign"), 0o755);
 
-  const manifest = (channel, version = "0.1.0-dev.2") => JSON.stringify({
+  const manifest = (
+    channel,
+    version = "0.1.0-dev.2",
+    zipName = "app.zip",
+    checksum = sha
+  ) => JSON.stringify({
     version, build: "2026-06-06T00:00:00Z", commit: "deadbee", channel,
-    zipUrl: `http://localhost:${PORT}/app.zip`, sha256: sha,
+    zipUrl: `http://localhost:${PORT}/${zipName}`, sha256: checksum,
     releaseNotes: ["dev build"], minimumInstallerVersion: "0.0.1"
   });
   let PORT;
@@ -303,6 +341,14 @@ test("dev updater: channel guard, backup root outside the bundle, ad-hoc re-sign
       res.writeHead(200, { "content-type": "application/json" });
       return res.end(manifest("student", "0.2.0"));
     }
+    if (req.url.startsWith("/missing-staged-channel.json")) {
+      res.writeHead(200, { "content-type": "application/json" });
+      return res.end(manifest("dev", "0.1.0-dev.2", "channel-less.zip", channelLessSha));
+    }
+    if (req.url.startsWith("/channel-less.zip")) {
+      res.writeHead(200, { "content-type": "application/zip" });
+      return res.end(channelLessZipBuf);
+    }
     if (req.url.startsWith("/app.zip")) {
       res.writeHead(200, { "content-type": "application/zip" });
       return res.end(zipBuf);
@@ -312,7 +358,14 @@ test("dev updater: channel guard, backup root outside the bundle, ad-hoc re-sign
   await new Promise((r) => server.listen(0, r));
   PORT = server.address().port;
   const url = (p) => `http://localhost:${PORT}${p}`;
-  const env = { PATH: `${shims}:${process.env.PATH}`, RIOS_APP_BUNDLE_DIR: join(work, "no-bundles") };
+  const env = {
+    PATH: `${shims}:${process.env.PATH}`,
+    RIOS_APP_BUNDLE_DIR: join(work, "no-bundles"),
+    RIOS_CONFIG_DIR: join(work, "app-support"),
+    RIOS_DATA_DIR: join(work, "app-support", "data"),
+    RIOS_STATE_DIR: join(work, "app-support", "state"),
+    RIOS_INSTALL_TRANSACTION_DIR: join(work, "app-support", "install-transactions")
+  };
 
   try {
     await t.test("a dev install refuses a student feed", async () => {
@@ -324,30 +377,39 @@ test("dev updater: channel guard, backup root outside the bundle, ad-hoc re-sign
       assert.ok(!existsSync(join(appDir, "NEWCODE.txt")), "install was modified despite channel mismatch");
     });
 
-    await t.test("apply with --backup-root and --resign swaps, backs up outside, re-signs", async () => {
-      const { code, stdout } = await runNode(UPDATER, [
+    await t.test("a channel-stamped manifest refuses a downloaded app without a channel stamp", async () => {
+      const { code, stderr } = await runNode(UPDATER, [
+        "--apply", "--no-deps", "--dir", appDir, "--url", url("/missing-staged-channel.json")
+      ], env);
+      assert.notEqual(code, 0);
+      assert.match(stderr, /different update channel/i);
+      assert.equal(
+        JSON.parse(readFileSync(join(appDir, "release.json"), "utf8")).version,
+        "0.1.0-dev.1"
+      );
+      assert.ok(!existsSync(join(appDir, "NEWCODE.txt")), "channel-less code reached the install");
+    });
+
+    await t.test("signed dev bundles refuse source replacement and require the native updater", async () => {
+      const { code, stderr } = await runNode(UPDATER, [
         "--apply", "--no-deps", "--dir", appDir, "--url", url("/dev.json"),
         "--backup-root", backupRoot, "--resign", bundle, "--keep-backups", "1"
       ], env);
-      assert.equal(code, 0, `updater failed:\n${stdout}`);
-      assert.ok(existsSync(join(appDir, "NEWCODE.txt")), "new code missing");
+      assert.notEqual(code, 0);
+      assert.match(stderr, /native whole-app updater/i);
+      assert.equal(existsSync(join(appDir, "NEWCODE.txt")), false);
       assert.equal(
         JSON.parse(readFileSync(join(appDir, "release.json"), "utf8")).version,
-        "0.1.0-dev.2"
-      );
-      assert.equal(
-        JSON.parse(readFileSync(join(appDir, "release.json"), "utf8")).updateFeedUrl,
-        "https://github.com/o/r/releases/download/dev/latest.json"
+        "0.1.0-dev.1"
       );
       const backups = readdirSync(backupRoot).filter((n) => n.startsWith(".rios-backup-"));
-      assert.equal(backups.length, 1, "backup must land in --backup-root");
+      assert.equal(backups.length, 0);
       const bundleEntries = readdirSync(join(bundle, "Contents", "Resources"));
       assert.ok(
         !bundleEntries.some((n) => n.startsWith(".rios-")),
         "no staging or backups may bloat the bundle"
       );
-      const signed = readFileSync(codesignLog, "utf8");
-      assert.match(signed, /--force --deep --sign - .*Tovi\.app/, "bundle was not re-signed");
+      assert.equal(existsSync(codesignLog), false);
       assert.ok(
         !existsSync(join(work, "no-bundles", "Tovi.app")),
         "packaged apply must not create a second ~/Applications bundle"
@@ -361,7 +423,7 @@ test("dev updater: channel guard, backup root outside the bundle, ad-hoc re-sign
 
 // ---- apply-and-restart helper: packaged orchestration ---------------------------
 
-test("apply helper in --bundle mode quits the app, clears the intent, and reopens it", async () => {
+test("apply helper refuses --bundle before quitting or changing the signed app", async () => {
   const work = mkdtempSync(join(tmpdir(), "rios-dev-helper-"));
   const bundle = join(work, "Tovi.app");
   const appDir = join(bundle, "Contents", "Resources", "app");
@@ -370,14 +432,8 @@ test("apply helper in --bundle mode quits the app, clears the intent, and reopen
   mkdirSync(appDir, { recursive: true });
   mkdirSync(dataDir, { recursive: true });
 
-  // The helper runs the updater from INSIDE the install, like a real one.
   writeFileSync(join(appDir, "package.json"), JSON.stringify({ name: "relationship-inbox-os", version: "0.1.0" }));
   writeFileSync(join(appDir, "release.json"), JSON.stringify({ version: "0.1.0-dev.2", channel: "dev" }));
-  mkdirSync(join(appDir, "scripts", "lib"), { recursive: true });
-  cpSync(UPDATER, join(appDir, "scripts", "update-student.mjs"));
-  cpSync(join(ROOT, "scripts", "lib", "release-manifest.mjs"), join(appDir, "scripts", "lib", "release-manifest.mjs"));
-  cpSync(join(ROOT, "scripts", "lib", "env-file.mjs"), join(appDir, "scripts", "lib", "env-file.mjs"));
-  cpSync(join(ROOT, "scripts", "lib", "branding.mjs"), join(appDir, "scripts", "lib", "branding.mjs"));
   writeFileSync(join(dataDir, "pending-update.json"), JSON.stringify({ toVersion: "0.1.0-dev.2" }));
 
   // Shims: no real quit/kill/open, just a call log.
@@ -393,23 +449,9 @@ test("apply helper in --bundle mode quits the app, clears the intent, and reopen
     chmodSync(join(shims, tool), 0o755);
   }
 
-  // Feed says the installed version is already current: the updater no-ops,
-  // which exercises the quit -> update -> relaunch orchestration cheaply.
-  const manifest = JSON.stringify({
-    version: "0.1.0-dev.2", build: "2026-06-06T00:00:00Z", commit: "deadbee", channel: "dev",
-    zipUrl: "https://example.com/app.zip?dl=1", sha256: "a".repeat(64),
-    releaseNotes: [], minimumInstallerVersion: "0.0.1"
-  });
-  const server = createServer((req, res) => {
-    res.writeHead(200, { "content-type": "application/json" });
-    res.end(manifest);
-  });
-  await new Promise((r) => server.listen(0, r));
-  const feed = `http://localhost:${server.address().port}/latest.json`;
-
   try {
-    const { code, stdout } = await runNode(HELPER, [
-      "--url", feed, "--dir", appDir, "--bundle", bundle
+    const { code, stdout, stderr } = await runNode(HELPER, [
+      "--url", "https://example.com/latest.json", "--dir", appDir, "--bundle", bundle
     ], {
       PATH: `${shims}:${process.env.PATH}`,
       RIOS_DATA_DIR: dataDir,
@@ -418,13 +460,12 @@ test("apply helper in --bundle mode quits the app, clears the intent, and reopen
       DASHBOARD_PORT: "45771",
       RUNNER_PORT: "45772"
     });
-    assert.equal(code, 0, `helper failed:\n${stdout}`);
-    const calls = readFileSync(callLog, "utf8");
-    assert.match(calls, /osascript -e quit app id /, "app was not asked to quit");
-    assert.match(calls, new RegExp(`open ${bundle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`), "bundle was not reopened");
-    assert.ok(!existsSync(join(dataDir, "pending-update.json")), "pending intent must be cleared");
+    assert.notEqual(code, 0, `helper unexpectedly succeeded:\n${stdout}`);
+    assert.match(`${stdout}\n${stderr}`, /native whole-app updater/i);
+    assert.equal(existsSync(callLog), false, "the helper must not signal or reopen the app");
+    assert.ok(existsSync(join(dataDir, "pending-update.json")), "pending intent must remain untouched");
+    assert.equal(JSON.parse(readFileSync(join(appDir, "release.json"), "utf8")).version, "0.1.0-dev.2");
   } finally {
-    await new Promise((r) => server.close(r));
     rmSync(work, { recursive: true, force: true });
   }
 });

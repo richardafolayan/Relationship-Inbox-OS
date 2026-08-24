@@ -1,6 +1,16 @@
 import { spawn } from "node:child_process";
-import { closeSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { randomUUID } from "node:crypto";
+import {
+  closeSync,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync
+} from "node:fs";
+import { basename, dirname, resolve } from "node:path";
 
 // Backs the dashboard's "App updates" card, the start wrapper's fallback, and
 // the detached apply-and-restart helper. /system/update-check delegates to the
@@ -184,9 +194,31 @@ export function stagePendingUpdate(dataDir: string, intent: PendingUpdateIntent)
   return path;
 }
 
-export function requestNativeUpdate(path: string, intent: PendingUpdateIntent): string {
-  mkdirSync(resolve(path, ".."), { recursive: true });
-  writeFileSync(path, JSON.stringify(intent, null, 2));
+export function requestNativeUpdate(
+  path: string,
+  intent: PendingUpdateIntent,
+  hooks: { beforePublish?: (temporaryPath: string) => void } = {}
+): string {
+  const directory = dirname(path);
+  const temporary = resolve(directory, `.${basename(path)}.${process.pid}.${randomUUID()}.tmp`);
+  mkdirSync(directory, { recursive: true });
+  let descriptor: number | undefined;
+  try {
+    descriptor = openSync(temporary, "wx", 0o600);
+    writeFileSync(descriptor, JSON.stringify(intent, null, 2));
+    fsyncSync(descriptor);
+    closeSync(descriptor);
+    descriptor = undefined;
+    hooks.beforePublish?.(temporary);
+    renameSync(temporary, path);
+    if (process.platform !== "win32") {
+      const directoryDescriptor = openSync(directory, "r");
+      try { fsyncSync(directoryDescriptor); } finally { closeSync(directoryDescriptor); }
+    }
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor);
+    rmSync(temporary, { force: true });
+  }
   return path;
 }
 
@@ -194,8 +226,6 @@ export function launchUpdateApplyAndRestart(opts: {
   projectRoot: string;
   feedUrl: string;
   nodeBin?: string;
-  /** Packaged mode: the helper quits the app bundle, swaps its code, re-signs, and relaunches it. */
-  appBundle?: string;
 }): { pid?: number; logPath: string } {
   const helperPath = resolve(opts.projectRoot, "scripts/apply-update-and-restart.mjs");
   const logsDir = resolve(opts.projectRoot, "logs");
@@ -204,7 +234,6 @@ export function launchUpdateApplyAndRestart(opts: {
   const logPath = resolve(logsDir, `update-restart-${stamp}.log`);
   const fd = openSync(logPath, "a");
   const helperArgs = [helperPath, "--url", opts.feedUrl, "--dir", opts.projectRoot];
-  if (opts.appBundle) helperArgs.push("--bundle", opts.appBundle);
   try {
     const child = spawn(
       opts.nodeBin ?? process.execPath,
