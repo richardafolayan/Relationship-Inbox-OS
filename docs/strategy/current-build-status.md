@@ -85,8 +85,8 @@ before claiming those guarantees still hold.
 - Reviewed local integration branch: `fix/instagram-integration-gate`.
 - Base: `origin/develop` at
   `ddfba09f44470852c349e0a7f82c12230ba7d32d`.
-- Latest verified corrective commit: `461bd812`.
-- The complete bounded-concurrency suite passes under Node 20.20.0: 3,010
+- Latest verified corrective commit: `9c95a96d`.
+- The complete bounded-concurrency suite passes under Node 20.20.0: 3,031
   tests, zero failures,
   zero skips, zero cancellations, and zero todos.
 - Dashboard, runner, and core type checks pass. The production dashboard build,
@@ -169,6 +169,15 @@ before claiming those guarantees still hold.
   floor, and Instagram graph resets remove markers transactionally after graph
   deletion. LinkedIn hard limits, disabled deep scroll, and unproven
   no-progress exits retain their causal incomplete stop reasons.
+- A seventh and eighth exact-head adversarial review reopened five final
+  boundary claims. Recipient ownership is now rechecked after focus handlers
+  and before any text mutation or input event. A bound Send must retain local
+  form and row ownership immediately before the synchronous click. Saturated
+  iMessage unread or recent queries report a candidate cap and cannot advance
+  freshness or the database watermark. Static adapter metrics cannot erase
+  observed non-empty scan counts, and collection diagnostics read the typed
+  native stop reason. The new privacy, reparenting, cap, watermark, count, and
+  diagnostic regressions pass through production paths.
 - Scheduled sends, attachments, polls, focus acknowledgements, and other
   automated Instagram sends are rejected at the durable worker boundary. The
   dashboard no longer offers those unsupported actions.
