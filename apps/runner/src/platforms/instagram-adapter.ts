@@ -54,8 +54,10 @@ export interface InstagramMessageSnapshot {
 interface InstagramComposerSendBinding {
   button: ElementHandle;
   owner: ElementHandle;
+  conversationContainer: ElementHandle;
   composerPath: ElementHandle[];
   sendPath: ElementHandle[];
+  ownerDocumentPath: ElementHandle[];
 }
 
 export class InstagramParsingError extends Error {
@@ -203,14 +205,14 @@ export function mergeInstagramThreadSnapshotSources(input: {
   domSnapshots: InstagramThreadSnapshot[];
   limit: number;
 }): ThreadStub[] {
-  const currentDomSnapshots = [
-    ...input.domSnapshots.filter((snapshot) => snapshot.unread),
-    ...input.domSnapshots.filter((snapshot) => !snapshot.unread)
-  ];
-  return normalizeInstagramThreadSnapshots([
-    ...currentDomSnapshots,
+  const distinctThreads = normalizeInstagramThreadSnapshots([
+    ...input.domSnapshots,
     ...input.networkSnapshots
-  ]).slice(0, Math.max(0, input.limit));
+  ]);
+  return [
+    ...distinctThreads.filter((thread) => (thread.unreadCount ?? 0) > 0),
+    ...distinctThreads.filter((thread) => (thread.unreadCount ?? 0) === 0)
+  ].slice(0, Math.max(0, input.limit));
 }
 
 export function resolveInstagramCollectionStopReason(input: {
@@ -1790,8 +1792,10 @@ export class InstagramAdapter extends BetaAdapter {
     composer: ElementHandle;
     sendButton?: ElementHandle;
     sendOwner?: ElementHandle;
+    sendConversationContainer?: ElementHandle;
     sendComposerPath?: ElementHandle[];
     sendPath?: ElementHandle[];
+    sendOwnerDocumentPath?: ElementHandle[];
     selectors: SelectorRegistry;
     thread: ThreadStub;
     platformThreadId: string;
@@ -1805,8 +1809,10 @@ export class InstagramAdapter extends BetaAdapter {
         {
           sendButton,
           sendOwner,
+          sendConversationContainer,
           sendComposerPath,
           sendPath,
+          sendOwnerDocumentPath,
           headerSelector,
           recipientVerificationLabel,
           platformThreadId,
@@ -2043,20 +2049,34 @@ export class InstagramAdapter extends BetaAdapter {
           !sendOwner ||
           !sendOwner.isConnected ||
           sendOwner.ownerDocument !== document ||
+          !sendConversationContainer ||
+          !sendConversationContainer.isConnected ||
+          sendConversationContainer.ownerDocument !== document ||
           !Array.isArray(sendComposerPath) ||
-          !Array.isArray(sendPath)
+          !Array.isArray(sendPath) ||
+          !Array.isArray(sendOwnerDocumentPath)
         ) {
           return fail("send_button_not_owned");
         }
         const ownerElement = sendOwner as Element;
-        const ancestorPath = (node: Element): Element[] | null => {
+        const conversationContainerElement = sendConversationContainer as Element;
+        const ancestorPath = (node: Element, ancestorBoundary: Element): Element[] | null => {
           const path: Element[] = [];
           let ancestor = node.parentElement;
-          while (ancestor && ancestor !== ownerElement) {
+          while (ancestor && ancestor !== ancestorBoundary) {
             path.push(ancestor);
             ancestor = ancestor.parentElement;
           }
-          return ancestor === ownerElement ? path : null;
+          return ancestor === ancestorBoundary ? path : null;
+        };
+        const documentPath = (node: Element): Element[] => {
+          const path: Element[] = [];
+          let ancestor = node.parentElement;
+          while (ancestor) {
+            path.push(ancestor);
+            ancestor = ancestor.parentElement;
+          }
+          return path;
         };
         const pathMatches = (boundPath: Element[], currentPath: Element[] | null): boolean => {
           if (!currentPath || boundPath.length !== currentPath.length) {
@@ -2077,11 +2097,16 @@ export class InstagramAdapter extends BetaAdapter {
           ownerElement === document.body ||
           ownerElement === document.documentElement ||
           ownerElement.matches("main, [role='main']") ||
+          conversationEvidence.container !== conversationContainerElement ||
           currentLocalOwner !== ownerElement ||
           !ownerElement.contains(composerNode as Element) ||
           !ownerElement.contains(sendElement) ||
-          !pathMatches(sendComposerPath as Element[], ancestorPath(composerNode as Element)) ||
-          !pathMatches(sendPath as Element[], ancestorPath(sendElement))
+          !pathMatches(
+            sendComposerPath as Element[],
+            ancestorPath(composerNode as Element, ownerElement)
+          ) ||
+          !pathMatches(sendPath as Element[], ancestorPath(sendElement, ownerElement)) ||
+          !pathMatches(sendOwnerDocumentPath as Element[], documentPath(ownerElement))
         ) {
           return fail("send_button_not_owned");
         }
@@ -2137,8 +2162,10 @@ export class InstagramAdapter extends BetaAdapter {
       {
         sendButton: input.sendButton,
         sendOwner: input.sendOwner,
+        sendConversationContainer: input.sendConversationContainer,
         sendComposerPath: input.sendComposerPath,
         sendPath: input.sendPath,
+        sendOwnerDocumentPath: input.sendOwnerDocumentPath,
         headerSelector:
           input.selectors.conversation_header ?? "header h1, header h2, header span[title]",
         recipientVerificationLabel: input.thread.recipientVerificationLabel,
@@ -2189,8 +2216,10 @@ export class InstagramAdapter extends BetaAdapter {
     await this.disposeElementHandles([
       binding.button,
       binding.owner,
+      binding.conversationContainer,
       ...binding.composerPath,
-      ...binding.sendPath
+      ...binding.sendPath,
+      ...binding.ownerDocumentPath
     ]);
   }
 
@@ -2228,7 +2257,8 @@ export class InstagramAdapter extends BetaAdapter {
   private async requireComposerSendButton(
     page: Page,
     composer: Locator | ElementHandle,
-    selector: string
+    selector: string,
+    conversationHeaderSelector = "header h1, header h2, header span[title]"
   ): Promise<InstagramComposerSendBinding> {
     let candidates = await this.enabledCandidates(page.locator(selector));
     if (candidates.length === 0) {
@@ -2278,9 +2308,49 @@ export class InstagramAdapter extends BetaAdapter {
         continue;
       }
       const structureHandle = await candidateHandle
-        .evaluateHandle((button, composerNode) => {
+        .evaluateHandle((button, { composerNode, conversationHeaderSelector }) => {
           const buttonElement = button as Element;
           const composerElement = composerNode as Element;
+          const isElementVisible = (element: Element): boolean => {
+            if (
+              !element.isConnected ||
+              element.closest("[hidden], [aria-hidden='true'], [inert]")
+            ) {
+              return false;
+            }
+            const style = window.getComputedStyle(element);
+            return (
+              style.display !== "none" &&
+              style.visibility !== "hidden" &&
+              style.opacity !== "0" &&
+              element.getClientRects().length > 0
+            );
+          };
+          let headerCandidates: Element[];
+          try {
+            headerCandidates = Array.from(
+              document.querySelectorAll(conversationHeaderSelector)
+            );
+          } catch {
+            return {};
+          }
+          let conversationContainer: Element | null = composerElement;
+          while (conversationContainer) {
+            if (
+              conversationContainer.matches("main, [role='main']") &&
+              isElementVisible(conversationContainer) &&
+              headerCandidates.some(
+                (header) =>
+                  conversationContainer?.contains(header) && isElementVisible(header)
+              )
+            ) {
+              break;
+            }
+            conversationContainer = conversationContainer.parentElement;
+          }
+          if (!conversationContainer || !conversationContainer.contains(buttonElement)) {
+            return {};
+          }
           let owner = buttonElement.parentElement;
           while (owner && !owner.contains(composerNode as Element)) {
             owner = owner.parentElement;
@@ -2307,24 +2377,59 @@ export class InstagramAdapter extends BetaAdapter {
           if (!composerPath || !sendPath) {
             return {};
           }
-          return { owner, composerPath, sendPath };
-        }, composerHandle)
+          const ownerDocumentPath: Element[] = [];
+          let ancestor = owner.parentElement;
+          while (ancestor) {
+            ownerDocumentPath.push(ancestor);
+            ancestor = ancestor.parentElement;
+          }
+          if (!ownerDocumentPath.includes(conversationContainer)) {
+            return {};
+          }
+          return {
+            owner,
+            conversationContainer,
+            composerPath,
+            sendPath,
+            ownerDocumentPath
+          };
+        }, { composerNode: composerHandle, conversationHeaderSelector })
         .catch(() => null);
       const structure = await structureHandle?.getProperties().catch(() => null);
       await structureHandle?.dispose().catch(() => undefined);
       const owner = structure?.get("owner")?.asElement() ?? null;
+      const conversationContainer =
+        structure?.get("conversationContainer")?.asElement() ?? null;
       const composerPath = await this.readElementHandlePath(structure?.get("composerPath"));
       const sendPath = await this.readElementHandlePath(structure?.get("sendPath"));
-      if (!owner || !composerPath || !sendPath) {
+      const ownerDocumentPath = await this.readElementHandlePath(
+        structure?.get("ownerDocumentPath")
+      );
+      if (
+        !owner ||
+        !conversationContainer ||
+        !composerPath ||
+        !sendPath ||
+        !ownerDocumentPath
+      ) {
         await this.disposeElementHandles([
           candidateHandle,
           owner,
+          conversationContainer,
           ...(composerPath ?? []),
-          ...(sendPath ?? [])
+          ...(sendPath ?? []),
+          ...(ownerDocumentPath ?? [])
         ]);
         continue;
       }
-      const binding = { button: candidateHandle, owner, composerPath, sendPath };
+      const binding = {
+        button: candidateHandle,
+        owner,
+        conversationContainer,
+        composerPath,
+        sendPath,
+        ownerDocumentPath
+      };
       const box = await candidateHandle.boundingBox();
       if (!box) {
         await this.disposeComposerSendBinding(binding);
@@ -2515,7 +2620,8 @@ export class InstagramAdapter extends BetaAdapter {
       const boundSend = await this.requireComposerSendButton(
         page,
         composer,
-        selectors.send_button
+        selectors.send_button,
+        selectors.conversation_header ?? "header h1, header h2, header span[title]"
       );
       try {
         await humanClick(page, boundSend.button, {
@@ -2527,8 +2633,10 @@ export class InstagramAdapter extends BetaAdapter {
               composer,
               sendButton: boundSend.button,
               sendOwner: boundSend.owner,
+              sendConversationContainer: boundSend.conversationContainer,
               sendComposerPath: boundSend.composerPath,
               sendPath: boundSend.sendPath,
+              sendOwnerDocumentPath: boundSend.ownerDocumentPath,
               selectors,
               thread,
               platformThreadId: platformThreadId!,

@@ -30,8 +30,9 @@ After humanized delays, the final route, recipient, composer, and control
 ownership checks run in the same synchronous browser task as each composer
 mutation and the Send click. It binds a send-control handle before measuring
 locality and binds the lowest non-page-level owner shared with the composer.
-It also binds both complete ordered ancestor paths up to that owner. The final
-task requires the same owner and every parent edge in both paths to remain
+It also binds the verified conversation container, both complete ordered paths
+to the shared owner, and the owner's complete path to the document root. The
+final task requires the same container and owner, with every bound parent edge
 connected and unchanged, then measures and clicks the same control handle.
 All temporary control and ownership handles are released after the click
 attempt or a rejected binding. Recipient ownership is
@@ -54,8 +55,9 @@ inbox is empty. Positive empty evidence is scoped to the inbox shell. Negative
 thread, composer, message, loading, error, and failed network evidence covers
 the document so sibling live panes veto an empty claim. GraphQL application
 errors count as failed collection evidence. The adapter captures all currently
-rendered DOM and network candidates before placing unread DOM rows first,
-deduplicating identities, and applying the final distinct-thread limit.
+rendered DOM and network candidates, deduplicates identities while preserving
+unread evidence from either source, places every unread thread first, and only
+then applies the final distinct-thread limit.
 
 Unsupported operations fail clearly and callers check optional capabilities
 before offering them.
