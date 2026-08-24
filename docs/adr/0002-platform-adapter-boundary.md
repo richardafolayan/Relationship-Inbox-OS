@@ -53,9 +53,9 @@ cannot publish platform-wide freshness unless every collection view proves the
 inbox is empty. Positive empty evidence is scoped to the inbox shell. Negative
 thread, composer, message, loading, error, and failed network evidence covers
 the document so sibling live panes veto an empty claim. GraphQL application
-errors count as failed collection evidence. Current DOM candidates, with
-unread rows first, take priority before network and DOM identities are
-deduplicated and the distinct-thread limit is applied.
+errors count as failed collection evidence. The adapter captures all currently
+rendered DOM and network candidates before placing unread DOM rows first,
+deduplicating identities, and applying the final distinct-thread limit.
 
 Unsupported operations fail clearly and callers check optional capabilities
 before offering them.

@@ -1126,7 +1126,7 @@ export class InstagramAdapter extends BetaAdapter {
     }
     await documentRoot.evaluate(INSTAGRAM_RUNTIME_SHIM_SOURCE);
     const domSnapshots = await documentRoot.evaluate(
-      (root, { selectors, limit }) => {
+      (root, { selectors }) => {
         const clean = (value: string | null | undefined): string =>
           (value ?? "").replace(/\s+/g, " ").trim();
         const query = (root: Element, selector: string | undefined): Element | null => {
@@ -1137,7 +1137,7 @@ export class InstagramAdapter extends BetaAdapter {
             return null;
           }
         };
-        const rows = Array.from(root.querySelectorAll(selectors.thread_item)).slice(0, limit);
+        const rows = Array.from(root.querySelectorAll(selectors.thread_item));
         return rows.map((row) => {
           const link = query(row, selectors.thread_link ?? "a[href*='/direct/t/']") as
             | HTMLAnchorElement
@@ -1162,10 +1162,10 @@ export class InstagramAdapter extends BetaAdapter {
           };
         });
       },
-      { selectors, limit }
+      { selectors }
     );
     return mergeInstagramThreadSnapshotSources({
-      networkSnapshots: this.capturedNetworkThreads(page, limit),
+      networkSnapshots: this.capturedNetworkThreads(page),
       domSnapshots,
       limit
     });

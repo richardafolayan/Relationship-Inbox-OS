@@ -384,6 +384,66 @@ test("live DOM unread threads take priority before the distinct-thread limit", (
   assert.equal(merged[0].unreadCount, 1);
 });
 
+test("fetchRecentThreads prioritizes unread rows before applying its limit", async (t) => {
+  let browser;
+  try {
+    browser = await chromium.launch({ headless: true });
+  } catch (error) {
+    t.skip(
+      `Playwright Chromium unavailable: ${error instanceof Error ? error.message : String(error)}`
+    );
+    return;
+  }
+
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  t.after(async () => {
+    await context.close();
+    await browser.close();
+  });
+  await page.route("https://www.instagram.com/**", async (route) => {
+    const row = (id, unread = false) => `
+      <a data-thread href="/direct/t/${id}/">
+        <span title="${id.toUpperCase()}">${id.toUpperCase()}</span>
+        ${unread ? "<span data-unread></span>" : ""}
+      </a>`;
+    await route.fulfill({
+      contentType: "text/html",
+      body: `<!doctype html><main>
+        ${row("r1")}${row("r2")}${row("r3")}
+        ${row("u1", true)}${row("u2", true)}${row("u3", true)}
+      </main>`
+    });
+  });
+
+  const adapter = new InstagramAdapter({
+    screenshotDir: "/tmp",
+    domDumpDir: "/tmp",
+    resolveSelectors: async () => ({
+      inbox_url: "https://www.instagram.com/direct/inbox/",
+      thread_list: "main",
+      thread_item: "[data-thread]",
+      thread_link: "a[href*='/direct/t/']",
+      thread_identity: "span[title]",
+      unread_badge: "[data-unread]",
+      message_container: "main",
+      message_item: "[data-message]",
+      message_text: "[data-text]",
+      composer_input: "[contenteditable='true']",
+      send_button: "[aria-label='Send']"
+    }),
+    sessionManager: { getManagedPage: async () => page },
+    personKey: "instagram",
+    connectTimeoutMs: 50
+  });
+
+  const threads = await adapter.fetchRecentThreads(3);
+  assert.deepEqual(
+    threads.map((thread) => [thread.platformThreadId, thread.unreadCount]),
+    [["u1", 1], ["u2", 1], ["u3", 1]]
+  );
+});
+
 test("Instagram collection stays incomplete unless every collection view proves empty", () => {
   assert.equal(
     resolveInstagramCollectionStopReason({
