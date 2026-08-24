@@ -21,6 +21,7 @@ test("enqueue persists auto-ack provenance for the worker safety boundary", asyn
     eventBus: { emit: () => undefined },
     settingsStore: {},
     auditLog: async () => "audit-id",
+    withExternalActionLock: async (_platform, work) => work(),
     withPlatformLock: async (_platform, work) => work(),
     prisma: {
       thread: {
@@ -53,6 +54,7 @@ test("enqueue persists user-triggered focus provenance instead of disguising it 
     eventBus: { emit: () => undefined },
     settingsStore: {},
     auditLog: async () => "audit-id",
+    withExternalActionLock: async (_platform, work) => work(),
     withPlatformLock: async (_platform, work) => work(),
     prisma: {
       thread: {
@@ -84,6 +86,7 @@ test("Instagram rejects user-triggered focus provenance at enqueue", async () =>
     eventBus: { emit: () => undefined },
     settingsStore: {},
     auditLog: async () => "audit-id",
+    withExternalActionLock: async (_platform, work) => work(),
     withPlatformLock: async (_platform, work) => work(),
     prisma: {
       thread: {

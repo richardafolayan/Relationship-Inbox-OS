@@ -1,13 +1,13 @@
 import type { PlatformName } from "@inbox-os/core";
 import { v5 as uuidv5 } from "uuid";
-import type { OperatorProfile } from "../types/runtime";
+import type { EventBus, OperatorProfile } from "../types/runtime";
 import type { SendQueueService } from "./send-queue";
 
 export interface FocusAutoAckThread {
   threadId: string;
   platform: PlatformName;
   isGroup: boolean;
-  category: string | null;
+  category: "outreach" | "genuine" | null;
   person: {
     id: string;
     displayName: string;
@@ -80,7 +80,7 @@ export function focusAutoAckCoverage(
   if (
     thread.platform === "INSTAGRAM" ||
     thread.isGroup ||
-    thread.category === "outreach"
+    thread.category !== "genuine"
   ) {
     return false;
   }
@@ -155,7 +155,28 @@ export function createFocusAutoAckService(deps: FocusAutoAckDeps) {
         return { type: "skipped", reason: "window_changed" };
       }
 
-      const text = focusAutoAckText(thread, latest);
+      const authoritativeThread = await deps.loadThread(threadId);
+      if (!authoritativeThread || authoritativeThread.person.id !== personId) {
+        return { type: "skipped", reason: "thread_changed" };
+      }
+      if (!focusAutoAckCoverage(authoritativeThread, latest)) {
+        return { type: "skipped", reason: "not_covered" };
+      }
+      if (!authoritativeThread.latestInboundAt) {
+        return { type: "skipped", reason: "no_inbound" };
+      }
+      if (authoritativeThread.latestInboundAt.getTime() < Date.parse(latest.focusWindow.startedAt)) {
+        return { type: "skipped", reason: "before_window" };
+      }
+      if (
+        authoritativeThread.latestOutboundAt &&
+        authoritativeThread.latestOutboundAt.getTime() >=
+          authoritativeThread.latestInboundAt.getTime()
+      ) {
+        return { type: "skipped", reason: "already_replied" };
+      }
+
+      const text = focusAutoAckText(authoritativeThread, latest);
       if (!text) return { type: "skipped", reason: "empty_note" };
       const clientSendId = uuidv5(key, uuidv5.URL);
       await deps.sendQueue.enqueueAndKick({
@@ -177,7 +198,7 @@ export function createFocusAutoAckService(deps: FocusAutoAckDeps) {
         });
       }
       await deps.auditLog?.({
-        platform: thread.platform,
+        platform: authoritativeThread.platform,
         stage: "focus-auto-ack",
         action: "focus_auto_ack_queued",
         status: "OK",
@@ -204,4 +225,20 @@ export function createFocusAutoAckService(deps: FocusAutoAckDeps) {
   }
 
   return { handleThread };
+}
+
+export function bindFocusAutoAckEvents(
+  eventBus: Pick<EventBus, "subscribe">,
+  service: Pick<ReturnType<typeof createFocusAutoAckService>, "handleThread">
+): () => void {
+  return eventBus.subscribe((event) => {
+    if (event.type !== "MESSAGES_PERSISTED" && event.type !== "THREAD_UPDATED") return;
+    void service.handleThread(event.threadId).catch((error) => {
+      console.warn(
+        `[focus-auto-ack] failed for threadId=${event.threadId}: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    });
+  });
 }

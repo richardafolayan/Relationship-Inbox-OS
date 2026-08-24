@@ -6,6 +6,8 @@ import {
   isClaimMarker
 } from "../apps/runner/dist/services/send.js";
 import { AdapterFailure } from "../apps/runner/dist/platforms/utils.js";
+import { createKeyedMutex } from "../apps/runner/dist/services/keyed-mutex.js";
+import { createAdminResetCoordinator } from "../apps/runner/dist/services/admin-reset-coordinator.js";
 
 // ---------------------------------------------------------------------------
 // BUG PH5 — processSendRequest must atomically CLAIM the PENDING row before the
@@ -46,6 +48,9 @@ function makeHarness(initialRows, opts = {}) {
   const sends = []; // every physical adapter.sendMessage call
   const sentStubs = [];
   const messages = []; // every Message upsert (one per actual persisted send)
+  const events = [];
+  let threadExists = true;
+  let claimAttempts = 0;
 
   const prisma = {
     sendRequest: {
@@ -60,6 +65,7 @@ function makeHarness(initialRows, opts = {}) {
         return match ? { ...match } : null;
       },
       async updateMany({ where, data }) {
+        if (data.receiptJson === SEND_CLAIM_MARKER) claimAttempts += 1;
         let count = 0;
         for (const r of rows) {
           if (matchesWhere(r, where)) {
@@ -75,6 +81,7 @@ function makeHarness(initialRows, opts = {}) {
         );
         if (!r) throw new Error("update: row not found");
         Object.assign(r, data);
+        if (data.status === "SENT") events.push("send-terminal-persisted");
         return { ...r };
       },
       async count({ where }) {
@@ -83,9 +90,12 @@ function makeHarness(initialRows, opts = {}) {
     },
     thread: {
       async findUnique({ where }) {
+        if (!threadExists) return null;
         return {
           id: where.id,
           platform: opts.platform ?? "LINKEDIN",
+          category: opts.category ?? "genuine",
+          isGroup: opts.isGroup ?? false,
           platformThreadId: "pt1",
           threadUrl: null,
           recipientVerificationLabel: opts.recipientVerificationLabel ?? null,
@@ -110,6 +120,7 @@ function makeHarness(initialRows, opts = {}) {
     async sendMessage(stub, text) {
       sentStubs.push(stub);
       sends.push(text);
+      await opts.onSend?.();
       if (opts.adapterFailure) {
         throw opts.adapterFailure;
       }
@@ -141,11 +152,26 @@ function makeHarness(initialRows, opts = {}) {
       getDemoSeedManifest: async () => null
     },
     auditLog: async () => "audit-id",
-    withPlatformLock: (_platform, work) => work(),
+    withExternalActionLock:
+      opts.withExternalActionLock ?? ((_platform, work) => work()),
+    withPlatformLock: opts.withPlatformLock ?? ((_platform, work) => work()),
     prisma
   });
 
-  return { svc, rows, sends, sentStubs, messages };
+  return {
+    svc,
+    rows,
+    sends,
+    sentStubs,
+    messages,
+    events,
+    claimAttempts: () => claimAttempts,
+    deleteGraph() {
+      events.push("graph-deleted");
+      rows.splice(0, rows.length);
+      threadExists = false;
+    }
+  };
 }
 
 const pendingRow = (over = {}) => ({
@@ -214,6 +240,26 @@ test("worker refuses persisted Instagram auto-ack provenance before any physical
   assert.equal(JSON.parse(rows[0].errorJson).reasonCode, "instagram_send_policy_rejected");
 });
 
+test("worker revalidates focus auto-ack eligibility inside the platform lease", async () => {
+  const opts = {
+    category: "genuine",
+    withPlatformLock: async (_platform, work) => {
+      opts.category = "outreach";
+      return work();
+    }
+  };
+  const { svc, rows, sends } = makeHarness(
+    [pendingRow({ source: "focus_auto_ack" })],
+    opts
+  );
+
+  await svc.processSendRequest("sr1");
+
+  assert.equal(sends.length, 0);
+  assert.equal(rows[0].status, "FAILED");
+  assert.equal(JSON.parse(rows[0].errorJson).reasonCode, "focus_auto_ack_not_eligible");
+});
+
 test("Instagram send failures never persist private platform URLs", async () => {
   const privateUrl = "https://www.instagram.com/direct/t/private-thread-id/";
   const { svc, rows } = makeHarness(
@@ -269,6 +315,101 @@ test("REGRESSION: two concurrent workers on one PENDING row send exactly once", 
   // only one win.
   assert.equal(sends.length, 1, "only the claim winner may dispatch the adapter");
   assert.equal(rows[0].status, "SENT");
+});
+
+test("a reset that owns the external-action fence deletes before an unclaimed worker", async () => {
+  const mutex = createKeyedMutex();
+  let releaseReset;
+  let markResetReady;
+  const resetReady = new Promise((resolve) => {
+    markResetReady = resolve;
+  });
+  const reset = mutex.runExclusive("LINKEDIN:SEND", async () => {
+    markResetReady();
+    await new Promise((resolve) => {
+      releaseReset = resolve;
+    });
+  });
+  await resetReady;
+
+  const h = makeHarness([pendingRow()], {
+    withExternalActionLock: (_platform, work) =>
+      mutex.runExclusive("LINKEDIN:SEND", work)
+  });
+  const worker = h.svc.processSendRequest("sr1");
+  await new Promise((resolve) => setImmediate(resolve));
+  const claimsBeforeResetDelete = h.claimAttempts();
+
+  h.deleteGraph();
+  releaseReset();
+  await reset;
+  await worker;
+
+  assert.equal(claimsBeforeResetDelete, 0);
+  assert.equal(h.sends.length, 0);
+});
+
+test("an active send persists terminal state before admin reset deletes its graph", async () => {
+  const mutex = createKeyedMutex();
+  let releaseAdapter;
+  let markAdapterStarted;
+  const adapterStarted = new Promise((resolve) => {
+    markAdapterStarted = resolve;
+  });
+  let h;
+  h = makeHarness([pendingRow()], {
+    withExternalActionLock: (platform, work) =>
+      mutex.runExclusive(`external:${platform}`, work),
+    withPlatformLock: (platform, work) =>
+      mutex.runExclusive(`platform:${platform}`, work),
+    onSend: async () => {
+      markAdapterStarted();
+      await new Promise((resolve) => {
+        releaseAdapter = resolve;
+      });
+    }
+  });
+  const coordinator = createAdminResetCoordinator({
+    platforms: ["LINKEDIN"],
+    requestAbort: () => undefined,
+    clearAbort: () => undefined,
+    clearInFlight: () => undefined,
+    withGlobalResetLock: (work) => mutex.runExclusive("global", work),
+    withExternalActionLock: (platform, work) =>
+      mutex.runExclusive(`external:${platform}`, work),
+    withPlatformLock: (platform, work) =>
+      mutex.runExclusive(`platform:${platform}`, work),
+    resetGraph: async (platform) => {
+      h.deleteGraph();
+      return {
+        platform,
+        matchedThreadCount: 1,
+        deleted: {
+          sendRequests: 1,
+          drafts: 0,
+          messages: 1,
+          threads: 1,
+          orphanPeople: 1
+        }
+      };
+    },
+    auditLog: async () => undefined
+  });
+
+  const worker = h.svc.processSendRequest("sr1");
+  await adapterStarted;
+  const reset = coordinator.reset({ platform: "LINKEDIN", requestId: "reset-active" });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(h.events.includes("graph-deleted"), false);
+
+  releaseAdapter();
+  await worker;
+  await reset;
+
+  assert.equal(h.sends.length, 1);
+  assert.ok(
+    h.events.indexOf("send-terminal-persisted") < h.events.indexOf("graph-deleted")
+  );
 });
 
 test("REGRESSION: resume() does NOT re-send a row left in-doubt by a crash; it reconciles to FAILED", async () => {

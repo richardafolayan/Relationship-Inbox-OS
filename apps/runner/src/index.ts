@@ -109,7 +109,9 @@ import {
 import { createSendService, parsePersistedSendSource } from "./services/send";
 import { createSendQueue } from "./services/send-queue";
 import { planPlatformSessionReset } from "./services/platform-session-reset";
-import { createFocusAutoAckService } from "./services/focus-auto-ack";
+import { bindFocusAutoAckEvents, createFocusAutoAckService } from "./services/focus-auto-ack";
+import { createAdminResetCoordinator } from "./services/admin-reset-coordinator";
+import { createThreadExternalActionFence } from "./services/external-action-fence";
 import {
   classifySendFailureKind,
   consumerSendFailure,
@@ -1233,7 +1235,8 @@ const sendService = createSendService({
   onPlatformResult: (input) => messageSyncLatency.finishSend(input),
   // Same per-platform mutex key the scan queue uses, so a send and a scan
   // never drive the shared managed page at the same time.
-  withPlatformLock: withPlatformControlLock
+  withPlatformLock: withPlatformControlLock,
+  withExternalActionLock
 });
 
 // Async send worker. The /control/thread/:id/send endpoint inserts a PENDING
@@ -1284,23 +1287,19 @@ const focusAutoAck = createFocusAutoAckService({
       threadId: thread.id,
       platform: thread.platform,
       isGroup: thread.isGroup,
-      category: thread.category,
+      category:
+        thread.category === "genuine"
+          ? "genuine"
+          : thread.category === "outreach"
+            ? "outreach"
+            : null,
       person: thread.person,
       latestInboundAt: latestInbound?.timestamp ?? null,
       latestOutboundAt: latestOutbound?.timestamp ?? null
     };
   }
 });
-eventBus.subscribe((event) => {
-  if (event.type !== "MESSAGES_PERSISTED") return;
-  void focusAutoAck.handleThread(event.threadId).catch((error) => {
-    console.warn(
-      `[focus-auto-ack] failed for threadId=${event.threadId}: ${
-        error instanceof Error ? error.message : String(error)
-      }`
-    );
-  });
-});
+bindFocusAutoAckEvents(eventBus, focusAutoAck);
 // Pick up any SendRequests left in PENDING from a previous runner process
 // (e.g. crashed mid-send, or restarted while a send was queued behind a
 // scan). The queue's `running` guard prevents duplicate processing.
@@ -1471,6 +1470,13 @@ if (autoEnrichmentEnabled) {
 
 async function withPlatformControlLock<T>(platform: PlatformName, work: () => Promise<T>): Promise<T> {
   return operationMutex.runExclusive(platformLockKey(platform), work);
+}
+
+async function withExternalActionLock<T>(
+  platform: PlatformName,
+  work: () => Promise<T>
+): Promise<T> {
+  return operationMutex.runExclusive(sendLockKeyFor(platform), work);
 }
 
 async function withGlobalResetLock<T>(work: () => Promise<T>): Promise<T> {
@@ -1731,7 +1737,7 @@ async function ensureRuntimeDirs(): Promise<void> {
   await mkdir(resolvePlatformSession("INSTAGRAM").profileDir, { recursive: true });
 }
 
-async function getThreadStub(threadId: string): Promise<{
+interface ThreadActionTarget {
   threadId: string;
   platform: PlatformName;
   platformThreadId: string;
@@ -1739,17 +1745,19 @@ async function getThreadStub(threadId: string): Promise<{
   displayName: string;
   recipientVerificationLabel?: string;
   personId: string;
-}> {
+}
+
+async function findThreadStub(threadId: string): Promise<ThreadActionTarget | null> {
   const thread = await prisma.thread.findUnique({
     where: { id: threadId },
     include: { person: true }
   });
 
   if (!thread) {
-    throw new Error("Thread not found");
+    return null;
   }
   if (!runnerConfig.availablePlatforms.includes(thread.platform as PlatformName)) {
-    throw new Error("Thread not found");
+    return null;
   }
 
   return {
@@ -1762,6 +1770,26 @@ async function getThreadStub(threadId: string): Promise<{
     personId: thread.personId
   };
 }
+
+async function getThreadStub(threadId: string): Promise<ThreadActionTarget> {
+  const target = await findThreadStub(threadId);
+  if (!target) throw new Error("Thread not found");
+  return target;
+}
+
+const threadExternalActionFence = createThreadExternalActionFence({
+  discoverPlatform: async (threadId) => {
+    const thread = await prisma.thread.findUnique({
+      where: { id: threadId },
+      select: { platform: true }
+    });
+    const platform = thread?.platform as PlatformName | undefined;
+    return platform && runnerConfig.availablePlatforms.includes(platform) ? platform : null;
+  },
+  loadTarget: findThreadStub,
+  withExternalActionLock,
+  withPlatformLock: withPlatformControlLock
+});
 
 /**
  * Returns every thread id belonging to a Person on a given platform. iMessage
@@ -1942,6 +1970,22 @@ async function loadVisibleThreadRows(options?: {
   return shapeThreadRows(threads as ThreadRowSource[], canonicalSiblings as ThreadRowSource[]);
 }
 
+const adminResetCoordinator = createAdminResetCoordinator({
+  platforms: allPlatforms,
+  requestAbort: (reason) => scanQueue.requestAbort(reason),
+  clearAbort: () => scanQueue.clearAbort(),
+  clearInFlight: () => {
+    connectInFlight.clear();
+    suggestedRepliesInFlight.clear();
+    threadSummaryRefreshInFlight.clear();
+  },
+  withGlobalResetLock,
+  withExternalActionLock,
+  withPlatformLock: withPlatformControlLock,
+  resetGraph: (platform) => resetPlatformInboxGraph(platform),
+  auditLog: (input) => auditService.log(input)
+});
+
 app.post("/admin/reset", asyncRoute(async (req, res) => {
   const payload = z
     .object({
@@ -1969,36 +2013,9 @@ app.post("/admin/reset", asyncRoute(async (req, res) => {
   }
 
   const requestId = uuid();
-  const resetResult = await withGlobalResetLock(async () => {
-    scanQueue.requestAbort(`admin_reset:${payload.platform.toLowerCase()}`);
-    // Drop every in-flight bookkeeping map so a wedged AI call from
-    // pre-reset state can't keep stale thread ids glued to slots.
-    connectInFlight.clear();
-    suggestedRepliesInFlight.clear();
-    threadSummaryRefreshInFlight.clear();
-    try {
-      for (const platform of allPlatforms) {
-        await operationMutex.runExclusive(platformLockKey(platform), async () => undefined);
-      }
-
-      const result = await resetPlatformInboxGraph(payload.platform);
-      await auditService.log({
-        platform: payload.platform,
-        stage: "System",
-        action: "ADMIN_RESET",
-        status: "OK",
-        details: {
-          requestId,
-          platform: payload.platform,
-          matchedThreadCount: result.matchedThreadCount,
-          deleted: result.deleted
-        }
-      });
-
-      return result;
-    } finally {
-      scanQueue.clearAbort();
-    }
+  const resetResult = await adminResetCoordinator.reset({
+    platform: payload.platform,
+    requestId
   });
 
   res.json({
@@ -4028,32 +4045,31 @@ app.post("/control/thread/:threadId/send-poll", asyncRoute(async (req, res) => {
     return;
   }
 
-  const target = await getThreadStub(threadId);
-  const adapter = requireAdapter(target.platform);
-  if (!adapter.sendPoll) {
-    res.status(400).json({ error: `${target.platform} adapter does not support sending polls` });
-    return;
-  }
-  const threadRow = await prisma.thread.findUnique({
-    where: { id: threadId },
-    include: { person: true }
-  });
-  if (!threadRow) {
-    res.status(404).json({ error: "thread not found" });
-    return;
-  }
-
-  const threadStub: ThreadStub = {
-    platformThreadId: target.platformThreadId,
-    displayName: target.displayName,
-    recipientVerificationLabel: target.recipientVerificationLabel,
-    threadUrl: target.threadUrl,
-    lastMessagePreview: ""
-  };
   const clientSendId = payload.clientSendId ?? uuid();
   const text = renderWhatsAppPollText(payload);
 
-  await withPlatformControlLock(target.platform, async () => {
+  const outcome = await threadExternalActionFence.run(threadId, async (target) => {
+    const adapter = requireAdapter(target.platform);
+    if (!adapter.sendPoll) {
+      res.status(400).json({ error: `${target.platform} adapter does not support sending polls` });
+      return;
+    }
+    const threadRow = await prisma.thread.findUnique({
+      where: { id: threadId },
+      include: { person: true }
+    });
+    if (!threadRow) {
+      res.status(404).json({ error: "thread not found" });
+      return;
+    }
+    const threadStub: ThreadStub = {
+      platformThreadId: target.platformThreadId,
+      displayName: target.displayName,
+      recipientVerificationLabel: target.recipientVerificationLabel,
+      threadUrl: target.threadUrl,
+      lastMessagePreview: ""
+    };
+
     try {
       const receipt = await adapter.sendPoll!(threadStub, {
         question: payload.question,
@@ -4163,6 +4179,9 @@ app.post("/control/thread/:threadId/send-poll", asyncRoute(async (req, res) => {
       });
     }
   });
+  if (outcome.status === "missing") {
+    res.status(404).json({ error: "thread not found" });
+  }
 }));
 
 app.post("/control/thread/:threadId/update-send", asyncRoute(async (req, res) => {
@@ -4417,27 +4436,25 @@ app.post("/control/thread/:threadId/message/:messageId/react", asyncRoute(async 
   if (await checkPresenterGuard(res, settingsStore, { threadId, action: "react to a message", kind: "thread-mutation" })) return;
   const payload = z.object({ emoji: z.string().trim().min(1).max(16) }).parse(req.body ?? {});
 
-  const message = await prisma.message.findUnique({ where: { id: messageId } });
-  if (!message || message.threadId !== threadId) {
-    res.status(404).json({ error: "message not found in thread" });
-    return;
-  }
+  const outcome = await threadExternalActionFence.run(threadId, async (target) => {
+    const message = await prisma.message.findUnique({ where: { id: messageId } });
+    if (!message || message.threadId !== threadId) {
+      res.status(404).json({ error: "message not found in thread" });
+      return;
+    }
+    const adapter = requireAdapter(target.platform);
+    if (!adapter.reactToMessage) {
+      res.status(400).json({ error: `${target.platform} adapter does not support message reactions` });
+      return;
+    }
+    const threadStub: ThreadStub = {
+      platformThreadId: target.platformThreadId,
+      displayName: target.displayName,
+      recipientVerificationLabel: target.recipientVerificationLabel,
+      threadUrl: target.threadUrl,
+      lastMessagePreview: ""
+    };
 
-  const target = await getThreadStub(threadId);
-  const adapter = requireAdapter(target.platform);
-  if (!adapter.reactToMessage) {
-    res.status(400).json({ error: `${target.platform} adapter does not support message reactions` });
-    return;
-  }
-  const threadStub: ThreadStub = {
-    platformThreadId: target.platformThreadId,
-    displayName: target.displayName,
-    recipientVerificationLabel: target.recipientVerificationLabel,
-    threadUrl: target.threadUrl,
-    lastMessagePreview: ""
-  };
-
-  await withPlatformControlLock(target.platform, async () => {
     try {
       await adapter.reactToMessage!(threadStub, message.platformMessageKey, payload.emoji);
       // Persist the operator's reaction onto rawJson so the dashboard badge
@@ -4463,6 +4480,9 @@ app.post("/control/thread/:threadId/message/:messageId/react", asyncRoute(async 
       throw error;
     }
   });
+  if (outcome.status === "missing") {
+    res.status(404).json({ error: "thread not found" });
+  }
 }));
 
 app.post("/control/thread/:threadId/message/:messageId/edit", asyncRoute(async (req, res) => {
@@ -4472,31 +4492,29 @@ app.post("/control/thread/:threadId/message/:messageId/edit", asyncRoute(async (
   if (await checkPresenterGuard(res, settingsStore, { threadId, action: "edit a message", kind: "thread-mutation" })) return;
   const payload = z.object({ text: z.string().trim().min(1).max(8_000) }).parse(req.body ?? {});
 
-  const message = await prisma.message.findUnique({ where: { id: messageId } });
-  if (!message || message.threadId !== threadId) {
-    res.status(404).json({ error: "message not found in thread" });
-    return;
-  }
-  if (message.direction !== "OUT") {
-    res.status(400).json({ error: "only outbound messages can be edited" });
-    return;
-  }
+  const outcome = await threadExternalActionFence.run(threadId, async (target) => {
+    const message = await prisma.message.findUnique({ where: { id: messageId } });
+    if (!message || message.threadId !== threadId) {
+      res.status(404).json({ error: "message not found in thread" });
+      return;
+    }
+    if (message.direction !== "OUT") {
+      res.status(400).json({ error: "only outbound messages can be edited" });
+      return;
+    }
+    const adapter = requireAdapter(target.platform);
+    if (!adapter.editMessage) {
+      res.status(400).json({ error: `${target.platform} adapter does not support message edits` });
+      return;
+    }
+    const threadStub: ThreadStub = {
+      platformThreadId: target.platformThreadId,
+      displayName: target.displayName,
+      recipientVerificationLabel: target.recipientVerificationLabel,
+      threadUrl: target.threadUrl,
+      lastMessagePreview: ""
+    };
 
-  const target = await getThreadStub(threadId);
-  const adapter = requireAdapter(target.platform);
-  if (!adapter.editMessage) {
-    res.status(400).json({ error: `${target.platform} adapter does not support message edits` });
-    return;
-  }
-  const threadStub: ThreadStub = {
-    platformThreadId: target.platformThreadId,
-    displayName: target.displayName,
-    recipientVerificationLabel: target.recipientVerificationLabel,
-    threadUrl: target.threadUrl,
-    lastMessagePreview: ""
-  };
-
-  await withPlatformControlLock(target.platform, async () => {
     try {
       await adapter.editMessage!(threadStub, message.platformMessageKey, payload.text);
       await prisma.message.update({ where: { id: message.id }, data: { text: payload.text } });
@@ -4519,6 +4537,9 @@ app.post("/control/thread/:threadId/message/:messageId/edit", asyncRoute(async (
       throw error;
     }
   });
+  if (outcome.status === "missing") {
+    res.status(404).json({ error: "thread not found" });
+  }
 }));
 
 app.post("/control/thread/:threadId/message/:messageId/poll-vote", asyncRoute(async (req, res) => {
@@ -4530,31 +4551,29 @@ app.post("/control/thread/:threadId/message/:messageId/poll-vote", asyncRoute(as
     selectedOptions: z.array(z.string().trim().min(1).max(280)).min(1).max(12)
   }).parse(req.body ?? {});
 
-  const message = await prisma.message.findUnique({ where: { id: messageId } });
-  if (!message || message.threadId !== threadId) {
-    res.status(404).json({ error: "message not found in thread" });
-    return;
-  }
-  if (!message.platformMessageKey) {
-    res.status(400).json({ error: "message has no platform key" });
-    return;
-  }
+  const outcome = await threadExternalActionFence.run(threadId, async (target) => {
+    const message = await prisma.message.findUnique({ where: { id: messageId } });
+    if (!message || message.threadId !== threadId) {
+      res.status(404).json({ error: "message not found in thread" });
+      return;
+    }
+    if (!message.platformMessageKey) {
+      res.status(400).json({ error: "message has no platform key" });
+      return;
+    }
+    const adapter = requireAdapter(target.platform);
+    if (!adapter.voteOnPoll) {
+      res.status(400).json({ error: `${target.platform} adapter does not support poll votes` });
+      return;
+    }
+    const threadStub: ThreadStub = {
+      platformThreadId: target.platformThreadId,
+      displayName: target.displayName,
+      recipientVerificationLabel: target.recipientVerificationLabel,
+      threadUrl: target.threadUrl,
+      lastMessagePreview: ""
+    };
 
-  const target = await getThreadStub(threadId);
-  const adapter = requireAdapter(target.platform);
-  if (!adapter.voteOnPoll) {
-    res.status(400).json({ error: `${target.platform} adapter does not support poll votes` });
-    return;
-  }
-  const threadStub: ThreadStub = {
-    platformThreadId: target.platformThreadId,
-    displayName: target.displayName,
-    recipientVerificationLabel: target.recipientVerificationLabel,
-    threadUrl: target.threadUrl,
-    lastMessagePreview: ""
-  };
-
-  await withPlatformControlLock(target.platform, async () => {
     try {
       await adapter.voteOnPoll!(threadStub, message.platformMessageKey!, payload.selectedOptions);
       await auditService.log({
@@ -4583,6 +4602,9 @@ app.post("/control/thread/:threadId/message/:messageId/poll-vote", asyncRoute(as
       throw error;
     }
   });
+  if (outcome.status === "missing") {
+    res.status(404).json({ error: "thread not found" });
+  }
 }));
 
 // Live poll tallies for the dashboard's "View votes" affordance

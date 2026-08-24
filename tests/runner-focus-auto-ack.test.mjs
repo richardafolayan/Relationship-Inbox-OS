@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  bindFocusAutoAckEvents,
   createFocusAutoAckService,
   focusAutoAckCoverage,
   focusAutoAckText
 } from "../apps/runner/src/services/focus-auto-ack.ts";
+import { createEventBus } from "../apps/runner/src/services/event-bus.ts";
 
 const now = new Date("2026-07-22T12:00:00.000Z");
 
@@ -67,7 +69,7 @@ function thread(overrides = {}) {
   };
 }
 
-function harness({ profileValue = profile(), threadValue = thread() } = {}) {
+function harness({ profileValue = profile(), threadValue = thread(), loadThread } = {}) {
   let current = structuredClone(profileValue);
   const queued = [];
   const writes = [];
@@ -83,8 +85,8 @@ function harness({ profileValue = profile(), threadValue = thread() } = {}) {
         return structuredClone(current);
       }
     },
-    async loadThread() {
-      return threadValue;
+    async loadThread(threadId) {
+      return loadThread ? loadThread(threadId) : threadValue;
     },
     sendQueue: {
       async enqueueAndKick(input) {
@@ -128,6 +130,7 @@ test("group chats, outreach, and unknown unstarred handles are never covered", (
   const base = profile({ audience: "all_personal" });
   assert.equal(focusAutoAckCoverage(thread({ isGroup: true }), base), false);
   assert.equal(focusAutoAckCoverage(thread({ category: "outreach" }), base), false);
+  assert.equal(focusAutoAckCoverage(thread({ category: null }), base), false);
   assert.equal(
     focusAutoAckCoverage(
       thread({
@@ -142,6 +145,69 @@ test("group chats, outreach, and unknown unstarred handles are never covered", (
     ),
     false
   );
+});
+
+test("auto-ack revalidates authoritative classification immediately before queueing", async () => {
+  let reads = 0;
+  const h = harness({
+    loadThread: async () => {
+      reads += 1;
+      return reads === 1 ? thread({ category: "genuine" }) : thread({ category: "outreach" });
+    }
+  });
+
+  assert.deepEqual(await h.service.handleThread("thread-1"), {
+    type: "skipped",
+    reason: "not_covered"
+  });
+  assert.equal(reads, 2);
+  assert.equal(h.queued.length, 0);
+});
+
+test("post-projection events retry genuine auto-ack without duplicating concurrent events", async () => {
+  let currentThread = thread({ category: null });
+  const h = harness({ loadThread: async () => currentThread });
+  const eventBus = createEventBus();
+  const unsubscribe = bindFocusAutoAckEvents(eventBus, h.service);
+  const settle = () => new Promise((resolve) => setImmediate(resolve));
+
+  eventBus.emit({
+    type: "MESSAGES_PERSISTED",
+    jobId: "persisted-null",
+    threadId: "thread-1",
+    platform: "IMESSAGE",
+    syncTiming: {
+      sourceChangedAt: now.toISOString(),
+      persistedAt: now.toISOString(),
+      trigger: "test"
+    }
+  });
+  await settle();
+  assert.equal(h.queued.length, 0);
+
+  currentThread = thread({ category: "outreach" });
+  eventBus.emit({ type: "THREAD_UPDATED", jobId: "classified-outreach", threadId: "thread-1" });
+  await settle();
+  assert.equal(h.queued.length, 0);
+
+  currentThread = thread({ category: "genuine" });
+  eventBus.emit({
+    type: "MESSAGES_PERSISTED",
+    jobId: "persisted-genuine",
+    threadId: "thread-1",
+    platform: "IMESSAGE",
+    syncTiming: {
+      sourceChangedAt: now.toISOString(),
+      persistedAt: now.toISOString(),
+      trigger: "test"
+    }
+  });
+  eventBus.emit({ type: "THREAD_UPDATED", jobId: "classified-genuine", threadId: "thread-1" });
+  await settle();
+  await settle();
+
+  assert.equal(h.queued.length, 1);
+  unsubscribe();
 });
 
 test("all-personal covers a saved iMessage contact but not the same unstarred LinkedIn contact", () => {

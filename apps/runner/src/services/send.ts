@@ -33,6 +33,14 @@ interface SendServiceDeps {
    * navigations/DOM reads on one page.
    */
   withPlatformLock: <T>(platform: PlatformName, work: () => Promise<T>) => Promise<T>;
+  /**
+   * Fences every externally visible action against an administrative reset.
+   * The fixed lock order is external action first, then the page/platform lock.
+   */
+  withExternalActionLock: <T>(
+    platform: PlatformName,
+    work: () => Promise<T>
+  ) => Promise<T>;
   /** Override the Prisma client. Defaults to the runner's singleton; tests inject a fake. */
   prisma?: PrismaClient;
   onPlatformResult?: (input: {
@@ -141,6 +149,16 @@ export interface ScheduleSendResult {
 }
 
 export type SendSource = "manual" | "focus_ack" | "focus_auto_ack";
+
+class SendPolicyError extends Error {
+  constructor(
+    readonly reasonCode: string,
+    message: string
+  ) {
+    super(message);
+    this.name = "SendPolicyError";
+  }
+}
 
 export function parsePersistedSendSource(value: unknown): SendSource | null {
   return value === "manual" || value === "focus_ack" || value === "focus_auto_ack"
@@ -274,16 +292,40 @@ export function createSendService(deps: SendServiceDeps) {
    * MESSAGE_SENT / MESSAGE_SEND_FAILED event so the dashboard's optimistic
    * UI can match by clientSendId.
    *
-   * Throws only on programmer-error situations (missing thread row); adapter
-   * errors are caught and recorded as FAILED on the SendRequest.
+   * Rows removed by an administrative reset are safe no-ops. Adapter errors
+   * are caught and recorded as FAILED on the SendRequest.
    */
   async function processSendRequest(sendRequestId: string): Promise<void> {
+    const discoveredRequest = await prisma.sendRequest.findUnique({
+      where: { id: sendRequestId }
+    });
+    if (
+      !discoveredRequest ||
+      discoveredRequest.status !== "PENDING" ||
+      isClaimMarker(discoveredRequest.receiptJson)
+    ) {
+      return;
+    }
+    const discoveredThread = await prisma.thread.findUnique({
+      where: { id: discoveredRequest.threadId },
+      select: { platform: true }
+    });
+    if (!discoveredThread) return;
+    const platform = discoveredThread.platform as PlatformName;
+
+    await deps.withExternalActionLock(platform, () =>
+      processSendRequestWithExternalLock(sendRequestId, platform)
+    );
+  }
+
+  async function processSendRequestWithExternalLock(
+    sendRequestId: string,
+    expectedPlatform: PlatformName
+  ): Promise<void> {
     const sendRequest = await prisma.sendRequest.findUnique({
       where: { id: sendRequestId }
     });
-    if (!sendRequest) {
-      throw new Error(`SendRequest ${sendRequestId} not found`);
-    }
+    if (!sendRequest) return;
     if (sendRequest.status !== "PENDING") {
       // Already processed — nothing to do. Defensive against double-kicks.
       return;
@@ -297,29 +339,21 @@ export function createSendService(deps: SendServiceDeps) {
       return;
     }
 
-    // Atomically claim the row BEFORE the (non-idempotent) adapter send. Only
-    // the worker whose guarded write wins (count === 1) proceeds; a concurrent
-    // kick or a post-restart resume() sees `receiptJson` already set and bails.
-    // Without this, a crash between the physical send and the SENT write at the
-    // bottom of this function leaves the row PENDING, and resume() re-dispatches
-    // it — sending the message twice.
-    const claim = await prisma.sendRequest.updateMany({
-      where: { id: sendRequestId, status: "PENDING", receiptJson: null },
-      data: { receiptJson: SEND_CLAIM_MARKER }
-    });
-    if (claim.count !== 1) {
-      // Lost the race — another worker already claimed (or terminalised) this
-      // row. Do nothing; the winner owns the send.
-      return;
-    }
-
     const thread = await prisma.thread.findUnique({
       where: { id: sendRequest.threadId },
       include: { person: true }
     });
-    if (!thread) {
-      throw new Error(`Thread ${sendRequest.threadId} not found for SendRequest ${sendRequestId}`);
-    }
+    if (!thread || thread.platform !== expectedPlatform) return;
+
+    // Claim only after the external-action fence and authoritative graph read.
+    // A reset that entered the fence first can delete the graph, leaving this
+    // worker with nothing to claim or dispatch. The guarded write still keeps
+    // concurrent workers and crash recovery idempotent.
+    const claim = await prisma.sendRequest.updateMany({
+      where: { id: sendRequestId, status: "PENDING", receiptJson: null },
+      data: { receiptJson: SEND_CLAIM_MARKER }
+    });
+    if (claim.count !== 1) return;
 
     // The threads table can hold rows whose `platform` column has values
     // the typed `PlatformAdapter` registry doesn't cover (e.g. iMessage
@@ -391,8 +425,25 @@ export function createSendService(deps: SendServiceDeps) {
         }
         // Serialize the page-driving send against scans on the shared managed
         // page. The demo branch above drives no page, so it stays unlocked.
-        receipt = await deps.withPlatformLock(thread.platform as PlatformName, () =>
-          adapter.sendMessage(
+        receipt = await deps.withPlatformLock(thread.platform as PlatformName, async () => {
+          if (source === "focus_auto_ack") {
+            const authoritativeThread = await prisma.thread.findUnique({
+              where: { id: thread.id },
+              select: { platform: true, category: true, isGroup: true }
+            });
+            if (
+              !authoritativeThread ||
+              authoritativeThread.platform === "INSTAGRAM" ||
+              authoritativeThread.category !== "genuine" ||
+              authoritativeThread.isGroup
+            ) {
+              throw new SendPolicyError(
+                "focus_auto_ack_not_eligible",
+                "Automatic focus acknowledgement is no longer eligible for this conversation"
+              );
+            }
+          }
+          return adapter.sendMessage(
             threadStub,
             input.text,
             stagedAttachments.map((a) => ({
@@ -401,8 +452,8 @@ export function createSendService(deps: SendServiceDeps) {
               mimeType: a.mimeType,
               kind: (a.kind as "voice_note" | "photo" | "video" | "audio" | "pdf" | "sticker" | "gif" | "unknown" | undefined) ?? undefined
             }))
-          )
-        );
+          );
+        });
       }
 
       // Persist platform-side attachments on the OUT row when the adapter
@@ -542,7 +593,9 @@ export function createSendService(deps: SendServiceDeps) {
       const persistedErrorMessage =
         thread.platform === "INSTAGRAM" ? consumerFailure.message : errorMessage;
       const reasonCode =
-        thread.platform === "INSTAGRAM"
+        error instanceof SendPolicyError
+          ? error.reasonCode
+          : thread.platform === "INSTAGRAM"
           ? (typeof adapterError?.details?.reason === "string" &&
               /^[a-z][a-z0-9_]{0,80}$/.test(adapterError.details.reason)
               ? adapterError.details.reason
