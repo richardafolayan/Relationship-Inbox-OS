@@ -85,8 +85,8 @@ before claiming those guarantees still hold.
 - Reviewed local integration branch: `fix/instagram-integration-gate`.
 - Base: `origin/develop` at
   `ddfba09f44470852c349e0a7f82c12230ba7d32d`.
-- Latest verified corrective commit: `ecaf18ae`.
-- The complete bounded-concurrency suite passes: 2,988 tests, zero failures,
+- Latest verified corrective commit: `6c705162`.
+- The complete bounded-concurrency suite passes: 2,999 tests, zero failures,
   zero skips, zero cancellations, and zero todos.
 - Dashboard, runner, and core type checks pass. The production dashboard build,
   Prisma generation, documentation checks, schema-upgrade checks, and diff
@@ -150,6 +150,15 @@ before claiming those guarantees still hold.
   retry state. Incomplete per-thread checks return HTTP 409, so dashboard bulk
   actions count them as failures. The mobile and desktop status bar renders the
   incomplete result after active work has ended.
+- A fifth exact-head adversarial review reopened six claims. Every Send
+  candidate must now be spatially associated with the bound composer, even
+  when only one candidate exists. Recipient identity is rechecked after pointer
+  movement and before every typed unit. Markerless predecessor databases adopt
+  any existing identity degradation into a privacy-safe durable sentinel,
+  while empty or malformed repair markers fail closed. Instagram admin reset
+  removes the complete quarantine namespace, and collector failures, native
+  caps, duration or iteration limits, and no-scroll incomplete boundaries all
+  preserve degraded freshness instead of certifying a complete scan.
 - Scheduled sends, attachments, polls, focus acknowledgements, and other
   automated Instagram sends are rejected at the durable worker boundary. The
   dashboard no longer offers those unsupported actions.
