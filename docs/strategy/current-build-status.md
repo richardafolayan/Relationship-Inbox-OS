@@ -85,8 +85,8 @@ before claiming those guarantees still hold.
 - Reviewed local integration branch: `fix/instagram-integration-gate`.
 - Base: `origin/develop` at
   `ddfba09f44470852c349e0a7f82c12230ba7d32d`.
-- Latest verified corrective commit: `bed1e545`.
-- The complete repository suite passes under Node 20.20.0: 3,042 tests, zero failures,
+- Latest verified corrective commit: `077e0b3c`.
+- The complete repository suite passes under Node 20.20.0: 3,043 tests, zero failures,
   zero skips, zero cancellations, and zero todos.
 - Dashboard, runner, and core type checks pass. The production dashboard build,
   Prisma generation, documentation checks, schema-upgrade checks, and diff
@@ -229,6 +229,19 @@ before claiming those guarantees still hold.
   then revalidated for every atomic composer action. Reparenting the complete
   composer owner during the first humanized pointer approach now produces zero
   clicks, zero submissions, and an explicit ownership failure in real Chromium.
+- A fifteenth exact-head standards review found that a Platform card could start
+  its More action while the primary action was running, and that selector tests
+  bypassed the normal inline action state. Each platform now has one shared
+  single-flight gate across its card and degraded banner. The gate is reserved
+  before the request factory can run, the primary action and every More action
+  are disabled while work is active, and selector tests use the same inline
+  pending, success, and failure path. A deferred-promise regression proves a
+  second request factory never starts. A safe localhost browser fixture then
+  exercised the corrected controls in dark and light themes at 1440 by 900 and
+  390 by 844. It found that the degraded-banner actions clipped on the phone
+  viewport, so those actions now wrap. The final phone render has no horizontal
+  overflow and keeps View diagnostics inside the viewport. No live platform
+  scan, send, reset, or database mutation was performed.
 - Scheduled sends, attachments, polls, focus acknowledgements, and other
   automated Instagram sends are rejected at the durable worker boundary. The
   dashboard no longer offers those unsupported actions.
