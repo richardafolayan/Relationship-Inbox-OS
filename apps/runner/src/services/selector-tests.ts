@@ -438,6 +438,18 @@ export function createSelectorTestService(deps: SelectorTestServiceDeps) {
     const reportId = uuid();
     const startedAt = new Date().toISOString();
 
+    if (input.platform === "INSTAGRAM") {
+      throw new SelectorTestServiceError(409, {
+        ok: false,
+        platform: input.platform,
+        stage: "connect",
+        error: "Instagram connection checks use Scan now because its inbox identity comes from network records, not stable DOM selectors.",
+        requestId,
+        reason: "instagram_selector_diagnostics_unavailable",
+        receipts: []
+      });
+    }
+
     const selectors = await deps.resolveSelectors(input.platform);
     if (input.key && input.selector) {
       selectors[input.key] = input.selector;

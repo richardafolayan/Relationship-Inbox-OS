@@ -902,12 +902,15 @@ export default function InboxPage() {
             degraded.lastScanFailure?.domDumpFile ??
             logs.find((log) => log.platform === degraded.platform && log.domDumpFile)?.domDumpFile
           }
-          onRunSelectorTests={() =>
-            runAction(
-              apiPost("/runner/control/platform/test-selectors", { platform: degraded.platform }),
-              setError,
-              refresh
-            )
+          onRunSelectorTests={
+            degraded.platform === "INSTAGRAM"
+              ? undefined
+              : () =>
+                  runAction(
+                    apiPost("/runner/control/platform/test-selectors", { platform: degraded.platform }),
+                    setError,
+                    refresh
+                  )
           }
           onOpenReceipts={() => setReceiptsOpen(true)}
         />

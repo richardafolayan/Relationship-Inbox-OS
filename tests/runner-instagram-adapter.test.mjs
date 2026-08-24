@@ -6,6 +6,9 @@ import {
   classifyInstagramThreadCollectionError,
   extractInstagramThreadSnapshotsFromPayload,
   findNewVerifiedInstagramOutgoing,
+  InstagramNetworkThreadCapture,
+  instagramEmptyInboxText,
+  instagramMessageFallbackKey,
   instagramAuthRequiredFromSignals,
   instagramThreadIdFromUrl,
   InstagramAdapter,
@@ -17,6 +20,7 @@ import {
 } from "../apps/runner/dist/platforms/instagram-adapter.js";
 import { assertInstagramManualTextSend } from "../apps/runner/dist/services/send.js";
 import {
+  createSelectorTestService,
   shouldCaptureSelectorArtifacts,
   shouldProbeSelectorTestConversation
 } from "../apps/runner/dist/services/selector-tests.js";
@@ -553,23 +557,50 @@ test("opening Instagram uses the exact thread URL and rejects identity mismatche
       error?.details?.reason === "opened_recipient_mismatch"
   );
 
-  for (const header of ["", "Joanne"]) {
-    const unverifiedRecipientPage = makePage({
-      openedUrl: "https://www.instagram.com/direct/t/safe-thread/",
-      header
-    });
-    await assert.rejects(
-      () =>
-        makeAdapter(unverifiedRecipientPage).openThread({
-          platformThreadId: "safe-thread",
-          displayName: header ? "Ann" : "Safe thread"
-        }),
-      (error) =>
-        error?.kind === "THREAD_NOT_FOUND" &&
-        error?.details?.reason === "opened_recipient_mismatch",
-      `header ${JSON.stringify(header)} must fail closed`
-    );
-  }
+  const unverifiedRecipientPage = makePage({
+    openedUrl: "https://www.instagram.com/direct/t/safe-thread/",
+    header: "Joanne"
+  });
+  await assert.rejects(
+    () =>
+      makeAdapter(unverifiedRecipientPage).openThread({
+        platformThreadId: "safe-thread",
+        displayName: "Ann"
+      }),
+    (error) =>
+      error?.kind === "THREAD_NOT_FOUND" &&
+      error?.details?.reason === "opened_recipient_mismatch"
+  );
+
+  const exactIdWithoutHeader = makePage({
+    openedUrl: "https://www.instagram.com/direct/t/safe-thread/",
+    header: ""
+  });
+  await makeAdapter(exactIdWithoutHeader).openThread({
+    platformThreadId: "safe-thread",
+    displayName: "Safe thread"
+  });
+
+  const invalidPersistedId = makePage({
+    openedUrl: "https://www.instagram.com/direct/t/safe-thread/"
+  });
+  await assert.rejects(
+    () =>
+      makeAdapter(invalidPersistedId).openThread({
+        platformThreadId: "not/a/stable/id",
+        threadUrl: "https://www.instagram.com/direct/t/safe-thread/",
+        displayName: "Safe thread"
+      }),
+    (error) =>
+      error?.kind === "THREAD_NOT_FOUND" &&
+      error?.details?.reason === "invalid_thread_id"
+  );
+});
+
+test("Instagram landing-pane copy is not evidence that a populated inbox is empty", () => {
+  assert.equal(instagramEmptyInboxText("Messages you send and receive will appear here."), false);
+  assert.equal(instagramEmptyInboxText("No conversations"), true);
+  assert.equal(instagramEmptyInboxText("No messages"), true);
 });
 
 test("message normalization preserves direction, exact timestamps and first-seen fallback", () => {
@@ -621,8 +652,8 @@ test("message keys are stable across rescans and deduplicate native ids", () => 
   const snapshots = [
     { direction: "IN", text: "Same text" },
     { direction: "IN", text: "Same text" },
-    { nativeId: "native-3", direction: "OUT", text: "Reply" },
-    { nativeId: "native-3", direction: "OUT", text: "Reply" }
+    { nativeId: "native-3", nativeIdStable: true, direction: "OUT", text: "Reply" },
+    { nativeId: "native-3", nativeIdStable: true, direction: "OUT", text: "Reply" }
   ];
   const first = normalizeInstagramMessageSnapshots("thread-3", snapshots);
   const second = normalizeInstagramMessageSnapshots("thread-3", snapshots);
@@ -633,6 +664,40 @@ test("message keys are stable across rescans and deduplicate native ids", () => 
   );
   assert.equal(first.length, 3);
   assert.notEqual(first[0].platformMessageKey, first[1].platformMessageKey);
+});
+
+test("volatile Instagram message metadata cannot impersonate a new outgoing message", () => {
+  const before = normalizeInstagramMessageSnapshots("thread-volatile", [
+    {
+      nativeId: "mount-a",
+      direction: "OUT",
+      text: "Reply"
+    }
+  ]);
+  const after = normalizeInstagramMessageSnapshots("thread-volatile", [
+    {
+      nativeId: "mount-b",
+      direction: "OUT",
+      text: "Reply",
+      senderName: "Me",
+      sourceTimestamp: "2026-08-24T08:00:00.000Z"
+    }
+  ]);
+
+  assert.equal(before[0].platformMessageKey, after[0].platformMessageKey);
+  assert.equal(findNewVerifiedInstagramOutgoing(before, after, "Reply"), null);
+});
+
+test("exact-layout receipts use the same key as later timestamp-less scans", () => {
+  const normalized = normalizeInstagramMessageSnapshots("thread-layout", [
+    { direction: "OUT", text: "Reply" },
+    { direction: "OUT", text: "Reply" }
+  ]);
+
+  assert.equal(
+    instagramMessageFallbackKey("thread-layout", "OUT", "Reply", undefined, 1),
+    normalized[1].platformMessageKey
+  );
 });
 
 test("fallback message keys stay attached to the same message when row order changes", () => {
@@ -713,7 +778,7 @@ test("send verification requires a new exact outgoing bubble", () => {
   assert.equal(
     findNewVerifiedInstagramOutgoing(before, submitted, "Approved smoke message")
       ?.platformMessageKey,
-    "instagram:new"
+    submitted[1].platformMessageKey
   );
 });
 
@@ -776,7 +841,11 @@ test("Instagram refuses to send through a disabled composer", async () => {
   );
 });
 
-function sendTestHarness({ observeSubmittedBubble, observeExactLayoutBubble = false }) {
+function sendTestHarness({
+  observeSubmittedBubble,
+  observeExactLayoutBubble = false,
+  switchThreadBeforeClick = false
+}) {
   let currentUrl = "about:blank";
   let submitted = false;
   let typed = "";
@@ -799,7 +868,12 @@ function sendTestHarness({ observeSubmittedBubble, observeExactLayoutBubble = fa
     }
   };
   const sendButton = {
-    count: async () => 1,
+    count: async () => {
+      if (switchThreadBeforeClick) {
+        currentUrl = "https://www.instagram.com/direct/t/wrong-thread/";
+      }
+      return 1;
+    },
     isVisible: async () => true,
     isEnabled: async () => true,
     getAttribute: async () => null,
@@ -864,7 +938,10 @@ function sendTestHarness({ observeSubmittedBubble, observeExactLayoutBubble = fa
       composer_input: "[contenteditable='true']",
       send_button: "[aria-label='Send']"
     }),
-    sessionManager: { getManagedPage: async () => page },
+    sessionManager: {
+      getManagedPage: async () => page,
+      revealWindow: async () => undefined
+    },
     personKey: "instagram",
     connectTimeoutMs: 50,
     sendVerificationTimeoutMs: 5
@@ -881,7 +958,10 @@ test("Instagram adapter reports success only after an exact new outgoing bubble"
 
   assert.equal(harness.wasSubmitted(), true);
   assert.equal(receipt.verifiedBy, "bubble_detected");
-  assert.equal(receipt.platformMessageKey, "instagram:new-out");
+  assert.equal(
+    receipt.platformMessageKey,
+    instagramMessageFallbackKey("safe-thread", "OUT", "x", undefined, 0)
+  );
 });
 
 test("Instagram adapter fails when submission produces no outgoing bubble", async () => {
@@ -913,6 +993,67 @@ test("Instagram adapter verifies an exact new outgoing layout bubble", async () 
   assert.equal(harness.wasSubmitted(), true);
   assert.equal(receipt.verifiedBy, "bubble_detected");
   assert.equal(receipt.raw?.verification, "exact_outgoing_layout_bubble");
+  assert.equal(
+    receipt.platformMessageKey,
+    instagramMessageFallbackKey("safe-thread", "OUT", "x", undefined, 0)
+  );
+});
+
+test("Instagram revalidates the exact thread after typing and before clicking Send", async () => {
+  const harness = sendTestHarness({
+    observeSubmittedBubble: false,
+    switchThreadBeforeClick: true
+  });
+
+  await assert.rejects(
+    () =>
+      harness.adapter.sendMessage(
+        { platformThreadId: "safe-thread", displayName: "Safe thread" },
+        "x"
+      ),
+    (error) => error?.details?.reason === "thread_changed_before_send"
+  );
+  assert.equal(harness.wasSubmitted(), false);
+});
+
+test("Instagram thread snapshots reject conflicting URL and record identities", () => {
+  assert.throws(
+    () =>
+      normalizeInstagramThreadSnapshots([
+        {
+          href: "https://www.instagram.com/direct/t/thread-b/",
+          stableId: "thread-a",
+          displayName: "Safe thread"
+        }
+      ]),
+    (error) =>
+      error instanceof InstagramParsingError &&
+      error.reason === "thread_identity_mismatch"
+  );
+});
+
+test("Instagram GraphQL capture isolates generations and prioritizes later responses", () => {
+  const capture = new InstagramNetworkThreadCapture();
+  const firstGeneration = capture.begin();
+  capture.accept(firstGeneration, [
+    { stableId: "old-1" },
+    { stableId: "old-2" }
+  ]);
+
+  const secondGeneration = capture.begin();
+  capture.accept(firstGeneration, [{ stableId: "stale-late" }]);
+  assert.deepEqual(capture.current(10), []);
+
+  capture.accept(secondGeneration, [
+    { stableId: "current-1" },
+    { stableId: "current-2" }
+  ]);
+  capture.accept(secondGeneration, [{ stableId: "newest" }]);
+
+  assert.deepEqual(
+    capture.current(2).map((snapshot) => snapshot.stableId),
+    ["newest", "current-1"]
+  );
 });
 
 test("Instagram selector diagnostics never capture content-bearing artifacts", () => {
@@ -920,4 +1061,22 @@ test("Instagram selector diagnostics never capture content-bearing artifacts", (
   assert.equal(shouldProbeSelectorTestConversation("INSTAGRAM"), false);
   assert.equal(shouldCaptureSelectorArtifacts("LINKEDIN"), true);
   assert.equal(shouldProbeSelectorTestConversation("LINKEDIN"), true);
+});
+
+test("Instagram selector diagnostics fail explicitly instead of reporting false selector counts", async () => {
+  const service = createSelectorTestService({
+    resolveSelectors: async () => {
+      throw new Error("Instagram diagnostics must not evaluate DOM selectors");
+    },
+    sessionManager: {},
+    screenshotDir: "/tmp",
+    domDumpDir: "/tmp"
+  });
+
+  await assert.rejects(
+    () => service.run({ platform: "INSTAGRAM" }),
+    (error) =>
+      error?.statusCode === 409 &&
+      error?.payload?.reason === "instagram_selector_diagnostics_unavailable"
+  );
 });

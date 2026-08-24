@@ -8,6 +8,7 @@ import {
   platformDiagnosticArtifactsAllowed,
   sanitizePlatformAuditInput
 } from "../apps/runner/dist/services/platform-diagnostics.js";
+import { createAuditService } from "../apps/runner/dist/services/audit.js";
 
 test("Instagram diagnostics cannot persist private values or content-bearing artifacts", async () => {
   const privateSentinel = "PRIVATE_ANN_https://instagram.example/thread/raw-id_message-body";
@@ -134,4 +135,47 @@ test("Instagram audit records preserve structure but strip private values and ar
   assert.equal(JSON.stringify(safe).includes(privateSentinel), false);
   assert.equal(platformDiagnosticArtifactsAllowed("INSTAGRAM"), false);
   assert.equal(platformDiagnosticArtifactsAllowed("LINKEDIN"), true);
+});
+
+test("audit privacy resolves the actual thread platform instead of trusting caller labels", async () => {
+  const privateSentinel = "PRIVATE_REMINDER_AND_THREAD_ID";
+  let persisted;
+  let platformLookups = 0;
+  const audit = createAuditService({
+    thread: {
+      findUnique: async ({ where }) => {
+        platformLookups += 1;
+        return where.id === privateSentinel ? { platform: "INSTAGRAM" } : null;
+      }
+    },
+    auditLog: {
+      create: async ({ data }) => {
+        persisted = data;
+        return { id: "audit-safe" };
+      }
+    }
+  });
+
+  await audit.log({
+    platform: "LINKEDIN",
+    action: "REMIND",
+    status: "OK",
+    details: {
+      threadId: privateSentinel,
+      reminderText: privateSentinel
+    }
+  });
+
+  assert.equal(persisted.platform, "INSTAGRAM");
+  assert.equal(persisted.threadId, undefined);
+  assert.equal(JSON.stringify(persisted).includes(privateSentinel), false);
+  assert.match(persisted.detailsJson, /\[redacted\]/);
+
+  await audit.log({
+    platform: "LINKEDIN",
+    action: "REMIND",
+    status: "OK",
+    details: { threadId: privateSentinel }
+  });
+  assert.equal(platformLookups, 1);
 });

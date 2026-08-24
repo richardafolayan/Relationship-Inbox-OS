@@ -66,7 +66,7 @@ test("inline action button renders running and successful states accessibly", ()
   );
   const success = renderToStaticMarkup(
     React.createElement(InlineActionButton, {
-      idleLabel: "Connect Instagram",
+      idleLabel: "Scan now",
       state: { phase: "success", label: "Instagram connected" },
       onClick: () => undefined
     })
@@ -76,6 +76,8 @@ test("inline action button renders running and successful states accessibly", ()
   assert.match(running, /aria-live="polite"/);
   assert.match(running, /Connecting Instagram/);
   assert.match(success, /data-phase="success"/);
+  assert.match(success, />Scan now<\/button>/);
+  assert.match(success, /role="status"/);
   assert.match(success, /Instagram connected/);
 });
 

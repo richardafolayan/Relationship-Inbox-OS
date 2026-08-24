@@ -5,8 +5,8 @@ import { resolve } from "node:path";
 
 // Source-contract guard for the send/scan focus-steal fix (companion to the
 // #420 bringToFront guard). The window only becomes visible via
-// revealBrowserWindow; that call must live ONLY in operator-initiated methods
-// of the LinkedIn adapter (openThread / openProfileUrl). If a regression adds
+// sessionManager.revealWindow; that call must live ONLY in operator-initiated
+// methods of the LinkedIn adapter (openThread / openProfileUrl). If a regression adds
 // it to a scan/send path it would surface Chrome mid-task again.
 
 const ADAPTER_PATH = "apps/runner/src/platforms/linkedin-adapter.ts";
@@ -31,12 +31,9 @@ function locateContainingMethodName(source, offset) {
   return matches.length ? matches[matches.length - 1][1] : null;
 }
 
-test("revealBrowserWindow appears only in operator-initiated adapter methods", () => {
+test("managed window reveal appears only in operator-initiated adapter methods", () => {
   const source = stripComments(readFileSync(resolve(process.cwd(), ADAPTER_PATH), "utf8"));
-  const occurrences = [...source.matchAll(/\brevealBrowserWindow\s*\(/g)].filter(
-    // skip the import line
-    (m) => !source.slice(Math.max(0, m.index - 40), m.index).includes("import")
-  );
+  const occurrences = [...source.matchAll(/\.revealWindow\s*\(/g)];
   assert.ok(occurrences.length >= 2, "openThread and openProfileUrl both reveal the window");
   const offenders = [];
   for (const occ of occurrences) {
@@ -45,7 +42,7 @@ test("revealBrowserWindow appears only in operator-initiated adapter methods", (
       offenders.push(containing ?? "(unknown)");
     }
   }
-  assert.deepEqual(offenders, [], `revealBrowserWindow in non-operator method(s): ${JSON.stringify(offenders)}`);
+  assert.deepEqual(offenders, [], `revealWindow in non-operator method(s): ${JSON.stringify(offenders)}`);
 });
 
 test("the LinkedIn send path does not reveal or foreground the window", () => {
@@ -54,7 +51,7 @@ test("the LinkedIn send path does not reveal or foreground the window", () => {
   assert.notEqual(start, -1, "sendMessage found");
   const end = source.indexOf("\n  }\n", start);
   const body = source.slice(start, end === -1 ? undefined : end);
-  assert.doesNotMatch(body, /\brevealBrowserWindow\s*\(/, "sendMessage must not reveal the window");
+  assert.doesNotMatch(body, /\.revealWindow\s*\(/, "sendMessage must not reveal the window");
   assert.doesNotMatch(body, /\bbringToFront\s*\(/, "sendMessage must not bringToFront");
   assert.doesNotMatch(body, /markVisibleLaunch/, "sendMessage must not request a visible launch");
 });

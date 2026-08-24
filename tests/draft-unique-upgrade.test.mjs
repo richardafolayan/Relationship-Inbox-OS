@@ -56,6 +56,18 @@ function createLegacyDraftTable(database) {
   `);
 }
 
+function createLegacySendRequestTable(database) {
+  database.exec(`
+    CREATE TABLE send_requests (
+      id TEXT PRIMARY KEY,
+      clientSendId TEXT NOT NULL,
+      threadId TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'PENDING',
+      requestText TEXT NOT NULL
+    )
+  `);
+}
+
 function insertDraft(database, id, threadId, text, updatedAt, createdAt = updatedAt) {
   database
     .prepare(
@@ -368,6 +380,7 @@ test("schema readiness check distinguishes legacy and repaired draft indexes", (
   try {
     let database = new Database(databasePath);
     createLegacyDraftTable(database);
+    createLegacySendRequestTable(database);
     database.close();
     const legacy = spawnSync(process.execPath, [repairScript, "--check", databasePath], {
       cwd: appDir,

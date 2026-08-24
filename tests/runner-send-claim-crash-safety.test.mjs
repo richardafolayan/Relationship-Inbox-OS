@@ -5,6 +5,7 @@ import {
   SEND_CLAIM_MARKER,
   isClaimMarker
 } from "../apps/runner/dist/services/send.js";
+import { AdapterFailure } from "../apps/runner/dist/platforms/utils.js";
 
 // ---------------------------------------------------------------------------
 // BUG PH5 — processSendRequest must atomically CLAIM the PENDING row before the
@@ -106,6 +107,12 @@ function makeHarness(initialRows, opts = {}) {
   const adapter = {
     async sendMessage(_stub, text) {
       sends.push(text);
+      if (opts.adapterFailure) {
+        throw opts.adapterFailure;
+      }
+      if (opts.adapterError) {
+        throw new Error(opts.adapterError);
+      }
       if (opts.crashAfterSend) {
         // Simulate the process dying AFTER the physical send but BEFORE the
         // terminal SENT write: the adapter delivered, then we throw past the
@@ -149,6 +156,7 @@ const pendingRow = (over = {}) => ({
   attachmentsJson: null,
   replyToMessageId: null,
   scheduledFor: null,
+  source: "manual",
   ...over
 });
 
@@ -175,7 +183,58 @@ test("worker refuses a stale scheduled Instagram row before any physical send", 
 
   assert.equal(sends.length, 0);
   assert.equal(rows[0].status, "FAILED");
-  assert.match(rows[0].errorJson, /user-triggered sends only/);
+  assert.equal(JSON.parse(rows[0].errorJson).reasonCode, "instagram_send_policy_rejected");
+});
+
+test("worker refuses persisted Instagram auto-ack provenance before any physical send", async () => {
+  const { svc, rows, sends } = makeHarness(
+    [pendingRow({ source: "focus_auto_ack" })],
+    { platform: "INSTAGRAM" }
+  );
+
+  await svc.processSendRequest("sr1");
+
+  assert.equal(sends.length, 0);
+  assert.equal(rows[0].status, "FAILED");
+  assert.equal(JSON.parse(rows[0].errorJson).reasonCode, "instagram_send_policy_rejected");
+});
+
+test("Instagram send failures never persist private platform URLs", async () => {
+  const privateUrl = "https://www.instagram.com/direct/t/private-thread-id/";
+  const { svc, rows } = makeHarness(
+    [pendingRow()],
+    { platform: "INSTAGRAM", adapterError: `navigation failed at ${privateUrl}` }
+  );
+
+  await svc.processSendRequest("sr1");
+
+  assert.equal(rows[0].status, "FAILED");
+  assert.equal(rows[0].errorJson.includes(privateUrl), false);
+  assert.equal(rows[0].errorJson.includes("private-thread-id"), false);
+});
+
+test("Instagram send failures discard diagnostic artifacts and unsafe reason values", async () => {
+  const privateSentinel = "PRIVATE_ARTIFACT_AND_REASON";
+  const { svc, rows } = makeHarness(
+    [pendingRow()],
+    {
+      platform: "INSTAGRAM",
+      adapterFailure: new AdapterFailure("Instagram send failed", {
+        kind: "THREAD_FETCH_FAILED",
+        platform: "INSTAGRAM",
+        stage: "persist",
+        screenshotFile: `${privateSentinel}.png`,
+        domDumpFile: `${privateSentinel}.html`,
+        details: { reason: privateSentinel }
+      })
+    }
+  );
+
+  await svc.processSendRequest("sr1");
+
+  assert.equal(rows[0].status, "FAILED");
+  assert.equal(rows[0].errorJson.includes(privateSentinel), false);
+  assert.equal(JSON.parse(rows[0].errorJson).reasonCode, undefined);
 });
 
 test("re-dispatch of an already-SENT row does NOT re-send (resume after a completed send)", async () => {

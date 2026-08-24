@@ -17,14 +17,26 @@ export function InlineActionButton({
   ...props
 }: InlineActionButtonProps) {
   return (
-    <button
-      {...props}
-      type={type}
-      disabled={disabled || state?.phase === "running"}
-      data-phase={state?.phase ?? "idle"}
-      aria-live="polite"
-    >
-      {state?.label ?? idleLabel}
-    </button>
+    <span className="inline-flex flex-wrap items-center gap-2 align-middle">
+      <button
+        {...props}
+        type={type}
+        disabled={disabled || state?.phase === "running"}
+        data-phase={state?.phase ?? "idle"}
+        aria-live={state?.phase === "running" ? "polite" : undefined}
+      >
+        {state?.phase === "running" ? state.label : idleLabel}
+      </button>
+      {state && state.phase !== "running" ? (
+        <span
+          role="status"
+          className={`font-mono text-[11px] ${
+            state.phase === "error" ? "text-ink-2" : "text-risk-fresh"
+          }`}
+        >
+          {state.label}
+        </span>
+      ) : null}
+    </span>
   );
 }

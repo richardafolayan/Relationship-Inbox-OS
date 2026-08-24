@@ -140,11 +140,17 @@ export interface ScheduleSendResult {
   replayed: boolean;
 }
 
+export type SendSource = "manual" | "focus_auto_ack";
+
+export function parsePersistedSendSource(value: unknown): SendSource | null {
+  return value === "manual" || value === "focus_auto_ack" ? value : null;
+}
+
 export function assertInstagramManualTextSend(input: {
   platform: PlatformName;
   scheduled?: boolean;
   attachmentCount?: number;
-  source?: "manual" | "focus_auto_ack";
+  source?: SendSource;
 }): void {
   if (input.platform !== "INSTAGRAM") {
     return;
@@ -177,7 +183,7 @@ export function createSendService(deps: SendServiceDeps) {
     text: string;
     clientSendId: string;
     attachments?: Array<{ absolutePath: string; displayName: string; mimeType?: string; kind?: string }>;
-    source?: "manual" | "focus_auto_ack";
+    source?: SendSource;
     /**
      * App-level threading: when set, the resulting Message row links back
      * to the parent (a Message.id cuid in the same thread). The send still
@@ -240,6 +246,7 @@ export function createSendService(deps: SendServiceDeps) {
           threadId: input.threadId,
           requestText: input.text,
           status: "PENDING",
+          source: input.source ?? "manual",
           attachmentsJson: input.attachments && input.attachments.length > 0
             ? JSON.stringify(input.attachments)
             : null,
@@ -355,11 +362,15 @@ export function createSendService(deps: SendServiceDeps) {
       const stagedAttachments = sendRequest.attachmentsJson
         ? (JSON.parse(sendRequest.attachmentsJson) as Array<{ absolutePath: string; displayName: string; mimeType?: string; kind?: string }>)
         : [];
+      const source = parsePersistedSendSource(sendRequest.source);
+      if (!source) {
+        throw new Error("Unknown persisted send source");
+      }
       assertInstagramManualTextSend({
         platform: thread.platform,
         scheduled: Boolean(sendRequest.scheduledFor),
         attachmentCount: stagedAttachments.length,
-        source: "manual"
+        source
       });
       if (inSandbox) {
         const manifest = await deps.settingsStore.getDemoSeedManifest();
@@ -525,6 +536,18 @@ export function createSendService(deps: SendServiceDeps) {
         adapterKind: adapterError?.kind
       });
       const consumerFailure = consumerSendFailure(errorKind);
+      const persistedErrorMessage =
+        thread.platform === "INSTAGRAM" ? consumerFailure.message : errorMessage;
+      const reasonCode =
+        thread.platform === "INSTAGRAM"
+          ? (typeof adapterError?.details?.reason === "string" &&
+              /^[a-z][a-z0-9_]{0,80}$/.test(adapterError.details.reason)
+              ? adapterError.details.reason
+              : undefined) ??
+            (/user-triggered sends only/i.test(errorMessage)
+              ? "instagram_send_policy_rejected"
+              : undefined)
+          : undefined;
 
       const logId = await deps.auditLog({
         platform: thread.platform as PlatformName,
@@ -545,10 +568,13 @@ export function createSendService(deps: SendServiceDeps) {
         data: {
           status: "FAILED",
           errorJson: JSON.stringify({
-            message: errorMessage,
+            message: persistedErrorMessage,
             errorKind,
-            screenshotFile: adapterError?.screenshotFile,
-            domDumpFile: adapterError?.domDumpFile,
+            reasonCode,
+            screenshotFile:
+              thread.platform === "INSTAGRAM" ? undefined : adapterError?.screenshotFile,
+            domDumpFile:
+              thread.platform === "INSTAGRAM" ? undefined : adapterError?.domDumpFile,
             logId
           })
         }
@@ -642,6 +668,7 @@ export function createSendService(deps: SendServiceDeps) {
           threadId: input.threadId,
           requestText: input.text,
           status: "SCHEDULED",
+          source: "manual",
           scheduledFor: input.scheduledFor,
           replyToMessageId: input.replyToMessageId ?? null,
           attachmentsJson: input.attachments && input.attachments.length > 0

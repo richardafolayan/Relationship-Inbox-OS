@@ -38,22 +38,11 @@ test("server setup validation and interactive connection include Instagram", () 
   assert.match(factorySource, /connectTimeoutMs: resolveConnectTimeoutMs\("personal"\)/);
 });
 
-test("Instagram reset is isolated from the shared browser profile", () => {
-  const instagramReset = runnerSource.indexOf('if (payload.platform === "INSTAGRAM")');
-  const sharedReset = runnerSource.indexOf(
-    "const summary = await sessionManager.resetPersonSession",
-    instagramReset
-  );
-  assert.ok(instagramReset > -1);
-  assert.ok(sharedReset > instagramReset);
-  assert.match(
-    runnerSource.slice(instagramReset, sharedReset),
-    /resolvePlatformSession\("INSTAGRAM"\)/
-  );
-  assert.match(
-    runnerSource.slice(instagramReset, sharedReset),
-    /where: \{ name: "INSTAGRAM" \}/
-  );
+test("session reset uses the isolated-platform reset plan", () => {
+  assert.match(runnerSource, /planPlatformSessionReset\(allPlatforms, payload\.platform\)/);
+  assert.match(runnerSource, /if \(resetPlan\.resetInstagramSession\)/);
+  assert.match(runnerSource, /resolvePlatformSession\("INSTAGRAM"\)/);
+  assert.match(runnerSource, /for \(const platform of resetPlan\.statusPlatforms\)/);
 });
 
 test("Instagram selectors and adapter never use a first-row or Enter-key send fallback", () => {

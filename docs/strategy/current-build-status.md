@@ -1,6 +1,6 @@
 # Current Build Status
 
-_Volatile. Update this whenever branches, commits, or build state change. Last updated: 2026-08-01._
+_Volatile. Update this whenever branches, commits, or build state change. Last updated: 2026-08-24._
 
 This file holds fast-moving build state on purpose. Branch tips and commit
 hashes go stale quickly, so verify live refs before starting work rather than
@@ -78,54 +78,50 @@ historical evidence rather than a guarantee about the newest `develop` tip:
 Re-run relevant checks against the current feature branch and merged `develop`
 before claiming those guarantees still hold.
 
-## Active Instagram feature verification
+## Active Instagram integration gate
 
-- Branch: `feat/instagram-platform`.
+- Pull request: [#1045](https://github.com/richardafolayan/Relationship-Inbox-OS/pull/1045),
+  `feat/instagram-platform` into `develop`.
+- Reviewed local integration branch: `fix/instagram-integration-gate`.
 - Base: `origin/develop` at
-  `23f01593e921150acf8fe6d362d02b5942daac7d`.
-- Instagram targeted tests pass, including availability, factory/session
-  routing, auth and verification gates, stable identities, deduplication,
-  direction, timestamp fallback, placeholders, exact-thread opening, manual
-  send restrictions, verified submission, and privacy-safe diagnostics.
-- Lint, type checking, documentation checks, Prisma generation, and the
-  production build pass.
-- The complete local suite has one existing LinkedIn fallback-scroll timing
-  failure under full parallel load. That exact browser test passes when rerun
-  alone. The browser-dependent Electron dictation and LinkedIn deep-scroll
-  fixtures also pass when run with the macOS permissions they require.
-- Setup, Settings, and Platforms were inspected at desktop and phone widths.
-- A live connection launch used installed standard Chrome with the dedicated
-  Instagram profile. The dedicated profile can now be seeded from a trusted
-  personal Chrome profile once without controlling or deleting the live
-  source. Later runner restarts preserve the app-owned login. On macOS, the
-  existing local Keychain cookie bridge injects the encrypted Instagram
-  session cookies without logging their values.
-- Manual login completed successfully and the runner reported the authenticated
-  Instagram inbox as connected across runner restarts. The earlier
-  verification-required state, profile reset, and disconnected state were also
-  observed. Connect and reveal now foreground the installed Chrome session
-  without launching a second Chrome for Testing window.
-- The current Instagram inbox DOM renders conversation rows as JavaScript
-  controls without stable thread links. The adapter now captures Instagram's
-  URL-facing Direct thread IDs from its own GraphQL responses and rejects the
-  separate internal message thread IDs. A live full scan discovered 30 stable
-  conversations, opened one exact canonical thread, and completed with zero
-  thread failures. It did not use row position or a first-row fallback.
-- One approved harmless send reached the exact accessible Send control and the
-  operator visually confirmed the outgoing message in the intended thread.
-  The current message-row selector did not observe the bubble before timeout,
-  so an exact-text, outgoing-layout verification fallback is implemented and
-  covered by browser-adapter tests but has not been exercised by a second live
-  send. A later read-only live scan extracted one outgoing message, and an
-  identical rescan kept the stored message count at one, verifying live
-  deduplication without sending another message.
+  `ddfba09f44470852c349e0a7f82c12230ba7d32d`.
+- The complete bounded-concurrency suite passes: 2,927 tests, zero failures,
+  zero skips, zero cancellations, and zero todos.
+- Dashboard, runner, and core type checks pass. The production dashboard build,
+  Prisma generation, documentation checks, schema-upgrade checks, and diff
+  whitespace check pass.
+- Instagram targeted coverage includes exact thread identity, pre-click
+  recipient revalidation, late GraphQL response isolation, stable message
+  reconciliation, delivery-uncertain failures, persisted send provenance,
+  retry safety, session-reset isolation, privacy-safe diagnostics, and the
+  explicit selector-diagnostics limitation.
+- Scheduled sends, attachments, polls, focus acknowledgements, and other
+  automated Instagram sends are rejected at the durable worker boundary. The
+  dashboard no longer offers those unsupported actions.
+- An isolated synthetic browser pass covered the Instagram thread, degraded
+  banners, and Platforms controls in dark and light themes at 1440 by 900,
+  1024 by 768, 390 by 844, and 320 by 568. It found no horizontal overflow or
+  fresh console errors. The pass did not open a live platform session or send
+  a real message.
+- The earlier live Instagram login, restart persistence, 30-thread scan,
+  canonical thread opening, one user-approved harmless send, and read-only
+  deduplication checks remain historical evidence from earlier branch commits.
+  They have not been repeated on the current integration head solely to create
+  another external action.
+- Physical iPhone and installed PWA suspension, keyboard, microphone, and
+  standalone-navigation checks still require a real device. Browser viewport
+  checks do not replace that native boundary.
 
 ## Next
 
-- Keep feature work based on `develop` and PRs targeted to `develop`.
-- Review the Instagram feature pull request and its clean-machine checks.
-- Review the live Instagram response-capture path and remaining inbound/media
-  extraction coverage without retrying an uncertain send.
+- Push the final reviewed Instagram head, require exact-head CI and adversarial
+  review, then merge pull request #1045 into `develop` if every gate remains
+  green.
+- Keep the broad full-product hardening branch as evidence. Move its confirmed
+  corrections through focused pull requests based on the new `develop` tip.
+- Finish the external-action safety, scheduled-send correctness, clean first
+  launch, composer recovery, setup ordering, and database-upgrade gates before
+  starting resume-to-fresh-state work.
 - Promote `develop` to `main` only when the full combined branch is release-ready.
 - Continue preparing and running the 3-5 student pilot.
 

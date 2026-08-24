@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 
 const DRAFT_THREAD_INDEX = "drafts_threadId_key";
+const SEND_SOURCE_COLUMN = "source";
 
 export function hasCorrectDraftThreadIndex(database) {
   const index = database
@@ -80,6 +81,54 @@ export function repairDraftUniqueness(database) {
   }).immediate();
 }
 
+export function hasSendRequestSourceColumn(database) {
+  const sendRequestsTable = database
+    .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'send_requests'")
+    .get();
+  if (!sendRequestsTable) return false;
+  const column = database
+    .prepare('PRAGMA table_info("send_requests")')
+    .all()
+    .find((candidate) => candidate.name === SEND_SOURCE_COLUMN);
+  return Boolean(
+    column &&
+      String(column.type).toUpperCase() === "TEXT" &&
+      Number(column.notnull) === 1 &&
+      String(column.dflt_value).replaceAll('"', "'") === "'manual'"
+  );
+}
+
+export function sendRequestSourceRequiresRepair(database) {
+  const sendRequestsTable = database
+    .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'send_requests'")
+    .get();
+  return Boolean(sendRequestsTable) && !hasSendRequestSourceColumn(database);
+}
+
+export function repairSendRequestSource(database) {
+  const sendRequestsTable = database
+    .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'send_requests'")
+    .get();
+  if (!sendRequestsTable) return { columnAdded: false };
+  if (hasSendRequestSourceColumn(database)) return { columnAdded: false };
+
+  const existingColumn = database
+    .prepare('PRAGMA table_info("send_requests")')
+    .all()
+    .find((candidate) => candidate.name === SEND_SOURCE_COLUMN);
+  if (existingColumn) {
+    throw new Error("Existing send request source column has an incompatible definition");
+  }
+
+  database.exec(
+    'ALTER TABLE "send_requests" ADD COLUMN "source" TEXT NOT NULL DEFAULT \'manual\''
+  );
+  if (!hasSendRequestSourceColumn(database)) {
+    throw new Error("Send request source column could not be validated");
+  }
+  return { columnAdded: true };
+}
+
 function runCli() {
   const checkOnly = process.argv[2] === "--check";
   const databasePath = process.argv[checkOnly ? 3 : 2];
@@ -92,9 +141,16 @@ function runCli() {
       const draftsTable = database
         .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'drafts'")
         .get();
-      if (!draftsTable || !hasCorrectDraftThreadIndex(database)) process.exitCode = 2;
+      if (
+        !draftsTable ||
+        !hasCorrectDraftThreadIndex(database) ||
+        sendRequestSourceRequiresRepair(database)
+      ) {
+        process.exitCode = 2;
+      }
     } else {
       repairDraftUniqueness(database);
+      repairSendRequestSource(database);
     }
   } finally {
     database.close();

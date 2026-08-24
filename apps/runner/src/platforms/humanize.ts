@@ -161,6 +161,8 @@ export interface HumanClickOptions {
   force?: boolean;
   /** Maximum wait for the element to be actionable. */
   timeout?: number;
+  /** Final safety check run after pointer movement and immediately before click. */
+  beforeClick?: () => Promise<void>;
 }
 
 /**
@@ -183,6 +185,7 @@ export async function humanClick(
     await humanCursorMove(page, target).catch(() => undefined);
   }
   await sleep(randInt(PRE_CLICK_HESITATION_MIN_MS, PRE_CLICK_HESITATION_MAX_MS));
+  await options.beforeClick?.();
   await (target as Locator | ElementHandle).click({
     force: options.force,
     timeout: options.timeout

@@ -104,12 +104,15 @@ export default function PlatformsPage() {
               row.lastScanFailure?.domDumpFile ??
               logs.find((log) => log.platform === row.platform && log.domDumpFile)?.domDumpFile
             }
-            onRunSelectorTests={() =>
-              runAction(
-                apiPost("/runner/control/platform/test-selectors", { platform: row.platform }),
-                setActionError,
-                refresh
-              )
+            onRunSelectorTests={
+              row.platform === "INSTAGRAM"
+                ? undefined
+                : () =>
+                    runAction(
+                      apiPost("/runner/control/platform/test-selectors", { platform: row.platform }),
+                      setActionError,
+                      refresh
+                    )
             }
             onOpenReceipts={() => setReceiptsOpen(true)}
           />
@@ -201,7 +204,7 @@ function PlatformCardView({
         ? "Sign in to enable"
         : null;
 
-  const report = row.latestSelectorReport;
+  const report = row.platform === "INSTAGRAM" ? undefined : row.latestSelectorReport;
   const passes = report?.results.filter((r) => r.status === "PASS").length ?? 0;
   const totalSelectors = report?.results.length ?? 0;
 
@@ -291,15 +294,19 @@ function PlatformCardView({
             }
           ]
         : []),
-    {
-      label: "Run selector tests",
-      onSelect: () =>
-        runAction(
-          apiPost("/runner/control/platform/test-selectors", { platform: row.platform }),
-          setActionError,
-          refresh
-        )
-    },
+    ...(row.platform === "INSTAGRAM"
+      ? []
+      : [
+          {
+            label: "Run selector tests",
+            onSelect: () =>
+              runAction(
+                apiPost("/runner/control/platform/test-selectors", { platform: row.platform }),
+                setActionError,
+                refresh
+              )
+          }
+        ]),
     {
       label: "Reset session…",
       danger: true,
@@ -455,7 +462,9 @@ function PlatformCardView({
             </div>
           ) : (
             <p className="mt-3 font-mono text-[12px] text-ink-3">
-              No selector report yet. Run selector tests to generate one.
+              {row.platform === "INSTAGRAM"
+                ? "Scan now checks Instagram and updates diagnostics."
+                : "No selector report yet. Run selector tests to generate one."}
             </p>
           )}
         </div>

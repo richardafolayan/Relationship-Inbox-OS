@@ -104,13 +104,15 @@ import {
   MESSAGE_SYNC_METRICS,
   type MessageSyncMetric
 } from "./services/message-sync-latency";
-import { createSendService } from "./services/send";
+import { createSendService, parsePersistedSendSource } from "./services/send";
 import { createSendQueue } from "./services/send-queue";
+import { planPlatformSessionReset } from "./services/platform-session-reset";
 import { createFocusAutoAckService } from "./services/focus-auto-ack";
 import {
   classifySendFailureKind,
   consumerSendFailure,
-  parsePersistedSendFailure
+  parsePersistedSendFailure,
+  persistedSendRetryEligibility
 } from "./services/send-failure";
 import { createReassessOnSendHandler } from "./services/reassess-on-send";
 import { createScheduledSendPromoter } from "./services/scheduled-send-promoter";
@@ -3938,7 +3940,7 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
       return;
     } catch (error) {
       await auditService.log({
-        platform: "LINKEDIN",
+        platform: target.platform,
         stage: "Send",
         action: "SEND_SCHEDULE_FAIL",
         status: "FAIL",
@@ -3974,7 +3976,7 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
     res.json(queueResult);
   } catch (error) {
     await auditService.log({
-      platform: "LINKEDIN",
+      platform: target.platform,
       stage: "Send",
       action: "SEND_ENQUEUE_FAIL",
       status: "FAIL",
@@ -4238,6 +4240,16 @@ app.post("/control/thread/:threadId/retry-send", asyncRoute(async (req, res) => 
     res.status(400).json({ error: "thread_mismatch" });
     return;
   }
+  const retryEligibility = persistedSendRetryEligibility(original.status, original.errorJson);
+  if (!retryEligibility.allowed) {
+    res.status(409).json({ error: retryEligibility.reason });
+    return;
+  }
+  const originalSource = parsePersistedSendSource(original.source);
+  if (!originalSource) {
+    res.status(409).json({ error: "invalid_send_source" });
+    return;
+  }
 
   // Preserve the original send's attachments and reply-threading so a retry
   // re-sends the same message, not a text-only stub. Staged attachment files
@@ -4262,13 +4274,14 @@ app.post("/control/thread/:threadId/retry-send", asyncRoute(async (req, res) => 
       threadId,
       text: original.requestText,
       clientSendId: newClientSendId,
+      source: originalSource,
       attachments: retryAttachments,
       replyToMessageId: original.replyToMessageId ?? undefined
     });
     res.json({ ...queueResult, clientSendId: newClientSendId });
   } catch (error) {
     await auditService.log({
-      platform: "LINKEDIN",
+      platform: retryTarget.platform,
       stage: "Send",
       action: "SEND_RETRY_FAIL",
       status: "FAIL",
@@ -8335,61 +8348,24 @@ app.post("/control/platform/reset-session", asyncRoute(async (req, res) => {
       await operationMutex.runExclusive(platformLockKey(platform), async () => undefined);
     }
 
-    if (payload.platform === "INSTAGRAM") {
+    const resetPlan = planPlatformSessionReset(allPlatforms, payload.platform);
+    if (resetPlan.resetSharedSession) {
+      await sessionManager.resetPersonSession({
+        personKey: defaultPersonKey,
+        reason: "manual_reset",
+        clearProfileDir: true
+      });
+    }
+    if (resetPlan.resetInstagramSession) {
       const route = resolvePlatformSession("INSTAGRAM");
-      const summary = await route.sessionManager.resetPersonSession({
+      await route.sessionManager.resetPersonSession({
         personKey: route.personKey,
         reason: "manual_reset",
         clearProfileDir: true
       });
-      await prisma.platform.upsert({
-        where: { name: "INSTAGRAM" },
-        update: {
-          status: "NOT_CONNECTED",
-          connectedAt: null,
-          lastError: null
-        },
-        create: {
-          name: "INSTAGRAM",
-          status: "NOT_CONNECTED"
-        }
-      });
-      await auditService.log({
-        platform: "INSTAGRAM",
-        stage: "Connect",
-        action: "RESET_SESSION_PLATFORM",
-        status: "OK",
-        details: {
-          resetScope: "PLATFORM_PROFILE",
-          personKey: summary.personKey,
-          profileDir: summary.profileDir,
-          clearedProfileDir: summary.clearedProfileDir
-        }
-      });
-      res.json({
-        status: "ok",
-        resetScope: "PLATFORM_PROFILE",
-        personKey: summary.personKey,
-        profileDir: summary.profileDir
-      });
-      return;
     }
 
-    const summary = await sessionManager.resetPersonSession({
-      personKey: defaultPersonKey,
-      reason: "manual_reset",
-      clearProfileDir: true
-    });
-
-    for (const platform of allPlatforms) {
-      // WHATSAPP is excluded: this reset clears the shared Playwright
-      // profile, but WhatsApp runs its own whatsapp-web.js session with a
-      // separate LocalAuth dir. Wiping its row (and connectedAt) here would
-      // make the dashboard hide a still-linked WhatsApp. Use
-      // /control/whatsapp/disconnect for that session instead.
-      if (platform === "WHATSAPP") {
-        continue;
-      }
+    for (const platform of resetPlan.statusPlatforms) {
       await prisma.platform.upsert({
         where: { name: platform },
         update: {
@@ -8407,21 +8383,20 @@ app.post("/control/platform/reset-session", asyncRoute(async (req, res) => {
     await auditService.log({
       platform: payload.platform,
       stage: "Connect",
-      action: "RESET_SESSION_SHARED",
+      action: "RESET_SESSION",
       status: "OK",
       details: {
-        resetScope: "PERSON_CONTEXT",
-        personKey: summary.personKey,
-        profileDir: summary.profileDir,
-        clearedProfileDir: summary.clearedProfileDir
+        resetScope: resetPlan.resetScope,
+        resetSharedSession: resetPlan.resetSharedSession,
+        resetInstagramSession: resetPlan.resetInstagramSession,
+        affectedPlatformCount: resetPlan.statusPlatforms.length
       }
     });
 
     res.json({
       status: "ok",
-      resetScope: "PERSON_CONTEXT",
-      personKey: summary.personKey,
-      profileDir: summary.profileDir
+      resetScope: resetPlan.resetScope,
+      affectedPlatforms: resetPlan.statusPlatforms
     });
   });
 }));

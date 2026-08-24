@@ -11,6 +11,7 @@ import { BetaAdapter, type BetaAdapterDependencies } from "./beta-adapter";
 import { ChromeCookieBridge } from "./chrome-cookie-bridge";
 import { AdapterFailure, cleanMessageText } from "./utils";
 import { humanClick, humanType, readingPause } from "./humanize";
+import { sanitizePlatformDiagnosticValue } from "../services/platform-diagnostics";
 
 const INSTAGRAM_ORIGIN = "https://www.instagram.com";
 const THREAD_PATH = /^\/direct\/t\/([^/?#]+)\/?$/i;
@@ -40,6 +41,7 @@ export type InstagramDirectionEvidence = "IN" | "OUT" | "AMBIGUOUS";
 
 export interface InstagramMessageSnapshot {
   nativeId?: string;
+  nativeIdStable?: boolean;
   direction: InstagramDirectionEvidence;
   text?: string;
   senderName?: string;
@@ -148,7 +150,11 @@ export function normalizeInstagramThreadSnapshots(
 
   for (const snapshot of snapshots) {
     const hrefId = instagramThreadIdFromUrl(snapshot.href);
-    const platformThreadId = hrefId ?? (isStableInstagramId(snapshot.stableId) ? snapshot.stableId : null);
+    const stableId = isStableInstagramId(snapshot.stableId) ? snapshot.stableId : null;
+    if (hrefId && stableId && hrefId !== stableId) {
+      throw new InstagramParsingError("thread_identity_mismatch");
+    }
+    const platformThreadId = hrefId ?? stableId;
     if (!platformThreadId) {
       throw new InstagramParsingError("thread_missing_stable_identity");
     }
@@ -295,24 +301,30 @@ export function findNewVerifiedInstagramOutgoing(
   text: string
 ): NormalizedMessage | null {
   const normalizedText = cleanMessageText(text);
-  const beforeKeys = new Set(
-    before
-      .filter(
-        (message) =>
-          message.direction === "OUT" && cleanMessageText(message.text) === normalizedText
-      )
-      .map((message) => message.platformMessageKey)
-      .filter((key): key is string => Boolean(key))
+  const beforeMatches = before.filter(
+    (message) =>
+      message.direction === "OUT" && cleanMessageText(message.text) === normalizedText
   );
-  return (
-    after
-      .filter(
-        (message) =>
-          message.direction === "OUT" && cleanMessageText(message.text) === normalizedText
-      )
-      .find((message) => !message.platformMessageKey || !beforeKeys.has(message.platformMessageKey)) ??
-    null
+  const afterMatches = after.filter(
+    (message) =>
+      message.direction === "OUT" && cleanMessageText(message.text) === normalizedText
   );
+  return afterMatches.length > beforeMatches.length
+    ? afterMatches[beforeMatches.length] ?? afterMatches.at(-1) ?? null
+    : null;
+}
+
+export function instagramMessageFallbackKey(
+  platformThreadId: string,
+  direction: "IN" | "OUT",
+  text: string,
+  attachmentType: string | undefined,
+  occurrence: number
+): string {
+  const signature = [direction, cleanMessageText(text), attachmentType ?? ""].join("\u001f");
+  return `instagram:${stableHash(
+    [platformThreadId, signature, String(occurrence)].join("\u001e")
+  )}`;
 }
 
 function placeholderForSnapshot(snapshot: InstagramMessageSnapshot): {
@@ -353,30 +365,33 @@ export function normalizeInstagramMessageSnapshots(
         : undefined;
     const text = snapshot.deleted ? placeholder!.text : cleanedText || placeholder!.text;
     const senderName = snapshot.senderName?.replace(/\s+/g, " ").trim() || undefined;
-    const signature = [
-      snapshot.direction,
-      text,
-      sourceTimestamp ?? "",
-      senderName ?? "",
-      placeholder?.attachmentType ?? ""
-    ].join("\u001f");
+    const signature = [snapshot.direction, text, placeholder?.attachmentType ?? ""].join("\u001f");
     return { snapshot, sourceTimestamp, text, senderName, placeholder, signature };
   });
 
   const occurrences = new Map<string, number>();
   const seenKeys = new Set<string>();
+  const seenStableNativeIds = new Set<string>();
   const messages: NormalizedMessage[] = [];
 
   for (let index = 0; index < prepared.length; index += 1) {
     const item = prepared[index]!;
+    const nativeId = item.snapshot.nativeId?.trim();
+    if (item.snapshot.nativeIdStable && nativeId) {
+      if (seenStableNativeIds.has(nativeId)) {
+        continue;
+      }
+      seenStableNativeIds.add(nativeId);
+    }
     const occurrence = occurrences.get(item.signature) ?? 0;
     occurrences.set(item.signature, occurrence + 1);
-    const nativeId = item.snapshot.nativeId?.trim();
-    const key = nativeId
-      ? `instagram:${nativeId}`
-      : `instagram:${stableHash(
-          [platformThreadId, item.signature, String(occurrence)].join("\u001e")
-        )}`;
+    const key = instagramMessageFallbackKey(
+      platformThreadId,
+      item.snapshot.direction as "IN" | "OUT",
+      item.text,
+      item.placeholder?.attachmentType,
+      occurrence
+    );
 
     if (seenKeys.has(key)) {
       continue;
@@ -417,17 +432,77 @@ export function normalizeInstagramMessageSnapshots(
 
 function threadIdForStub(thread: ThreadStub): string {
   const fromUrl = instagramThreadIdFromUrl(thread.threadUrl);
-  if (fromUrl) {
-    return fromUrl;
+  if (thread.threadUrl?.trim() && !fromUrl) {
+    throw new InstagramParsingError("invalid_thread_url");
   }
-  const fromPlatformId = instagramThreadIdFromUrl(thread.platformThreadId);
-  if (fromPlatformId) {
-    return fromPlatformId;
+  const fromPlatformUrl = instagramThreadIdFromUrl(thread.platformThreadId);
+  const fromPlatformId = fromPlatformUrl ??
+    (isStableInstagramId(thread.platformThreadId) ? thread.platformThreadId : null);
+  if (!fromPlatformId) {
+    throw new InstagramParsingError("invalid_thread_id");
   }
-  if (isStableInstagramId(thread.platformThreadId)) {
-    return thread.platformThreadId;
+  if (fromUrl && fromPlatformId && fromUrl !== fromPlatformId) {
+    throw new InstagramParsingError("thread_identity_mismatch");
   }
-  throw new InstagramParsingError("invalid_thread_id");
+  return fromPlatformId;
+}
+
+interface CapturedInstagramThread {
+  snapshot: InstagramThreadSnapshot;
+  batch: number;
+  position: number;
+}
+
+export class InstagramNetworkThreadCapture {
+  private generation = 0;
+  private batch = 0;
+  private readonly byId = new Map<string, CapturedInstagramThread>();
+
+  begin(): number {
+    this.generation += 1;
+    this.batch = 0;
+    this.byId.clear();
+    return this.generation;
+  }
+
+  currentGeneration(): number {
+    return this.generation;
+  }
+
+  accept(generation: number, snapshots: InstagramThreadSnapshot[]): void {
+    if (generation !== this.generation) {
+      return;
+    }
+    this.batch += 1;
+    for (let position = 0; position < snapshots.length; position += 1) {
+      const snapshot = snapshots[position]!;
+      if (!snapshot.stableId) {
+        continue;
+      }
+      const existing = this.byId.get(snapshot.stableId)?.snapshot;
+      this.byId.set(snapshot.stableId, {
+        snapshot: {
+          ...existing,
+          ...snapshot,
+          displayName: snapshot.displayName ?? existing?.displayName,
+          unread: snapshot.unread ?? existing?.unread
+        },
+        batch: this.batch,
+        position
+      });
+    }
+  }
+
+  current(limit: number): InstagramThreadSnapshot[] {
+    return [...this.byId.values()]
+      .sort((left, right) => right.batch - left.batch || left.position - right.position)
+      .slice(0, Math.max(0, limit))
+      .map((entry) => entry.snapshot);
+  }
+}
+
+export function instagramEmptyInboxText(bodyText: string): boolean {
+  return /\bno messages\b|\bno conversations\b/i.test(bodyText);
 }
 
 export class InstagramAdapter extends BetaAdapter {
@@ -436,10 +511,8 @@ export class InstagramAdapter extends BetaAdapter {
   private lastCookieSyncAt: number | null = null;
   private readonly shimmedContexts = new WeakSet<BrowserContext>();
   private readonly networkCapturePages = new WeakSet<Page>();
-  private readonly networkThreadSnapshots = new WeakMap<
-    Page,
-    Map<string, InstagramThreadSnapshot>
-  >();
+  private readonly networkThreadCaptures = new WeakMap<Page, InstagramNetworkThreadCapture>();
+  private readonly networkRequestGenerations = new WeakMap<object, number>();
 
   constructor(deps: InstagramAdapterDependencies) {
     super({ ...deps, platform: "INSTAGRAM" });
@@ -461,8 +534,11 @@ export class InstagramAdapter extends BetaAdapter {
       return;
     }
     this.networkCapturePages.add(page);
-    const byId = new Map<string, InstagramThreadSnapshot>();
-    this.networkThreadSnapshots.set(page, byId);
+    const capture = new InstagramNetworkThreadCapture();
+    this.networkThreadCaptures.set(page, capture);
+    page.on("request", (request: object) => {
+      this.networkRequestGenerations.set(request, capture.currentGeneration());
+    });
     page.on("response", (response: any) => {
       let url: URL;
       try {
@@ -478,28 +554,28 @@ export class InstagramAdapter extends BetaAdapter {
       ) {
         return;
       }
+      const request = typeof response.request === "function" ? response.request() : null;
+      const generation = request
+        ? this.networkRequestGenerations.get(request)
+        : capture.currentGeneration();
+      if (generation === undefined) {
+        return;
+      }
       void response
         .json()
         .then((payload: unknown) => {
-          for (const snapshot of extractInstagramThreadSnapshotsFromPayload(payload)) {
-            if (!snapshot.stableId) {
-              continue;
-            }
-            const existing = byId.get(snapshot.stableId);
-            byId.set(snapshot.stableId, {
-              ...existing,
-              ...snapshot,
-              displayName: snapshot.displayName ?? existing?.displayName,
-              unread: snapshot.unread ?? existing?.unread
-            });
-          }
+          capture.accept(generation, extractInstagramThreadSnapshotsFromPayload(payload));
         })
         .catch(() => undefined);
     });
   }
 
-  private capturedNetworkThreads(page: Page): InstagramThreadSnapshot[] {
-    return [...(this.networkThreadSnapshots.get(page)?.values() ?? [])];
+  private beginNetworkThreadCapture(page: Page): void {
+    this.networkThreadCaptures.get(page)?.begin();
+  }
+
+  private capturedNetworkThreads(page: Page, limit = Number.MAX_SAFE_INTEGER): InstagramThreadSnapshot[] {
+    return this.networkThreadCaptures.get(page)?.current(limit) ?? [];
   }
 
   private async waitForCapturedNetworkThreads(page: Page, timeoutMs: number): Promise<void> {
@@ -795,7 +871,7 @@ export class InstagramAdapter extends BetaAdapter {
       },
       { selectors, limit }
     );
-    return [...domSnapshots, ...this.capturedNetworkThreads(page)].slice(0, limit);
+    return [...this.capturedNetworkThreads(page, limit), ...domSnapshots].slice(0, limit);
   }
 
   private async probeThreadDom(page: Page): Promise<Record<string, unknown>> {
@@ -809,7 +885,6 @@ export class InstagramAdapter extends BetaAdapter {
       const directPathPatterns = new Set<string>();
       const candidateShapes = new Map<string, number>();
       const reactMetadataKeyPaths = new Set<string>();
-      const resourcePathPatterns = new Set<string>();
       const seenMetadata = new WeakSet<object>();
       const collectMetadataKeys = (
         value: unknown,
@@ -853,29 +928,10 @@ export class InstagramAdapter extends BetaAdapter {
           if (segments[0] === "direct" && segments[1] === "t" && segments.length >= 3) {
             directPathPatterns.add("/direct/t/:id/");
           } else {
-            directPathPatterns.add(`/${segments.join("/")}/`);
+            directPathPatterns.add("other_direct_path");
           }
         } catch {
           directPathPatterns.add("invalid_direct_url");
-        }
-      }
-      for (const entry of performance.getEntriesByType("resource").slice(-300)) {
-        if (!("name" in entry) || typeof entry.name !== "string") {
-          continue;
-        }
-        try {
-          const url = new URL(entry.name);
-          if (url.hostname !== "www.instagram.com" && url.hostname !== "instagram.com") {
-            continue;
-          }
-          if (!/direct|inbox|graphql|ajax|api/i.test(url.pathname)) {
-            continue;
-          }
-          resourcePathPatterns.add(
-            `${url.pathname}?${[...url.searchParams.keys()].sort().join(",")}`
-          );
-        } catch {
-          continue;
         }
       }
       const controls = Array.from(
@@ -932,8 +988,7 @@ export class InstagramAdapter extends BetaAdapter {
           0
         ),
         candidateShapes: [...candidateShapes.entries()].slice(0, 12),
-        reactMetadataKeyPaths: [...reactMetadataKeyPaths].sort().slice(0, 80),
-        resourcePathPatterns: [...resourcePathPatterns].sort().slice(0, 30)
+        reactMetadataKeyPaths: [...reactMetadataKeyPaths].sort().slice(0, 80)
       };
     });
   }
@@ -942,6 +997,7 @@ export class InstagramAdapter extends BetaAdapter {
     const selectors = await this.deps.resolveSelectors();
     const page = await this.getPage();
     try {
+      this.beginNetworkThreadCapture(page);
       await this.navigateToInbox(page, selectors, 12_000);
       await Promise.race([
         page
@@ -954,14 +1010,18 @@ export class InstagramAdapter extends BetaAdapter {
         const emptyInbox = await page
           .evaluate(() => {
             const text = document.body?.innerText?.toLowerCase() ?? "";
-            return /no messages|no conversations|messages you send and receive/.test(text);
+            return /\bno messages\b|\bno conversations\b/i.test(text);
           })
           .catch(() => false);
         if (!emptyInbox) {
           const structuralDetails = await this.probeThreadDom(page).catch(() => ({
             documentProbeFailed: true
           }));
-          console.warn(`[instagram-thread-probe] ${JSON.stringify(structuralDetails)}`);
+          console.warn(
+            `[instagram-thread-probe] ${JSON.stringify(
+              sanitizePlatformDiagnosticValue("INSTAGRAM", structuralDetails)
+            )}`
+          );
           throw this.safeFailure(
             "SELECTOR_MISMATCH",
             "collect_threads",
@@ -996,7 +1056,8 @@ export class InstagramAdapter extends BetaAdapter {
   private async openExactThread(
     page: Page,
     selectors: SelectorRegistry,
-    thread: ThreadStub
+    thread: ThreadStub,
+    requireRecipientHeader = false
   ): Promise<string> {
     const platformThreadId = threadIdForStub(thread);
     await page.goto(canonicalInstagramThreadUrl(platformThreadId), {
@@ -1011,11 +1072,31 @@ export class InstagramAdapter extends BetaAdapter {
       page.waitForSelector(selectors.message_item, { timeout: 12_000 })
     ]);
 
+    await this.verifyCurrentThreadIdentity(
+      page,
+      selectors,
+      thread,
+      platformThreadId,
+      requireRecipientHeader,
+      "open"
+    );
+
+    return platformThreadId;
+  }
+
+  private async verifyCurrentThreadIdentity(
+    page: Page,
+    selectors: SelectorRegistry,
+    thread: ThreadStub,
+    platformThreadId: string,
+    requireRecipientHeader: boolean,
+    phase: "open" | "before_send"
+  ): Promise<void> {
     if (!instagramThreadUrlMatches(page.url(), platformThreadId)) {
       throw this.safeFailure(
         "THREAD_NOT_FOUND",
         "open_thread",
-        "opened_thread_id_mismatch",
+        phase === "before_send" ? "thread_changed_before_send" : "opened_thread_id_mismatch",
         platformThreadId
       );
     }
@@ -1038,20 +1119,24 @@ export class InstagramAdapter extends BetaAdapter {
       .trim()
       .normalize("NFKC")
       .toLocaleLowerCase();
-    if (
-      normalizedRecipient &&
-      normalizedRecipient !== "instagram conversation" &&
-      normalizedHeader !== normalizedRecipient
-    ) {
+    const hasSpecificRecipient =
+      Boolean(normalizedRecipient) && normalizedRecipient !== "instagram conversation";
+    if (requireRecipientHeader && (!hasSpecificRecipient || !normalizedHeader)) {
       throw this.safeFailure(
         "THREAD_NOT_FOUND",
         "open_thread",
-        "opened_recipient_mismatch",
+        phase === "before_send" ? "recipient_unverified_before_send" : "recipient_unverified",
         platformThreadId
       );
     }
-
-    return platformThreadId;
+    if (normalizedHeader && hasSpecificRecipient && normalizedHeader !== normalizedRecipient) {
+      throw this.safeFailure(
+        "THREAD_NOT_FOUND",
+        "open_thread",
+        phase === "before_send" ? "recipient_changed_before_send" : "opened_recipient_mismatch",
+        platformThreadId
+      );
+    }
   }
 
   private async snapshotMessages(
@@ -1125,11 +1210,7 @@ export class InstagramAdapter extends BetaAdapter {
           const idNode = query(root, selectors.message_id);
           const nativeId =
             root.getAttribute("data-message-id") ||
-            root.getAttribute("data-id") ||
-            root.id ||
             idNode?.getAttribute("data-message-id") ||
-            idNode?.getAttribute("data-id") ||
-            idNode?.id ||
             undefined;
           const textNode = query(root, selectors.message_text);
           const timestampNode = query(root, selectors.message_timestamp ?? "time[datetime]");
@@ -1157,6 +1238,7 @@ export class InstagramAdapter extends BetaAdapter {
                   : "attachment";
           return {
             nativeId,
+            nativeIdStable: Boolean(nativeId),
             direction,
             text: clean(textNode?.textContent),
             senderName: clean(senderNode?.textContent) || undefined,
@@ -1375,7 +1457,19 @@ export class InstagramAdapter extends BetaAdapter {
         composer,
         selectors.send_button
       );
-      await humanClick(page, sendButton, { timeout: 10_000, reading: null });
+      await humanClick(page, sendButton, {
+        timeout: 10_000,
+        reading: null,
+        beforeClick: () =>
+          this.verifyCurrentThreadIdentity(
+            page,
+            selectors,
+            thread,
+            platformThreadId!,
+            true,
+            "before_send"
+          )
+      });
 
       const deadline =
         Date.now() + (this.instagramDeps.sendVerificationTimeoutMs ?? 12_000);
@@ -1407,14 +1501,13 @@ export class InstagramAdapter extends BetaAdapter {
             sentAt: new Date().toISOString(),
             acknowledgedAt: new Date().toISOString(),
             verifiedBy: "bubble_detected",
-            platformMessageKey: `instagram:${stableHash(
-              [
-                platformThreadId,
-                "OUT",
-                normalizedText,
-                String(exactOutgoingAfter)
-              ].join("\u001e")
-            )}`,
+            platformMessageKey: instagramMessageFallbackKey(
+              platformThreadId,
+              "OUT",
+              normalizedText,
+              undefined,
+              Math.max(0, exactOutgoingAfter - 1)
+            ),
             raw: { verification: "exact_outgoing_layout_bubble" }
           };
         }
@@ -1441,7 +1534,19 @@ export class InstagramAdapter extends BetaAdapter {
   async openThread(thread: ThreadStub): Promise<void> {
     const selectors = await this.deps.resolveSelectors();
     const page = await this.getPage();
-    await page.bringToFront();
-    await this.openExactThread(page, selectors, thread);
+    try {
+      await this.openExactThread(page, selectors, thread);
+    } catch (error) {
+      if (error instanceof AdapterFailure) {
+        throw error;
+      }
+      const reason =
+        error instanceof InstagramParsingError ? error.reason : "open_thread_failed";
+      throw this.safeFailure("THREAD_NOT_FOUND", "open_thread", reason, undefined, error);
+    } finally {
+      await this.instagramDeps.sessionManager
+        .revealWindow?.("INSTAGRAM", this.instagramDeps.personKey)
+        .catch(() => undefined);
+    }
   }
 }
