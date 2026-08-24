@@ -14,6 +14,32 @@ export interface PollVoteRecord {
   votedAt: string | null;
 }
 
+export type CollectionBoundaryStopReason =
+  | "max_threads"
+  | "max_duration"
+  | "max_iterations"
+  | "no_scroll_container"
+  | "deep_scroll_disabled"
+  | "end_of_list_no_progress"
+  | "instagram_bounded_snapshot"
+  | "zero_threads_found"
+  | "end_of_list_reached"
+  | "deep_scroll_exhausted"
+  | "unchanged_streak";
+
+export interface PlatformCollectionBoundaryMetrics {
+  totalFound: number;
+  unreadFound: number;
+  failures?: number;
+  stopReason: CollectionBoundaryStopReason;
+  [key: string]: unknown;
+}
+
+export interface PlatformCollectionBoundaryCapability {
+  beginCycle(): void;
+  getMetrics(): PlatformCollectionBoundaryMetrics;
+}
+
 export interface PlatformAdapter {
   platform: PlatformName;
   ensureConnected(): Promise<void>;
@@ -26,6 +52,11 @@ export interface PlatformAdapter {
   connectInteractively?(): Promise<void>;
   scanUnreadThreads(): Promise<ThreadStub[]>;
   fetchRecentThreads(limit: number): Promise<ThreadStub[]>;
+  /**
+   * Optional proof about whether candidate discovery reached an authoritative
+   * inbox boundary. When present, scan freshness must respect its result.
+   */
+  collectionBoundary?: PlatformCollectionBoundaryCapability;
   /**
    * Optional targeted lookup used when a platform event identifies the exact
    * conversation that changed. Falls back to the normal unread/recent scan

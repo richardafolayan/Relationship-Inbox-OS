@@ -153,6 +153,11 @@ test("a collector that cannot prove the inbox boundary stays degraded", () => {
     collectionIncomplete: false,
     collectionFailures: 0
   });
+  assert.deepEqual(resolveCollectionBoundaryFreshness("renamed_boundary", 0, true), {
+    candidateCapBroke: false,
+    collectionIncomplete: true,
+    collectionFailures: 0
+  });
 });
 
 test("collector row failures are included in the platform failure gate", () => {

@@ -7877,6 +7877,18 @@ export class LinkedInAdapter implements PlatformAdapter {
           }
 
           noNewRowKeysStreak = rowPass.newRowsSeen > 0 ? 0 : noNewRowKeysStreak + 1;
+          if (options.disableDeepScroll) {
+            metrics.stopReason = "deep_scroll_disabled";
+            this.logTraceDecision({
+              stage: "collect_threads",
+              decision: "Stopped streaming collection because deep scroll is disabled for this run",
+              details: {
+                processedRows: metrics.processedRows,
+                stopReason: metrics.stopReason
+              }
+            });
+            break;
+          }
           if (!scrollResolution) {
             metrics.stopReason = "no_scroll_container";
             this.logTraceEvent({

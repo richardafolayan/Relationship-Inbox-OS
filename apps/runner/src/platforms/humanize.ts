@@ -163,6 +163,8 @@ export interface HumanClickOptions {
   timeout?: number;
   /** Final safety check run after pointer movement and immediately before click. */
   beforeClick?: () => Promise<void>;
+  /** Custom click operation for callers that must combine validation and mutation atomically. */
+  performClick?: () => Promise<void>;
 }
 
 /**
@@ -186,6 +188,10 @@ export async function humanClick(
   }
   await sleep(randInt(PRE_CLICK_HESITATION_MIN_MS, PRE_CLICK_HESITATION_MAX_MS));
   await options.beforeClick?.();
+  if (options.performClick) {
+    await options.performClick();
+    return;
+  }
   await (target as Locator | ElementHandle).click({
     force: options.force,
     timeout: options.timeout
@@ -205,6 +211,8 @@ export interface HumanTypeOptions {
   bindKeystrokesToTarget?: boolean;
   /** Final safety check run immediately before each typed unit. */
   beforeTypeUnit?: (unit: string, index: number) => Promise<void>;
+  /** Custom unit operation for callers that must combine validation and mutation atomically. */
+  typeUnit?: (unit: string, index: number) => Promise<void>;
 }
 
 /**
@@ -250,7 +258,9 @@ export async function humanType(
   for (let i = 0; i < units.length; i += 1) {
     const unit = units[i] ?? "";
     await options.beforeTypeUnit?.(unit, i);
-    if (options.bindKeystrokesToTarget) {
+    if (options.typeUnit) {
+      await options.typeUnit(unit, i);
+    } else if (options.bindKeystrokesToTarget) {
       await (target as Locator | ElementHandle).type(unit);
     } else {
       await page.keyboard.type(unit);

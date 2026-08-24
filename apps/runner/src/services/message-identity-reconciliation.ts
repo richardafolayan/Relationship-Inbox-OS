@@ -102,7 +102,8 @@ export function resolvePlatformScanFreshness(input: {
 
 export function resolveCollectionBoundaryFreshness(
   stopReason: unknown,
-  failures: unknown = 0
+  failures: unknown = 0,
+  boundaryReported = false
 ): {
   candidateCapBroke: boolean;
   collectionIncomplete: boolean;
@@ -123,6 +124,17 @@ export function resolveCollectionBoundaryFreshness(
     stopReason === "end_of_list_no_progress" ||
     stopReason === "instagram_bounded_snapshot"
   ) {
+    return { candidateCapBroke: false, collectionIncomplete: true, collectionFailures };
+  }
+  if (
+    stopReason === "zero_threads_found" ||
+    stopReason === "end_of_list_reached" ||
+    stopReason === "deep_scroll_exhausted" ||
+    stopReason === "unchanged_streak"
+  ) {
+    return { candidateCapBroke: false, collectionIncomplete: false, collectionFailures };
+  }
+  if (boundaryReported) {
     return { candidateCapBroke: false, collectionIncomplete: true, collectionFailures };
   }
   return { candidateCapBroke: false, collectionIncomplete: false, collectionFailures };

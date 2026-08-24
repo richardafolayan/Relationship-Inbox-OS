@@ -3,6 +3,7 @@ import {
   stableHash,
   type NormalizedMessage,
   type OutboundAttachment,
+  type PlatformCollectionBoundaryCapability,
   type SelectorRegistry,
   type SendReceipt,
   type ThreadStub
@@ -195,9 +196,13 @@ export function mergeInstagramThreadSnapshotSources(input: {
   domSnapshots: InstagramThreadSnapshot[];
   limit: number;
 }): ThreadStub[] {
+  const currentDomSnapshots = [
+    ...input.domSnapshots.filter((snapshot) => snapshot.unread),
+    ...input.domSnapshots.filter((snapshot) => !snapshot.unread)
+  ];
   return normalizeInstagramThreadSnapshots([
-    ...input.networkSnapshots,
-    ...input.domSnapshots
+    ...currentDomSnapshots,
+    ...input.networkSnapshots
   ]).slice(0, Math.max(0, input.limit));
 }
 
@@ -570,11 +575,17 @@ interface CapturedInstagramThread {
 export class InstagramNetworkThreadCapture {
   private generation = 0;
   private nextRequestOrder = 0;
+  private pendingRequests = 0;
+  private successfulResponses = 0;
+  private failedRequests = 0;
   private readonly byId = new Map<string, CapturedInstagramThread>();
 
   begin(): number {
     this.generation += 1;
     this.nextRequestOrder = 0;
+    this.pendingRequests = 0;
+    this.successfulResponses = 0;
+    this.failedRequests = 0;
     this.byId.clear();
     return this.generation;
   }
@@ -590,6 +601,38 @@ export class InstagramNetworkThreadCapture {
     const requestOrder = this.nextRequestOrder;
     this.nextRequestOrder += 1;
     return requestOrder;
+  }
+
+  startRequest(generation: number): number | null {
+    const requestOrder = this.reserveRequestOrder(generation);
+    if (requestOrder !== null) {
+      this.pendingRequests += 1;
+    }
+    return requestOrder;
+  }
+
+  finishRequest(generation: number, succeeded: boolean): void {
+    if (generation !== this.generation) {
+      return;
+    }
+    this.pendingRequests = Math.max(0, this.pendingRequests - 1);
+    if (succeeded) {
+      this.successfulResponses += 1;
+    } else {
+      this.failedRequests += 1;
+    }
+  }
+
+  status(): {
+    pendingRequests: number;
+    successfulResponses: number;
+    failedRequests: number;
+  } {
+    return {
+      pendingRequests: this.pendingRequests,
+      successfulResponses: this.successfulResponses,
+      failedRequests: this.failedRequests
+    };
   }
 
   accept(
@@ -637,10 +680,46 @@ export class InstagramNetworkThreadCapture {
 }
 
 export function instagramEmptyInboxText(bodyText: string): boolean {
-  return /\bno messages\b|\bno conversations\b/i.test(bodyText);
+  const normalized = bodyText.replace(/\s+/g, " ").trim().toLocaleLowerCase();
+  return normalized === "no messages" || normalized === "no conversations";
+}
+
+export interface InstagramEmptyInboxEvidence {
+  documentRootPresent: boolean;
+  scopedEmptyLabels: string[];
+  threadItemCount: number;
+  directThreadLinkCount: number;
+  composerCount: number;
+  messageItemCount: number;
+  loadingSignalCount: number;
+  errorSignalCount: number;
+  networkPendingRequests: number;
+  networkFailedRequests: number;
+}
+
+export function isInstagramExplicitEmptyInbox(
+  evidence: InstagramEmptyInboxEvidence
+): boolean {
+  return (
+    evidence.documentRootPresent &&
+    evidence.scopedEmptyLabels.length === 1 &&
+    instagramEmptyInboxText(evidence.scopedEmptyLabels[0] ?? "") &&
+    evidence.threadItemCount === 0 &&
+    evidence.directThreadLinkCount === 0 &&
+    evidence.composerCount === 0 &&
+    evidence.messageItemCount === 0 &&
+    evidence.loadingSignalCount === 0 &&
+    evidence.errorSignalCount === 0 &&
+    evidence.networkPendingRequests === 0 &&
+    evidence.networkFailedRequests === 0
+  );
 }
 
 export class InstagramAdapter extends BetaAdapter {
+  readonly collectionBoundary: PlatformCollectionBoundaryCapability = {
+    beginCycle: () => this.beginCollectionCycle(),
+    getMetrics: () => this.getLastCollectionMetrics()
+  };
   private readonly instagramDeps: InstagramAdapterDependencies;
   private cookieBridge: ChromeCookieBridge | null = null;
   private lastCookieSyncAt: number | null = null;
@@ -651,6 +730,7 @@ export class InstagramAdapter extends BetaAdapter {
     object,
     { generation: number; requestOrder: number }
   >();
+  private readonly settledNetworkRequests = new WeakSet<object>();
   private collectionCalls = 0;
   private collectionObservedRows = false;
   private collectionExplicitlyEmpty = true;
@@ -679,9 +759,21 @@ export class InstagramAdapter extends BetaAdapter {
     this.networkCapturePages.add(page);
     const capture = new InstagramNetworkThreadCapture();
     this.networkThreadCaptures.set(page, capture);
-    page.on("request", (request: object) => {
+    page.on("request", (request: any) => {
+      let url: URL;
+      try {
+        url = new URL(request.url());
+      } catch {
+        return;
+      }
+      if (
+        (url.hostname !== "www.instagram.com" && url.hostname !== "instagram.com") ||
+        !/\/api\/graphql$|\/graphql\/query$/i.test(url.pathname)
+      ) {
+        return;
+      }
       const generation = capture.currentGeneration();
-      const requestOrder = capture.reserveRequestOrder(generation);
+      const requestOrder = capture.startRequest(generation);
       if (requestOrder !== null) {
         this.networkRequestTokens.set(request, { generation, requestOrder });
       }
@@ -695,28 +787,48 @@ export class InstagramAdapter extends BetaAdapter {
       }
       if (
         (url.hostname !== "www.instagram.com" && url.hostname !== "instagram.com") ||
-        !/\/api\/graphql$|\/graphql\/query$/i.test(url.pathname) ||
-        response.status() < 200 ||
-        response.status() >= 300
+        !/\/api\/graphql$|\/graphql\/query$/i.test(url.pathname)
       ) {
         return;
       }
       const request = typeof response.request === "function" ? response.request() : null;
       const token = request ? this.networkRequestTokens.get(request) : undefined;
-      const generation = token?.generation ?? capture.currentGeneration();
-      if (request && !token) {
+      if (!request || !token) {
+        return;
+      }
+      const settle = (succeeded: boolean): void => {
+        if (this.settledNetworkRequests.has(request)) {
+          return;
+        }
+        this.settledNetworkRequests.add(request);
+        capture.finishRequest(token.generation, succeeded);
+      };
+      if (response.status() < 200 || response.status() >= 300) {
+        settle(false);
         return;
       }
       void response
         .json()
         .then((payload: unknown) => {
+          if (this.settledNetworkRequests.has(request)) {
+            return;
+          }
           capture.accept(
-            generation,
+            token.generation,
             extractInstagramThreadSnapshotsFromPayload(payload),
             token?.requestOrder
           );
+          settle(true);
         })
-        .catch(() => undefined);
+        .catch(() => settle(false));
+    });
+    page.on("requestfailed", (request: object) => {
+      const token = this.networkRequestTokens.get(request);
+      if (!token || this.settledNetworkRequests.has(request)) {
+        return;
+      }
+      this.settledNetworkRequests.add(request);
+      capture.finishRequest(token.generation, false);
     });
   }
 
@@ -726,6 +838,18 @@ export class InstagramAdapter extends BetaAdapter {
 
   private capturedNetworkThreads(page: Page, limit = Number.MAX_SAFE_INTEGER): InstagramThreadSnapshot[] {
     return this.networkThreadCaptures.get(page)?.current(limit) ?? [];
+  }
+
+  private networkThreadCaptureStatus(page: Page): {
+    pendingRequests: number;
+    successfulResponses: number;
+    failedRequests: number;
+  } {
+    return this.networkThreadCaptures.get(page)?.status() ?? {
+      pendingRequests: 0,
+      successfulResponses: 0,
+      failedRequests: 0
+    };
   }
 
   private async waitForCapturedNetworkThreads(page: Page, timeoutMs: number): Promise<void> {
@@ -1162,12 +1286,71 @@ export class InstagramAdapter extends BetaAdapter {
       const threads = await this.snapshotThreads(page, selectors, limit);
       let explicitlyEmpty = false;
       if (threads.length === 0) {
-        const emptyInbox = await page
-          .evaluate(() => {
-            const text = document.body?.innerText?.toLowerCase() ?? "";
-            return /\bno messages\b|\bno conversations\b/i.test(text);
+        const domEvidence = await page
+          .evaluate(({ selectors }) => {
+            const main = document.querySelector("main, div[role='main']");
+            const count = (root: ParentNode | null, selector: string | undefined): number => {
+              if (!root || !selector) return 0;
+              try {
+                return root.querySelectorAll(selector).length;
+              } catch {
+                return -1;
+              }
+            };
+            const visible = (element: Element): boolean => {
+              if ((element as HTMLElement).hidden || element.getAttribute("aria-hidden") === "true") {
+                return false;
+              }
+              const style = window.getComputedStyle(element);
+              return (
+                style.display !== "none" &&
+                style.visibility !== "hidden" &&
+                element.getClientRects().length > 0
+              );
+            };
+            const scopedEmptyLabels = main
+              ? Array.from(
+                  main.querySelectorAll(
+                    "h1, h2, h3, [role='heading'], [role='status'], [aria-live='polite']"
+                  )
+                )
+                  .filter(visible)
+                  .map((element) => (element.textContent ?? "").replace(/\s+/g, " ").trim())
+                  .filter((text) => /^(no messages|no conversations)$/i.test(text))
+              : [];
+            const errorSignalCount = main
+              ? Array.from(main.querySelectorAll("[role='alert'], [aria-live='assertive']")).filter(
+                  (element) =>
+                    visible(element) &&
+                    /try again|could(?:n't| not) load|something went wrong|\berror\b|log in|verify/i.test(
+                      element.textContent ?? ""
+                    )
+                ).length
+              : 0;
+            return {
+              documentRootPresent: Boolean(main),
+              scopedEmptyLabels,
+              threadItemCount: count(main, selectors.thread_item),
+              directThreadLinkCount: count(main, "a[href*='/direct/t/']"),
+              composerCount: count(main, selectors.composer_input),
+              messageItemCount: count(main, selectors.message_item),
+              loadingSignalCount: count(
+                main,
+                "[aria-busy='true'], [role='progressbar'], [data-visualcompletion='loading-state'], [aria-label*='Loading']"
+              ),
+              errorSignalCount
+            };
+          }, { selectors })
+          .catch(() => null);
+        const networkEvidence = this.networkThreadCaptureStatus(page);
+        const emptyInbox = Boolean(
+          domEvidence &&
+          isInstagramExplicitEmptyInbox({
+            ...domEvidence,
+            networkPendingRequests: networkEvidence.pendingRequests,
+            networkFailedRequests: networkEvidence.failedRequests
           })
-          .catch(() => false);
+        );
         explicitlyEmpty = emptyInbox;
         if (!emptyInbox) {
           const structuralDetails = await this.probeThreadDom(page).catch(() => ({
@@ -1582,6 +1765,247 @@ export class InstagramAdapter extends BetaAdapter {
     }
   }
 
+  private async runAtomicComposerAction(input: {
+    composer: ElementHandle;
+    sendButton?: ElementHandle;
+    selectors: SelectorRegistry;
+    thread: ThreadStub;
+    platformThreadId: string;
+    action: "focus" | "type" | "send";
+    expectedText: string;
+    unit?: string;
+  }): Promise<{ ok: true } | { ok: false; reason: string }> {
+    return input.composer.evaluate(
+      (
+        composerNode,
+        {
+          sendButton,
+          headerSelector,
+          recipientVerificationLabel,
+          platformThreadId,
+          action,
+          expectedText,
+          unit
+        }
+      ) => {
+        const fail = (reason: string): { ok: false; reason: string } => ({ ok: false, reason });
+        const normalizeIdentity = (value: string | null | undefined): string =>
+          (value ?? "")
+            .replace(/\s+/g, " ")
+            .trim()
+            .normalize("NFKC")
+            .toLocaleLowerCase();
+        const currentThreadMatches = (): boolean => {
+          if (
+            window.location.hostname !== "www.instagram.com" &&
+            window.location.hostname !== "instagram.com"
+          ) {
+            return false;
+          }
+          const match = window.location.pathname.match(/^\/direct\/t\/([^/?#]+)\/?$/i);
+          if (!match?.[1]) return false;
+          try {
+            return decodeURIComponent(match[1]) === platformThreadId;
+          } catch {
+            return false;
+          }
+        };
+        const currentRecipientMatches = (): { ok: true } | { ok: false; reason: string } => {
+          let header: Element | null = null;
+          try {
+            header = document.querySelector(headerSelector);
+          } catch {
+            return fail("recipient_unverified_before_send");
+          }
+          const normalizedHeader = normalizeIdentity(
+            header?.getAttribute("title") || header?.textContent
+          );
+          const normalizedRecipient = normalizeIdentity(recipientVerificationLabel);
+          if (!normalizedRecipient || normalizedRecipient === "instagram conversation" || !normalizedHeader) {
+            return fail("recipient_unverified_before_send");
+          }
+          return normalizedHeader === normalizedRecipient
+            ? { ok: true }
+            : fail("recipient_changed_before_send");
+        };
+        const readComposer = (): string => {
+          const element = composerNode as HTMLElement & { value?: string };
+          const value = typeof element.value === "string" ? element.value : element.textContent ?? "";
+          return value.replace(/\u00a0/g, " ");
+        };
+        const cleanComposer = (): string =>
+          readComposer()
+            .replace(/\r\n?/g, "\n")
+            .split("\n")
+            .map((line) => line.replace(/[ \t\f\v]+/g, " ").trim())
+            .join("\n")
+            .replace(/\n{3,}/g, "\n\n")
+            .trim();
+        const verifyOwnership = (): { ok: true } | { ok: false; reason: string } => {
+          if (!currentThreadMatches()) {
+            return fail("thread_changed_before_send");
+          }
+          const recipient = currentRecipientMatches();
+          if (!recipient.ok) return recipient;
+          if (
+            !composerNode.isConnected ||
+            composerNode.ownerDocument !== document
+          ) {
+            return fail("composer_detached");
+          }
+          return currentThreadMatches() ? { ok: true } : fail("thread_changed_before_send");
+        };
+        const ownership = verifyOwnership();
+        if (!ownership.ok) return ownership;
+
+        const composerElement = composerNode as HTMLElement & {
+          value?: string;
+          selectionStart?: number | null;
+          selectionEnd?: number | null;
+          setRangeText?: (
+            replacement: string,
+            start?: number,
+            end?: number,
+            selectionMode?: "select" | "start" | "end" | "preserve"
+          ) => void;
+        };
+        if (action === "focus") {
+          if (readComposer() !== expectedText) {
+            return fail("composer_text_mismatch_before_send");
+          }
+          composerElement.focus();
+          if (!currentThreadMatches()) return fail("thread_changed_before_send");
+          composerElement.click();
+          return currentThreadMatches() ? { ok: true } : fail("thread_changed_before_send");
+        }
+
+        if (action === "type") {
+          if (readComposer() !== expectedText || typeof unit !== "string") {
+            return fail("composer_text_mismatch_before_send");
+          }
+          composerElement.focus();
+          if (!currentThreadMatches()) return fail("thread_changed_before_send");
+
+          const priorValue = typeof composerElement.value === "string"
+            ? composerElement.value
+            : null;
+          const priorHtml = priorValue === null ? composerElement.innerHTML : null;
+          if (priorValue !== null && typeof composerElement.setRangeText === "function") {
+            composerElement.setRangeText(
+              unit,
+              priorValue.length,
+              priorValue.length,
+              "end"
+            );
+          } else {
+            const selection = window.getSelection();
+            const range = document.createRange();
+            range.selectNodeContents(composerElement);
+            range.collapse(false);
+            selection?.removeAllRanges();
+            selection?.addRange(range);
+            range.insertNode(document.createTextNode(unit));
+            range.collapse(false);
+            selection?.removeAllRanges();
+            selection?.addRange(range);
+          }
+          const inputEvent = typeof InputEvent === "function"
+            ? new InputEvent("input", {
+                bubbles: true,
+                composed: true,
+                data: unit,
+                inputType: "insertText"
+              })
+            : new Event("input", { bubbles: true, composed: true });
+          composerElement.dispatchEvent(inputEvent);
+
+          if (!currentThreadMatches()) {
+            if (priorValue !== null) {
+              composerElement.value = priorValue;
+            } else if (priorHtml !== null) {
+              composerElement.innerHTML = priorHtml;
+            }
+            return fail("thread_changed_before_send");
+          }
+          const recipientAfterInput = currentRecipientMatches();
+          if (!recipientAfterInput.ok) {
+            if (priorValue !== null) {
+              composerElement.value = priorValue;
+            } else if (priorHtml !== null) {
+              composerElement.innerHTML = priorHtml;
+            }
+            return recipientAfterInput;
+          }
+          return readComposer() === `${expectedText}${unit}`
+            ? { ok: true }
+            : fail("composer_text_mismatch_before_send");
+        }
+
+        if (cleanComposer() !== expectedText) {
+          return fail("composer_text_mismatch_before_send");
+        }
+        if (
+          !sendButton ||
+          !sendButton.isConnected ||
+          sendButton.ownerDocument !== document
+        ) {
+          return fail("send_button_detached");
+        }
+        const sendElement = sendButton as Element;
+        const normalizeControlLabel = (value: string | null | undefined): string =>
+          (value ?? "").replace(/\s+/g, " ").trim().toLocaleLowerCase();
+        const labels = [
+          sendElement.getAttribute("aria-label"),
+          sendElement.getAttribute("title"),
+          sendElement.textContent,
+          (sendElement as HTMLInputElement).value
+        ];
+        const exactSend = labels.some((value) => normalizeControlLabel(value) === "send");
+        const composerForm = composerElement.closest("form");
+        const sendForm = sendElement.closest("form");
+        if (!exactSend && (!composerForm || composerForm !== sendForm)) {
+          return fail("send_button_not_owned");
+        }
+        const finalOwnership = verifyOwnership();
+        if (!finalOwnership.ok) return finalOwnership;
+        (sendElement as HTMLElement).click();
+        return { ok: true };
+      },
+      {
+        sendButton: input.sendButton,
+        headerSelector:
+          input.selectors.conversation_header ?? "header h1, header h2, header span[title]",
+        recipientVerificationLabel: input.thread.recipientVerificationLabel,
+        platformThreadId: input.platformThreadId,
+        action: input.action,
+        expectedText: input.expectedText,
+        unit: input.unit
+      }
+    );
+  }
+
+  private assertAtomicComposerAction(
+    result: { ok: true } | { ok: false; reason: string },
+    platformThreadId: string
+  ): void {
+    if (result.ok) {
+      return;
+    }
+    if (
+      result.reason === "thread_changed_before_send" ||
+      result.reason === "recipient_unverified_before_send" ||
+      result.reason === "recipient_changed_before_send"
+    ) {
+      throw this.safeFailure(
+        "THREAD_NOT_FOUND",
+        "open_thread",
+        result.reason,
+        platformThreadId
+      );
+    }
+    throw new InstagramParsingError(result.reason);
+  }
+
   private async requireComposerSendButton(
     page: Page,
     composer: Locator | ElementHandle,
@@ -1608,6 +2032,29 @@ export class InstagramAdapter extends BetaAdapter {
     for (const candidate of candidates) {
       const candidateHandle = await candidate.elementHandle();
       if (!candidateHandle) continue;
+      const association = await candidateHandle
+        .evaluate((button, composerNode) => {
+          const buttonElement = button as Element;
+          const normalize = (value: string | null | undefined): string =>
+            (value ?? "").replace(/\s+/g, " ").trim().toLocaleLowerCase();
+          const labels = [
+            buttonElement.getAttribute("aria-label"),
+            buttonElement.getAttribute("title"),
+            buttonElement.textContent,
+            (buttonElement as HTMLInputElement).value
+          ];
+          const exactSend = labels.some((value) => normalize(value) === "send");
+          const composerForm = (composerNode as Element).closest("form");
+          const buttonForm = buttonElement.closest("form");
+          return {
+            exactSend,
+            sameForm: Boolean(composerForm && composerForm === buttonForm)
+          };
+        }, composer as ElementHandle)
+        .catch(() => null);
+      if (!association || (!association.exactSend && !association.sameForm)) {
+        continue;
+      }
       const box = await candidateHandle.boundingBox();
       if (!box) continue;
       const centerY = box.y + box.height / 2;
@@ -1752,37 +2199,40 @@ export class InstagramAdapter extends BetaAdapter {
         true,
         "before_send"
       );
-      if (existingComposerText === normalizedText) {
-        await composer.fill("");
+      if (!existingComposerText) {
+        await humanClick(page, composer, {
+          timeout: 10_000,
+          performClick: async () => {
+            const result = await this.runAtomicComposerAction({
+              composer,
+              selectors,
+              thread,
+              platformThreadId: platformThreadId!,
+              action: "focus",
+              expectedText: ""
+            });
+            this.assertAtomicComposerAction(result, platformThreadId!);
+          }
+        });
+        let typedPrefix = "";
+        await humanType(page, composer, normalizedText, {
+          alreadyFocused: true,
+          reading: null,
+          typeUnit: async (unit) => {
+            const result = await this.runAtomicComposerAction({
+              composer,
+              selectors,
+              thread,
+              platformThreadId: platformThreadId!,
+              action: "type",
+              expectedText: typedPrefix,
+              unit
+            });
+            this.assertAtomicComposerAction(result, platformThreadId!);
+            typedPrefix += unit;
+          }
+        });
       }
-      await humanClick(page, composer, {
-        timeout: 10_000,
-        beforeClick: async () => {
-          await this.verifyCurrentThreadIdentity(
-            page,
-            selectors,
-            thread,
-            platformThreadId!,
-            true,
-            "before_send"
-          );
-        }
-      });
-      await humanType(page, composer, normalizedText, {
-        alreadyFocused: true,
-        bindKeystrokesToTarget: true,
-        reading: null,
-        beforeTypeUnit: async () => {
-          await this.verifyCurrentThreadIdentity(
-            page,
-            selectors,
-            thread,
-            platformThreadId!,
-            true,
-            "before_send"
-          );
-        }
-      });
       await this.verifyComposerText(composer, normalizedText);
       await readingPause(500, 1_100);
 
@@ -1794,17 +2244,21 @@ export class InstagramAdapter extends BetaAdapter {
       await humanClick(page, boundSendButton, {
         timeout: 10_000,
         reading: null,
-        beforeClick: async () => {
-          await this.verifyCurrentThreadIdentity(
-            page,
+        performClick: async () => {
+          submissionMayHaveOccurred = true;
+          const result = await this.runAtomicComposerAction({
+            composer,
+            sendButton: boundSendButton,
             selectors,
             thread,
-            platformThreadId!,
-            true,
-            "before_send"
-          );
-          await this.verifyComposerText(composer, normalizedText);
-          submissionMayHaveOccurred = true;
+            platformThreadId: platformThreadId!,
+            action: "send",
+            expectedText: normalizedText
+          });
+          if (!result.ok) {
+            submissionMayHaveOccurred = false;
+          }
+          this.assertAtomicComposerAction(result, platformThreadId!);
         }
       });
 

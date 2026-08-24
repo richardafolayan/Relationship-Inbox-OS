@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { chromium } from "patchright";
 import {
   canonicalInstagramThreadUrl,
   classifyInstagramAuthRequirement,
@@ -9,6 +10,7 @@ import {
   findNewVerifiedInstagramOutgoing,
   InstagramNetworkThreadCapture,
   instagramEmptyInboxText,
+  isInstagramExplicitEmptyInbox,
   instagramMessageFallbackKey,
   instagramAuthRequiredFromSignals,
   instagramThreadIdFromUrl,
@@ -358,7 +360,27 @@ test("network and DOM overlap is deduplicated before the distinct-thread limit",
     limit: 3
   });
 
-  assert.deepEqual(merged.map((thread) => thread.platformThreadId), ["a", "b", "c"]);
+  assert.deepEqual(merged.map((thread) => thread.platformThreadId), ["a", "c", "d"]);
+  assert.equal(merged[0].unreadCount, 1);
+});
+
+test("live DOM unread threads take priority before the distinct-thread limit", () => {
+  const merged = mergeInstagramThreadSnapshotSources({
+    networkSnapshots: [
+      { stableId: "network-a", displayName: "A" },
+      { stableId: "network-b", displayName: "B" },
+      { stableId: "network-c", displayName: "C" }
+    ],
+    domSnapshots: [
+      { href: "/direct/t/live-unread/", displayName: "Live unread", unread: true }
+    ],
+    limit: 3
+  });
+
+  assert.deepEqual(
+    merged.map((thread) => thread.platformThreadId),
+    ["live-unread", "network-a", "network-b"]
+  );
   assert.equal(merged[0].unreadCount, 1);
 });
 
@@ -387,6 +409,25 @@ test("Instagram collection stays incomplete unless every collection view proves 
     }),
     "instagram_bounded_snapshot"
   );
+});
+
+test("Instagram exposes its collection boundary through the typed adapter capability", () => {
+  const adapter = new InstagramAdapter({
+    screenshotDir: "/tmp",
+    domDumpDir: "/tmp",
+    resolveSelectors: async () => ({}),
+    sessionManager: {},
+    personKey: "instagram",
+    connectTimeoutMs: 50
+  });
+
+  adapter.collectionBoundary.beginCycle();
+  assert.deepEqual(adapter.collectionBoundary.getMetrics(), {
+    totalFound: 0,
+    unreadFound: 0,
+    failures: 0,
+    stopReason: "instagram_bounded_snapshot"
+  });
 });
 
 test("GraphQL thread payloads use only typed thread IDs and ignore unsupported fallbacks", () => {
@@ -716,8 +757,53 @@ test("opening Instagram uses the exact thread URL and rejects identity mismatche
 
 test("Instagram landing-pane copy is not evidence that a populated inbox is empty", () => {
   assert.equal(instagramEmptyInboxText("Messages you send and receive will appear here."), false);
+  assert.equal(
+    instagramEmptyInboxText("No messages selected. Choose a conversation from the list."),
+    false
+  );
   assert.equal(instagramEmptyInboxText("No conversations"), true);
   assert.equal(instagramEmptyInboxText("No messages"), true);
+});
+
+test("Instagram empty-inbox certification requires scoped structural evidence", () => {
+  const explicitEmpty = {
+    documentRootPresent: true,
+    scopedEmptyLabels: ["No conversations"],
+    threadItemCount: 0,
+    directThreadLinkCount: 0,
+    composerCount: 0,
+    messageItemCount: 0,
+    loadingSignalCount: 0,
+    errorSignalCount: 0,
+    networkPendingRequests: 0,
+    networkFailedRequests: 0
+  };
+
+  assert.equal(isInstagramExplicitEmptyInbox(explicitEmpty), true);
+  assert.equal(
+    isInstagramExplicitEmptyInbox({
+      ...explicitEmpty,
+      scopedEmptyLabels: ["No messages selected. Choose a conversation from the list."],
+      directThreadLinkCount: 3
+    }),
+    false
+  );
+  assert.equal(
+    isInstagramExplicitEmptyInbox({ ...explicitEmpty, loadingSignalCount: 1 }),
+    false
+  );
+  assert.equal(
+    isInstagramExplicitEmptyInbox({ ...explicitEmpty, networkFailedRequests: 1 }),
+    false
+  );
+  assert.equal(
+    resolveInstagramCollectionStopReason({
+      collectionCalls: 2,
+      observedRows: false,
+      explicitlyEmpty: false
+    }),
+    "instagram_bounded_snapshot"
+  );
 });
 
 test("message normalization preserves direction, exact timestamps and first-seen fallback", () => {
@@ -1293,6 +1379,144 @@ test("Instagram refuses to send through a disabled composer", async () => {
   );
 });
 
+test("Instagram atomic composer actions validate and mutate in one browser task", async (t) => {
+  let browser;
+  try {
+    browser = await chromium.launch({ headless: true });
+  } catch (error) {
+    t.skip(`Playwright Chromium unavailable: ${error instanceof Error ? error.message : String(error)}`);
+    return;
+  }
+
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  t.after(async () => {
+    await context.close();
+    await browser.close();
+  });
+  await page.route("https://www.instagram.com/**", async (route) => {
+    await route.fulfill({
+      contentType: "text/html",
+      body: `<!doctype html>
+        <main>
+          <header><h1>Safe thread</h1></header>
+          <div style="display:flex;align-items:center;gap:8px">
+            <div id="composer" role="textbox" contenteditable="true" style="width:300px;height:40px"></div>
+            <button id="send" type="button" aria-label="Send">Send</button>
+            <button id="unrelated" type="submit"></button>
+          </div>
+        </main>`
+    });
+  });
+  await page.goto("https://www.instagram.com/direct/t/safe-thread/");
+  await page.evaluate(() => {
+    window.submitted = 0;
+    document.querySelector("#send")?.addEventListener("click", () => {
+      window.submitted += 1;
+    });
+  });
+
+  const adapter = new InstagramAdapter({
+    screenshotDir: "/tmp",
+    domDumpDir: "/tmp",
+    resolveSelectors: async () => ({}),
+    sessionManager: {},
+    personKey: "instagram",
+    connectTimeoutMs: 50
+  });
+  const composer = await page.locator("#composer").elementHandle();
+  const sendButton = await page.locator("#send").elementHandle();
+  const unrelated = await page.locator("#unrelated").elementHandle();
+  const selectors = { conversation_header: "main header h1" };
+  const thread = {
+    platformThreadId: "safe-thread",
+    displayName: "Safe thread",
+    recipientVerificationLabel: "Safe thread"
+  };
+
+  const resolvedSend = await adapter.requireComposerSendButton(page, composer, "button");
+  assert.equal(await resolvedSend.getAttribute("id"), "send");
+
+  assert.deepEqual(
+    await adapter.runAtomicComposerAction({
+      composer,
+      selectors,
+      thread,
+      platformThreadId: "safe-thread",
+      action: "focus",
+      expectedText: ""
+    }),
+    { ok: true }
+  );
+  assert.deepEqual(
+    await adapter.runAtomicComposerAction({
+      composer,
+      selectors,
+      thread,
+      platformThreadId: "safe-thread",
+      action: "type",
+      expectedText: "",
+      unit: "h"
+    }),
+    { ok: true }
+  );
+  assert.deepEqual(
+    await adapter.runAtomicComposerAction({
+      composer,
+      selectors,
+      thread,
+      platformThreadId: "safe-thread",
+      action: "type",
+      expectedText: "h",
+      unit: "i"
+    }),
+    { ok: true }
+  );
+  assert.equal(await composer.textContent(), "hi");
+
+  await page.evaluate(() => history.pushState({}, "", "/direct/t/wrong-thread/"));
+  assert.deepEqual(
+    await adapter.runAtomicComposerAction({
+      composer,
+      selectors,
+      thread,
+      platformThreadId: "safe-thread",
+      action: "type",
+      expectedText: "hi",
+      unit: "!"
+    }),
+    { ok: false, reason: "thread_changed_before_send" }
+  );
+  assert.equal(await composer.textContent(), "hi");
+
+  await page.evaluate(() => history.pushState({}, "", "/direct/t/safe-thread/"));
+  assert.deepEqual(
+    await adapter.runAtomicComposerAction({
+      composer,
+      sendButton: unrelated,
+      selectors,
+      thread,
+      platformThreadId: "safe-thread",
+      action: "send",
+      expectedText: "hi"
+    }),
+    { ok: false, reason: "send_button_not_owned" }
+  );
+  assert.deepEqual(
+    await adapter.runAtomicComposerAction({
+      composer,
+      sendButton,
+      selectors,
+      thread,
+      platformThreadId: "safe-thread",
+      action: "send",
+      expectedText: "hi"
+    }),
+    { ok: true }
+  );
+  assert.equal(await page.evaluate(() => window.submitted), 1);
+});
+
 function sendTestHarness({
   observeSubmittedBubble,
   observeExactLayoutBubble = false,
@@ -1300,10 +1524,13 @@ function sendTestHarness({
   switchThreadDuringComposerHandle = false,
   switchThreadAfterComposerBound = false,
   switchThreadDuringComposerApproach = false,
+  switchThreadAtTypeInvocation = false,
   switchThreadAfterFirstTypedUnit = false,
   switchThreadDuringHeaderReadAt = null,
   switchThreadDuringClick = false,
+  switchThreadAtSendInvocation = false,
   reorderSendCandidateAfterGeometry = false,
+  unrelatedNearbySubmit = false,
   dropTypedUnit = false,
   failAfterClick = false,
   submitOnTypedNewline = false,
@@ -1351,6 +1578,9 @@ function sendTestHarness({
       typed = value;
     },
     type: async (unit) => {
+      if (switchThreadAtTypeInvocation) {
+        currentUrl = "https://www.instagram.com/direct/t/wrong-thread/";
+      }
       composerMutations.push("type");
       typedUnits.push(unit);
       if (submitOnTypedNewline && unit === "\n") {
@@ -1364,6 +1594,56 @@ function sendTestHarness({
         currentUrl = "https://www.instagram.com/direct/t/wrong-thread/";
       }
     },
+    evaluate: async (_callback, input) => {
+      const action = input?.action;
+      headerReads += 1;
+      if (headerReads === switchThreadDuringHeaderReadAt) {
+        currentUrl = "https://www.instagram.com/direct/t/wrong-thread/";
+      }
+      if (action === "type" && switchThreadAtTypeInvocation) {
+        currentUrl = "https://www.instagram.com/direct/t/wrong-thread/";
+      }
+      if (action === "send" && switchThreadAtSendInvocation) {
+        currentUrl = "https://www.instagram.com/direct/t/wrong-thread/";
+      }
+      if (currentUrl !== "https://www.instagram.com/direct/t/safe-thread/") {
+        return { ok: false, reason: "thread_changed_before_send" };
+      }
+      if (headerLabel !== "Safe thread") {
+        return { ok: false, reason: "recipient_changed_before_send" };
+      }
+      if (action === "focus") {
+        composerMutations.push("click");
+        return { ok: true };
+      }
+      if (action === "type") {
+        if (dropTypedUnit && typed.length === 0) {
+          return { ok: false, reason: "composer_text_mismatch_before_send" };
+        }
+        composerMutations.push("type");
+        typedUnits.push(input.unit);
+        typed += input.unit;
+        if (switchThreadAfterFirstTypedUnit && typedUnits.length === 1) {
+          currentUrl = "https://www.instagram.com/direct/t/wrong-thread/";
+        }
+        return { ok: true };
+      }
+      if (action === "send") {
+        if (typed !== input.expectedText) {
+          return { ok: false, reason: "composer_text_mismatch_before_send" };
+        }
+        if (input.sendButton?.unrelatedNearbySubmit) {
+          return { ok: false, reason: "send_button_not_owned" };
+        }
+        if (switchThreadDuringClick) {
+          currentUrl = "https://www.instagram.com/direct/t/wrong-thread/";
+          throw new Error("Execution context was destroyed");
+        }
+        submitted = true;
+        return { ok: true };
+      }
+      throw new Error(`Unexpected atomic action ${action}`);
+    },
     elementHandle: async () => {
       if (switchThreadDuringComposerHandle) {
         currentUrl = "https://www.instagram.com/direct/t/wrong-thread/";
@@ -1372,17 +1652,27 @@ function sendTestHarness({
     }
   };
   const boundSendButton = {
+    unrelatedNearbySubmit,
     boundingBox: async () =>
       reorderSendCandidateAfterGeometry
         ? { x: 4_000, y: 900, width: 80, height: 40 }
         : sendButtonBox,
     click: async () => {
+      if (switchThreadAtSendInvocation) {
+        currentUrl = "https://www.instagram.com/direct/t/wrong-thread/";
+        submitted = true;
+        return;
+      }
       if (switchThreadDuringClick) {
         currentUrl = "https://www.instagram.com/direct/t/wrong-thread/";
         throw new Error("Element is not attached to the DOM");
       }
       submitted = true;
-    }
+    },
+    evaluate: async () => ({
+      exactSend: !unrelatedNearbySubmit,
+      sameForm: false
+    })
   };
   const sendButton = {
     count: async () => {
@@ -1752,6 +2042,28 @@ test("Instagram stops bound typing when the active thread changes", async () => 
   assert.equal(harness.wasSubmitted(), false);
 });
 
+test("Instagram cannot type after the route changes at the mutation boundary", async () => {
+  const harness = sendTestHarness({
+    observeSubmittedBubble: false,
+    switchThreadAtTypeInvocation: true
+  });
+
+  await assert.rejects(
+    () =>
+      harness.adapter.sendMessage(
+        {
+          platformThreadId: "safe-thread",
+          displayName: "Safe thread",
+          recipientVerificationLabel: "Safe thread"
+        },
+        "private"
+      ),
+    (error) => error?.details?.reason === "thread_changed_before_send"
+  );
+  assert.deepEqual(harness.typedUnits(), []);
+  assert.equal(harness.wasSubmitted(), false);
+});
+
 test("Instagram catches navigation during a mid-typing recipient-header check", async () => {
   const harness = sendTestHarness({
     observeSubmittedBubble: false,
@@ -1799,6 +2111,27 @@ test("Instagram rejects a same-row Send control far from the composer", async ()
   const harness = sendTestHarness({
     observeSubmittedBubble: false,
     sendButtonBox: { x: 4_000, y: 900, width: 80, height: 40 }
+  });
+
+  await assert.rejects(
+    () =>
+      harness.adapter.sendMessage(
+        {
+          platformThreadId: "safe-thread",
+          displayName: "Safe thread",
+          recipientVerificationLabel: "Safe thread"
+        },
+        "approved"
+      ),
+    (error) => error?.details?.reason === "send_button_not_unique"
+  );
+  assert.equal(harness.wasSubmitted(), false);
+});
+
+test("Instagram rejects a nearby unrelated submit beside the composer", async () => {
+  const harness = sendTestHarness({
+    observeSubmittedBubble: false,
+    unrelatedNearbySubmit: true
   });
 
   await assert.rejects(
@@ -1875,6 +2208,27 @@ test("Instagram binds Send to the verified document instead of re-resolving afte
         "approved"
       ),
     (error) => error?.details?.reason === "delivery_uncertain_after_submit"
+  );
+  assert.equal(harness.wasSubmitted(), false);
+});
+
+test("Instagram cannot submit after the route changes at the click boundary", async () => {
+  const harness = sendTestHarness({
+    observeSubmittedBubble: false,
+    switchThreadAtSendInvocation: true
+  });
+
+  await assert.rejects(
+    () =>
+      harness.adapter.sendMessage(
+        {
+          platformThreadId: "safe-thread",
+          displayName: "Safe thread",
+          recipientVerificationLabel: "Safe thread"
+        },
+        "approved"
+      ),
+    (error) => error?.details?.reason === "thread_changed_before_send"
   );
   assert.equal(harness.wasSubmitted(), false);
 });
@@ -1979,6 +2333,38 @@ test("Instagram GraphQL capture preserves request order when responses complete 
     capture.current(2).map((snapshot) => snapshot.stableId),
     ["recent-a", "recent-b"]
   );
+});
+
+test("Instagram GraphQL capture exposes pending and failed network evidence per generation", () => {
+  const capture = new InstagramNetworkThreadCapture();
+  const firstGeneration = capture.begin();
+  const firstOrder = capture.startRequest(firstGeneration);
+  assert.equal(firstOrder, 0);
+  assert.deepEqual(capture.status(), {
+    pendingRequests: 1,
+    successfulResponses: 0,
+    failedRequests: 0
+  });
+  capture.finishRequest(firstGeneration, false);
+  assert.deepEqual(capture.status(), {
+    pendingRequests: 0,
+    successfulResponses: 0,
+    failedRequests: 1
+  });
+
+  const secondGeneration = capture.begin();
+  const secondOrder = capture.startRequest(secondGeneration);
+  capture.accept(
+    secondGeneration,
+    [{ stableId: "safe-thread" }],
+    secondOrder ?? undefined
+  );
+  capture.finishRequest(secondGeneration, true);
+  assert.deepEqual(capture.status(), {
+    pendingRequests: 0,
+    successfulResponses: 1,
+    failedRequests: 0
+  });
 });
 
 test("Instagram selector diagnostics never capture content-bearing artifacts", () => {

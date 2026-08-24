@@ -1,11 +1,17 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  beginAdapterCollectionBoundary,
   enqueueScanJobByPriority,
   jobCoversTriggeredScan,
   promoteQueuedJob,
   resolveEnqueueStatus
 } from "../apps/runner/dist/services/scan-queue.js";
+import {
+  PLATFORM_SCAN_COLLECTION_INCOMPLETE_ERROR,
+  resolveCollectionBoundaryFreshness,
+  resolvePlatformScanFreshness
+} from "../apps/runner/dist/services/message-identity-reconciliation.js";
 
 // Regression for P1-L3: enqueueScan must report "running" for the job that
 // starts immediately, not always "queued".
@@ -53,4 +59,38 @@ test("platform-wide queued scans cover targeted change triggers", () => {
     ),
     false
   );
+});
+
+test("a typed bounded collector cannot publish freshness as complete", () => {
+  let began = false;
+  const capability = beginAdapterCollectionBoundary({
+    collectionBoundary: {
+      beginCycle: () => {
+        began = true;
+      },
+      getMetrics: () => ({
+        totalFound: 3,
+        unreadFound: 1,
+        stopReason: "instagram_bounded_snapshot"
+      })
+    }
+  });
+
+  assert.equal(began, true);
+  const metrics = capability.getMetrics();
+  const boundary = resolveCollectionBoundaryFreshness(
+    metrics.stopReason,
+    metrics.failures,
+    true
+  );
+  const freshness = resolvePlatformScanFreshness({
+    quarantinedMessages: 0,
+    threadFailures: boundary.collectionFailures,
+    candidateCapBroke: boundary.candidateCapBroke,
+    collectionIncomplete: boundary.collectionIncomplete
+  });
+
+  assert.equal(freshness.freshnessComplete, false);
+  assert.equal(freshness.advanceLastScanAt, false);
+  assert.equal(freshness.lastError, PLATFORM_SCAN_COLLECTION_INCOMPLETE_ERROR);
 });

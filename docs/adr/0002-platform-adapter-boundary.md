@@ -26,17 +26,20 @@ separately from the user-facing `Person.displayName`, so an operator rename does
 not become platform identity evidence.
 
 Browser sends bind the exact composer element before recipient verification.
-The adapter revalidates the active thread after every awaited recipient-header
-read, after humanized pointer movement, and before every typed unit. It binds a
-send-control handle before measuring locality, then measures and clicks that
-same handle. A send control must be uniquely and horizontally associated with
-the bound composer even when the selector returns only one enabled candidate.
+After humanized delays, the final route, recipient, composer, and control
+ownership checks run in the same synchronous browser task as each composer
+mutation and the Send click. It binds a send-control handle before measuring
+locality, then measures and clicks that same handle. A send control must have
+an exact Send semantic or share the composer's form, and must also be uniquely
+and horizontally associated with the composer.
 
-Candidate discovery reports whether it proved the inbox boundary. A bounded
-Instagram network and DOM snapshot remains useful for ingest, but it cannot
-publish platform-wide freshness unless every collection view proves the inbox
-is empty. Network and DOM candidates are deduplicated before applying the
-distinct-thread limit.
+Candidate discovery exposes a typed optional collection-boundary capability.
+A bounded Instagram network and DOM snapshot remains useful for ingest, but it
+cannot publish platform-wide freshness unless every collection view proves the
+inbox is empty. Empty evidence must be scoped and structural, with no thread,
+loading, error, or failed network signal. Current DOM candidates, with unread
+rows first, take priority before network and DOM identities are deduplicated and
+the distinct-thread limit is applied.
 
 Unsupported operations fail clearly and callers check optional capabilities
 before offering them.
@@ -46,7 +49,8 @@ before offering them.
 - Scan and send services stay platform-neutral.
 - Platform-specific correctness and verification remain inside the adapter.
 - Platform-specific data repair remains behind an injected generic capability.
-- Humanized browser delays cannot bypass recipient or composer locality checks.
+- Humanized browser delays cannot create a gap between ownership checks and an
+  external browser mutation.
 - A bounded candidate window cannot become an authoritative freshness claim.
 - UI controls must be capability-aware.
 - A new platform needs an adapter, selector/config wiring where relevant, and

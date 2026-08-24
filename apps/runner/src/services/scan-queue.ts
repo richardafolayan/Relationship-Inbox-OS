@@ -1,6 +1,7 @@
 import type {
   NormalizedMessage,
   PlatformAdapter,
+  PlatformCollectionBoundaryCapability,
   PlatformName,
   RememberItem,
   ThreadStub
@@ -526,6 +527,14 @@ export function resolveEffectiveCount(rawCount: number, max?: number): number {
     return safeRawCount;
   }
   return Math.min(safeRawCount, cap);
+}
+
+export function beginAdapterCollectionBoundary(
+  adapter: PlatformAdapter
+): PlatformCollectionBoundaryCapability | null {
+  const capability = adapter.collectionBoundary ?? null;
+  capability?.beginCycle();
+  return capability;
 }
 
 export function shouldUseForceFallback(value: unknown, nodeEnv = process.env.NODE_ENV): boolean {
@@ -2312,11 +2321,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
                 cappedCandidatesCount: candidatesToSync.length
               });
             } else {
-              const metricsProvider = adapter as unknown as {
-                beginCollectionCycle?: () => void;
-                getLastCollectionMetrics?: () => Record<string, unknown> | null;
-              };
-              metricsProvider.beginCollectionCycle?.();
+              const collectionBoundaryCapability = beginAdapterCollectionBoundary(adapter);
               const unread = await adapter.scanUnreadThreads();
               unreadCandidatesCount = unread.length;
               runLogger.logAction({
@@ -2381,14 +2386,13 @@ export function createScanQueue(deps: ScanQueueDeps) {
               });
 
               collectionMetrics =
-                typeof metricsProvider.getLastCollectionMetrics === "function"
-                  ? metricsProvider.getLastCollectionMetrics()
-                  : null;
+                collectionBoundaryCapability?.getMetrics() ?? null;
             }
           }
           const collectionBoundary = resolveCollectionBoundaryFreshness(
             collectionMetrics?.stopReason,
-            collectionFailures
+            collectionFailures,
+            collectionMetrics !== null
           );
           candidateCapBroke ||= collectionBoundary.candidateCapBroke;
           collectionIncomplete ||= collectionBoundary.collectionIncomplete;
