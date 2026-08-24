@@ -85,8 +85,8 @@ before claiming those guarantees still hold.
 - Reviewed local integration branch: `fix/instagram-integration-gate`.
 - Base: `origin/develop` at
   `ddfba09f44470852c349e0a7f82c12230ba7d32d`.
-- Latest verified corrective commit: `642cd8d9`.
-- The complete repository suite passes under Node 20.20.0: 3,038 tests, zero failures,
+- Latest verified corrective commit: `bed1e545`.
+- The complete repository suite passes under Node 20.20.0: 3,042 tests, zero failures,
   zero skips, zero cancellations, and zero todos.
 - Dashboard, runner, and core type checks pass. The production dashboard build,
   Prisma generation, documentation checks, schema-upgrade checks, and diff
@@ -217,6 +217,18 @@ before claiming those guarantees still hold.
   sources, every unread thread is prioritized, and the distinct-thread limit is
   applied last. Network-only unread and cross-source disagreement regressions
   pass through the production merge path.
+- A fourteenth exact-head adversarial review found three remaining concurrency
+  boundaries. Overlapping GraphQL responses for the same thread now merge by
+  reserved request order rather than response completion order, while unread
+  evidence remains monotonic. The collection path waits, within its existing
+  bounded deadline, for pending GraphQL work to settle before combining DOM and
+  network candidates. A delayed network-only unread thread now outranks three
+  already-rendered read threads in the real Chromium production path. Composer
+  ownership is captured before the first pointer movement or input, including
+  the verified conversation container and complete path to the document root,
+  then revalidated for every atomic composer action. Reparenting the complete
+  composer owner during the first humanized pointer approach now produces zero
+  clicks, zero submissions, and an explicit ownership failure in real Chromium.
 - Scheduled sends, attachments, polls, focus acknowledgements, and other
   automated Instagram sends are rejected at the durable worker boundary. The
   dashboard no longer offers those unsupported actions.
