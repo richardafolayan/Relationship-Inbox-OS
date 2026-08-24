@@ -52,7 +52,13 @@ import {
 
 type RiskTab = "all" | "overdue" | "waiting" | "fresh" | "scheduled";
 type CategoryFilter = "any" | "genuine" | "outreach" | "needs_reply" | "waiting_on_them";
-type PlatformFilter = "all" | "LINKEDIN" | "IMESSAGE" | "WHATSAPP" | "GOOGLE_MESSAGES";
+type PlatformFilter =
+  | "all"
+  | "LINKEDIN"
+  | "INSTAGRAM"
+  | "IMESSAGE"
+  | "WHATSAPP"
+  | "GOOGLE_MESSAGES";
 type PriorityGroupFilter = "all" | string;
 type SortMode = "oldest" | "recent" | "name";
 
@@ -85,6 +91,7 @@ const CATEGORY_FILTERS: { key: CategoryFilter; label: string }[] = [
 const PLATFORM_FILTERS: { key: PlatformFilter; label: string }[] = [
   { key: "all", label: "All" },
   { key: "LINKEDIN", label: "LinkedIn" },
+  { key: "INSTAGRAM", label: "Instagram" },
   { key: "IMESSAGE", label: "iMessage" },
   { key: "WHATSAPP", label: "WhatsApp" },
   { key: "GOOGLE_MESSAGES", label: "Google Messages" }
@@ -895,12 +902,15 @@ export default function InboxPage() {
             degraded.lastScanFailure?.domDumpFile ??
             logs.find((log) => log.platform === degraded.platform && log.domDumpFile)?.domDumpFile
           }
-          onRunSelectorTests={() =>
-            runAction(
-              apiPost("/runner/control/platform/test-selectors", { platform: degraded.platform }),
-              setError,
-              refresh
-            )
+          onRunSelectorTests={
+            degraded.platform === "INSTAGRAM"
+              ? undefined
+              : () =>
+                  runAction(
+                    apiPost("/runner/control/platform/test-selectors", { platform: degraded.platform }),
+                    setError,
+                    refresh
+                  )
           }
           onOpenReceipts={() => setReceiptsOpen(true)}
         />

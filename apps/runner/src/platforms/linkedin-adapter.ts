@@ -18,7 +18,11 @@ import {
   linkedInVoicePath,
   writeLinkedInVoice
 } from "../services/linkedin-voice-store.js";
-import { stableHash } from "@inbox-os/core";
+import {
+  stableHash,
+  type CollectionBoundaryCompleteness,
+  type PlatformCollectionBoundaryCapability
+} from "@inbox-os/core";
 import {
   classifyLinkedInSendVerification,
   type LinkedInSendBubble
@@ -43,7 +47,6 @@ import {
   type RunLogger
 } from "../services/run-logger.js";
 import { parseAllowedProfileUrl } from "../services/profile-url-policy.js";
-import { revealBrowserWindow } from "../services/runner-window.js";
 import {
   buildTemporaryCandidateId,
   normalizeCanonicalLinkedInThreadId
@@ -1940,6 +1943,7 @@ export type LinkedInCollectionStopReason =
   | "end_of_list_reached"
   | "deep_scroll_exhausted"
   | "no_scroll_container"
+  | "deep_scroll_disabled"
   | "max_iterations"
   | "max_duration"
   | "zero_threads_found"
@@ -1948,6 +1952,38 @@ export type LinkedInCollectionStopReason =
   // lists most-recent-first, so a streak of unchanged rows means we've
   // reached the high-water mark and everything below is already scanned.
   | "unchanged_streak";
+
+export function linkedInCollectionCompleteness(
+  stopReason: LinkedInCollectionStopReason
+): CollectionBoundaryCompleteness {
+  if (stopReason === "max_threads") {
+    return "candidate_cap";
+  }
+  if (
+    stopReason === "zero_threads_found" ||
+    stopReason === "end_of_list_reached" ||
+    stopReason === "deep_scroll_exhausted" ||
+    stopReason === "unchanged_streak"
+  ) {
+    return "complete";
+  }
+  return "incomplete";
+}
+
+export function resolveLinkedInEmptyCollectionStopReason(
+  stopReason: LinkedInCollectionStopReason
+): LinkedInCollectionStopReason {
+  if (
+    stopReason === "max_duration" ||
+    stopReason === "max_iterations" ||
+    stopReason === "deep_scroll_disabled" ||
+    stopReason === "no_scroll_container" ||
+    stopReason === "end_of_list_no_progress"
+  ) {
+    return stopReason;
+  }
+  return "zero_threads_found";
+}
 
 export function updateLinkedInCollectionStability(input: {
   previousCount: number;
@@ -2151,6 +2187,27 @@ export function classifyPostLoginUrl(url: string): "verification" | "still_on_lo
 
 export class LinkedInAdapter implements PlatformAdapter {
   platform = "LINKEDIN" as const;
+  readonly collectionBoundary: PlatformCollectionBoundaryCapability = {
+    beginCycle: () => {
+      this.lastCollectionMetrics = null;
+    },
+    getMetrics: () => {
+      const metrics = this.lastCollectionMetrics;
+      if (!metrics) {
+        return {
+          totalFound: 0,
+          unreadFound: 0,
+          completeness: "incomplete",
+          nativeStopReason: "collection_boundary_not_reported"
+        };
+      }
+      return {
+        ...metrics,
+        completeness: linkedInCollectionCompleteness(metrics.stopReason),
+        nativeStopReason: metrics.stopReason
+      };
+    }
+  };
   private lastCollectionMetrics: {
     totalFound: number;
     unreadFound: number;
@@ -4465,7 +4522,7 @@ export class LinkedInAdapter implements PlatformAdapter {
         break;
       }
       if (options?.disableDeepScroll) {
-        stopReason = merged.size > 0 ? "end_of_list_reached" : "zero_threads_found";
+        stopReason = "deep_scroll_disabled";
         this.logTraceDecision({
           stage: "collect_threads",
           decision: "Stopped collection because deep scroll is disabled for this run",
@@ -4527,7 +4584,7 @@ export class LinkedInAdapter implements PlatformAdapter {
     }
 
     if (merged.size <= 0 && stopReason !== "max_threads") {
-      stopReason = "zero_threads_found";
+      stopReason = resolveLinkedInEmptyCollectionStopReason(stopReason);
     }
 
     this.logTraceEvent({
@@ -7862,6 +7919,18 @@ export class LinkedInAdapter implements PlatformAdapter {
           }
 
           noNewRowKeysStreak = rowPass.newRowsSeen > 0 ? 0 : noNewRowKeysStreak + 1;
+          if (options.disableDeepScroll) {
+            metrics.stopReason = "deep_scroll_disabled";
+            this.logTraceDecision({
+              stage: "collect_threads",
+              decision: "Stopped streaming collection because deep scroll is disabled for this run",
+              details: {
+                processedRows: metrics.processedRows,
+                stopReason: metrics.stopReason
+              }
+            });
+            break;
+          }
           if (!scrollResolution) {
             metrics.stopReason = "no_scroll_container";
             this.logTraceEvent({
@@ -8059,8 +8128,8 @@ export class LinkedInAdapter implements PlatformAdapter {
           }
         }
 
-        if (metrics.processedRows <= 0 && metrics.stopReason === "max_iterations") {
-          metrics.stopReason = "zero_threads_found";
+        if (metrics.processedRows <= 0) {
+          metrics.stopReason = resolveLinkedInEmptyCollectionStopReason(metrics.stopReason);
         }
 
         this.lastCollectionMetrics = {
@@ -10187,7 +10256,7 @@ export class LinkedInAdapter implements PlatformAdapter {
       // Operator-initiated: bring the (possibly background-launched, hence
       // minimized/off-screen) window fully on-screen and to the front. A bare
       // bringToFront would raise the tab but leave a minimized OS window.
-      await revealBrowserWindow(page);
+      await this.deps.sessionManager.revealWindow(this.platform, this.deps.personKey);
       await this.openThreadAndWaitForActivation(page, selectors, thread);
     });
   }
@@ -10207,7 +10276,7 @@ export class LinkedInAdapter implements PlatformAdapter {
       const page = await this.getPage();
       // Operator clicked "open profile" - surface the runner's Chrome window
       // (un-minimize + on-screen + front), not just raise the tab.
-      await revealBrowserWindow(page);
+      await this.deps.sessionManager.revealWindow(this.platform, this.deps.personKey);
       await this.tracedGoto(page, safeUrl, {
         stage: "open_profile",
         note: displayName ? `open_profile:${displayName}` : "open_profile"

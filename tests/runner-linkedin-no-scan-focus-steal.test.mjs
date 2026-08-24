@@ -14,9 +14,8 @@ import { resolve } from "node:path";
 // fetchThreadMessages); a focus-stealing call here disrupts the
 // operator on every scan tick.
 //
-// openThread() and openProfileUrl() are operator-initiated — an
-// explicit "open this thing" click — so they keep their own
-// bringToFront().
+// openThread() and openProfileUrl() are operator-initiated. An
+// explicit "open this thing" click surfaces the managed window.
 //
 // This test pins the invariant at the source level: every
 // bringToFront() in the adapter must live inside a method whose name
@@ -66,18 +65,16 @@ function locateContainingMethodName(source, offset) {
 
 test("every focus-raising call in linkedin-adapter sits inside an operator-initiated method", () => {
   const source = stripComments(readFileSync(resolve(process.cwd(), ADAPTER_PATH), "utf8"));
-  // The operator focus-raise moved from a bare page.bringToFront() to
-  // revealBrowserWindow() (un-minimize + on-screen + raise), since launches
-  // are now hidden by default (the send/scan focus-steal fix). Either form is
-  // a "surface Chrome to the operator" call and must stay out of scan/send
-  // paths. The `import` of revealBrowserWindow is excluded.
-  const occurrences = [...source.matchAll(/\b(?:bringToFront\s*\(\s*\)|revealBrowserWindow\s*\()/g)].filter(
-    (m) => !source.slice(Math.max(0, m.index - 40), m.index).includes("import")
-  );
+  // The operator focus raise goes through sessionManager.revealWindow so the
+  // app bundle activation path is preserved. A bare bringToFront remains a
+  // focus raise too. Both must stay out of scan and send paths.
+  const occurrences = [
+    ...source.matchAll(/\bbringToFront\s*\(\s*\)|\.revealWindow\s*\(/g)
+  ];
 
   assert.ok(
     occurrences.length > 0,
-    "expected at least one focus-raising call — openThread/openProfileUrl surface Chrome on operator clicks"
+    "expected at least one focus-raising call in openThread or openProfileUrl"
   );
 
   const offenders = [];

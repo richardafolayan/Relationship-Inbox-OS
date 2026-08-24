@@ -161,6 +161,10 @@ export interface HumanClickOptions {
   force?: boolean;
   /** Maximum wait for the element to be actionable. */
   timeout?: number;
+  /** Final safety check run after pointer movement and immediately before click. */
+  beforeClick?: () => Promise<void>;
+  /** Custom click operation for callers that must combine validation and mutation atomically. */
+  performClick?: () => Promise<void>;
 }
 
 /**
@@ -183,6 +187,11 @@ export async function humanClick(
     await humanCursorMove(page, target).catch(() => undefined);
   }
   await sleep(randInt(PRE_CLICK_HESITATION_MIN_MS, PRE_CLICK_HESITATION_MAX_MS));
+  await options.beforeClick?.();
+  if (options.performClick) {
+    await options.performClick();
+    return;
+  }
   await (target as Locator | ElementHandle).click({
     force: options.force,
     timeout: options.timeout
@@ -198,6 +207,12 @@ export interface HumanTypeOptions {
   reading?: { min: number; max: number } | null;
   /** Disable mid-word "thinking" pauses (use for short fields like passwords). */
   noThink?: boolean;
+  /** Type through this exact target instead of the page's current keyboard focus. */
+  bindKeystrokesToTarget?: boolean;
+  /** Final safety check run immediately before each typed unit. */
+  beforeTypeUnit?: (unit: string, index: number) => Promise<void>;
+  /** Custom unit operation for callers that must combine validation and mutation atomically. */
+  typeUnit?: (unit: string, index: number) => Promise<void>;
 }
 
 /**
@@ -241,7 +256,15 @@ export async function humanType(
   const maxDelay = options.delay?.max ?? TYPING_DELAY_MAX_MS;
   const units = toTypingUnits(text);
   for (let i = 0; i < units.length; i += 1) {
-    await page.keyboard.type(units[i] ?? "");
+    const unit = units[i] ?? "";
+    await options.beforeTypeUnit?.(unit, i);
+    if (options.typeUnit) {
+      await options.typeUnit(unit, i);
+    } else if (options.bindKeystrokesToTarget) {
+      await (target as Locator | ElementHandle).type(unit);
+    } else {
+      await page.keyboard.type(unit);
+    }
     await sleep(randInt(minDelay, maxDelay));
     if (!options.noThink && Math.random() < TYPING_THINK_CHANCE && i < units.length - 1) {
       await sleep(randInt(TYPING_THINK_MIN_MS, TYPING_THINK_MAX_MS));

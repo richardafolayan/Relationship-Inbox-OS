@@ -12,6 +12,7 @@ approve behavior that exists only on an unmerged workstream branch.
 | [0005](0005-ai-routing-and-voice-controls.md) | Accepted | OpenAI-compatible provider routing plus deterministic output controls |
 | [0006](0006-events-and-polling-recovery.md) | Accepted | Replayable local events with polling recovery |
 | [0007](0007-forward-only-pilot-updates.md) | Accepted | Checksummed, data-preserving, forward-only pilot updates |
+| [0008](0008-guarded-data-provenance-repairs.md) | Accepted | Transactional provenance repair and verified message identity upgrades |
 
 New ADRs use the next four-digit number and contain Context, Decision,
 Consequences, and Verification sections. Amend an ADR only to correct the

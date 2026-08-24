@@ -66,3 +66,30 @@ test("a lost send response is never converted into a definite failure or success
     globalThis.fetch = originalFetch;
   }
 });
+
+test("an incomplete thread rescan is rejected and cannot be counted as a success", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () =>
+    new Response(
+      JSON.stringify({
+        ok: false,
+        error: "Message check incomplete. Some historical messages could not be verified safely.",
+        freshnessComplete: false
+      }),
+      { status: 409, headers: { "content-type": "application/json" } }
+    );
+  try {
+    await assert.rejects(
+      apiPost("/runner/control/thread/t1/rescan", {}),
+      (error) => {
+        assert.ok(error instanceof ApiRequestError);
+        assert.equal(error.status, 409);
+        assert.equal(error.failure.code, "SCAN_FAILED");
+        assert.equal(error.failure.dataUncertain, true);
+        return true;
+      }
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

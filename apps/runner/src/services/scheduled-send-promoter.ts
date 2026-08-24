@@ -11,11 +11,15 @@ export interface ScheduledSendPromoterPrisma {
     findMany(args: {
       where: { status: "SCHEDULED"; scheduledFor: { lte: Date } };
       orderBy: { scheduledFor: "asc" };
-      select: { id: true; clientSendId: true };
-    }): Promise<Array<{ id: string; clientSendId: string }>>;
+      select: { id: true; clientSendId: true; thread: { select: { platform: true } } };
+    }): Promise<Array<{
+      id: string;
+      clientSendId: string;
+      thread: { platform: string };
+    }>>;
     updateMany(args: {
       where: { id: { in: string[] }; status: "SCHEDULED"; scheduledFor: { lte: Date } };
-      data: { status: "PENDING" };
+      data: { status: "PENDING" } | { status: "FAILED"; errorJson: string };
     }): Promise<{ count: number }>;
     count(args: { where: { status: "PENDING" } }): Promise<number>;
   };
@@ -66,9 +70,31 @@ export function createScheduledSendPromoter(deps: ScheduledSendPromoterDeps): Sc
           scheduledFor: { lte: now }
         },
         orderBy: { scheduledFor: "asc" },
-        select: { id: true, clientSendId: true }
+        select: {
+          id: true,
+          clientSendId: true,
+          thread: { select: { platform: true } }
+        }
       });
       if (due.length === 0) return { promoted: 0 };
+
+      const blockedInstagram = due.filter((row) => row.thread.platform === "INSTAGRAM");
+      if (blockedInstagram.length > 0) {
+        await prisma.sendRequest.updateMany({
+          where: {
+            id: { in: blockedInstagram.map((row) => row.id) },
+            status: "SCHEDULED",
+            scheduledFor: { lte: now }
+          },
+          data: {
+            status: "FAILED",
+            errorJson: JSON.stringify({
+              errorKind: "UNSUPPORTED_SEND",
+              message: "Instagram currently supports user-triggered sends only."
+            })
+          }
+        });
+      }
 
       // Status- AND time-guarded promotion. Between the findMany above and this
       // write, the operator may have cancelled a row (SCHEDULED -> CANCELLED)
@@ -77,7 +103,10 @@ export function createScheduledSendPromoter(deps: ScheduledSendPromoterDeps): Sc
       // rescheduled one at its old time — without this guard, the id-only
       // updateMany would flip a just-cancelled row back to PENDING. `count` is
       // the number actually promoted, which can be fewer than `due.length`.
-      const ids = due.map((r) => r.id);
+      const ids = due
+        .filter((row) => row.thread.platform !== "INSTAGRAM")
+        .map((row) => row.id);
+      if (ids.length === 0) return { promoted: 0 };
       const { count: promoted } = await prisma.sendRequest.updateMany({
         where: { id: { in: ids }, status: "SCHEDULED", scheduledFor: { lte: now } },
         data: { status: "PENDING" }

@@ -81,6 +81,23 @@ test("zero new messages reads as a clear no", () => {
   assert.equal(threadCheckLabel(ticker), "No new messages from Tola");
 });
 
+test("an incomplete freshness check never claims there were no new messages", () => {
+  const snap = reduceThreadCheck(
+    EMPTY_THREAD_CHECK,
+    {
+      type: "SCAN_THREAD_FINISHED",
+      threadId: "t1",
+      personName: "Tola",
+      newMessages: 0,
+      freshnessComplete: false
+    },
+    T0
+  );
+  const ticker = selectThreadCheck(snap, T0);
+  assert.deepEqual(ticker, { kind: "incomplete", personName: "Tola" });
+  assert.equal(threadCheckLabel(ticker), "Message check incomplete for Tola");
+});
+
 test("singular copy for exactly one new message", () => {
   const snap = reduceThreadCheck(EMPTY_THREAD_CHECK, finished("t1", "Tola", 1), T0);
   assert.equal(threadCheckLabel(selectThreadCheck(snap, T0)), "1 new message from Tola");

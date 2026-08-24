@@ -6,6 +6,7 @@ const SETUP_PREFERENCES_KEY = "setup_preferences_v2";
 const SETUP_PLATFORMS: PlatformName[] = [
   "IMESSAGE",
   "LINKEDIN",
+  "INSTAGRAM",
   "WHATSAPP",
   "GOOGLE_MESSAGES"
 ];

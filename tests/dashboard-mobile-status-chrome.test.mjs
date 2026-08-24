@@ -8,6 +8,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const {
   resolveMobileStatusChrome,
+  shouldRenderStatusTicker,
   shouldSurfaceHiddenStatus
 } = await import("../apps/dashboard/lib/mobile-status-chrome.ts");
 
@@ -144,6 +145,7 @@ test("hidden chrome surfaces in-flight and failed work", () => {
     "reassessing",
     "sending_report",
     "checking_thread",
+    "thread_check_incomplete",
     "send_failed"
   ]) {
     assert.equal(
@@ -157,6 +159,12 @@ test("hidden chrome surfaces in-flight and failed work", () => {
       `${tickerKind} should re-surface the status row`
     );
   }
+});
+
+test("an incomplete message check renders even though it is no longer active", () => {
+  assert.equal(shouldRenderStatusTicker("thread_check_incomplete", false), true);
+  assert.equal(shouldRenderStatusTicker("thread_checked", false), true);
+  assert.equal(shouldRenderStatusTicker("idle", false), false);
 });
 
 test("Search hidden chrome still re-surfaces offline, degraded, and in-flight", () => {

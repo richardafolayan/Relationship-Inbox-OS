@@ -96,6 +96,15 @@ test("resolveBrowserProfileConfig accepts explicit personal-profile env values",
   assert.equal(config.personalChromeProfileResolutionStrategy, "local_state_missing");
 });
 
+test("resolveBrowserProfileConfig accepts seed-once profile sync mode", () => {
+  const config = resolveBrowserProfileConfig({
+    HOME: "/Users/someone",
+    PERSONAL_PROFILE_SYNC_MODE: "once"
+  });
+
+  assert.equal(config.personalProfileSyncMode, "once");
+});
+
 test("resolveBrowserProfileConfig defaults to strict fallback in personal mode", () => {
   const config = resolveBrowserProfileConfig({
     HOME: "/Users/richard",
@@ -232,7 +241,35 @@ test("launchPersistentContextForPlatform uses installed Chrome with an isolated 
   assert.equal(calls[0]?.options.channel, "chrome");
 });
 
-test("launchPersistentContextForPlatform uses mirrored target directory for personal launch", async () => {
+test("launchPersistentContextForPlatform uses installed Chrome for an isolated Instagram profile", async () => {
+  const calls = [];
+  await launchPersistentContextForPlatform({
+    platform: "INSTAGRAM",
+    launchPersistentContext: async (userDataDir, options) => {
+      calls.push({ userDataDir, options });
+      return { kind: "instagram-isolated-context" };
+    },
+    isolatedProfileDir: "/tmp/isolated/instagram",
+    headless: false,
+    hostPlatform: "darwin",
+    preferInstalledChrome: true,
+    browserProfile: {
+      mode: "isolated",
+      fallbackBehavior: "allow_isolated",
+      personalProfileSyncMode: "smart",
+      personalProfileMirrorRoot: "/tmp/mirror",
+      personalChromeUserDataDir: "/tmp/personal",
+      personalChromeProfileDirectory: "Default",
+      personalChromeProfileName: "Default",
+      personalChromeProfileResolutionStrategy: "directory_exact"
+    }
+  });
+
+  assert.equal(calls[0]?.options.channel, "chrome");
+  assert.equal(calls[0]?.userDataDir, "/tmp/isolated/instagram");
+});
+
+test("launchPersistentContextForPlatform keeps non-Instagram personal Chrome defaults unchanged", async () => {
   const calls = [];
   const context = { kind: "personal-context" };
   const prepared = [];
@@ -269,6 +306,37 @@ test("launchPersistentContextForPlatform uses mirrored target directory for pers
   assert.equal(calls[0]?.userDataDir, "/tmp/isolated/linkedin");
   assert.equal(calls[0]?.options.channel, "chrome");
   assert.ok(calls[0]?.options.args.includes("--profile-directory=Person 1"));
+  assert.equal(calls[0]?.options.ignoreDefaultArgs.includes("--password-store=basic"), false);
+  assert.equal(calls[0]?.options.ignoreDefaultArgs.includes("--use-mock-keychain"), false);
+});
+
+test("launchPersistentContextForPlatform applies keychain flags only to Instagram personal launch", async () => {
+  const calls = [];
+  await launchPersistentContextForPlatform({
+    platform: "INSTAGRAM",
+    launchPersistentContext: async (userDataDir, options) => {
+      calls.push({ userDataDir, options });
+      return { kind: "instagram-personal-context" };
+    },
+    isolatedProfileDir: "/tmp/isolated/instagram",
+    headless: false,
+    browserProfile: basePersonalConfig(),
+    preparePersonalProfileMirror: async (input) => ({
+      syncPerformed: true,
+      syncReason: "target_missing",
+      sourceUserDataDir: input.sourceUserDataDir,
+      targetUserDataDir: input.targetUserDataDir,
+      profileDirectory: input.profileDirectory,
+      sourceProfileDir: "/tmp/source/Person 1",
+      targetProfileDir: "/tmp/isolated/instagram/Person 1",
+      sourceMarkerMtimeMs: 100,
+      lastMirroredSourceMarkerMtimeMs: undefined,
+      durationMs: 10
+    })
+  });
+
+  assert.ok(calls[0]?.options.ignoreDefaultArgs.includes("--password-store=basic"));
+  assert.ok(calls[0]?.options.ignoreDefaultArgs.includes("--use-mock-keychain"));
 });
 
 test("launchPersistentContextForPlatform falls back to isolated profile when personal launch fails", async () => {
@@ -415,6 +483,27 @@ test("preparePersonalProfileMirror smart mode syncs when source marker is newer"
 
   assert.equal(second.syncPerformed, true);
   assert.equal(second.syncReason, "source_newer");
+});
+
+test("preparePersonalProfileMirror once mode preserves an existing app-owned profile", async () => {
+  const sourceUserDataDir = uniqueTempDir("profile-once-source");
+  const targetUserDataDir = uniqueTempDir("profile-once-target");
+  mkdirSync(join(sourceUserDataDir, "Default"), { recursive: true });
+  mkdirSync(join(targetUserDataDir, "Default"), { recursive: true });
+  writeFileSync(join(sourceUserDataDir, "Local State"), "{}");
+  writeFileSync(join(targetUserDataDir, "Local State"), "{}");
+  writeFileSync(join(sourceUserDataDir, "Default", "Preferences"), "source");
+  writeFileSync(join(targetUserDataDir, "Default", "Preferences"), "signed-in-app-copy");
+
+  const result = await preparePersonalProfileMirror({
+    sourceUserDataDir,
+    targetUserDataDir,
+    profileDirectory: "Default",
+    syncMode: "once"
+  });
+
+  assert.equal(result.syncPerformed, false);
+  assert.equal(result.syncReason, "sync_disabled");
 });
 
 test("preparePersonalProfileMirror excludes lock and cache artifacts", async () => {

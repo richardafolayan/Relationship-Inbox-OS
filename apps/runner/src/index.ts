@@ -92,6 +92,8 @@ import {
   snapshotImessageVoice
 } from "./services/imessage-voice-store";
 import { createScanQueue, type ScanTrigger } from "./services/scan-queue";
+import { createInstagramMessageIdentityReconciler } from "./services/instagram-message-key-upgrade";
+import { MESSAGE_IDENTITY_FRESHNESS_ERROR } from "./services/message-identity-reconciliation";
 import { runReassessForThread } from "./services/reassess-thread";
 import { resolveSseResumeCursor } from "./services/sse-resume-cursor";
 import { resummarizeThread } from "./services/resummarize-thread";
@@ -104,13 +106,15 @@ import {
   MESSAGE_SYNC_METRICS,
   type MessageSyncMetric
 } from "./services/message-sync-latency";
-import { createSendService } from "./services/send";
+import { createSendService, parsePersistedSendSource } from "./services/send";
 import { createSendQueue } from "./services/send-queue";
+import { planPlatformSessionReset } from "./services/platform-session-reset";
 import { createFocusAutoAckService } from "./services/focus-auto-ack";
 import {
   classifySendFailureKind,
   consumerSendFailure,
-  parsePersistedSendFailure
+  parsePersistedSendFailure,
+  persistedSendRetryEligibility
 } from "./services/send-failure";
 import { createReassessOnSendHandler } from "./services/reassess-on-send";
 import { createScheduledSendPromoter } from "./services/scheduled-send-promoter";
@@ -443,7 +447,12 @@ async function syncWhatsAppPlatformRow(state: WhatsAppConnectState): Promise<voi
   });
 }
 
-const { adapters, resolveSelectorsForPlatform, sessionManager } = createAdapters({
+const {
+  adapters,
+  resolveSelectorsForPlatform,
+  sessionManager,
+  resolvePlatformSession
+} = createAdapters({
   settingsStore,
   whatsappPrisma: prisma,
   onWhatsAppStateChange: (state) => {
@@ -527,7 +536,7 @@ const { adapters, resolveSelectorsForPlatform, sessionManager } = createAdapters
 
 const selectorTestService = createSelectorTestService({
   resolveSelectors: resolveSelectorsForPlatform,
-  sessionManager,
+  resolvePlatformSession,
   screenshotDir: runnerConfig.screenshotDir,
   domDumpDir: runnerConfig.domDumpDir,
 });
@@ -544,7 +553,12 @@ type ScanQueueWithSmokeIngest = ReturnType<typeof createScanQueue> & {
     requestId: string;
     messages?: NormalizedMessage[];
     trigger?: ScanTrigger;
-  }) => Promise<{ updatedThreads: number; parsedMessages: number }>;
+  }) => Promise<{
+    updatedThreads: number;
+    parsedMessages: number;
+    persistedMessages: number;
+    quarantinedMessages: number;
+  }>;
 };
 
 // Lock-key helpers used both by control endpoints and the enrichment
@@ -552,10 +566,10 @@ type ScanQueueWithSmokeIngest = ReturnType<typeof createScanQueue> & {
 // so the enrichment queue can be constructed alongside scan/send and
 // share the same lock vocabulary.
 function platformLockKey(platform: PlatformName): string {
-  return `${defaultPersonKey}:${platform}`;
+  return `${resolvePlatformSession(platform).personKey}:${platform}`;
 }
 function sendLockKeyFor(platform: PlatformName): string {
-  return `${defaultPersonKey}:${platform}:SEND`;
+  return `${resolvePlatformSession(platform).personKey}:${platform}:SEND`;
 }
 function enrichLockKeyFor(): string {
   return `${defaultPersonKey}:LINKEDIN:ENRICH`;
@@ -1031,6 +1045,9 @@ const transcriptionSetup = createTranscriptionSetupManager({
 
 const scanQueue = createScanQueue({
   adapters,
+  messageIdentityReconcilers: {
+    INSTAGRAM: createInstagramMessageIdentityReconciler(prisma)
+  },
   eventBus,
   settingsStore,
   aiService,
@@ -1632,7 +1649,35 @@ function summarizeFailureDetails(details: Record<string, unknown> | undefined): 
 
 function connectTimeoutMsForCurrentProfile(platform?: PlatformName): number {
   if (platform === "GOOGLE_MESSAGES") return 120_000;
+  if (platform === "INSTAGRAM") return resolveConnectTimeoutMs("personal", process.env);
   return resolveConnectTimeoutMs(runnerConfig.browserProfile.mode, process.env);
+}
+
+function platformBrowserProfileDetails(platform: PlatformName, launchUserDataDir: string) {
+  if (platform === "INSTAGRAM") {
+    return {
+      profileMode: "isolated" as const,
+      fallbackBehavior: "error" as const,
+      syncMode: null,
+      sourceUserDataDir: null,
+      launchUserDataDir,
+      profileDirectory: null,
+      profileName: "Instagram",
+      profileResolutionStrategy: "dedicated_standard_chrome"
+    };
+  }
+
+  return {
+    profileMode: runnerConfig.browserProfile.mode,
+    fallbackBehavior: runnerConfig.browserProfile.fallbackBehavior,
+    syncMode: runnerConfig.browserProfile.personalProfileSyncMode,
+    sourceUserDataDir: runnerConfig.browserProfile.personalChromeUserDataDir,
+    launchUserDataDir,
+    profileDirectory: runnerConfig.browserProfile.personalChromeProfileDirectory,
+    profileName: runnerConfig.browserProfile.personalChromeProfileName,
+    profileResolutionStrategy:
+      runnerConfig.browserProfile.personalChromeProfileResolutionStrategy
+  };
 }
 
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
@@ -1683,6 +1728,7 @@ async function ensureRuntimeDirs(): Promise<void> {
   await mkdir(runnerConfig.profileDirs.INSTAGRAM, { recursive: true });
   await mkdir(runnerConfig.profileDirs.TIKTOK, { recursive: true });
   await mkdir(sessionManager.getProfileDir(defaultPersonKey), { recursive: true });
+  await mkdir(resolvePlatformSession("INSTAGRAM").profileDir, { recursive: true });
 }
 
 async function getThreadStub(threadId: string): Promise<{
@@ -1691,6 +1737,7 @@ async function getThreadStub(threadId: string): Promise<{
   platformThreadId: string;
   threadUrl?: string;
   displayName: string;
+  recipientVerificationLabel?: string;
   personId: string;
 }> {
   const thread = await prisma.thread.findUnique({
@@ -1711,6 +1758,7 @@ async function getThreadStub(threadId: string): Promise<{
     platformThreadId: thread.platformThreadId,
     threadUrl: thread.threadUrl ?? undefined,
     displayName: thread.person.displayName,
+    recipientVerificationLabel: thread.recipientVerificationLabel ?? undefined,
     personId: thread.personId
   };
 }
@@ -2650,7 +2698,9 @@ app.get("/data/setup/status", asyncRoute(async (_req, res) => {
 
 app.post("/control/setup/preferences", asyncRoute(async (req, res) => {
   const payload = z.object({
-    selectedPlatforms: z.array(z.enum(["IMESSAGE", "LINKEDIN", "WHATSAPP", "GOOGLE_MESSAGES"])).optional(),
+    selectedPlatforms: z
+      .array(z.enum(["IMESSAGE", "LINKEDIN", "INSTAGRAM", "WHATSAPP", "GOOGLE_MESSAGES"]))
+      .optional(),
     aiEnabled: z.boolean().optional(),
     startedAt: z.string().max(100).optional(),
     completedAt: z.string().max(100).optional()
@@ -2660,10 +2710,13 @@ app.post("/control/setup/preferences", asyncRoute(async (req, res) => {
     settingsStore.getSettings()
   ]);
   const existingPilotPlatforms = currentSettings.enabledPlatforms.filter(
-    (platform): platform is "IMESSAGE" | "LINKEDIN" | "WHATSAPP" | "GOOGLE_MESSAGES" =>
+    (
+      platform
+    ): platform is "IMESSAGE" | "LINKEDIN" | "INSTAGRAM" | "WHATSAPP" | "GOOGLE_MESSAGES" =>
       runnerConfig.availablePlatforms.includes(platform) &&
       (platform === "IMESSAGE" ||
         platform === "LINKEDIN" ||
+        platform === "INSTAGRAM" ||
         platform === "WHATSAPP" ||
         platform === "GOOGLE_MESSAGES")
   );
@@ -3545,6 +3598,11 @@ app.post("/control/platform/connect", asyncRoute(async (req, res) => {
   const connectTimeoutMs = connectTimeoutMsForCurrentProfile(platform);
 
   await withPlatformControlLock(platform, async () => {
+    const platformSession = resolvePlatformSession(platform);
+    const browserProfileDetails = platformBrowserProfileDetails(
+      platform,
+      platformSession.profileDir
+    );
     await auditService.log({
       platform,
       stage: "Connect",
@@ -3552,14 +3610,7 @@ app.post("/control/platform/connect", asyncRoute(async (req, res) => {
       status: "OK",
       details: {
         requestId,
-        profileMode: runnerConfig.browserProfile.mode,
-        fallbackBehavior: runnerConfig.browserProfile.fallbackBehavior,
-        syncMode: runnerConfig.browserProfile.personalProfileSyncMode,
-        sourceUserDataDir: runnerConfig.browserProfile.personalChromeUserDataDir,
-        launchUserDataDir: sessionManager.getProfileDir(defaultPersonKey),
-        profileDirectory: runnerConfig.browserProfile.personalChromeProfileDirectory,
-        profileName: runnerConfig.browserProfile.personalChromeProfileName,
-        profileResolutionStrategy: runnerConfig.browserProfile.personalChromeProfileResolutionStrategy,
+        ...browserProfileDetails,
         timeoutBudgetMs: connectTimeoutMs
       }
     });
@@ -3583,10 +3634,15 @@ app.post("/control/platform/connect", asyncRoute(async (req, res) => {
         // the hidden background launches that scans and sends use. Mark the
         // visible intent for the launch, and reveal an already-warm-but-hidden
         // window so manual sign-in is reachable even when no new launch fires.
-        const releaseVisible = sessionManager.markVisibleLaunch(platform);
-        trackedPromise = platformAdapter
-          .ensureConnected()
-          .finally(() => sessionManager.revealWindow(platform).catch(() => undefined))
+        const releaseVisible = platformSession.sessionManager.markVisibleLaunch(platform);
+        trackedPromise = (
+          platformAdapter.connectInteractively?.() ?? platformAdapter.ensureConnected()
+        )
+          .finally(() =>
+            platformSession.sessionManager
+              .revealWindow(platform, platformSession.personKey)
+              .catch(() => undefined)
+          )
           .finally(() => releaseVisible())
           .finally(() => {
             if (connectInFlight.get(platform) === trackedPromise) {
@@ -3647,14 +3703,7 @@ app.post("/control/platform/connect", asyncRoute(async (req, res) => {
         details: {
           requestId,
           durationMs: Date.now() - startedAt,
-          profileMode: runnerConfig.browserProfile.mode,
-          fallbackBehavior: runnerConfig.browserProfile.fallbackBehavior,
-          syncMode: runnerConfig.browserProfile.personalProfileSyncMode,
-          sourceUserDataDir: runnerConfig.browserProfile.personalChromeUserDataDir,
-          launchUserDataDir: sessionManager.getProfileDir(defaultPersonKey),
-          profileDirectory: runnerConfig.browserProfile.personalChromeProfileDirectory,
-          profileName: runnerConfig.browserProfile.personalChromeProfileName,
-          profileResolutionStrategy: runnerConfig.browserProfile.personalChromeProfileResolutionStrategy,
+          ...browserProfileDetails,
           timeoutBudgetMs: connectTimeoutMs
         }
       });
@@ -3695,14 +3744,7 @@ app.post("/control/platform/connect", asyncRoute(async (req, res) => {
           failureKind: failure.failureKind ?? "UNKNOWN",
           failureType: failure.failureType,
           failureUrl: failureUrl ?? null,
-          profileMode: runnerConfig.browserProfile.mode,
-          fallbackBehavior: runnerConfig.browserProfile.fallbackBehavior,
-          syncMode: runnerConfig.browserProfile.personalProfileSyncMode,
-          sourceUserDataDir: runnerConfig.browserProfile.personalChromeUserDataDir,
-          launchUserDataDir: sessionManager.getProfileDir(defaultPersonKey),
-          profileDirectory: runnerConfig.browserProfile.personalChromeProfileDirectory,
-          profileName: runnerConfig.browserProfile.personalChromeProfileName,
-          profileResolutionStrategy: runnerConfig.browserProfile.personalChromeProfileResolutionStrategy,
+          ...browserProfileDetails,
           timeoutBudgetMs: connectTimeoutMs,
           ...summarizeError(error)
         }
@@ -3727,9 +3769,19 @@ app.post("/control/platform/test-selectors", asyncRoute(async (req, res) => {
           "thread_item",
           "unread_badge",
           "thread_snippet",
+          "thread_link",
+          "thread_identity",
+          "conversation_header",
           "message_container",
           "message_item",
           "message_text",
+          "message_id",
+          "message_direction_in",
+          "message_direction_out",
+          "message_timestamp",
+          "message_sender",
+          "message_media",
+          "message_deleted",
           "composer_input",
           "send_button"
         ])
@@ -3847,6 +3899,7 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
       // when the time elapses. When absent, the send is enqueued
       // immediately (existing behaviour).
       scheduledFor: z.string().datetime().optional(),
+      source: z.literal("focus_ack").optional(),
       // App-level threading. When the dashboard's focused-thread composer
       // sends a reply, it includes the parent Message.id here. The send
       // itself still goes out as a regular text bubble — the threading is
@@ -3863,6 +3916,10 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
   }));
   if (stagedAttachments.length === 0 && payload.text.trim().length === 0) {
     res.status(400).json({ error: "send must have text, attachments, or both" });
+    return;
+  }
+  if (payload.source && payload.scheduledFor) {
+    res.status(400).json({ error: "focus acknowledgements cannot be scheduled" });
     return;
   }
 
@@ -3900,7 +3957,7 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
       return;
     } catch (error) {
       await auditService.log({
-        platform: "LINKEDIN",
+        platform: target.platform,
         stage: "Send",
         action: "SEND_SCHEDULE_FAIL",
         status: "FAIL",
@@ -3931,12 +3988,13 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
       text: payload.text,
       clientSendId: payload.clientSendId,
       attachments: stagedAttachments,
+      source: payload.source ?? "manual",
       replyToMessageId: payload.replyToMessageId
     });
     res.json(queueResult);
   } catch (error) {
     await auditService.log({
-      platform: "LINKEDIN",
+      platform: target.platform,
       stage: "Send",
       action: "SEND_ENQUEUE_FAIL",
       status: "FAIL",
@@ -3988,6 +4046,7 @@ app.post("/control/thread/:threadId/send-poll", asyncRoute(async (req, res) => {
   const threadStub: ThreadStub = {
     platformThreadId: target.platformThreadId,
     displayName: target.displayName,
+    recipientVerificationLabel: target.recipientVerificationLabel,
     threadUrl: target.threadUrl,
     lastMessagePreview: ""
   };
@@ -4200,6 +4259,16 @@ app.post("/control/thread/:threadId/retry-send", asyncRoute(async (req, res) => 
     res.status(400).json({ error: "thread_mismatch" });
     return;
   }
+  const retryEligibility = persistedSendRetryEligibility(original.status, original.errorJson);
+  if (!retryEligibility.allowed) {
+    res.status(409).json({ error: retryEligibility.reason });
+    return;
+  }
+  const originalSource = parsePersistedSendSource(original.source);
+  if (!originalSource) {
+    res.status(409).json({ error: "invalid_send_source" });
+    return;
+  }
 
   // Preserve the original send's attachments and reply-threading so a retry
   // re-sends the same message, not a text-only stub. Staged attachment files
@@ -4224,13 +4293,14 @@ app.post("/control/thread/:threadId/retry-send", asyncRoute(async (req, res) => 
       threadId,
       text: original.requestText,
       clientSendId: newClientSendId,
+      source: originalSource,
       attachments: retryAttachments,
       replyToMessageId: original.replyToMessageId ?? undefined
     });
     res.json({ ...queueResult, clientSendId: newClientSendId });
   } catch (error) {
     await auditService.log({
-      platform: "LINKEDIN",
+      platform: retryTarget.platform,
       stage: "Send",
       action: "SEND_RETRY_FAIL",
       status: "FAIL",
@@ -4251,6 +4321,7 @@ app.post("/control/thread/:threadId/open", asyncRoute(async (req, res) => {
       await adapter.openThread({
         platformThreadId: target.platformThreadId,
         displayName: target.displayName,
+        recipientVerificationLabel: target.recipientVerificationLabel,
         lastMessagePreview: "",
         threadUrl: target.threadUrl
       });
@@ -4361,6 +4432,7 @@ app.post("/control/thread/:threadId/message/:messageId/react", asyncRoute(async 
   const threadStub: ThreadStub = {
     platformThreadId: target.platformThreadId,
     displayName: target.displayName,
+    recipientVerificationLabel: target.recipientVerificationLabel,
     threadUrl: target.threadUrl,
     lastMessagePreview: ""
   };
@@ -4419,6 +4491,7 @@ app.post("/control/thread/:threadId/message/:messageId/edit", asyncRoute(async (
   const threadStub: ThreadStub = {
     platformThreadId: target.platformThreadId,
     displayName: target.displayName,
+    recipientVerificationLabel: target.recipientVerificationLabel,
     threadUrl: target.threadUrl,
     lastMessagePreview: ""
   };
@@ -4476,6 +4549,7 @@ app.post("/control/thread/:threadId/message/:messageId/poll-vote", asyncRoute(as
   const threadStub: ThreadStub = {
     platformThreadId: target.platformThreadId,
     displayName: target.displayName,
+    recipientVerificationLabel: target.recipientVerificationLabel,
     threadUrl: target.threadUrl,
     lastMessagePreview: ""
   };
@@ -4539,6 +4613,7 @@ app.get("/control/thread/:threadId/message/:messageId/poll-votes", asyncRoute(as
   const threadStub: ThreadStub = {
     platformThreadId: target.platformThreadId,
     displayName: target.displayName,
+    recipientVerificationLabel: target.recipientVerificationLabel,
     threadUrl: target.threadUrl,
     lastMessagePreview: ""
   };
@@ -4583,9 +4658,21 @@ app.post("/control/thread/:threadId/rescan", asyncRoute(async (req, res) => {
     target.platform === "IMESSAGE"
       ? await prisma.thread.findMany({
           where: { platform: target.platform, personId: target.personId },
-          select: { id: true, platformThreadId: true, threadUrl: true, person: { select: { displayName: true } } }
+          select: {
+            id: true,
+            platformThreadId: true,
+            threadUrl: true,
+            recipientVerificationLabel: true,
+            person: { select: { displayName: true } }
+          }
         })
-      : [{ id: target.threadId, platformThreadId: target.platformThreadId, threadUrl: target.threadUrl, person: { displayName: target.displayName } }];
+      : [{
+          id: target.threadId,
+          platformThreadId: target.platformThreadId,
+          threadUrl: target.threadUrl,
+          recipientVerificationLabel: target.recipientVerificationLabel,
+          person: { displayName: target.displayName }
+        }];
 
   // Per-thread rescan: open ONLY this thread and re-parse its messages,
   // instead of triggering a full-inbox scan via enqueueScan(). The full-
@@ -4607,7 +4694,14 @@ app.post("/control/thread/:threadId/rescan", asyncRoute(async (req, res) => {
   });
   try {
     const result = await withPlatformControlLock(target.platform, async () => {
-      const aggregate = { updatedThreads: 0, parsedMessages: 0, newMessages: 0 };
+      const aggregate = {
+        updatedThreads: 0,
+        parsedMessages: 0,
+        persistedMessages: 0,
+        quarantinedMessages: 0,
+        newMessages: 0,
+        freshnessComplete: true
+      };
       eventBus.emit({
         type: "SCAN_THREAD_PROGRESS",
         jobId: requestId,
@@ -4626,6 +4720,7 @@ app.post("/control/thread/:threadId/rescan", asyncRoute(async (req, res) => {
         const candidate: ThreadStub = {
           platformThreadId: t.platformThreadId,
           displayName: t.person.displayName,
+          recipientVerificationLabel: t.recipientVerificationLabel ?? undefined,
           threadUrl: t.threadUrl ?? undefined,
           lastMessagePreview: ""
         };
@@ -4637,6 +4732,8 @@ app.post("/control/thread/:threadId/rescan", asyncRoute(async (req, res) => {
         });
         aggregate.updatedThreads += partial.updatedThreads ?? 0;
         aggregate.parsedMessages += partial.parsedMessages ?? 0;
+        aggregate.persistedMessages += partial.persistedMessages ?? 0;
+        aggregate.quarantinedMessages += partial.quarantinedMessages ?? 0;
       }
       eventBus.emit({
         type: "SCAN_THREAD_PROGRESS",
@@ -4648,6 +4745,7 @@ app.post("/control/thread/:threadId/rescan", asyncRoute(async (req, res) => {
       });
       const messagesAfter = await prisma.message.count({ where: { threadId: { in: targetIds } } });
       aggregate.newMessages = Math.max(0, messagesAfter - messagesBefore);
+      aggregate.freshnessComplete = aggregate.quarantinedMessages === 0;
       return aggregate;
     });
     eventBus.emit({
@@ -4658,13 +4756,14 @@ app.post("/control/thread/:threadId/rescan", asyncRoute(async (req, res) => {
       updatedThreads: result.updatedThreads,
       parsedMessages: result.parsedMessages,
       personName: target.displayName,
-      newMessages: result.newMessages
+      newMessages: result.newMessages,
+      freshnessComplete: result.freshnessComplete
     });
     await auditService.log({
       platform: target.platform,
       stage: "Scan",
       action: "RESCAN_THREAD",
-      status: "OK",
+      status: result.freshnessComplete ? "OK" : "FAIL",
       details: {
         requestId,
         threadId: target.threadId,
@@ -4673,13 +4772,22 @@ app.post("/control/thread/:threadId/rescan", asyncRoute(async (req, res) => {
         ...result
       }
     });
-    res.json({
-      ok: true,
+    const responseBody = {
+      ok: result.freshnessComplete,
       requestId,
       threadId: target.threadId,
       scope: "single_thread",
+      warning: result.freshnessComplete ? undefined : MESSAGE_IDENTITY_FRESHNESS_ERROR,
       ...result
-    });
+    };
+    if (!result.freshnessComplete) {
+      res.status(409).json({
+        ...responseBody,
+        error: "Message check incomplete. Some historical messages could not be verified safely."
+      });
+      return;
+    }
+    res.json(responseBody);
   } catch (error) {
     eventBus.emit({
       type: "SCAN_THREAD_FINISHED",
@@ -6254,7 +6362,8 @@ app.get("/data/platforms", asyncRoute(async (_req, res) => {
     platformsForDisplay.map(async (platform) => {
       const row = platforms.find((entry) => entry.name === platform);
       const supported = true;
-      const sharedProfileDir = sessionManager.getProfileDir(defaultPersonKey);
+      const profileDir = resolvePlatformSession(platform).profileDir;
+      const browserProfileDetails = platformBrowserProfileDetails(platform, profileDir);
       const [latestFailure, latestRecovery] = await Promise.all([
         prisma.auditLog.findFirst({
           where: {
@@ -6290,32 +6399,18 @@ app.get("/data/platforms", asyncRoute(async (_req, res) => {
         unavailableReason:
           supported ? null : "iMessage is only available on macOS.",
         runnerProcess: platform === "IMESSAGE" ? runnerProcessInfo : undefined,
-        profileDir: sharedProfileDir,
-        browserProfileMode: runnerConfig.browserProfile.mode,
+        profileDir,
+        browserProfileMode: browserProfileDetails.profileMode,
         browserProfileSyncMode:
-          runnerConfig.browserProfile.mode === "personal"
-            ? runnerConfig.browserProfile.personalProfileSyncMode
+          browserProfileDetails.profileMode === "personal"
+            ? browserProfileDetails.syncMode
             : null,
-        browserProfileSourceUserDataDir:
-          runnerConfig.browserProfile.mode === "personal"
-            ? runnerConfig.browserProfile.personalChromeUserDataDir
-            : null,
-        browserProfileLaunchUserDataDir:
-          runnerConfig.browserProfile.mode === "personal"
-            ? sharedProfileDir
-            : sharedProfileDir,
-        browserProfileDirectory:
-          runnerConfig.browserProfile.mode === "personal"
-            ? runnerConfig.browserProfile.personalChromeProfileDirectory
-            : null,
-        browserProfileName:
-          runnerConfig.browserProfile.mode === "personal"
-            ? runnerConfig.browserProfile.personalChromeProfileName
-            : null,
+        browserProfileSourceUserDataDir: browserProfileDetails.sourceUserDataDir,
+        browserProfileLaunchUserDataDir: browserProfileDetails.launchUserDataDir,
+        browserProfileDirectory: browserProfileDetails.profileDirectory,
+        browserProfileName: browserProfileDetails.profileName,
         browserProfileResolutionStrategy:
-          runnerConfig.browserProfile.mode === "personal"
-            ? runnerConfig.browserProfile.personalChromeProfileResolutionStrategy
-            : null,
+          browserProfileDetails.profileResolutionStrategy,
         latestSelectorReport: selectorReports.getLatestReport(platform),
         lastScanFailure: latestFailure && failureIsCurrent
           ? {
@@ -6525,7 +6620,9 @@ app.post("/control/message-sync-latency", asyncRoute(async (req, res) => {
     .object({
       metric: z.enum(MESSAGE_SYNC_METRICS),
       durationMs: z.number().finite().min(0).max(24 * 60 * 60 * 1_000),
-      platform: z.enum(["LINKEDIN", "IMESSAGE", "WHATSAPP", "GOOGLE_MESSAGES"]).optional(),
+      platform: z
+        .enum(["LINKEDIN", "INSTAGRAM", "IMESSAGE", "WHATSAPP", "GOOGLE_MESSAGES"])
+        .optional(),
       outcome: z.enum(["success", "failure"]).optional()
     })
     .parse(req.body) as {
@@ -7642,11 +7739,14 @@ app.post("/control/platform/open-browser", asyncRoute(async (req, res) => {
     // isn't hidden, and reveal a warm-but-hidden window so it surfaces even
     // when ensureConnected reuses an existing background context (or throws
     // auth-required - the operator still needs the window).
-    const releaseVisible = sessionManager.markVisibleLaunch(payload.platform);
+    const platformSession = resolvePlatformSession(payload.platform);
+    const releaseVisible = platformSession.sessionManager.markVisibleLaunch(payload.platform);
     try {
-      await adapter.ensureConnected();
+      await (adapter.connectInteractively?.() ?? adapter.ensureConnected());
     } finally {
-      await sessionManager.revealWindow(payload.platform).catch(() => undefined);
+      await platformSession.sessionManager
+        .revealWindow(payload.platform, platformSession.personKey)
+        .catch(() => undefined);
       releaseVisible();
     }
     res.json({ status: "ok" });
@@ -8305,21 +8405,24 @@ app.post("/control/platform/reset-session", asyncRoute(async (req, res) => {
       await operationMutex.runExclusive(platformLockKey(platform), async () => undefined);
     }
 
-    const summary = await sessionManager.resetPersonSession({
-      personKey: defaultPersonKey,
-      reason: "manual_reset",
-      clearProfileDir: true
-    });
+    const resetPlan = planPlatformSessionReset(allPlatforms, payload.platform);
+    if (resetPlan.resetSharedSession) {
+      await sessionManager.resetPersonSession({
+        personKey: defaultPersonKey,
+        reason: "manual_reset",
+        clearProfileDir: true
+      });
+    }
+    if (resetPlan.resetInstagramSession) {
+      const route = resolvePlatformSession("INSTAGRAM");
+      await route.sessionManager.resetPersonSession({
+        personKey: route.personKey,
+        reason: "manual_reset",
+        clearProfileDir: true
+      });
+    }
 
-    for (const platform of allPlatforms) {
-      // WHATSAPP is excluded: this reset clears the shared Playwright
-      // profile, but WhatsApp runs its own whatsapp-web.js session with a
-      // separate LocalAuth dir. Wiping its row (and connectedAt) here would
-      // make the dashboard hide a still-linked WhatsApp. Use
-      // /control/whatsapp/disconnect for that session instead.
-      if (platform === "WHATSAPP") {
-        continue;
-      }
+    for (const platform of resetPlan.statusPlatforms) {
       await prisma.platform.upsert({
         where: { name: platform },
         update: {
@@ -8337,21 +8440,20 @@ app.post("/control/platform/reset-session", asyncRoute(async (req, res) => {
     await auditService.log({
       platform: payload.platform,
       stage: "Connect",
-      action: "RESET_SESSION_SHARED",
+      action: "RESET_SESSION",
       status: "OK",
       details: {
-        resetScope: "PERSON_CONTEXT",
-        personKey: summary.personKey,
-        profileDir: summary.profileDir,
-        clearedProfileDir: summary.clearedProfileDir
+        resetScope: resetPlan.resetScope,
+        resetSharedSession: resetPlan.resetSharedSession,
+        resetInstagramSession: resetPlan.resetInstagramSession,
+        affectedPlatformCount: resetPlan.statusPlatforms.length
       }
     });
 
     res.json({
       status: "ok",
-      resetScope: "PERSON_CONTEXT",
-      personKey: summary.personKey,
-      profileDir: summary.profileDir
+      resetScope: resetPlan.resetScope,
+      affectedPlatforms: resetPlan.statusPlatforms
     });
   });
 }));

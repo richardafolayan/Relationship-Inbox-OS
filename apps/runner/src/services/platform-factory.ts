@@ -1,9 +1,12 @@
 import { resolveSelectors } from "@inbox-os/core";
 import type { PlatformAdapter, PlatformName, SelectorRegistry } from "@inbox-os/core";
-import { resolve, dirname } from "node:path";
-import { runnerConfig } from "../config";
+import { basename, resolve, dirname } from "node:path";
+import { resolveConnectTimeoutMs, runnerConfig } from "../config";
+import type { BrowserProfileConfig } from "../config";
+import type { PlatformAvailability } from "../platform-availability";
 import type { SettingsStore } from "../types/runtime";
 import { LinkedInAdapter } from "../platforms/linkedin-adapter";
+import { InstagramAdapter } from "../platforms/instagram-adapter";
 import { IMessageAdapter } from "../platforms/imessage-adapter";
 import { WhatsAppAdapter } from "../platforms/whatsapp-adapter";
 import { GoogleMessagesAdapter } from "../platforms/google-messages-adapter";
@@ -13,6 +16,12 @@ import { createSessionManager } from "./session-manager";
 
 /** WhatsApp connect-state machine (#774), surfaced to the dashboard QR flow. */
 export type WhatsAppConnectState = "qr_ready" | "connecting" | "connected" | "disconnected";
+
+export interface PlatformSessionRoute {
+  sessionManager: ReturnType<typeof createSessionManager>;
+  personKey: string;
+  profileDir: string;
+}
 
 /**
  * Lazy-throwing adapter shell used while a platform is in scaffolding.
@@ -27,6 +36,15 @@ export function createNotImplementedAdapter(platform: PlatformName): PlatformAda
   };
   return {
     platform,
+    collectionBoundary: {
+      beginCycle: () => undefined,
+      getMetrics: () => ({
+        totalFound: 0,
+        unreadFound: 0,
+        completeness: "incomplete",
+        nativeStopReason: "adapter_not_implemented"
+      })
+    },
     ensureConnected: () => reject("ensureConnected"),
     scanUnreadThreads: () => reject("scanUnreadThreads"),
     fetchRecentThreads: () => reject("fetchRecentThreads"),
@@ -53,6 +71,8 @@ export function createAdapters(input: {
     platformThreadId: string;
     sourceChangedAt: string;
   }) => void;
+  platformAvailability?: PlatformAvailability;
+  instagramBrowserProfile?: BrowserProfileConfig;
 }): {
   // `Partial` because not every PlatformName has an adapter on main today.
   // IMESSAGE was added to PlatformName so prisma can read existing iMessage
@@ -63,12 +83,15 @@ export function createAdapters(input: {
   adapters: Partial<Record<PlatformName, PlatformAdapter>>;
   resolveSelectorsForPlatform: (platform: PlatformName) => Promise<SelectorRegistry>;
   sessionManager: ReturnType<typeof createSessionManager>;
+  resolvePlatformSession: (platform: PlatformName) => PlatformSessionRoute;
 } {
   async function resolveSelectorsForPlatform(platform: PlatformName): Promise<SelectorRegistry> {
     const overrides = await input.settingsStore.getSelectorOverrides();
     return resolveSelectors(platform, runnerConfig.selectorDir, overrides);
   }
 
+  const availability = input.platformAvailability ?? runnerConfig.platformAvailability;
+  const instagramBrowserProfile = input.instagramBrowserProfile ?? runnerConfig.browserProfile;
   const managedProfileRoot = resolve(dirname(runnerConfig.profileDirs.LINKEDIN), "__managed_person_profiles");
   const sessionManager = createSessionManager({
     profileRootDir: managedProfileRoot,
@@ -77,10 +100,36 @@ export function createAdapters(input: {
     onConnectStep: input.onConnectStep,
     onPersonalProfileFallback: input.onPersonalProfileFallback
   });
+  const instagramPersonKey = basename(runnerConfig.profileDirs.INSTAGRAM);
+  const instagramSessionManager = createSessionManager({
+    profileRootDir: dirname(runnerConfig.profileDirs.INSTAGRAM),
+    browserProfile: {
+      ...instagramBrowserProfile,
+      personalProfileSyncMode:
+        instagramBrowserProfile.mode === "personal"
+          ? "once"
+          : instagramBrowserProfile.personalProfileSyncMode,
+      fallbackBehavior: "error"
+    },
+    preferInstalledChrome: true,
+    getSettings: () => input.settingsStore.getSettings(),
+    onConnectStep: input.onConnectStep,
+    onPersonalProfileFallback: input.onPersonalProfileFallback
+  });
+
+  function resolvePlatformSession(platform: PlatformName): PlatformSessionRoute {
+    const manager = platform === "INSTAGRAM" ? instagramSessionManager : sessionManager;
+    const personKey = platform === "INSTAGRAM" ? instagramPersonKey : "default";
+    return {
+      sessionManager: manager,
+      personKey,
+      profileDir: manager.getProfileDir(personKey)
+    };
+  }
 
   const adapters: Partial<Record<PlatformName, PlatformAdapter>> = {};
 
-  if (runnerConfig.platformAvailability.LINKEDIN) {
+  if (availability.LINKEDIN) {
     adapters.LINKEDIN = new LinkedInAdapter({
       screenshotDir: runnerConfig.screenshotDir,
       domDumpDir: runnerConfig.domDumpDir,
@@ -119,14 +168,33 @@ export function createAdapters(input: {
     });
   }
 
-  if (runnerConfig.platformAvailability.IMESSAGE) {
+  if (availability.INSTAGRAM) {
+    const route = resolvePlatformSession("INSTAGRAM");
+    adapters.INSTAGRAM = new InstagramAdapter({
+      screenshotDir: runnerConfig.screenshotDir,
+      domDumpDir: runnerConfig.domDumpDir,
+      resolveSelectors: () => resolveSelectorsForPlatform("INSTAGRAM"),
+      sessionManager: route.sessionManager,
+      personKey: route.personKey,
+      connectTimeoutMs: resolveConnectTimeoutMs("personal"),
+      personalProfile:
+        instagramBrowserProfile.mode === "personal"
+          ? {
+              sourceUserDataDir: instagramBrowserProfile.personalChromeUserDataDir,
+              profileDirectory: instagramBrowserProfile.personalChromeProfileDirectory
+            }
+          : undefined
+    });
+  }
+
+  if (availability.IMESSAGE) {
     adapters.IMESSAGE = new IMessageAdapter({
       dbPath: runnerConfig.imessage.dbPath,
       contactsVcfPath: runnerConfig.imessage.contactsVcfPath
     });
   }
 
-  if (runnerConfig.platformAvailability.WHATSAPP && input.whatsappPrisma) {
+  if (availability.WHATSAPP && input.whatsappPrisma) {
     adapters.WHATSAPP = new WhatsAppAdapter({
       authDir: runnerConfig.profileDirs.WHATSAPP,
       mediaDir: runnerConfig.whatsapp.mediaDir,
@@ -138,7 +206,7 @@ export function createAdapters(input: {
     });
   }
 
-  if (runnerConfig.platformAvailability.GOOGLE_MESSAGES) {
+  if (availability.GOOGLE_MESSAGES) {
     adapters.GOOGLE_MESSAGES = new GoogleMessagesAdapter({
       screenshotDir: runnerConfig.screenshotDir,
       domDumpDir: runnerConfig.domDumpDir,
@@ -151,6 +219,7 @@ export function createAdapters(input: {
   return {
     adapters,
     resolveSelectorsForPlatform,
-    sessionManager
+    sessionManager,
+    resolvePlatformSession
   };
 }

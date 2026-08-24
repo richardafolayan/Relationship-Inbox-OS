@@ -15,6 +15,58 @@ and close through `PlatformAdapter`. Keep reactions, edits, polls, incremental
 watermarks, and retracted-send collection optional. Persist only shared
 `ThreadStub`, `NormalizedMessage`, attachment, and receipt shapes.
 
+Cross-cutting persistence repairs use a platform-neutral reconciler registry.
+The composition root injects a reconciler for a platform, while the shared scan
+service sees only blocked and quarantined message keys. Migration scheme values
+remain opaque strings outside the platform implementation.
+
+`ThreadStub.recipientVerificationLabel` carries the last platform-reported
+conversation label when a platform needs recipient verification. It is stored
+separately from the user-facing `Person.displayName`, so an operator rename does
+not become platform identity evidence.
+
+Browser sends bind the exact composer element, its verified conversation
+container, and its complete path to the document root before recipient
+verification, pointer movement, or input. After humanized delays, the final
+route, recipient, composer, and control ownership checks run in the same
+synchronous browser task as each composer mutation and the Send click. Every
+task requires the original composer path and conversation container to remain
+connected and unchanged. The send boundary binds a control handle before
+measuring locality and binds the lowest non-page-level owner shared with the
+composer. It also binds both complete ordered paths to the shared owner and the
+owner's complete path to the document root. The final task requires the same
+original conversation container and local owner, with every bound parent edge
+connected and unchanged, then measures and clicks the same control handle. All
+temporary control and ownership handles are released after the click attempt,
+a rejected binding, or an earlier composer failure. Recipient ownership is
+rechecked after focus handlers run and before any text mutation or input event.
+The active conversation container and local composer form or row must still own
+the visible recipient evidence, composer, and Send control. The control must
+have exact Send semantics, remain enabled and visible, and pass a final hit
+test immediately before the synchronous click.
+
+Every adapter declares a typed collection-boundary capability. Adapters whose
+source query is exhaustive declare authoritative completeness. Bounded or
+stateful collectors report `complete`, `incomplete`, or `candidate_cap` after
+each cycle. Native stop reasons remain opaque diagnostic strings and never
+drive shared freshness policy. Missing or unknown completeness fails closed.
+A saturated unread or recent iMessage query reports `candidate_cap`, retains the
+previous fully fresh time, and cannot advance its incremental watermark.
+A bounded Instagram network and DOM snapshot remains useful for ingest, but it
+cannot publish platform-wide freshness unless every collection view proves the
+inbox is empty. Positive empty evidence is scoped to the inbox shell. Negative
+thread, composer, message, loading, error, and failed network evidence covers
+the document so sibling live panes veto an empty claim. GraphQL application
+errors count as failed collection evidence. The adapter captures all currently
+rendered DOM and network candidates, deduplicates identities while preserving
+unread evidence from either source, places every unread thread first, and only
+then applies the final distinct-thread limit. Network requests reserve their
+ordering when they start. Overlapping thread snapshots retain fields and
+position from the earliest request while unread evidence is monotonic across
+responses. After DOM or network readiness, the adapter gives current-generation
+pending GraphQL requests the remainder of one bounded readiness window to
+settle before the final merge.
+
 Unsupported operations fail clearly and callers check optional capabilities
 before offering them.
 
@@ -22,6 +74,10 @@ before offering them.
 
 - Scan and send services stay platform-neutral.
 - Platform-specific correctness and verification remain inside the adapter.
+- Platform-specific data repair remains behind an injected generic capability.
+- Humanized browser delays cannot create a gap between ownership checks and an
+  external browser mutation.
+- A bounded candidate window cannot become an authoritative freshness claim.
 - UI controls must be capability-aware.
 - A new platform needs an adapter, selector/config wiring where relevant, and
   focused identity, parse, send, and failure tests.
@@ -31,4 +87,5 @@ before offering them.
 - [`packages/core/src/adapters.ts`](../../packages/core/src/adapters.ts)
 - [`packages/core/src/types.ts`](../../packages/core/src/types.ts)
 - [`apps/runner/src/services/platform-factory.ts`](../../apps/runner/src/services/platform-factory.ts)
+- [`apps/runner/src/services/message-identity-reconciliation.ts`](../../apps/runner/src/services/message-identity-reconciliation.ts)
 - [Platform adapter reference](../developer/platform-adapters.md)

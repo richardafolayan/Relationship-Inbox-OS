@@ -24,6 +24,7 @@ import {
 import type { HealthResponse, PlatformCard } from "@/lib/types";
 import {
   type MobileStatusChrome,
+  shouldRenderStatusTicker,
   shouldSurfaceHiddenStatus
 } from "@/lib/mobile-status-chrome";
 import { cn } from "@/lib/utils";
@@ -153,6 +154,10 @@ type TickerState =
       kind: "thread_checked";
       personName: string | null;
       newMessages: number | null;
+    }
+  | {
+      kind: "thread_check_incomplete";
+      personName: string | null;
     };
 
 function formatRelativeScan(lastScanAt: string | null): string {
@@ -264,6 +269,12 @@ function computeTicker(input: {
       newMessages: threadCheck.newMessages
     };
   }
+  if (threadCheck.kind === "incomplete") {
+    return {
+      kind: "thread_check_incomplete",
+      personName: threadCheck.personName
+    };
+  }
   if (blockedByScan) {
     const platform = input.health?.currentScanPlatform ?? null;
     const progress = input.health?.scanProgress;
@@ -355,6 +366,11 @@ function tickerLabel(state: TickerState): string {
         kind: "checked",
         personName: state.personName,
         newMessages: state.newMessages
+      });
+    case "thread_check_incomplete":
+      return threadCheckLabel({
+        kind: "incomplete",
+        personName: state.personName
       });
     default:
       return "";
@@ -589,9 +605,11 @@ export function TopStatus({
   const tickerTone =
     ticker.kind === "send_failed"
       ? "text-ink-2"
-      : ticker.kind === "send_succeeded" || ticker.kind === "thread_checked"
-        ? "text-risk-fresh"
-        : "text-ink-2";
+      : ticker.kind === "thread_check_incomplete"
+        ? "text-risk-waiting"
+        : ticker.kind === "send_succeeded" || ticker.kind === "thread_checked"
+          ? "text-risk-fresh"
+          : "text-ink-2";
 
   // #914: secondary mobile routes hide the row unless degraded / offline /
   // in-flight work needs a surface. Desktop always keeps the full row.
@@ -668,14 +686,13 @@ export function TopStatus({
         </Link>
       )}
 
-      {tickerIsActive ||
-      ticker.kind === "send_failed" ||
-      ticker.kind === "send_succeeded" ||
-      ticker.kind === "thread_checked" ? (
+      {shouldRenderStatusTicker(ticker.kind, tickerIsActive) ? (
         <>
           <span className="inline-flex min-w-0 items-center gap-[8px]">
             {ticker.kind === "send_succeeded" || ticker.kind === "thread_checked" ? (
               <span className="inline-block h-[6px] w-[6px] rounded-full bg-risk-fresh" aria-hidden />
+            ) : ticker.kind === "thread_check_incomplete" ? (
+              <span className="inline-block h-[6px] w-[6px] rounded-full bg-risk-waiting" aria-hidden />
             ) : ticker.kind === "send_failed" ? (
               <span className="inline-block h-[6px] w-[6px] rounded-full bg-ink-3" aria-hidden />
             ) : null}

@@ -14,11 +14,42 @@ export interface PollVoteRecord {
   votedAt: string | null;
 }
 
+export type CollectionBoundaryCompleteness =
+  | "complete"
+  | "incomplete"
+  | "candidate_cap";
+
+export interface PlatformCollectionBoundaryMetrics {
+  totalFound: number;
+  unreadFound: number;
+  failures?: number;
+  completeness: CollectionBoundaryCompleteness;
+  nativeStopReason?: string;
+  [key: string]: unknown;
+}
+
+export interface PlatformCollectionBoundaryCapability {
+  beginCycle(): void;
+  getMetrics(): PlatformCollectionBoundaryMetrics;
+}
+
 export interface PlatformAdapter {
   platform: PlatformName;
   ensureConnected(): Promise<void>;
+  /**
+   * Optional operator-initiated connection flow. Browser adapters can keep
+   * the visible session open while the operator completes login or 2FA.
+   * Background scans continue to use ensureConnected so they fail quickly
+   * when authentication is required.
+   */
+  connectInteractively?(): Promise<void>;
   scanUnreadThreads(): Promise<ThreadStub[]>;
   fetchRecentThreads(limit: number): Promise<ThreadStub[]>;
+  /**
+   * Required proof about whether candidate discovery reached the adapter's
+   * authoritative inbox boundary. Missing or unknown evidence fails closed.
+   */
+  collectionBoundary: PlatformCollectionBoundaryCapability;
   /**
    * Optional targeted lookup used when a platform event identifies the exact
    * conversation that changed. Falls back to the normal unread/recent scan

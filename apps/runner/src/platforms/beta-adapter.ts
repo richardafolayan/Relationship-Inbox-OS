@@ -7,6 +7,7 @@ import type {
   SendReceipt,
   ThreadStub
 } from "@inbox-os/core";
+import { BOUNDED_COLLECTION_BOUNDARY } from "./collection-boundary";
 import { AdapterFailure, cleanMessageText, humanDelay, toStageFailure } from "./utils";
 import { humanClick, humanType, readingPause } from "./humanize";
 import type { SessionManager } from "../services/session-manager";
@@ -53,7 +54,7 @@ export function betaIdentityMatch(
   return header.includes(target) || target.includes(header);
 }
 
-interface BetaAdapterDependencies {
+export interface BetaAdapterDependencies {
   platform: PlatformName;
   screenshotDir: string;
   domDumpDir: string;
@@ -64,12 +65,13 @@ interface BetaAdapterDependencies {
 
 export class BetaAdapter implements PlatformAdapter {
   platform: PlatformName;
+  readonly collectionBoundary = BOUNDED_COLLECTION_BOUNDARY;
 
-  constructor(private readonly deps: BetaAdapterDependencies) {
+  constructor(protected readonly deps: BetaAdapterDependencies) {
     this.platform = deps.platform;
   }
 
-  private async getPage(): Promise<Page> {
+  protected async getPage(): Promise<Page> {
     return this.deps.sessionManager.getManagedPage({
       platform: this.platform,
       personKey: this.deps.personKey ?? "default"
@@ -80,7 +82,7 @@ export class BetaAdapter implements PlatformAdapter {
     return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
   }
 
-  private async waitForInboxReady(page: Page, selectors: SelectorRegistry, timeout: number): Promise<void> {
+  protected async waitForInboxReady(page: Page, selectors: SelectorRegistry, timeout: number): Promise<void> {
     try {
       await page.waitForSelector(selectors.thread_list, { timeout });
       return;
@@ -107,14 +109,20 @@ export class BetaAdapter implements PlatformAdapter {
     }
   }
 
-  private async detectAuthRequired(page: Page): Promise<{ authRequired: boolean; reason?: string; url: string }> {
+  protected async detectAuthRequired(page: Page): Promise<{ authRequired: boolean; reason?: string; url: string }> {
     const url = page.url();
     const detection = await page.evaluate((platform) => {
       const bodyText = document.body?.innerText?.toLowerCase() ?? "";
       const has = (selector: string) => document.querySelector(selector) !== null;
 
       if (platform === "INSTAGRAM") {
-        if (has("input[name='username']") || has("input[name='password']") || /log in to instagram/.test(bodyText)) {
+        if (
+          has("input[name='email']") ||
+          has("input[name='pass']") ||
+          has("input[name='username']") ||
+          has("input[name='password']") ||
+          /log in to instagram/.test(bodyText)
+        ) {
           return { authRequired: true, reason: "instagram_login_form" };
         }
       }
@@ -147,7 +155,7 @@ export class BetaAdapter implements PlatformAdapter {
     };
   }
 
-  private async throwIfAuthRequired(page: Page, context: string): Promise<void> {
+  protected async throwIfAuthRequired(page: Page, context: string): Promise<void> {
     const auth = await this.detectAuthRequired(page);
     if (!auth.authRequired) {
       return;

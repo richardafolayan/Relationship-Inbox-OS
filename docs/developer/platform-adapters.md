@@ -10,12 +10,12 @@ platform can verify.
 
 | Capability | LinkedIn | iMessage | Instagram | TikTok | WhatsApp |
 | --- | --- | --- | --- | --- | --- |
-| Current status | Primary | Primary on macOS | Beta | Beta | Opt-in, off by default |
-| Integration | Patchright/Playwright browser | Read `chat.db`, send via AppleScript/Messages | Shared browser beta adapter | Shared browser beta adapter | `whatsapp-web.js` and its Puppeteer |
-| Auth | Personal Chrome mirror or isolated profile | Signed-in Messages plus macOS permissions | Isolated/managed browser session | Isolated/managed browser session | LocalAuth and linked-device QR |
+| Current status | Primary | Primary on macOS | Pilot beta, opt-in | Scaffold only | Opt-in, off by default |
+| Integration | Patchright/Playwright browser | Read `chat.db`, send via AppleScript/Messages | Instagram wrapper over shared beta browser primitives | Shared browser beta adapter | `whatsapp-web.js` and its Puppeteer |
+| Auth | Personal Chrome mirror or isolated profile | Signed-in Messages plus macOS permissions | Dedicated persistent profile and manual login | Isolated/managed browser session | LocalAuth and linked-device QR |
 | Unread/recent scan | Yes | Yes | Yes | Yes | Yes |
 | Change trigger | Scheduled/manual, streaming row ingest within a scan | Filesystem watcher plus database watermark | Scheduled/manual | Scheduled/manual | Incoming library event plus scheduled/manual |
-| Text send | Yes, verified bubble | Yes, post-send `chat.db` check | Yes, beta verification | Yes, beta verification | Yes, library best effort plus guard |
+| Text send | Yes, verified bubble | Yes, post-send `chat.db` check | Manual only, verified new bubble | Beta best effort | Yes, library best effort plus guard |
 | Attachments | No | Yes | No | No | Yes |
 | Groups | Limited by platform rows | Group names and senders | Selector-dependent | Selector-dependent | Yes, group JID and sender names |
 | Reaction action | Yes | No adapter action | No | No | No |
@@ -28,6 +28,12 @@ platform can verify.
 
 The UI must check optional methods before exposing reactions, edit, poll, or
 profile actions. A schema enum value does not prove a usable adapter.
+
+Every adapter also declares collection completeness. Exhaustive adapters use
+an authoritative-by-construction boundary. Bounded collectors report
+`complete`, `incomplete`, or `candidate_cap` after each collection cycle and
+may attach an opaque native stop reason for diagnostics. The scan queue treats
+missing or unknown completeness as incomplete and does not advance freshness.
 
 ## Shared contract and factory
 
@@ -96,6 +102,8 @@ Source:
 - Reads unread/recent chats, a generous message window, attachments,
   reactions, native reply metadata, group names, delivery error state, and
   cheap change-watermark values.
+- Treats a saturated unread or recent query as a candidate cap. A capped cycle
+  stays degraded and cannot advance the database watermark past omitted chats.
 - Filters known Messages system events before they affect presentation or AI.
 - Resolves raw handles through live macOS Contacts and optional
   `data/contacts.vcf`, preserving manual names.
@@ -127,25 +135,66 @@ Relevant tests include
 [`runner-imessage-chatdb-open-denied.test.mjs`](../../tests/runner-imessage-chatdb-open-denied.test.mjs),
 and [`runner-imessage-receipt-sibling-chat.test.mjs`](../../tests/runner-imessage-receipt-sibling-chat.test.mjs).
 
-## Instagram and TikTok
+## Instagram
 
-Both use [`beta-adapter.ts`](../../apps/runner/src/platforms/beta-adapter.ts)
-with platform-specific selector JSON.
+Source:
+[`instagram-adapter.ts`](../../apps/runner/src/platforms/instagram-adapter.ts),
+[`beta-adapter.ts`](../../apps/runner/src/platforms/beta-adapter.ts), and
+[`selectors/instagram.json`](../../packages/core/selectors/instagram.json).
 
-The shared adapter can connect, find unread/recent conversations, parse
-messages, send text after verifying thread context, open a thread, and close
-the session. It does not implement attachments, reactions, edits, polls,
-incremental watermarks, or platform events.
+- Opt-in through `INSTAGRAM_ENABLED`; missing or invalid values keep it out of
+  setup, scanning, and platform management.
+- Reuses shared beta browser/auth primitives but owns a dedicated persistent
+  profile so reconnect/reset cannot disturb another platform.
+- Requests standard installed Chrome with that dedicated profile, never Chrome
+  for Testing. In personal mode, the app-owned profile is seeded from the
+  configured trusted Chrome profile once, then preserved so a later runner
+  restart cannot overwrite a completed manual login. macOS cookies are
+  injected through the existing local Keychain bridge. Cookie values are never
+  logged. The live source profile is never controlled or deleted, and login or
+  Instagram security checks stay manual. A user-triggered Connect action may
+  press the single saved-profile `Continue` button when the page also shows
+  `Use another profile`; background scans never press login controls.
+- Thread identity comes only from a canonical `/direct/t/<id>/` URL, a
+  verified stable attribute, or Instagram's URL-facing Direct thread record
+  ID captured from its own GraphQL response. The current control-only inbox
+  rows do not expose thread links, so response capture is the primary live
+  discovery path. Internal 39-digit message thread IDs, display names,
+  previews, and row order never become identifiers.
+- Browser-side parsing installs the same runtime compatibility shim used by
+  LinkedIn before evaluating row or message normalizers.
+- Message parsing scopes broad `main` selectors to the active conversation pane
+  identified by its composer or header. Control-only sidebar rows are excluded
+  even when they expose no thread link. Profile images and avatars are excluded
+  by both link destination and semantic labels, while linked post and reel media
+  remain message content.
+- Ambiguous message direction fails the fetch. Exact source datetimes are
+  stored when exposed; otherwise persistence retains first-seen time.
+- Unsupported or deleted content is represented by a safe placeholder.
+- Opening and sending navigate to the exact thread ID and verify the resulting
+  URL. A send also verifies the adapter-captured recipient label before any
+  composer mutation and again immediately before clicking the bound Send
+  control. Sending is manual text only and succeeds only after a new matching
+  outbound bubble appears.
+- Revealing Instagram foregrounds the installed stable Chrome bundle used by
+  its session. It does not launch Patchright's Chrome for Testing as a second
+  window.
+- Instagram selector tests report structural counts without screenshots or DOM
+  dumps so private conversations do not enter diagnostic artifacts.
 
-These adapters are beta because their external DOM contracts shift often.
-Selector failure should set the platform degraded and preserve other platform
-operation rather than trigger speculative selector changes. Use the selector
-test control and audit artifacts before editing selectors.
+Instagram remains beta because its external DOM can change. A selector mismatch
+degrades Instagram without speculative fallback or changes to other platforms.
 
 Relevant tests include
-[`runner-selector-service.test.mjs`](../../tests/runner-selector-service.test.mjs),
-[`runner-selector-contract.test.mjs`](../../tests/runner-selector-contract.test.mjs),
-and [`core-selectors.test.mjs`](../../tests/core-selectors.test.mjs).
+[`runner-instagram-adapter.test.mjs`](../../tests/runner-instagram-adapter.test.mjs),
+[`runner-instagram-factory.test.mjs`](../../tests/runner-instagram-factory.test.mjs),
+and [`runner-instagram-runtime-contract.test.mjs`](../../tests/runner-instagram-runtime-contract.test.mjs).
+
+## TikTok
+
+TikTok retains the generic [`beta-adapter.ts`](../../apps/runner/src/platforms/beta-adapter.ts)
+scaffold. It is not enabled by platform availability and is not expanded or
+verified by the Instagram implementation.
 
 ## WhatsApp
 

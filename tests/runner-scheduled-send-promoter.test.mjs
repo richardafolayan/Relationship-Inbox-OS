@@ -14,14 +14,18 @@ function createFakePrisma(initialRows) {
         return rows
           .filter((r) => r.status === "SCHEDULED" && r.scheduledFor.getTime() <= byTime)
           .sort((a, b) => a.scheduledFor.getTime() - b.scheduledFor.getTime())
-          .map((r) => ({ id: r.id, clientSendId: r.clientSendId }));
+          .map((r) => ({
+            id: r.id,
+            clientSendId: r.clientSendId,
+            thread: { platform: r.platform ?? "LINKEDIN" }
+          }));
       },
       async updateMany({ where, data }) {
         const ids = new Set(where.id.in);
         let count = 0;
         for (const r of rows) {
           if (ids.has(r.id)) {
-            r.status = data.status;
+            Object.assign(r, data);
             count += 1;
           }
         }
@@ -97,6 +101,61 @@ test("promoter flips SCHEDULED rows whose time has passed to PENDING and kicks t
   assert.equal(eventBus.events.length, 1);
   assert.equal(eventBus.events[0].type, "SEND_QUEUE_UPDATED");
   assert.equal(eventBus.events[0].activeCount, 2, "active count should reflect newly-PENDING rows");
+});
+
+test("promoter terminalises due Instagram schedules without kicking them into the send queue", async () => {
+  const past = new Date(Date.now() - 60_000);
+  const fake = createFakePrisma([
+    {
+      id: "instagram-due",
+      clientSendId: "cs-instagram",
+      status: "SCHEDULED",
+      scheduledFor: past,
+      platform: "INSTAGRAM"
+    }
+  ]);
+  const sendQueue = createCountingSendQueue();
+  const eventBus = createCountingEventBus();
+  const promoter = createScheduledSendPromoter({ sendQueue, eventBus, prisma: fake });
+
+  const { promoted } = await promoter.tick();
+
+  assert.equal(promoted, 0);
+  assert.equal(fake.rows[0].status, "FAILED");
+  assert.match(fake.rows[0].errorJson, /user-triggered sends only/);
+  assert.equal(sendQueue.kicks(), 0);
+  assert.equal(eventBus.events.length, 0);
+});
+
+test("promoter only promotes non-Instagram rows from a mixed due batch", async () => {
+  const past = new Date(Date.now() - 60_000);
+  const fake = createFakePrisma([
+    {
+      id: "instagram-due",
+      clientSendId: "cs-instagram",
+      status: "SCHEDULED",
+      scheduledFor: past,
+      platform: "INSTAGRAM"
+    },
+    {
+      id: "linkedin-due",
+      clientSendId: "cs-linkedin",
+      status: "SCHEDULED",
+      scheduledFor: past,
+      platform: "LINKEDIN"
+    }
+  ]);
+  const sendQueue = createCountingSendQueue();
+  const eventBus = createCountingEventBus();
+  const promoter = createScheduledSendPromoter({ sendQueue, eventBus, prisma: fake });
+
+  const { promoted } = await promoter.tick();
+
+  assert.equal(promoted, 1);
+  assert.equal(fake.rows.find((row) => row.id === "instagram-due").status, "FAILED");
+  assert.equal(fake.rows.find((row) => row.id === "linkedin-due").status, "PENDING");
+  assert.equal(sendQueue.kicks(), 1);
+  assert.equal(eventBus.events[0].activeCount, 1);
 });
 
 test("promoter no-ops and does not kick the queue when nothing is due", async () => {

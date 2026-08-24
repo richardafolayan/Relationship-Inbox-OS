@@ -179,6 +179,9 @@ export async function preparePersonalProfileMirror(input: PersonalProfileMirrorI
   } else if (input.syncMode === "always") {
     shouldSync = true;
     syncReason = "forced_sync";
+  } else if (input.syncMode === "once") {
+    shouldSync = !targetReady;
+    syncReason = shouldSync ? "target_missing" : "sync_disabled";
   } else if (!targetReady || typeof lastMirroredSourceMarkerMtimeMs !== "number") {
     shouldSync = true;
     syncReason = "target_missing";

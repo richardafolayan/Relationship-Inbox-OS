@@ -18,7 +18,7 @@ export function classifySendFailureKind(input: {
   adapterKind?: string;
 }): SendFailureKind {
   if (
-    /could not confirm.*deliver|no new outbound bubble|delivery (?:could not be confirmed|.*unconfirm)|delivery status.*unknown|send interrupted|interrupted.*send/i.test(
+    /could not confirm.*deliver|no new outbound bubble|delivery (?:could not be confirmed|.*unconfirm|uncertain)|delivery status.*unknown|send interrupted|interrupted.*send|submitted message not observed|thread changed during send/i.test(
       input.message
     )
   ) {
@@ -124,4 +124,17 @@ export function parsePersistedSendFailure(errorJson?: string | null): ConsumerSe
   } catch {
     return consumerSendFailure("UNKNOWN");
   }
+}
+
+export function persistedSendRetryEligibility(
+  status: string,
+  errorJson?: string | null
+): { allowed: true } | { allowed: false; reason: "not_failed" | "delivery_uncertain" } {
+  if (status !== "FAILED") {
+    return { allowed: false, reason: "not_failed" };
+  }
+  const failure = parsePersistedSendFailure(errorJson);
+  return failure.retrySafe && !failure.deliveryUncertain
+    ? { allowed: true }
+    : { allowed: false, reason: "delivery_uncertain" };
 }

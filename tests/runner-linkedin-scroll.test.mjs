@@ -1,11 +1,32 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  linkedInCollectionCompleteness,
+  resolveLinkedInEmptyCollectionStopReason,
   resolveLinkedInScanFailureReason,
   resolveLinkedInCollectionStopReason,
   shouldStopLinkedInCollection,
   updateLinkedInCollectionStability
 } from "../apps/runner/dist/platforms/linkedin-adapter.js";
+
+test("LinkedIn normalizes native collection reasons before the shared freshness gate", () => {
+  assert.equal(linkedInCollectionCompleteness("deep_scroll_exhausted"), "complete");
+  assert.equal(linkedInCollectionCompleteness("max_threads"), "candidate_cap");
+  assert.equal(linkedInCollectionCompleteness("deep_scroll_disabled"), "incomplete");
+});
+
+test("LinkedIn empty collectors preserve incomplete boundary causes", () => {
+  for (const stopReason of [
+    "max_duration",
+    "max_iterations",
+    "deep_scroll_disabled",
+    "no_scroll_container",
+    "end_of_list_no_progress"
+  ]) {
+    assert.equal(resolveLinkedInEmptyCollectionStopReason(stopReason), stopReason);
+  }
+  assert.equal(resolveLinkedInEmptyCollectionStopReason("end_of_list_reached"), "zero_threads_found");
+});
 
 test("LinkedIn collector stability counters reset on growth and increment on no-growth", () => {
   const grew = updateLinkedInCollectionStability({

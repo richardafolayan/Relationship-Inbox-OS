@@ -1,6 +1,8 @@
 import type {
+  CollectionBoundaryCompleteness,
   NormalizedMessage,
   PlatformAdapter,
+  PlatformCollectionBoundaryCapability,
   PlatformName,
   RememberItem,
   ThreadStub
@@ -20,10 +22,23 @@ import { effectiveLastOutboundAt } from "./reaction-effects.js";
 import type { AiService, EventBus, ScanJobOutcome, SettingsStore } from "../types/runtime";
 import { AdapterFailure, cleanMessageText, cleanText, humanDelay, stripUnpairedSurrogates } from "../platforms/utils";
 import { shouldRefreshGroupDisplayName } from "../platforms/imessage-group-name";
-import type { LinkedInStreamPreOpenDecision } from "../platforms/linkedin-adapter";
+import {
+  linkedInCollectionCompleteness,
+  type LinkedInCollectionStopReason,
+  type LinkedInStreamPreOpenDecision
+} from "../platforms/linkedin-adapter";
 import { resolveAdapterFailureKind, shouldStopScanForFailureKind } from "./failure-routing";
 import { isAiVisibleMessage, prismaMessageToPrompt } from "./ai";
 import { buildMessageUpsertPayload } from "./message-upsert-payload";
+import {
+  PLATFORM_SCAN_IN_PROGRESS_ERROR,
+  preparePlatformScanIdentityFreshness,
+  resolveCollectionBoundaryFreshness,
+  resolveMessageIdentityFreshness,
+  resolvePlatformScanFreshness,
+  reconcilePlatformMessageIdentity,
+  type MessageIdentityReconciler
+} from "./message-identity-reconciliation";
 import { deleteImessageVoiceSnapshot } from "./imessage-voice-store";
 import { isVoicePlaceholderText, previewFromTranscript } from "./transcript-preview";
 import type { KeyedMutex } from "./keyed-mutex";
@@ -61,6 +76,7 @@ interface ScanQueueDeps {
   // scan loop only iterates `enabledPlatforms` (which excludes IMESSAGE
   // by default); per-thread sync paths guard via requireAdapter.
   adapters: Partial<Record<PlatformName, PlatformAdapter>>;
+  messageIdentityReconcilers?: Partial<Record<PlatformName, MessageIdentityReconciler>>;
   eventBus: EventBus;
   settingsStore: SettingsStore;
   aiService: AiService;
@@ -183,7 +199,7 @@ interface LinkedInScanAdapter extends PlatformAdapter {
     }) => Promise<void>;
     onProgress?: (snapshot: { processedRows: number; openedRows: number; total: number }) => void;
   }): Promise<{
-    stopReason: string;
+    stopReason: LinkedInCollectionStopReason;
     iterations: number;
     scrollIterations: number;
     processedRows: number;
@@ -213,7 +229,7 @@ interface LinkedInScanAdapter extends PlatformAdapter {
       messages: NormalizedMessage[];
     }) => Promise<void>;
   }): Promise<{
-    stopReason: string;
+    stopReason: LinkedInCollectionStopReason;
     threadsScanned: number;
     actionableRows: number;
     unreadRows: number;
@@ -516,6 +532,47 @@ export function resolveEffectiveCount(rawCount: number, max?: number): number {
     return safeRawCount;
   }
   return Math.min(safeRawCount, cap);
+}
+
+export function resolveObservedCollectionCount(
+  observedCount: number,
+  boundaryCount: unknown
+): number {
+  const safeObserved =
+    Number.isFinite(observedCount) && observedCount > 0
+      ? Math.floor(observedCount)
+      : 0;
+  const safeBoundary =
+    typeof boundaryCount === "number" &&
+    Number.isFinite(boundaryCount) &&
+    boundaryCount > 0
+      ? Math.floor(boundaryCount)
+      : 0;
+  return Math.max(safeObserved, safeBoundary);
+}
+
+export function resolveCollectionNativeStopReason(
+  metrics: Record<string, unknown> | null | undefined
+): string | undefined {
+  return typeof metrics?.nativeStopReason === "string"
+    ? metrics.nativeStopReason
+    : undefined;
+}
+
+export function beginAdapterCollectionBoundary(
+  adapter: PlatformAdapter
+): PlatformCollectionBoundaryCapability {
+  const capability = adapter.collectionBoundary ?? {
+    beginCycle: () => undefined,
+    getMetrics: () => ({
+      totalFound: 0,
+      unreadFound: 0,
+      completeness: "incomplete" as const,
+      nativeStopReason: "collection_boundary_not_declared"
+    })
+  };
+  capability.beginCycle();
+  return capability;
 }
 
 export function shouldUseForceFallback(value: unknown, nodeEnv = process.env.NODE_ENV): boolean {
@@ -1060,6 +1117,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
     status: "CONNECTED" | "NOT_CONNECTED" | "DEGRADED" | "ERROR";
     lastError?: string;
     connected?: boolean;
+    markScanComplete?: boolean;
   }): Promise<void> {
     const resolvedLastError = input.status === "CONNECTED" ? null : input.lastError;
 
@@ -1069,14 +1127,14 @@ export function createScanQueue(deps: ScanQueueDeps) {
         status: input.status,
         lastError: resolvedLastError,
         connectedAt: input.connected ? new Date() : undefined,
-        lastScanAt: input.status === "CONNECTED" ? new Date() : undefined
+        lastScanAt: input.markScanComplete ? new Date() : undefined
       },
       create: {
         name: input.platform,
         status: input.status,
         lastError: resolvedLastError,
         connectedAt: input.connected ? new Date() : undefined,
-        lastScanAt: input.status === "CONNECTED" ? new Date() : undefined
+        lastScanAt: input.markScanComplete ? new Date() : undefined
       }
     });
 
@@ -1449,6 +1507,9 @@ export function createScanQueue(deps: ScanQueueDeps) {
         let authInterrupted = false;
         let openedThreadsCount = 0;
         let messagesParsedCount = 0;
+        let messagesPersistedCount = 0;
+        let messageIdentityQuarantines = 0;
+        let untrackedIdentityQuarantineFloor = 0;
         let candidatesCount = 0;
         let threadsScannedCount = 0;
         let unreadCandidatesCount = 0;
@@ -1472,7 +1533,13 @@ export function createScanQueue(deps: ScanQueueDeps) {
         // watermark would silently drop those threads' changes).
         let capturedScanWatermark: string | null = null;
         let candidateCapBroke = false;
+        let collectionIncomplete = false;
+        let collectionFailures = 0;
         let runError: unknown;
+        let platformStateBeforeScan: {
+          status: "CONNECTED" | "NOT_CONNECTED" | "DEGRADED" | "ERROR";
+          lastError: string | null;
+        } | null = null;
 
         runLogger.logEvent({
           level: "info",
@@ -1578,7 +1645,23 @@ export function createScanQueue(deps: ScanQueueDeps) {
             runStopReason = "aborted";
             return;
           }
-          await setPlatformStatus({ platform, status: "CONNECTED", connected: true });
+          platformStateBeforeScan = await prisma.platform.findUnique({
+            where: { name: platform },
+            select: { status: true, lastError: true }
+          });
+          const scanStartFreshness = await preparePlatformScanIdentityFreshness({
+            reconciler: deps.messageIdentityReconcilers?.[platform],
+            previousStatus: platformStateBeforeScan?.status,
+            previousLastError: platformStateBeforeScan?.lastError
+          });
+          untrackedIdentityQuarantineFloor =
+            scanStartFreshness.untrackedIdentityQuarantineFloor;
+          await setPlatformStatus({
+            platform,
+            status: scanStartFreshness.status,
+            lastError: scanStartFreshness.lastError ?? undefined,
+            connected: true
+          });
           headline("CONNECT_OK", "connection ready", {
             platform
           });
@@ -1601,6 +1684,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
 
           let candidatesBeforeCap = 0;
           let collectionMetrics: Record<string, unknown> | null = null;
+          let collectionCompleteness: CollectionBoundaryCompleteness | undefined;
           let candidatesToSync: Array<{ thread: ThreadStub; messages?: NormalizedMessage[] }> = [];
           // Lifted to the outer scope so the per-candidate persistence loop
           // (further down) can read it. Populated by the streaming-scan
@@ -1664,6 +1748,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
               }
 
               fallbackTriggered = true;
+              collectionFailures = 0;
               fallbackTriggerReason = triggerReason;
               collectorMode = fallbackResult.collectorMode;
               selectorThreadItemCount = fallbackResult.selectorThreadItemCount;
@@ -1686,7 +1771,8 @@ export function createScanQueue(deps: ScanQueueDeps) {
                 unreadFound: fallbackResult.unreadRows,
                 needsReplyFound: fallbackResult.needsReplyRows,
                 candidatesFound: fallbackResult.actionableRows,
-                stopReason: fallbackResult.stopReason,
+                completeness: linkedInCollectionCompleteness(fallbackResult.stopReason),
+                nativeStopReason: fallbackResult.stopReason,
                 collectorMode,
                 selectorThreadItemCount,
                 selectorThreadSnippetCount,
@@ -1694,6 +1780,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
                 fallbackTriggered,
                 fallbackTriggerReason
               };
+              collectionCompleteness = linkedInCollectionCompleteness(fallbackResult.stopReason);
               runLogger.logDecision({
                 stage: "collect_threads",
                 decision: "Collected LinkedIn direct fallback candidates",
@@ -2080,6 +2167,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
                   fallbackTriggered: streamMetrics.fallbackTriggered
                 }
               });
+              collectionFailures = streamMetrics.failures;
 
               if (await markAborted("after_scan_stream", platform)) {
                 runStopReason = "aborted";
@@ -2104,13 +2192,15 @@ export function createScanQueue(deps: ScanQueueDeps) {
                 needsReplyFound: streamMetrics.needsReplyRows,
                 candidatesFound: streamMetrics.actionableRows,
                 iterations: streamMetrics.iterations,
-                stopReason: streamMetrics.stopReason,
+                completeness: linkedInCollectionCompleteness(streamMetrics.stopReason),
+                nativeStopReason: streamMetrics.stopReason,
                 collectorMode,
                 selectorThreadItemCount,
                 selectorThreadSnippetCount,
                 fallbackEligible: streamMetrics.fallbackEligible,
                 fallbackTriggered: streamMetrics.fallbackTriggered
               };
+              collectionCompleteness = linkedInCollectionCompleteness(streamMetrics.stopReason);
               runLogger.logDecision({
                 stage: "collect_threads",
                 decision: "Collected LinkedIn stream candidates",
@@ -2236,11 +2326,13 @@ export function createScanQueue(deps: ScanQueueDeps) {
             }
 
             if (job.platformThreadId && adapter.fetchThreadById) {
+              collectionCompleteness = "complete";
               headline("COLLECT_TARGETED_OK", "event-targeted candidate collection complete", {
                 platformThreadId: job.platformThreadId,
                 candidatesCount: candidatesToSync.length
               });
             } else if (incrementalPlan && incrementalPlan.mode === "skip") {
+              collectionCompleteness = "complete";
               // Nothing changed upstream since the last completed scan -
               // finish the tick with zero candidates. Same flow/events as a
               // scan that found no work, so consumers see a normal scan.
@@ -2253,6 +2345,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
                 watermark: incrementalPlan.watermark
               });
             } else if (incrementalPlan && incrementalPlan.mode === "delta") {
+              collectionCompleteness = "complete";
               // Only these conversations changed - sync exactly them. The
               // usual thread cap still applies (deltas are typically 1-2).
               const changedStubs = incrementalPlan.stubs;
@@ -2274,6 +2367,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
                 cappedCandidatesCount: candidatesToSync.length
               });
             } else {
+              const collectionBoundaryCapability = beginAdapterCollectionBoundary(adapter);
               const unread = await adapter.scanUnreadThreads();
               unreadCandidatesCount = unread.length;
               runLogger.logAction({
@@ -2337,28 +2431,35 @@ export function createScanQueue(deps: ScanQueueDeps) {
                 }
               });
 
-              const metricsProvider = adapter as unknown as {
-                getLastCollectionMetrics?: () => Record<string, unknown> | null;
-              };
-              collectionMetrics =
-                typeof metricsProvider.getLastCollectionMetrics === "function"
-                  ? metricsProvider.getLastCollectionMetrics()
-                  : null;
+              collectionMetrics = collectionBoundaryCapability.getMetrics();
+              collectionCompleteness = collectionMetrics.completeness as
+                | CollectionBoundaryCompleteness
+                | undefined;
             }
           }
+          const collectionBoundary = resolveCollectionBoundaryFreshness(
+            collectionCompleteness,
+            collectionFailures
+          );
+          candidateCapBroke ||= collectionBoundary.candidateCapBroke;
+          collectionIncomplete ||= collectionBoundary.collectionIncomplete;
+          collectionFailures = collectionBoundary.collectionFailures;
+          if (rawThreadCount > effectiveThreadCount) {
+            candidateCapBroke = true;
+          }
           candidatesCount = candidatesToSync.length;
-          if (threadsScannedCount <= 0) {
-            threadsScannedCount =
-              typeof collectionMetrics?.totalFound === "number"
-                ? (collectionMetrics.totalFound as number)
-                : candidatesBeforeCap;
-          }
-          if (unreadCandidatesCount <= 0 && typeof collectionMetrics?.unreadFound === "number") {
-            unreadCandidatesCount = collectionMetrics.unreadFound as number;
-          }
-          if (needsReplyCandidatesCount <= 0 && typeof collectionMetrics?.needsReplyFound === "number") {
-            needsReplyCandidatesCount = collectionMetrics.needsReplyFound as number;
-          }
+          threadsScannedCount = resolveObservedCollectionCount(
+            Math.max(threadsScannedCount, candidatesBeforeCap),
+            collectionMetrics?.totalFound
+          );
+          unreadCandidatesCount = resolveObservedCollectionCount(
+            unreadCandidatesCount,
+            collectionMetrics?.unreadFound
+          );
+          needsReplyCandidatesCount = resolveObservedCollectionCount(
+            needsReplyCandidatesCount,
+            collectionMetrics?.needsReplyFound
+          );
 
           deps.eventBus.emit({
             type: "SCAN_PROGRESS",
@@ -2383,8 +2484,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
             effectiveThreadCount,
             rows: candidatesBeforeCap,
             candidates: candidatesCount,
-            stopReason:
-              typeof collectionMetrics?.stopReason === "string" ? (collectionMetrics.stopReason as string) : undefined
+            stopReason: resolveCollectionNativeStopReason(collectionMetrics)
           });
 
           rawCandidateCount = candidatesToSync.length;
@@ -2451,6 +2551,8 @@ export function createScanQueue(deps: ScanQueueDeps) {
               updatedThreads += syncResult.updatedThreads;
               platformUpdatedThreads += syncResult.updatedThreads;
               messagesParsedCount += syncResult.parsedMessages;
+              messagesPersistedCount += syncResult.persistedMessages;
+              messageIdentityQuarantines += syncResult.quarantinedMessages;
               headline("OPEN_THREAD_OK", "thread opened and synced", {
                 index: openedThreadsCount,
                 total: Math.min(candidatesToSync.length, maxOpenCount),
@@ -2460,18 +2562,27 @@ export function createScanQueue(deps: ScanQueueDeps) {
                 name: thread.displayName,
                 messagesParsed: syncResult.parsedMessages
               });
-              headline("PERSIST_OK", "thread persisted", {
-                name: thread.displayName,
-                threadsUpserted: syncResult.updatedThreads,
-                messagesUpserted: syncResult.parsedMessages
-              });
+              headline(
+                syncResult.quarantinedMessages > 0 ? "PERSIST_PARTIAL" : "PERSIST_OK",
+                syncResult.quarantinedMessages > 0
+                  ? "thread persisted with identity quarantine"
+                  : "thread persisted",
+                {
+                  name: thread.displayName,
+                  threadsUpserted: syncResult.updatedThreads,
+                  messagesUpserted: syncResult.persistedMessages,
+                  messagesQuarantined: syncResult.quarantinedMessages
+                }
+              );
               runLogger.logAction({
                 stage: "read_thread",
                 action: "thread_sync_complete",
-                result: "ok",
+                result: syncResult.quarantinedMessages > 0 ? "partial" : "ok",
                 counts: {
                   openedThreadsCount,
                   messagesParsedCount,
+                  messagesPersistedCount,
+                  messageIdentityQuarantines,
                   updatedThreads: platformUpdatedThreads
                 },
                 note: thread.displayName
@@ -2607,56 +2718,88 @@ export function createScanQueue(deps: ScanQueueDeps) {
             return;
           }
 
-          await prisma.platform.update({
-            where: { name: platform },
-            data: {
-              status: "CONNECTED",
-              lastScanAt: new Date(),
-              lastError: null
-            }
+          let durableIdentityQuarantines: number | undefined;
+          const quarantineCounter =
+            deps.messageIdentityReconcilers?.[platform]?.getOutstandingQuarantineCount;
+          try {
+            durableIdentityQuarantines = await quarantineCounter?.();
+          } catch {
+            durableIdentityQuarantines = quarantineCounter ? 1 : undefined;
+          }
+          const freshnessIdentityQuarantines = Math.max(
+            durableIdentityQuarantines ?? messageIdentityQuarantines,
+            untrackedIdentityQuarantineFloor
+          );
+          const freshness = resolvePlatformScanFreshness({
+            quarantinedMessages: freshnessIdentityQuarantines,
+            threadFailures: threadFailures + collectionFailures,
+            candidateCapBroke,
+            collectionIncomplete
+          });
+          const freshnessComplete = freshness.freshnessComplete;
+          const publishedFreshness =
+            job.platformThreadId && freshnessComplete
+              ? platformStateBeforeScan?.status === "CONNECTED"
+                ? {
+                    status: "CONNECTED" as const,
+                    lastError: null,
+                    advanceLastScanAt: false
+                  }
+                : {
+                    status: "DEGRADED" as const,
+                    lastError:
+                      platformStateBeforeScan?.lastError ?? PLATFORM_SCAN_IN_PROGRESS_ERROR,
+                    advanceLastScanAt: false
+                  }
+              : freshness;
+          await setPlatformStatus({
+            platform,
+            status: publishedFreshness.status,
+            lastError: publishedFreshness.lastError ?? undefined,
+            markScanComplete: publishedFreshness.advanceLastScanAt
           });
 
-          runStopReason =
-            typeof collectionMetrics?.stopReason === "string" ? (collectionMetrics.stopReason as string) : runStopReason;
+          runStopReason = freshnessComplete
+            ? resolveCollectionNativeStopReason(collectionMetrics) ?? runStopReason
+            : freshness.stopReason;
           runLogger.setStopReason(runStopReason ?? "scan_complete");
-          headline("SCAN_END_OK", "scan completed", {
-            stopReason: runStopReason ?? "scan_complete",
-            updatedThreads: platformUpdatedThreads,
-            LOG_DIR: logDir
-          });
+          headline(
+            freshnessComplete ? "SCAN_END_OK" : "SCAN_END_PARTIAL",
+            freshnessComplete ? "scan completed" : "scan completed with incomplete freshness",
+            {
+              stopReason: runStopReason ?? "scan_complete",
+              updatedThreads: platformUpdatedThreads,
+              messagesQuarantined: freshnessIdentityQuarantines,
+              LOG_DIR: logDir
+            }
+          );
           if (logDir) {
-            headline("SCAN_END_OK", `LOG_DIR: ${logDir}`);
+            headline(freshnessComplete ? "SCAN_END_OK" : "SCAN_END_PARTIAL", `LOG_DIR: ${logDir}`);
           }
 
           await deps.auditLog({
             platform,
             stage: "Scan",
             action: "SCAN_END",
-            status: "OK",
+            status: freshnessComplete ? "OK" : "FAIL",
             details: {
               jobId: job.jobId,
               requestId: job.jobId,
               stage: "persist",
               platform,
+              freshnessComplete,
+              messagesParsed: messagesParsedCount,
+              messagesPersisted: messagesPersistedCount,
+              messagesQuarantined: freshnessIdentityQuarantines,
               updatedThreads: platformUpdatedThreads,
               processed: platformUpdatedThreads,
               skipped: Math.max(0, candidatesCount - platformUpdatedThreads),
-              totalFound:
-                typeof collectionMetrics?.totalFound === "number"
-                  ? (collectionMetrics.totalFound as number)
-                  : threadsScannedCount,
-              unreadFound:
-                typeof collectionMetrics?.unreadFound === "number"
-                  ? (collectionMetrics.unreadFound as number)
-                  : unreadCandidatesCount,
-              needsReplyFound:
-                typeof collectionMetrics?.needsReplyFound === "number"
-                  ? (collectionMetrics.needsReplyFound as number)
-                  : needsReplyCandidatesCount,
+              totalFound: threadsScannedCount,
+              unreadFound: unreadCandidatesCount,
+              needsReplyFound: needsReplyCandidatesCount,
               iterations:
                 typeof collectionMetrics?.iterations === "number" ? (collectionMetrics.iterations as number) : undefined,
-              stopReason:
-                typeof collectionMetrics?.stopReason === "string" ? (collectionMetrics.stopReason as string) : undefined,
+              stopReason: runStopReason,
               threadsScanned: threadsScannedCount,
               unreadCount: unreadCandidatesCount,
               needsReplyCount: needsReplyCandidatesCount,
@@ -2676,12 +2819,17 @@ export function createScanQueue(deps: ScanQueueDeps) {
               rawCandidateCount,
               effectiveOpenCount,
               threadFailures,
-              threadFailureKinds
+              collectionFailures,
+              threadFailureKinds,
+              candidateCapBroke,
+              collectionIncomplete
             }
           });
-          retryController.markSuccess(platform);
-          runError = undefined;
-          runSuccess = true;
+          if (freshnessComplete) {
+            retryController.markSuccess(platform);
+            runError = undefined;
+          }
+          runSuccess = freshnessComplete;
 
           // Advance the incremental-scan watermark ONLY now: clean
           // completion, every candidate processed, no per-thread failures.
@@ -2689,7 +2837,12 @@ export function createScanQueue(deps: ScanQueueDeps) {
           // changes that landed mid-scan stay ahead of it and are picked up
           // next tick. A failed/capped/aborted run leaves the old watermark
           // in place and the next tick simply re-derives a (cheap) delta.
-          if (capturedScanWatermark && threadFailures === 0 && !candidateCapBroke) {
+          if (
+            capturedScanWatermark &&
+            threadFailures === 0 &&
+            !candidateCapBroke &&
+            freshnessComplete
+          ) {
             await saveScanWatermark(platform, capturedScanWatermark);
           }
         } catch (error) {
@@ -2831,6 +2984,8 @@ export function createScanQueue(deps: ScanQueueDeps) {
             candidatesToOpenCount: candidatesCount,
             openedThreadsCount,
             messagesParsedCount,
+            messagesPersistedCount,
+            messageIdentityQuarantines,
             threadFailures,
             threadFailureKinds,
             updatedThreads: platformUpdatedThreads,
@@ -2991,7 +3146,12 @@ export function createScanQueue(deps: ScanQueueDeps) {
     // what the backfill is for.
     skipAi = false,
     trigger?: ScanTrigger
-  ): Promise<{ updatedThreads: number; parsedMessages: number }> {
+  ): Promise<{
+    updatedThreads: number;
+    parsedMessages: number;
+    persistedMessages: number;
+    quarantinedMessages: number;
+  }> {
     const candidateListTimestamp = parseCandidateListTimestamp(candidate.lastMessageAt);
     const adapter = deps.adapters[platform];
     if (!adapter) {
@@ -3057,7 +3217,9 @@ export function createScanQueue(deps: ScanQueueDeps) {
       });
       return {
         updatedThreads: 0,
-        parsedMessages: 0
+        parsedMessages: 0,
+        persistedMessages: 0,
+        quarantinedMessages: 0
       };
     }
 
@@ -3211,6 +3373,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
           platformThreadId: candidate.platformThreadId,
           personId: person.id,
           threadUrl: candidate.threadUrl,
+          recipientVerificationLabel: candidate.recipientVerificationLabel,
           unreadCount: candidate.unreadCount ?? 0,
           lastMessagePreview: cleanText(candidate.lastMessagePreview ?? ""),
           lastMessageAt: candidateListTimestamp ?? undefined,
@@ -3244,6 +3407,19 @@ export function createScanQueue(deps: ScanQueueDeps) {
       note: candidate.displayName
     });
 
+    const identityReconciliation = await reconcilePlatformMessageIdentity({
+      reconcilers: deps.messageIdentityReconcilers ?? {},
+      platform,
+      threadId: thread.id,
+      currentMessages: messages
+    });
+    const blockedMessageKeys = new Set(identityReconciliation.blockedMessageKeys);
+    const quarantinedMessageKeys = new Set(identityReconciliation.quarantinedMessageKeys);
+    const persistedMessages = messages.filter(
+      (message) =>
+        !message.platformMessageKey || !blockedMessageKeys.has(message.platformMessageKey)
+    ).length;
+
     const timestampFallback = candidateListTimestamp ?? new Date();
     const batchedMessageWrites: Array<ReturnType<typeof prisma.message.upsert>> = [];
     const flushBatchedMessageWrites = async (): Promise<void> => {
@@ -3260,6 +3436,12 @@ export function createScanQueue(deps: ScanQueueDeps) {
     const audioBearingMessageKeys: string[] = [];
 
     for (const message of messages) {
+      if (
+        message.platformMessageKey &&
+        blockedMessageKeys.has(message.platformMessageKey)
+      ) {
+        continue;
+      }
       const safeTimestamp = normalizeMessageTimestamp(message.timestamp, timestampFallback);
       const messageText = cleanMessageText(message.text);
       const key =
@@ -3547,7 +3729,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
           trigger: trigger.kind
         }
       : undefined;
-    if (syncTiming) {
+    if (syncTiming && persistedMessages > 0) {
       deps.recordLatency?.({
         metric: "source_change_to_persisted_message",
         durationMs: Date.parse(syncTiming.persistedAt) - Date.parse(syncTiming.sourceChangedAt),
@@ -3897,6 +4079,9 @@ export function createScanQueue(deps: ScanQueueDeps) {
         // fix) would get reverted on the next rescan. PR #151's profileUrl-
         // first resolution still applies on first creation.
         threadUrl: candidate.threadUrl ?? thread.threadUrl,
+        ...(candidate.recipientVerificationLabel !== undefined
+          ? { recipientVerificationLabel: candidate.recipientVerificationLabel }
+          : {}),
         unreadCount: candidate.unreadCount ?? thread.unreadCount,
         // Keep the thread's group flags current, but never wipe a known
         // name: a group renamed on another device reports isGroup with no
@@ -4000,11 +4185,20 @@ export function createScanQueue(deps: ScanQueueDeps) {
       syncTiming
     });
 
+    if (quarantinedMessageKeys.size > 0) {
+      const freshness = resolveMessageIdentityFreshness(quarantinedMessageKeys.size);
+      await setPlatformStatus({
+        platform,
+        status: freshness.status,
+        lastError: freshness.lastError ?? undefined
+      });
+    }
+
     await deps.auditLog({
       platform,
       stage: "Parse",
       action: "THREAD_UPDATED",
-      status: "OK",
+      status: quarantinedMessageKeys.size === 0 ? "OK" : "FAIL",
       details: {
         requestId: jobId,
         jobId,
@@ -4012,15 +4206,18 @@ export function createScanQueue(deps: ScanQueueDeps) {
         threadId: thread.id,
         platformThreadId: candidate.platformThreadId,
         messageCount: latestMessages.length,
+        freshnessComplete: quarantinedMessageKeys.size === 0,
+        quarantinedMessages: quarantinedMessageKeys.size,
         needsReply: resolvedNeedsReply
       }
     });
     runLogger?.logAction({
       stage: "persist",
       action: "thread_updated",
-      result: "ok",
+      result: quarantinedMessageKeys.size === 0 ? "ok" : "partial",
       counts: {
         messageCount: latestMessages.length,
+        quarantinedMessages: quarantinedMessageKeys.size,
         needsReply: resolvedNeedsReply
       },
       note: candidate.displayName
@@ -4028,7 +4225,9 @@ export function createScanQueue(deps: ScanQueueDeps) {
 
     return {
       updatedThreads: 1,
-      parsedMessages: messages.length
+      parsedMessages: messages.length,
+      persistedMessages,
+      quarantinedMessages: quarantinedMessageKeys.size
     };
   }
 

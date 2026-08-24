@@ -23,8 +23,7 @@ import {
   captureFrontmostMacApp,
   hideBrowserWindow,
   isVisibleBrowserLaunchForced,
-  revealBrowserWindow,
-  setBrowserActivateHint
+  revealBrowserWindow
 } from "./runner-window.js";
 
 // The Chrome.app bundle that owns `executablePath` (.../Foo.app/Contents/
@@ -39,10 +38,26 @@ function deriveAppBundlePath(executablePath: string | undefined): string | null 
   return idx >= 0 ? executablePath.slice(0, idx + ".app".length) : null;
 }
 
+export function resolveBrowserActivateAppBundlePath(input: {
+  hostPlatform: NodeJS.Platform;
+  browserProfileMode: BrowserProfileConfig["mode"];
+  preferInstalledChrome?: boolean;
+  patchrightExecutablePath?: string;
+}): string | null {
+  if (input.hostPlatform !== "darwin") {
+    return null;
+  }
+  if (input.preferInstalledChrome || input.browserProfileMode === "personal") {
+    return "/Applications/Google Chrome.app";
+  }
+  return deriveAppBundlePath(input.patchrightExecutablePath);
+}
+
 interface SessionManagerDependencies {
   profileRootDir: string;
   browserProfile: BrowserProfileConfig;
   getSettings: () => Promise<AppSettings>;
+  preferInstalledChrome?: boolean;
   launchPersistentContext?: (userDataDir: string, options: {
     headless: boolean;
     viewport: null;
@@ -120,15 +135,21 @@ export class SessionManager {
   // requests in flight. A launch is hidden unless this is > 0 (or the
   // kill-switch is set). Refcounted so overlapping operator actions compose.
   private readonly visibleLaunchRefcount = new Map<PlatformName, number>();
+  private readonly browserActivateAppBundlePath: string | null;
 
   constructor(private readonly deps: SessionManagerDependencies) {
+    let patchrightExecutablePath: string | undefined;
     try {
-      // Only the real patchright launcher exposes executablePath; the test
-      // fake injects its own launcher, so guard the call.
-      setBrowserActivateHint(deriveAppBundlePath(chromium.executablePath?.()));
+      patchrightExecutablePath = chromium.executablePath?.();
     } catch {
-      setBrowserActivateHint(null);
+      patchrightExecutablePath = undefined;
     }
+    this.browserActivateAppBundlePath = resolveBrowserActivateAppBundlePath({
+      hostPlatform: process.platform,
+      browserProfileMode: deps.browserProfile.mode,
+      preferInstalledChrome: deps.preferInstalledChrome,
+      patchrightExecutablePath
+    });
   }
 
   /**
@@ -163,7 +184,7 @@ export class SessionManager {
     const state = this.states.get(sanitizePersonKey(personKey));
     const page = state?.pages.get(platform);
     if (page) {
-      await revealBrowserWindow(page);
+      await revealBrowserWindow(page, this.browserActivateAppBundlePath);
     }
   }
 
@@ -589,6 +610,7 @@ export class SessionManager {
       headless: settings.headless,
       browserProfile: this.deps.browserProfile,
       args: launchArgs,
+      preferInstalledChrome: this.deps.preferInstalledChrome,
       onConnectStep: this.deps.onConnectStep,
       onPersonalProfileFallback: this.deps.onPersonalProfileFallback
     });

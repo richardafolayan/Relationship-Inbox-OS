@@ -18,6 +18,11 @@ import {
   type LucideIcon
 } from "lucide-react";
 import { apiGet, apiPost } from "@/lib/api";
+import {
+  runActionWithInlineFeedback,
+  type InlineActionState
+} from "@/lib/feedback";
+import { InlineActionButton } from "@/components/common/inline-action-button";
 import { Canvas, PageHead } from "@/components/common/canvas";
 import { UserVoiceProfile } from "@/components/settings/UserVoiceProfile";
 import { FocusSettingsSection } from "@/components/settings/FocusSettingsSection";
@@ -186,7 +191,12 @@ const PLATFORM_DISPLAY: Record<PlatformCard["platform"], string> = {
   GOOGLE_MESSAGES: "Google Messages"
 };
 
-type PlatformActionEndpoint = "open-browser" | "connect" | "scan" | "full-disk-access";
+type PlatformActionEndpoint =
+  | "open-browser"
+  | "connect"
+  | "scan"
+  | "reset-session"
+  | "full-disk-access";
 
 interface FullDiskAccessResponse {
   message?: string;
@@ -266,6 +276,12 @@ export default function SettingsPage() {
   const [uiScale, setUiScale] = useState<UiScale>("normal");
   const [platformRows, setPlatformRows] = useState<PlatformCard[]>([]);
   const [platformBusy, setPlatformBusy] = useState<PlatformCard["platform"] | null>(null);
+  const [platformBusyEndpoint, setPlatformBusyEndpoint] =
+    useState<PlatformActionEndpoint | null>(null);
+  const [platformActionState, setPlatformActionState] = useState<{
+    platform: PlatformCard["platform"];
+    state: InlineActionState;
+  } | null>(null);
   const [platformError, setPlatformError] = useState("");
   const [platformNotice, setPlatformNotice] = useState("");
 
@@ -454,29 +470,75 @@ export default function SettingsPage() {
   ) => {
     if (platformBusy) return;
     setPlatformBusy(platform);
+    setPlatformBusyEndpoint(endpoint);
     setPlatformError("");
     setPlatformNotice("");
     try {
       if (endpoint === "full-disk-access") {
-        const result = await apiPost<FullDiskAccessResponse>("/runner/control/imessage/full-disk-access", {});
-        const name = result.runnerProcess?.executableName ?? "node";
-        const path = result.runnerProcess?.executablePath;
-        setPlatformNotice(
-          path
-            ? `Opened Full Disk Access. Toggle ${name}. macOS may show it as ${name}: ${path}`
-            : result.message ?? "Opened Full Disk Access. Toggle the runner app, then restart."
+        const outcome = await runActionWithInlineFeedback(
+          apiPost<FullDiskAccessResponse>("/runner/control/imessage/full-disk-access", {}),
+          {
+            pending: "Opening Full Disk Access...",
+            success: "Full Disk Access opened",
+            failure: "Couldn't open Full Disk Access",
+            setState: (state) => setPlatformActionState({ platform, state }),
+            setError: (message) => setPlatformError(message ?? ""),
+            onDone: refreshPlatforms
+          }
         );
+        if (outcome.ok) {
+          const name = outcome.value.runnerProcess?.executableName ?? "node";
+          const path = outcome.value.runnerProcess?.executablePath;
+          setPlatformNotice(
+            path
+              ? `Opened Full Disk Access. Toggle ${name}. macOS may show it as ${name}: ${path}`
+              : outcome.value.message ?? "Opened Full Disk Access. Toggle the runner app, then restart."
+          );
+          setSavedAt(Date.now());
+        }
       } else {
         const path =
           endpoint === "scan" ? "/runner/control/scan" : `/runner/control/platform/${endpoint}`;
-        await apiPost(path, { platform });
+        const display = PLATFORM_DISPLAY[platform];
+        const pending =
+          endpoint === "scan"
+            ? `Scanning ${display}...`
+            : endpoint === "open-browser"
+              ? `Opening ${display}...`
+              : endpoint === "reset-session"
+                ? `Resetting ${display}...`
+                : `Connecting ${display}...`;
+        const success =
+          endpoint === "scan"
+            ? `${display} scan queued`
+            : endpoint === "open-browser"
+              ? `${display} opened`
+              : endpoint === "reset-session"
+                ? `${display} disconnected`
+                : `${display} connected`;
+        const outcome = await runActionWithInlineFeedback(apiPost(path, { platform }), {
+          pending,
+          success,
+          failure:
+            platform === "INSTAGRAM" && (endpoint === "connect" || endpoint === "open-browser")
+              ? "Finish Instagram sign-in, then try again"
+              : `Couldn't update ${display}`,
+          setState: (state) => setPlatformActionState({ platform, state }),
+          setError: (message) => setPlatformError(message ?? ""),
+          onDone: refreshPlatforms
+        });
+        if (outcome.ok) {
+          setPlatformNotice(`${success}.`);
+          setSavedAt(Date.now());
+        }
       }
-      await refreshPlatforms();
-      setSavedAt(Date.now());
-    } catch {
-      setPlatformError(`Couldn't update ${PLATFORM_DISPLAY[platform]}. Is the runner online?`);
+    } catch (error) {
+      setPlatformError(
+        error instanceof Error ? error.message : `Couldn't update ${PLATFORM_DISPLAY[platform]}.`
+      );
     } finally {
       setPlatformBusy(null);
+      setPlatformBusyEndpoint(null);
     }
   };
 
@@ -584,6 +646,8 @@ export default function SettingsPage() {
               busy={platformBusy}
               error={platformError}
               notice={platformNotice}
+              busyEndpoint={platformBusyEndpoint}
+              actionState={platformActionState}
               onAction={platformAction}
               host={host}
               phoneLayout={phoneLayout}
@@ -895,6 +959,8 @@ function SettingsTabs({
 function PlatformSettingsSection({
   rows,
   busy,
+  busyEndpoint,
+  actionState,
   error,
   notice,
   onAction,
@@ -903,6 +969,11 @@ function PlatformSettingsSection({
 }: {
   rows: PlatformCard[];
   busy: PlatformCard["platform"] | null;
+  busyEndpoint: PlatformActionEndpoint | null;
+  actionState: {
+    platform: PlatformCard["platform"];
+    state: InlineActionState;
+  } | null;
   error: string;
   notice: string;
   onAction: (platform: PlatformCard["platform"], endpoint: PlatformActionEndpoint) => void;
@@ -914,13 +985,23 @@ function PlatformSettingsSection({
   const imessageRow = findRow("IMESSAGE");
   const googleMessagesRow = findRow("GOOGLE_MESSAGES");
   const linkedinRow = findRow("LINKEDIN");
+  const instagramRow = findRow("INSTAGRAM");
   const whatsappRow = findRow("WHATSAPP");
   const imessageNeedsFullDiskAccess = isIMessageFullDiskAccessProblem(imessageRow);
   const googleMessagesPrimary = googleMessagesRow
     ? resolvePlatformPrimaryAction(googleMessagesRow)
     : "connect";
   const linkedinPrimary = linkedinRow ? resolvePlatformPrimaryAction(linkedinRow) : "connect";
+  const instagramPrimary = instagramRow
+    ? resolvePlatformPrimaryAction(instagramRow)
+    : "connect";
   const remoteDisabled = phoneLayout && !host.remoteAvailable;
+  const resetInstagram = () => {
+    if (!window.confirm("Reset the Instagram session? You'll need to sign in again.")) {
+      return;
+    }
+    onAction("INSTAGRAM", "reset-session");
+  };
 
   return (
     <section className="mb-9">
@@ -950,6 +1031,7 @@ function PlatformSettingsSection({
             remoteDisabled={remoteDisabled}
             offlineExplanation={host.offlineExplanation}
             busy={busy === "IMESSAGE"}
+            actionState={actionState?.platform === "IMESSAGE" ? actionState.state : null}
             onPrimary={() =>
               onAction("IMESSAGE", imessageNeedsFullDiskAccess ? "full-disk-access" : "scan")
             }
@@ -990,6 +1072,7 @@ function PlatformSettingsSection({
             remoteDisabled={remoteDisabled}
             offlineExplanation={host.offlineExplanation}
             busy={busy === "GOOGLE_MESSAGES"}
+            actionState={actionState?.platform === "GOOGLE_MESSAGES" ? actionState.state : null}
             onPrimary={() =>
               onAction(
                 "GOOGLE_MESSAGES",
@@ -1049,6 +1132,7 @@ function PlatformSettingsSection({
             remoteDisabled={remoteDisabled}
             offlineExplanation={host.offlineExplanation}
             busy={busy === "LINKEDIN"}
+            actionState={actionState?.platform === "LINKEDIN" ? actionState.state : null}
             onPrimary={() =>
               onAction("LINKEDIN", linkedinPrimary === "scan" ? "scan" : "connect")
             }
@@ -1077,6 +1161,72 @@ function PlatformSettingsSection({
             }
           />
         ) : null}
+        {instagramRow ? (
+          <PlatformSetupCard
+            row={instagramRow}
+            title="Instagram"
+            body={`Uses standard Chrome with a dedicated profile. Sign in yourself and complete any security check when ${APP_NAME} opens it. Messages only send when you press Send.`}
+            primaryLabel={
+              instagramPrimary === "scan"
+                ? "Scan now"
+                : instagramPrimary === "reconnect"
+                  ? "Reconnect"
+                  : "Connect Instagram"
+            }
+            busyLabel={
+              busyEndpoint === "reset-session"
+                ? "Resetting..."
+                : instagramPrimary === "scan"
+                  ? "Scanning..."
+                  : "Connecting..."
+            }
+            deviceLabel={
+              phoneLayout
+                ? host.actionLabel(instagramPrimary === "scan" ? "scan" : "connect")
+                : undefined
+            }
+            remoteDisabled={remoteDisabled}
+            offlineExplanation={host.offlineExplanation}
+            busy={busy === "INSTAGRAM"}
+            actionState={actionState?.platform === "INSTAGRAM" ? actionState.state : null}
+            onPrimary={() =>
+              onAction("INSTAGRAM", instagramPrimary === "scan" ? "scan" : "connect")
+            }
+            moreItems={
+              instagramPrimary === "scan"
+                ? [
+                    {
+                      label: "Open Instagram",
+                      onSelect: () => onAction("INSTAGRAM", "open-browser")
+                    },
+                    {
+                      label: "Reconnect",
+                      onSelect: () => onAction("INSTAGRAM", "connect")
+                    },
+                    {
+                      label: "Reset Instagram",
+                      danger: true,
+                      onSelect: resetInstagram
+                    }
+                  ]
+                : [
+                    {
+                      label: "Open Instagram",
+                      onSelect: () => onAction("INSTAGRAM", "open-browser")
+                    },
+                    {
+                      label: "Scan now",
+                      onSelect: () => onAction("INSTAGRAM", "scan")
+                    },
+                    {
+                      label: "Reset Instagram",
+                      danger: true,
+                      onSelect: resetInstagram
+                    }
+                  ]
+            }
+          />
+        ) : null}
         {whatsappRow ? (
           <div className="rounded-[8px] bg-paper-2/45 px-4 py-4">
             <WhatsAppConnect
@@ -1099,11 +1249,13 @@ function PlatformSetupCard({
   title,
   body,
   primaryLabel,
+  busyLabel = "Working...",
   deviceLabel,
   hideProcessPath = false,
   remoteDisabled = false,
   offlineExplanation,
   busy,
+  actionState,
   onPrimary,
   moreItems
 }: {
@@ -1111,11 +1263,13 @@ function PlatformSetupCard({
   title: string;
   body: string;
   primaryLabel: string;
+  busyLabel?: string;
   deviceLabel?: string;
   hideProcessPath?: boolean;
   remoteDisabled?: boolean;
   offlineExplanation?: string;
   busy: boolean;
+  actionState?: InlineActionState | null;
   onPrimary: () => void;
   moreItems?: MenuItem[];
 }) {
@@ -1185,15 +1339,14 @@ function PlatformSetupCard({
         </p>
       ) : null}
       <div className="mt-4 flex flex-wrap items-center gap-2">
-        <button
-          type="button"
+        <InlineActionButton
           onClick={onPrimary}
           disabled={busy || !enabled || !supported || remoteDisabled}
+          idleLabel={primaryLabel}
+          state={actionState ?? (busy ? { phase: "running", label: busyLabel } : null)}
           title={remoteDisabled ? offlineExplanation : undefined}
           className="inline-flex min-h-[40px] items-center rounded-pill bg-ink px-4 py-[8px] text-[12.5px] font-medium text-paper hover:bg-ink-2 disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          {busy ? "Working..." : primaryLabel}
-        </button>
+        />
         {secondaryItems.length > 0 && supported ? (
           <Menu
             trigger={
@@ -1327,6 +1480,17 @@ function SetupGuideSection({
               "Install Chrome if needed.",
               "Sign into LinkedIn in a normal Chrome window.",
               "Use Connect LinkedIn, complete security checks yourself, then run a scan."
+            ]}
+          />
+        ) : null}
+        {available.has("INSTAGRAM") ? (
+          <SetupGuideDrawer
+            name="Connect Instagram"
+            desc="Use standard Chrome with the dedicated Instagram profile. The app never asks for your password."
+            steps={[
+              "Open Platforms, then Connect Instagram.",
+              "Sign in yourself in the Chrome window and complete any security checks.",
+              "Leave the window open until the app says connected, then run a scan."
             ]}
           />
         ) : null}

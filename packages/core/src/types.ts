@@ -26,6 +26,12 @@ export type VerificationMethod =
 export interface ThreadStub {
   platformThreadId: string;
   displayName: string;
+  /**
+   * Last platform-reported conversation label used to verify that an exact
+   * thread navigation still targets the intended recipient. Kept separate
+   * from displayName because the operator may edit the user-facing name.
+   */
+  recipientVerificationLabel?: string;
   avatarUrl?: string;
   /**
    * Participant's profile URL (e.g. `https://www.linkedin.com/in/<slug>/`)
@@ -73,6 +79,15 @@ export interface AttachmentPlaceholder {
 
 export interface NormalizedMessage {
   platformMessageKey?: string;
+  /**
+   * A non-authoritative key emitted by an adapter when a previous release
+   * used a different identity scheme. Persistence must verify the candidate
+   * against stable evidence before rekeying an existing row.
+   */
+  platformMessageKeyMigration?: {
+    scheme: string;
+    candidateKey: string;
+  };
   direction: Direction;
   /**
    * The platform-reported send time as an ISO string. Adapters that
@@ -142,9 +157,19 @@ export interface SelectorRegistry {
   thread_item: string;
   unread_badge: string;
   thread_snippet?: string;
+  thread_link?: string;
+  thread_identity?: string;
+  conversation_header?: string;
   message_container: string;
   message_item: string;
   message_text: string;
+  message_id?: string;
+  message_direction_in?: string;
+  message_direction_out?: string;
+  message_timestamp?: string;
+  message_sender?: string;
+  message_media?: string;
+  message_deleted?: string;
   composer_input: string;
   send_button: string;
 }
@@ -207,6 +232,10 @@ export type RunnerEvent =
       // True when the check errored. The ticker suppresses its result
       // line in that case instead of claiming "No new messages".
       failed?: boolean;
+      // False when parsing completed but one or more message identities
+      // were quarantined. The ticker must surface the incomplete check
+      // instead of claiming the conversation is current.
+      freshnessComplete?: boolean;
     })
   | (RunnerEventBase & {
       type: "MESSAGES_PERSISTED";

@@ -18,6 +18,7 @@ export interface ThreadCheckEventDetail {
   stage?: string;
   newMessages?: number;
   failed?: boolean;
+  freshnessComplete?: boolean;
 }
 
 interface ThreadCheckActive {
@@ -32,6 +33,7 @@ interface ThreadCheckResult {
   personName: string | null;
   // null = unknown (older runner build without the newMessages field).
   newMessages: number | null;
+  freshnessComplete: boolean | null;
   completedAt: number;
 }
 
@@ -79,6 +81,8 @@ export function reduceThreadCheck(
             threadId: detail.threadId,
             personName: detail.personName ?? null,
             newMessages: typeof detail.newMessages === "number" ? detail.newMessages : null,
+            freshnessComplete:
+              typeof detail.freshnessComplete === "boolean" ? detail.freshnessComplete : null,
             completedAt: now
           }
     };
@@ -99,6 +103,7 @@ export function reduceThreadCheck(
 export type ThreadCheckTicker =
   | { kind: "checking"; personName: string | null; count: number }
   | { kind: "checked"; personName: string | null; newMessages: number | null }
+  | { kind: "incomplete"; personName: string | null }
   | { kind: "none" };
 
 export function selectThreadCheck(snapshot: ThreadCheckSnapshot, now: number): ThreadCheckTicker {
@@ -109,6 +114,9 @@ export function selectThreadCheck(snapshot: ThreadCheckSnapshot, now: number): T
   }
   const result = snapshot.lastResult;
   if (result && now - result.completedAt < THREAD_CHECK_RESULT_FRESH_MS) {
+    if (result.freshnessComplete === false) {
+      return { kind: "incomplete", personName: result.personName };
+    }
     return { kind: "checked", personName: result.personName, newMessages: result.newMessages };
   }
   return { kind: "none" };
@@ -126,6 +134,11 @@ export function threadCheckLabel(state: ThreadCheckTicker): string {
     const from = state.personName ? ` from ${state.personName}` : "";
     if (state.newMessages === 0) return `No new messages${from}`;
     return `${state.newMessages} new message${state.newMessages === 1 ? "" : "s"}${from}`;
+  }
+  if (state.kind === "incomplete") {
+    return state.personName
+      ? `Message check incomplete for ${state.personName}`
+      : "Message check incomplete";
   }
   return "";
 }

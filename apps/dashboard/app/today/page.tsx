@@ -706,12 +706,15 @@ export default function TodayPage() {
           errorSummary={degraded.lastScanFailure?.errorSummary ?? degraded.lastError ?? undefined}
           screenshotFile={degraded.lastScanFailure?.screenshotFile}
           domDumpFile={degraded.lastScanFailure?.domDumpFile}
-          onRunSelectorTests={() =>
-            runAction(
-              apiPost("/runner/control/platform/test-selectors", { platform: degraded.platform }),
-              setError,
-              refresh
-            )
+          onRunSelectorTests={
+            degraded.platform === "INSTAGRAM"
+              ? undefined
+              : () =>
+                  runAction(
+                    apiPost("/runner/control/platform/test-selectors", { platform: degraded.platform }),
+                    setError,
+                    refresh
+                  )
           }
         />
       ) : null}

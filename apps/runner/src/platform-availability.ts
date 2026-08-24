@@ -2,6 +2,7 @@ import type { PlatformName } from "@inbox-os/core";
 
 export const CONFIGURABLE_PLATFORMS = [
   "LINKEDIN",
+  "INSTAGRAM",
   "IMESSAGE",
   "WHATSAPP",
   "GOOGLE_MESSAGES"
@@ -23,6 +24,7 @@ export function resolvePlatformAvailability(
 ): PlatformAvailability {
   return {
     LINKEDIN: envFlag(env.LINKEDIN_ENABLED, true),
+    INSTAGRAM: envFlag(env.INSTAGRAM_ENABLED, false),
     IMESSAGE: envFlag(env.IMESSAGE_ENABLED, false) && hostPlatform === "darwin",
     WHATSAPP: envFlag(env.WHATSAPP_ENABLED, false),
     GOOGLE_MESSAGES:

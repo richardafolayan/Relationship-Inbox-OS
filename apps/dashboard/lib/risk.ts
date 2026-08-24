@@ -52,8 +52,11 @@ export function visibleImplementedPlatforms(
     : fallbackPlatforms;
   return candidates
     .filter(
-      (platform): platform is "LINKEDIN" | "IMESSAGE" | "WHATSAPP" | "GOOGLE_MESSAGES" =>
+      (
+        platform
+      ): platform is "LINKEDIN" | "INSTAGRAM" | "IMESSAGE" | "WHATSAPP" | "GOOGLE_MESSAGES" =>
         platform === "LINKEDIN" ||
+        platform === "INSTAGRAM" ||
         platform === "IMESSAGE" ||
         platform === "WHATSAPP" ||
         platform === "GOOGLE_MESSAGES"

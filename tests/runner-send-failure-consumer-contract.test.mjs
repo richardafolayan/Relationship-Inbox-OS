@@ -4,7 +4,8 @@ import assert from "node:assert/strict";
 const {
   classifySendFailureKind,
   consumerSendFailure,
-  parsePersistedSendFailure
+  parsePersistedSendFailure,
+  persistedSendRetryEligibility
 } = await import("../apps/runner/src/services/send-failure.ts");
 
 test("post-click verification failures are delivery uncertain", () => {
@@ -30,6 +31,22 @@ test("a missing WhatsApp send result blocks blind retry", () => {
   assert.equal(failure.deliveryUncertain, true);
   assert.match(failure.message, /check the conversation/i);
 });
+
+for (const message of [
+  "Instagram submitted message not observed",
+  "Instagram thread changed during send",
+  "Instagram delivery uncertain after submit"
+]) {
+  test(`Instagram post-click failure blocks blind retry: ${message}`, () => {
+    const kind = classifySendFailureKind({ message });
+    const failure = consumerSendFailure(kind);
+
+    assert.equal(kind, "DELIVERY_UNCERTAIN");
+    assert.equal(failure.retrySafe, false);
+    assert.equal(failure.deliveryUncertain, true);
+    assert.match(failure.message, /check the conversation/i);
+  });
+}
 
 test("interrupted claimed sends stay uncertain after restart", () => {
   const failure = parsePersistedSendFailure(
@@ -79,4 +96,28 @@ test("definite send failures return safe recovery copy", () => {
   assert.equal(failure.retrySafe, true);
   assert.equal(failure.deliveryUncertain, false);
   assert.doesNotMatch(failure.message, /Locator|9912|TimeoutError/);
+});
+
+test("the server-side retry gate rejects in-doubt and non-failed sends", () => {
+  assert.deepEqual(
+    persistedSendRetryEligibility(
+      "FAILED",
+      JSON.stringify({
+        message: "Instagram submitted message not observed",
+        errorKind: "DELIVERY_UNCERTAIN"
+      })
+    ),
+    { allowed: false, reason: "delivery_uncertain" }
+  );
+  assert.deepEqual(
+    persistedSendRetryEligibility("SENT", null),
+    { allowed: false, reason: "not_failed" }
+  );
+  assert.deepEqual(
+    persistedSendRetryEligibility(
+      "FAILED",
+      JSON.stringify({ message: "connect ECONNRESET", errorKind: "TRANSIENT" })
+    ),
+    { allowed: true }
+  );
 });

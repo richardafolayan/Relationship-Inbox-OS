@@ -77,16 +77,17 @@ fallback, racing, and voice controls.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `BROWSER_PROFILE_MODE` | `isolated` in code / `personal` in example | Shared browser mode for LinkedIn and beta adapters. |
+| `BROWSER_PROFILE_MODE` | `isolated` in code / `personal` in example | Browser mode for managed LinkedIn, Google Messages, and Instagram sessions. Every platform still launches an app-owned profile. |
 | `PERSONAL_PROFILE_FALLBACK` | `error` in personal mode | `error` or `allow_isolated` when mirror launch cannot proceed. |
-| `PERSONAL_PROFILE_SYNC_MODE` | `smart` | `smart`, `always`, or `never` mirror refresh. |
+| `PERSONAL_PROFILE_SYNC_MODE` | `smart` | `smart`, `always`, `once`, or `never` mirror refresh. Instagram uses seed-once behavior in personal mode so restarts preserve later manual sign-ins. |
 | `PERSONAL_PROFILE_MIRROR_ROOT` | `data/profiles` | Mirror storage root. |
 | `PERSONAL_CHROME_USER_DATA_DIR` | Chrome Application Support path | Source Chrome user-data directory. |
 | `PERSONAL_CHROME_PROFILE_DIRECTORY` | `Person 1` | Directory or display name resolved through Chrome Local State. |
 | `PERSONAL_CHROME_PROFILE_NAME` | empty | Optional profile-name hint. |
 | `CONNECT_OPERATION_TIMEOUT_MS` | `25000` | Isolated connection timeout. |
-| `CONNECT_OPERATION_TIMEOUT_MS_PERSONAL` | `90000` | Personal mirror connection timeout. |
+| `CONNECT_OPERATION_TIMEOUT_MS_PERSONAL` | `90000` | Personal mirror and interactive Instagram connection timeout. |
 | `RIOS_VISIBLE_BROWSER_LAUNCH` | off | Debug option to bring a runner browser launch visibly onscreen. |
+| `INSTAGRAM_ENABLED` | `false` | Enables the dedicated Instagram profile, setup choice, scans, and manual text sending. |
 | `IMESSAGE_ENABLED` | off in code, true in pilot example on macOS | Gates iMessage boot probe, watcher, attachments, and related services. |
 | `IMESSAGE_DB_PATH` | `~/Library/Messages/chat.db` | Messages database override. |
 | `IMESSAGE_WATCH_DEBOUNCE_MS` | `500` | Filesystem event debounce. |
@@ -98,6 +99,19 @@ fallback, racing, and voice controls.
 
 WhatsApp's own Puppeteer is always headless in the verified adapter and does
 not read the persisted dashboard headless toggle.
+
+Instagram is opt-in and keeps its session in `data/profiles/instagram`. It
+always requests the installed stable Chrome channel and never falls back to
+Chrome for Testing. In personal mode, the dedicated Instagram profile is
+seeded once from the configured Chrome profile so its established cookies and
+device history can be reused. On macOS, the runner uses the same local
+Keychain-backed cookie bridge as LinkedIn because copied Chrome cookies remain
+encrypted. Cookie values stay in memory and are never logged. The runner never
+controls or deletes the live source profile.
+Missing, blank, false, or unrecognised `INSTAGRAM_ENABLED` values leave it
+disabled. Login and any Instagram security check happen manually in the
+runner-controlled browser. Resetting Instagram clears only the app-owned copy and
+does not sign LinkedIn or Google Messages out.
 
 ## LinkedIn scanning and enrichment
 

@@ -456,7 +456,11 @@ exit 0
     let stderr = "";
     installer.stdout.on("data", (chunk) => (stdout += chunk));
     installer.stderr.on("data", (chunk) => (stderr += chunk));
-    await waitForCondition(() => fs.existsSync(workerMarker), `installer worker did not start\n${stdout}\n${stderr}`);
+    await waitForCondition(
+      () => fs.existsSync(workerMarker),
+      `installer worker did not start\n${stdout}\n${stderr}`,
+      20_000
+    );
     workerPid = Number(read(workerMarker));
     installer.kill("SIGTERM");
     await waitForExit(installer);

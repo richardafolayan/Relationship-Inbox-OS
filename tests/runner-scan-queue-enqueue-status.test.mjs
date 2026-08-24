@@ -1,11 +1,19 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  beginAdapterCollectionBoundary,
   enqueueScanJobByPriority,
   jobCoversTriggeredScan,
   promoteQueuedJob,
+  resolveCollectionNativeStopReason,
+  resolveObservedCollectionCount,
   resolveEnqueueStatus
 } from "../apps/runner/dist/services/scan-queue.js";
+import {
+  PLATFORM_SCAN_COLLECTION_INCOMPLETE_ERROR,
+  resolveCollectionBoundaryFreshness,
+  resolvePlatformScanFreshness
+} from "../apps/runner/dist/services/message-identity-reconciliation.js";
 
 // Regression for P1-L3: enqueueScan must report "running" for the job that
 // starts immediately, not always "queued".
@@ -53,4 +61,64 @@ test("platform-wide queued scans cover targeted change triggers", () => {
     ),
     false
   );
+});
+
+test("a typed bounded collector cannot publish freshness as complete", () => {
+  let began = false;
+  const capability = beginAdapterCollectionBoundary({
+    collectionBoundary: {
+      beginCycle: () => {
+        began = true;
+      },
+      getMetrics: () => ({
+        totalFound: 3,
+        unreadFound: 1,
+        completeness: "incomplete",
+        nativeStopReason: "instagram_bounded_snapshot"
+      })
+    }
+  });
+
+  assert.equal(began, true);
+  const metrics = capability.getMetrics();
+  const boundary = resolveCollectionBoundaryFreshness(
+    metrics.completeness,
+    metrics.failures
+  );
+  const freshness = resolvePlatformScanFreshness({
+    quarantinedMessages: 0,
+    threadFailures: boundary.collectionFailures,
+    candidateCapBroke: boundary.candidateCapBroke,
+    collectionIncomplete: boundary.collectionIncomplete
+  });
+
+  assert.equal(freshness.freshnessComplete, false);
+  assert.equal(freshness.advanceLastScanAt, false);
+  assert.equal(freshness.lastError, PLATFORM_SCAN_COLLECTION_INCOMPLETE_ERROR);
+});
+
+test("a runtime adapter missing its required boundary declaration fails closed", () => {
+  const capability = beginAdapterCollectionBoundary({});
+  const metrics = capability.getMetrics();
+  assert.equal(metrics.completeness, "incomplete");
+  assert.equal(metrics.nativeStopReason, "collection_boundary_not_declared");
+  assert.equal(
+    resolveCollectionBoundaryFreshness(metrics.completeness).collectionIncomplete,
+    true
+  );
+});
+
+test("static boundary metrics cannot erase observed scan counts", () => {
+  assert.equal(resolveObservedCollectionCount(4, 0), 4);
+  assert.equal(resolveObservedCollectionCount(4, 7), 7);
+  assert.equal(resolveObservedCollectionCount(4, undefined), 4);
+  assert.equal(resolveObservedCollectionCount(4, Number.NaN), 4);
+});
+
+test("collection diagnostics use the normalized native stop reason", () => {
+  assert.equal(
+    resolveCollectionNativeStopReason({ nativeStopReason: "imessage_recent_limit_reached" }),
+    "imessage_recent_limit_reached"
+  );
+  assert.equal(resolveCollectionNativeStopReason({ stopReason: "legacy_field" }), undefined);
 });

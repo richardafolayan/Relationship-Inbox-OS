@@ -19,7 +19,11 @@ function createGuardedPromoterPrisma(initialRows, opts = {}) {
         return rows
           .filter((r) => r.status === "SCHEDULED" && r.scheduledFor.getTime() <= lte)
           .sort((a, b) => a.scheduledFor.getTime() - b.scheduledFor.getTime())
-          .map((r) => ({ id: r.id, clientSendId: r.clientSendId }));
+          .map((r) => ({
+            id: r.id,
+            clientSendId: r.clientSendId,
+            thread: { platform: r.platform ?? "LINKEDIN" }
+          }));
       },
       async updateMany({ where, data }) {
         // Simulate a cancel/reschedule landing between findMany and updateMany.

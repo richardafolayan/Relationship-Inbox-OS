@@ -210,6 +210,33 @@ test("LinkedIn streaming scan progresses through virtualized rows without reload
   assert.equal(["deep_scroll_exhausted", "end_of_list_reached", "end_of_list_no_progress", "max_threads", "no_scroll_container"].includes(metrics.stopReason), true);
 });
 
+test("LinkedIn streaming scan honors disableDeepScroll before its first scroll", async (t) => {
+  const fixture = await createFixture();
+  if (fixture.skipped) {
+    t.skip(fixture.reason);
+    return;
+  }
+
+  t.after(async () => {
+    await fixture.context.close();
+    await fixture.browser.close();
+  });
+
+  const metrics = await fixture.adapter.scanInboxThreadsStream({
+    requestId: "stream-deep-scroll-disabled-test",
+    maxThreads: 60,
+    maxOpens: 60,
+    disableDeepScroll: true,
+    onThreadCandidate: async () => undefined
+  });
+
+  assert.equal(metrics.processedRows > 0, true);
+  assert.equal(metrics.processedRows < 60, true);
+  assert.equal(metrics.stopReason, "deep_scroll_disabled");
+  assert.equal(metrics.scrollIterations, 0);
+  assert.equal(metrics.secondPassRan, false);
+});
+
 test("LinkedIn streaming resolver handles div-based list root and non-UL scroll container", async (t) => {
   const fixture = await createFixture({
     fixtureName: "streaming-div-scroll.html",

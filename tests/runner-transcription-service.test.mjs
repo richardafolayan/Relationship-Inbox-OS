@@ -4,6 +4,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createTranscriptionService } from "../apps/runner/dist/services/transcription/index.js";
+import { withMessageIdentityLock } from "../apps/runner/dist/services/message-identity-lock.js";
 
 function makeFakePrisma() {
   const audioRows = new Map();
@@ -164,6 +165,64 @@ test("successful transcription writes a transcribed row", async () => {
   assert.equal(row.transcript, "hello there");
   assert.equal(row.provider, "openai");
   assert.equal(row.model, "gpt-4o-mini-transcribe");
+});
+
+test("transcription waits for an identity rekey and persists the current message key", async () => {
+  const audioPath = makeAudioFile();
+  const prisma = makeFakePrisma();
+  const message = {
+    id: "m1",
+    platformMessageKey: "instagram:legacy",
+    attachmentsJson: JSON.stringify([
+      { type: "voice_note", manualReview: false, kind: "voice_note", guid: "g1" }
+    ])
+  };
+  prisma.message._messages.push(message);
+  let markProviderCalled;
+  const providerCalled = new Promise((resolve) => {
+    markProviderCalled = resolve;
+  });
+  const provider = makeFakeProvider(() => {
+    markProviderCalled();
+    return {
+      kind: "ok",
+      result: { text: "hello there", model: "gpt-4o-mini-transcribe" }
+    };
+  });
+  const service = createTranscriptionService({
+    prisma,
+    provider: provider.provider,
+    attachmentResolver: makeFakeResolver({
+      g1: {
+        absolutePath: audioPath,
+        mimeType: "audio/mp4",
+        filename: "voice.m4a",
+        transferName: "voice.m4a"
+      }
+    }),
+    config: {
+      enabled: true,
+      apiKey: "sk",
+      model: "gpt-4o-mini-transcribe",
+      language: "en",
+      maxBytes: 1024,
+      maxSeconds: 60
+    },
+    warn: () => {}
+  });
+
+  let transcription;
+  await withMessageIdentityLock("m1", async () => {
+    transcription = service.transcribeMessage("m1");
+    await providerCalled;
+    await Promise.resolve();
+    assert.equal(prisma.audioRows.size, 0);
+    message.platformMessageKey = "instagram:stable";
+  });
+  await transcription;
+
+  assert.equal(prisma.audioRows.has("instagram:legacy|g1"), false);
+  assert.ok(prisma.audioRows.has("instagram:stable|g1"));
 });
 
 test("model defaults to gpt-4o-mini-transcribe", async () => {

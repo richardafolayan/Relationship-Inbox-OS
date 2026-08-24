@@ -35,13 +35,6 @@ const OFFSCREEN_TOP = 24000;
 // Where a revealed window lands when we bring it back on-screen.
 const ONSCREEN_BOUNDS = { left: 80, top: 80, width: 1280, height: 880 };
 
-let activateAppBundlePath: string | null = null;
-
-/** One-time hint (the Chrome.app bundle path) so reveal can foreground the app. */
-export function setBrowserActivateHint(appBundlePath: string | null): void {
-  activateAppBundlePath = appBundlePath && appBundlePath.trim() ? appBundlePath : null;
-}
-
 export function isVisibleBrowserLaunchForced(): boolean {
   return process.env.RIOS_VISIBLE_BROWSER_LAUNCH === "1";
 }
@@ -140,7 +133,10 @@ export async function hideBrowserWindow(page: unknown, previousFrontmostApp: str
  * / profile). Restores normal state + on-screen bounds, raises the tab, and
  * foregrounds the app when we know its bundle path.
  */
-export async function revealBrowserWindow(page: unknown): Promise<void> {
+export async function revealBrowserWindow(
+  page: unknown,
+  activateAppBundlePath: string | null = null
+): Promise<void> {
   await withWindowCdp(page, async (session, windowId) => {
     // Un-minimize first; some Chrome builds reject a bounds change made in the
     // same call as a state change, so split them.

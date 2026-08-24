@@ -4,8 +4,7 @@ import {
   backgroundWindowLaunchArgs,
   hideBrowserWindow,
   isVisibleBrowserLaunchForced,
-  revealBrowserWindow,
-  setBrowserActivateHint
+  revealBrowserWindow
 } from "../apps/runner/dist/services/runner-window.js";
 
 // Window-control helpers for the focus-steal fix. The runner keeps patchright's
@@ -67,7 +66,6 @@ test("hideBrowserWindow minimizes via CDP and always detaches", async () => {
 });
 
 test("revealBrowserWindow un-minimizes, moves on-screen, and raises the tab", async () => {
-  setBrowserActivateHint(null); // don't shell out to `open` in the test
   const { page, sends, frontCount } = makeCdpPage();
   await revealBrowserWindow(page);
   const bounds = sends.filter((s) => s.method === "Browser.setWindowBounds");

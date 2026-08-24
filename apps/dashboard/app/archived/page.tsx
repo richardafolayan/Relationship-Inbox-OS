@@ -27,7 +27,13 @@ interface ArchivedResponse {
 
 type Outcome = "handled" | "snoozed" | "ghosted";
 type OutcomeTab = "all" | Outcome;
-type PlatformFilter = "all" | "LINKEDIN" | "IMESSAGE" | "WHATSAPP" | "GOOGLE_MESSAGES";
+type PlatformFilter =
+  | "all"
+  | "LINKEDIN"
+  | "INSTAGRAM"
+  | "IMESSAGE"
+  | "WHATSAPP"
+  | "GOOGLE_MESSAGES";
 type ArchSort = "recent" | "oldest" | "name";
 
 const OUTCOME_TABS: { key: OutcomeTab; label: string }[] = [
@@ -50,6 +56,7 @@ const PLATFORM_FILTERS: { key: PlatformFilter; label: string }[] = [
   { key: "all", label: "All" },
   { key: "IMESSAGE", label: "iMessage" },
   { key: "LINKEDIN", label: "LinkedIn" },
+  { key: "INSTAGRAM", label: "Instagram" },
   { key: "WHATSAPP", label: "WhatsApp" },
   { key: "GOOGLE_MESSAGES", label: "Google Messages" }
 ];

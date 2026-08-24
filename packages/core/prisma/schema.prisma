@@ -211,6 +211,9 @@ model Thread {
   platform          PlatformName
   platformThreadId  String
   threadUrl         String?
+  // Last label read from the platform for recipient verification. This is
+  // deliberately separate from Person.displayName, which is user-editable.
+  recipientVerificationLabel String?
   personId          String
   unreadCount       Int          @default(0)
   needsReply        Boolean      @default(false)
@@ -581,6 +584,9 @@ model SendRequest {
   threadId     String
   status       SendRequestStatus @default(PENDING)
   requestText  String
+  // Durable dispatch provenance. The worker rechecks this at the final safety
+  // boundary so an automated row cannot become manual merely by restarting.
+  source       String
   // Set on scheduled sends. The promoter looks for SCHEDULED rows whose
   // scheduledFor has passed and flips them to PENDING so the regular
   // send-queue worker drains them. Null on rows that were sent immediately.

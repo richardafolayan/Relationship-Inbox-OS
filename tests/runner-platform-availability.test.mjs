@@ -10,6 +10,7 @@ import {
 test("platform switches use pilot-safe defaults", () => {
   assert.deepEqual(resolvePlatformAvailability({}, "darwin"), {
     LINKEDIN: true,
+    INSTAGRAM: false,
     IMESSAGE: false,
     WHATSAPP: false,
     GOOGLE_MESSAGES: false
@@ -21,6 +22,7 @@ test("platform switches still obey host operating-system support", () => {
   const availability = resolvePlatformAvailability(
     {
       LINKEDIN_ENABLED: "false",
+      INSTAGRAM_ENABLED: "true",
       IMESSAGE_ENABLED: "true",
       WHATSAPP_ENABLED: "1",
       GOOGLE_MESSAGES_ENABLED: "yes"
@@ -30,11 +32,12 @@ test("platform switches still obey host operating-system support", () => {
 
   assert.deepEqual(availability, {
     LINKEDIN: false,
+    INSTAGRAM: true,
     IMESSAGE: true,
     WHATSAPP: true,
     GOOGLE_MESSAGES: false
   });
-  assert.deepEqual(availablePlatformNames(availability), ["IMESSAGE", "WHATSAPP"]);
+  assert.deepEqual(availablePlatformNames(availability), ["INSTAGRAM", "IMESSAGE", "WHATSAPP"]);
   assert.equal(resolvePlatformAvailability({ IMESSAGE_ENABLED: "true" }, "win32").IMESSAGE, false);
   assert.equal(
     resolvePlatformAvailability({ GOOGLE_MESSAGES_ENABLED: "true" }, "win32")
@@ -51,6 +54,9 @@ test("iMessage remains unavailable away from macOS", () => {
 test("common false and true spellings are accepted", () => {
   assert.equal(resolvePlatformAvailability({ LINKEDIN_ENABLED: "off" }, "darwin").LINKEDIN, false);
   assert.equal(resolvePlatformAvailability({ WHATSAPP_ENABLED: "yes" }, "darwin").WHATSAPP, true);
+  assert.equal(resolvePlatformAvailability({ INSTAGRAM_ENABLED: "on" }, "darwin").INSTAGRAM, true);
+  assert.equal(resolvePlatformAvailability({ INSTAGRAM_ENABLED: "invalid" }, "darwin").INSTAGRAM, false);
+  assert.equal(resolvePlatformAvailability({ INSTAGRAM_ENABLED: "" }, "darwin").INSTAGRAM, false);
   assert.equal(resolvePlatformAvailability({ GOOGLE_MESSAGES_ENABLED: "off" }, "win32").GOOGLE_MESSAGES, false);
 });
 
@@ -60,14 +66,15 @@ test("live WhatsApp state overrides a stale stored platform row", () => {
   assert.equal(effectivePlatformStatus("LINKEDIN", "CONNECTED", "disconnected"), "CONNECTED");
   assert.equal(
     connectedPlatformCount(
-      ["IMESSAGE", "LINKEDIN", "WHATSAPP"],
+      ["IMESSAGE", "LINKEDIN", "INSTAGRAM", "WHATSAPP"],
       [
         { name: "IMESSAGE", status: "CONNECTED" },
         { name: "LINKEDIN", status: "CONNECTED" },
+        { name: "INSTAGRAM", status: "CONNECTED" },
         { name: "WHATSAPP", status: "NOT_CONNECTED" }
       ],
       "connected"
     ),
-    3
+    4
   );
 });

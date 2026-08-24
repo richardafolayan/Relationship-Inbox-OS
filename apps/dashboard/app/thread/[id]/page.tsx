@@ -43,6 +43,10 @@ import { Menu } from "@/components/ui/menu";
 import { ActionSheet, type ActionSheetGroup } from "@/components/ui/action-sheet";
 import { apiGet, apiPost, apiPostForm, peekCache, runAction } from "@/lib/api";
 import { BrandLoader } from "@/components/common/brand-loader";
+import {
+  SiblingPlatformFilter,
+  type SiblingPlatformFilterValue
+} from "@/components/common/sibling-platform-filter";
 import { APP_NAME } from "@/lib/branding";
 import { setFavourite } from "@/lib/favourites";
 import { runActionWithFeedback, showToast } from "@/lib/feedback";
@@ -137,6 +141,7 @@ import { ViewportDiagnostics } from "@/components/thread/viewport-diagnostics";
 import { chooseDisplayBrief } from "@/lib/reply-brief";
 import { restoreFailedAttachments } from "@/lib/composer-attachments";
 import { nextMorningSendSlot, shouldOfferLateNightSchedule } from "@/lib/late-night-send";
+import { platformSupportsScheduledSend } from "@/lib/platform-send-capabilities";
 import {
   afterNextPaint,
   recordMessageSyncLatency
@@ -568,9 +573,8 @@ export default function ThreadPage() {
     () => peekCache<ThreadResponse>(`/runner/data/thread/${threadId}`) ?? null
   );
   const [siblings, setSiblings] = useState<InboxRow[]>([]);
-  const [siblingPlatform, setSiblingPlatform] = useState<
-    "all" | "LINKEDIN" | "IMESSAGE" | "WHATSAPP" | "GOOGLE_MESSAGES"
-  >("all");
+  const [siblingPlatform, setSiblingPlatform] =
+    useState<SiblingPlatformFilterValue>("all");
   const [platforms, setPlatforms] = useState<PlatformCard[]>([]);
   const [logs, setLogs] = useState<AuditLogRow[]>([]);
   // Focused thread: cuid of the parent message whose thread we're zoomed
@@ -2699,6 +2703,16 @@ export default function ThreadPage() {
             )
         };
       case "SELECTOR_FAIL":
+        if (platformName === "INSTAGRAM") {
+          return {
+            label: "Open Instagram",
+            run: () =>
+              runAction(
+                apiPost("/runner/control/platform/open-browser", { platform: platformName }),
+                setError
+              )
+          };
+        }
         return {
           label: "Run selector tests",
           run: () =>
@@ -3637,6 +3651,7 @@ export default function ThreadPage() {
     thread.platform === "IMESSAGE" ||
     thread.platform === "WHATSAPP" ||
     thread.platform === "GOOGLE_MESSAGES";
+  const canScheduleSend = platformSupportsScheduledSend(thread.platform);
   const mobileComposerGroups: ActionSheetGroup[] = [
     {
       id: "writing",
@@ -3683,14 +3698,16 @@ export default function ThreadPage() {
     {
       id: "later",
       label: "Later",
-      items: [
-        {
-          label: "Schedule send",
-          description: composer.trim() ? "Choose when this reply should be sent." : "Write a reply first.",
-          disabled: !composer.trim() || sending || scheduling,
-          onSelect: () => setMobileScheduleOpen(true)
-        }
-      ]
+      items: canScheduleSend
+        ? [
+            {
+              label: "Schedule send",
+              description: composer.trim() ? "Choose when this reply should be sent." : "Write a reply first.",
+              disabled: !composer.trim() || sending || scheduling,
+              onSelect: () => setMobileScheduleOpen(true)
+            }
+          ]
+        : []
     },
     {
       id: "whatsapp",
@@ -3710,6 +3727,7 @@ export default function ThreadPage() {
           : []
     }
   ];
+  const hasMobileComposerActions = mobileComposerGroups.some((group) => group.items.length > 0);
   const mobileSuggestionGroups: ActionSheetGroup[] = [
     {
       id: "suggestions",
@@ -4041,26 +4059,11 @@ export default function ThreadPage() {
                 Threads
               </p>
               <div className="flex items-center gap-1">
-                <select
+                <SiblingPlatformFilter
                   value={siblingPlatform}
-                  onChange={(e) =>
-                    setSiblingPlatform(
-                      e.target.value as "all" | "LINKEDIN" | "IMESSAGE" | "WHATSAPP" | "GOOGLE_MESSAGES"
-                    )
-                  }
-                  className="rounded border border-hairline bg-paper px-1 py-[2px] font-mono text-[10px] uppercase tracking-[0.06em] text-ink-2 focus:border-ink-3 focus:outline-none"
-                  aria-label="Filter sibling threads by platform"
-                >
-                  <option value="all">All</option>
-                  <option value="LINKEDIN">LinkedIn</option>
-                  <option value="IMESSAGE">iMessage</option>
-                  {siblings.some((row) => row.platform === "GOOGLE_MESSAGES") ? (
-                    <option value="GOOGLE_MESSAGES">Google Messages</option>
-                  ) : null}
-                  {siblings.some((row) => row.platform === "WHATSAPP") ? (
-                    <option value="WHATSAPP">WhatsApp</option>
-                  ) : null}
-                </select>
+                  siblings={siblings}
+                  onChange={setSiblingPlatform}
+                />
                 <button
                   type="button"
                   onClick={() => setThreadsCollapsed(true)}
@@ -4181,12 +4184,15 @@ export default function ThreadPage() {
               errorSummary={degraded.lastScanFailure?.errorSummary ?? degraded.lastError ?? undefined}
               screenshotFile={degraded.lastScanFailure?.screenshotFile}
               domDumpFile={degradedDomDump}
-              onRunSelectorTests={() =>
-                runAction(
-                  apiPost("/runner/control/platform/test-selectors", { platform: degraded.platform }),
-                  setError,
-                  refresh
-                )
+              onRunSelectorTests={
+                degraded.platform === "INSTAGRAM"
+                  ? undefined
+                  : () =>
+                      runAction(
+                        apiPost("/runner/control/platform/test-selectors", { platform: degraded.platform }),
+                        setError,
+                        refresh
+                      )
               }
               onOpenReceipts={() => setReceiptsOpen(true)}
             />
@@ -5862,68 +5868,70 @@ export default function ThreadPage() {
                       Cancel
                     </button>
                   ) : null}
-                  <div className="relative" ref={scheduleMenuDesktopRef}>
-                    <button
-                      type="button"
-                      onClick={() => setScheduleMenuOpen((v) => !v)}
-                      disabled={!composer.trim() || sending || scheduling}
-                      title="Schedule send"
-                      aria-label="Schedule send"
-                      className="inline-flex h-[30px] w-[30px] items-center justify-center rounded-full border border-hairline text-ink-2 transition-colors duration-calm hover:border-hairline-strong hover:bg-paper-2 hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
-                    >
-                      <Clock className="h-[13px] w-[13px]" strokeWidth={1.8} />
-                    </button>
-                    {scheduleMenuOpen ? (
-                      <div className="absolute bottom-[calc(100%+8px)] right-0 z-20 w-[min(300px,calc(100vw-32px))] overflow-hidden rounded-row border border-hairline bg-paper p-[6px] shadow-pop">
-                        <p className="m-0 px-3 pb-2 pt-2 font-mono text-[10.5px] uppercase tracking-[0.06em] text-ink-3">
-                          Schedule send
-                        </p>
-                        {buildSchedulePresets(new Date()).map((preset) => (
-                          <button
-                            key={preset.label}
-                            type="button"
-                            onClick={() => void scheduleSend(preset.at)}
-                            disabled={scheduling}
-                            className="flex w-full items-center justify-between rounded-[10px] px-3 py-[10px] text-left transition-colors duration-calm hover:bg-paper-2 disabled:opacity-50"
-                          >
-                            <span className="text-[13px] font-medium text-ink">{preset.label}</span>
-                            <span className="font-mono text-[11px] text-ink-3">{preset.sub}</span>
-                          </button>
-                        ))}
-                        <div className="mx-2 my-2 border-t border-hairline" />
-                        <div className="px-3 pb-2 pt-1">
-                          <p className="mb-1 font-mono text-[10.5px] uppercase tracking-[0.06em] text-ink-3">
-                            Custom
+                  {canScheduleSend ? (
+                    <div className="relative" ref={scheduleMenuDesktopRef}>
+                      <button
+                        type="button"
+                        onClick={() => setScheduleMenuOpen((v) => !v)}
+                        disabled={!composer.trim() || sending || scheduling}
+                        title="Schedule send"
+                        aria-label="Schedule send"
+                        className="inline-flex h-[30px] w-[30px] items-center justify-center rounded-full border border-hairline text-ink-2 transition-colors duration-calm hover:border-hairline-strong hover:bg-paper-2 hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        <Clock className="h-[13px] w-[13px]" strokeWidth={1.8} />
+                      </button>
+                      {scheduleMenuOpen ? (
+                        <div className="absolute bottom-[calc(100%+8px)] right-0 z-20 w-[min(300px,calc(100vw-32px))] overflow-hidden rounded-row border border-hairline bg-paper p-[6px] shadow-pop">
+                          <p className="m-0 px-3 pb-2 pt-2 font-mono text-[10.5px] uppercase tracking-[0.06em] text-ink-3">
+                            Schedule send
                           </p>
-                          <input
-                            type="datetime-local"
-                            value={customScheduleValue}
-                            onChange={(e) => setCustomScheduleValue(e.target.value)}
-                            className="w-full rounded-row border border-hairline bg-paper px-3 py-[7px] text-[13px] text-ink outline-none transition-[border-color] duration-calm focus:border-hairline-strong"
-                          />
-                          <button
-                            type="button"
-                            disabled={!customScheduleValue || scheduling}
-                            onClick={() => {
-                              const at = new Date(customScheduleValue);
-                              if (Number.isNaN(at.getTime())) {
-                                setError("Pick a valid date and time.");
-                                return;
-                              }
-                              if (at.getTime() <= Date.now()) {
-                                setError("Pick a time in the future.");
-                                return;
-                              }
-                              void scheduleSend(at);
-                            }}
-                            className="mt-2 w-full rounded-pill bg-ink px-3 py-[7px] text-[12px] font-medium text-paper hover:bg-ink-2 disabled:cursor-not-allowed disabled:opacity-50"
-                          >
-                            {scheduling ? "Scheduling…" : "Schedule"}
-                          </button>
+                          {buildSchedulePresets(new Date()).map((preset) => (
+                            <button
+                              key={preset.label}
+                              type="button"
+                              onClick={() => void scheduleSend(preset.at)}
+                              disabled={scheduling}
+                              className="flex w-full items-center justify-between rounded-[10px] px-3 py-[10px] text-left transition-colors duration-calm hover:bg-paper-2 disabled:opacity-50"
+                            >
+                              <span className="text-[13px] font-medium text-ink">{preset.label}</span>
+                              <span className="font-mono text-[11px] text-ink-3">{preset.sub}</span>
+                            </button>
+                          ))}
+                          <div className="mx-2 my-2 border-t border-hairline" />
+                          <div className="px-3 pb-2 pt-1">
+                            <p className="mb-1 font-mono text-[10.5px] uppercase tracking-[0.06em] text-ink-3">
+                              Custom
+                            </p>
+                            <input
+                              type="datetime-local"
+                              value={customScheduleValue}
+                              onChange={(e) => setCustomScheduleValue(e.target.value)}
+                              className="w-full rounded-row border border-hairline bg-paper px-3 py-[7px] text-[13px] text-ink outline-none transition-[border-color] duration-calm focus:border-hairline-strong"
+                            />
+                            <button
+                              type="button"
+                              disabled={!customScheduleValue || scheduling}
+                              onClick={() => {
+                                const at = new Date(customScheduleValue);
+                                if (Number.isNaN(at.getTime())) {
+                                  setError("Pick a valid date and time.");
+                                  return;
+                                }
+                                if (at.getTime() <= Date.now()) {
+                                  setError("Pick a time in the future.");
+                                  return;
+                                }
+                                void scheduleSend(at);
+                              }}
+                              className="mt-2 w-full rounded-pill bg-ink px-3 py-[7px] text-[12px] font-medium text-paper hover:bg-ink-2 disabled:cursor-not-allowed disabled:opacity-50"
+                            >
+                              {scheduling ? "Scheduling…" : "Schedule"}
+                            </button>
+                          </div>
                         </div>
-                      </div>
-                    ) : null}
-                  </div>
+                      ) : null}
+                    </div>
+                  ) : null}
                   {thread.platform === "IMESSAGE" ||
                   thread.platform === "WHATSAPP" ||
                   thread.platform === "GOOGLE_MESSAGES" ? (
@@ -5988,19 +5996,21 @@ export default function ThreadPage() {
                 data-testid="composer-mobile-actions"
                 className="phone-ui-flex mt-1.5 items-center gap-2"
               >
-                <button
-                  ref={composerMoreTriggerRef}
-                  type="button"
-                  data-testid="composer-more-toggle"
-                  onClick={() => setComposerMoreOpen(true)}
-                  aria-expanded={composerMoreOpen}
-                  aria-haspopup="dialog"
-                  aria-label="More actions"
-                  title="More actions"
-                  className="grid h-[34px] w-[34px] shrink-0 place-items-center rounded-full border border-hairline bg-paper text-ink-2 transition-colors duration-calm hover:border-hairline-strong hover:bg-paper-2 hover:text-ink"
-                >
-                  <Plus className="h-[15px] w-[15px]" strokeWidth={1.8} />
-                </button>
+                {hasMobileComposerActions ? (
+                  <button
+                    ref={composerMoreTriggerRef}
+                    type="button"
+                    data-testid="composer-more-toggle"
+                    onClick={() => setComposerMoreOpen(true)}
+                    aria-expanded={composerMoreOpen}
+                    aria-haspopup="dialog"
+                    aria-label="More actions"
+                    title="More actions"
+                    className="grid h-[34px] w-[34px] shrink-0 place-items-center rounded-full border border-hairline bg-paper text-ink-2 transition-colors duration-calm hover:border-hairline-strong hover:bg-paper-2 hover:text-ink"
+                  >
+                    <Plus className="h-[15px] w-[15px]" strokeWidth={1.8} />
+                  </button>
+                ) : null}
                 <button
                   type="button"
                   onClick={() =>
@@ -6079,15 +6089,17 @@ export default function ThreadPage() {
                   {dictationCaptureRecoveryMessage(dictationCaptureUnavailableReason)}
                 </p>
               ) : null}
-              <ActionSheet
-                open={composerMoreOpen}
-                onClose={() => setComposerMoreOpen(false)}
-                title="Add to your reply"
-                groups={mobileComposerGroups}
-                returnFocusRef={composerMoreTriggerRef}
-                scrollLockTargetRef={timelineRef}
-                historyKey="composerMore"
-              />
+              {hasMobileComposerActions ? (
+                <ActionSheet
+                  open={composerMoreOpen}
+                  onClose={() => setComposerMoreOpen(false)}
+                  title="Add to your reply"
+                  groups={mobileComposerGroups}
+                  returnFocusRef={composerMoreTriggerRef}
+                  scrollLockTargetRef={timelineRef}
+                  historyKey="composerMore"
+                />
+              ) : null}
               <ActionSheet
                 open={mobileSuggestionsOpen}
                 onClose={() => setMobileSuggestionsOpen(false)}
@@ -6097,44 +6109,46 @@ export default function ThreadPage() {
                 scrollLockTargetRef={timelineRef}
                 historyKey="composerSuggestions"
               />
-              <ActionSheet
-                open={mobileScheduleOpen}
-                onClose={() => setMobileScheduleOpen(false)}
-                title="Schedule send"
-                groups={mobileScheduleGroups}
-                returnFocusRef={composerMoreTriggerRef}
-                scrollLockTargetRef={timelineRef}
-                historyKey="composerSchedule"
-                footer={
-                  <div className="border-t border-hairline pt-3">
-                    <label className="block font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3">
-                      Custom time
-                      <input
-                        type="datetime-local"
-                        value={customScheduleValue}
-                        onChange={(event) => setCustomScheduleValue(event.target.value)}
-                        className="mt-1.5 w-full rounded-row border border-hairline bg-paper px-3 py-2.5 font-sans text-[14px] normal-case tracking-normal text-ink outline-none focus:border-hairline-strong"
-                      />
-                    </label>
-                    <button
-                      type="button"
-                      disabled={!customScheduleValue || scheduling}
-                      onClick={() => {
-                        const at = new Date(customScheduleValue);
-                        if (Number.isNaN(at.getTime()) || at.getTime() <= Date.now()) {
-                          setError("Pick a future date and time.");
-                          return;
-                        }
-                        setMobileScheduleOpen(false);
-                        void scheduleSend(at);
-                      }}
-                      className="mt-2 w-full rounded-pill bg-ink px-3 py-2.5 text-[13px] font-medium text-paper disabled:opacity-50"
-                    >
-                      {scheduling ? "Scheduling..." : "Schedule"}
-                    </button>
-                  </div>
-                }
-              />
+              {canScheduleSend ? (
+                <ActionSheet
+                  open={mobileScheduleOpen}
+                  onClose={() => setMobileScheduleOpen(false)}
+                  title="Schedule send"
+                  groups={mobileScheduleGroups}
+                  returnFocusRef={composerMoreTriggerRef}
+                  scrollLockTargetRef={timelineRef}
+                  historyKey="composerSchedule"
+                  footer={
+                    <div className="border-t border-hairline pt-3">
+                      <label className="block font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3">
+                        Custom time
+                        <input
+                          type="datetime-local"
+                          value={customScheduleValue}
+                          onChange={(event) => setCustomScheduleValue(event.target.value)}
+                          className="mt-1.5 w-full rounded-row border border-hairline bg-paper px-3 py-2.5 font-sans text-[14px] normal-case tracking-normal text-ink outline-none focus:border-hairline-strong"
+                        />
+                      </label>
+                      <button
+                        type="button"
+                        disabled={!customScheduleValue || scheduling}
+                        onClick={() => {
+                          const at = new Date(customScheduleValue);
+                          if (Number.isNaN(at.getTime()) || at.getTime() <= Date.now()) {
+                            setError("Pick a future date and time.");
+                            return;
+                          }
+                          setMobileScheduleOpen(false);
+                          void scheduleSend(at);
+                        }}
+                        className="mt-2 w-full rounded-pill bg-ink px-3 py-2.5 text-[13px] font-medium text-paper disabled:opacity-50"
+                      >
+                        {scheduling ? "Scheduling..." : "Schedule"}
+                      </button>
+                    </div>
+                  }
+                />
+              ) : null}
               {showLateNightNudge && lateNightSlot ? (
                 <button
                   type="button"
