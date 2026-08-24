@@ -85,8 +85,8 @@ before claiming those guarantees still hold.
 - Reviewed local integration branch: `fix/instagram-integration-gate`.
 - Base: `origin/develop` at
   `ddfba09f44470852c349e0a7f82c12230ba7d32d`.
-- Latest verified corrective commit: `9c95a96d`.
-- The complete bounded-concurrency suite passes under Node 20.20.0: 3,031
+- Latest verified corrective commit: `6cd4fbb4`.
+- The complete bounded-concurrency suite passes under Node 20.20.0: 3,032
   tests, zero failures,
   zero skips, zero cancellations, and zero todos.
 - Dashboard, runner, and core type checks pass. The production dashboard build,
@@ -178,6 +178,14 @@ before claiming those guarantees still hold.
   observed non-empty scan counts, and collection diagnostics read the typed
   native stop reason. The new privacy, reparenting, cap, watermark, count, and
   diagnostic regressions pass through production paths.
+- A ninth exact-head review found that form-less controls could retain their
+  geometry after moving to another composer owner, and that the watermark
+  regression had not enabled the complete incremental capability pair. Send
+  now binds the lowest local owner shared by the composer and control, rejects
+  page-level owners, and requires the same owner immediately before clicking.
+  The no-form coordinate-preserving reparent case performs zero clicks. The
+  queue regression now proves the watermark was captured and still not saved
+  after incomplete or candidate-capped collection.
 - Scheduled sends, attachments, polls, focus acknowledgements, and other
   automated Instagram sends are rejected at the durable worker boundary. The
   dashboard no longer offers those unsupported actions.
