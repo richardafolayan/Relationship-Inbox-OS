@@ -173,7 +173,6 @@ export async function runActionWithInlineFeedback<T>(
   try {
     const value = await promise;
     const success = typeof opts.success === "function" ? opts.success(value) : opts.success;
-    opts.setState({ phase: "success", label: success });
     if (opts.onDone) {
       try {
         await opts.onDone(value);
@@ -181,6 +180,7 @@ export async function runActionWithInlineFeedback<T>(
         console.warn("[action] onDone failed after success", error);
       }
     }
+    opts.setState({ phase: "success", label: success });
     return { ok: true, value };
   } catch (error) {
     const detail =

@@ -110,6 +110,66 @@ test("single-flight inline actions do not start overlapping work", async () => {
   ]);
 });
 
+test("single-flight inline actions stay visibly running through follow-up refresh", async () => {
+  const gate = { current: false };
+  const states = [];
+  let refreshResolve;
+  let markRefreshStarted;
+  let secondStarts = 0;
+  const refreshStarted = new Promise((resolve) => {
+    markRefreshStarted = resolve;
+  });
+
+  const first = runSingleFlightInlineAction(
+    gate,
+    () => Promise.resolve("connected"),
+    {
+      pending: "Connecting Instagram...",
+      success: "Instagram connected",
+      failure: "Instagram needs attention",
+      setState: (state) => states.push(state),
+      onDone: () => {
+        markRefreshStarted();
+        return new Promise((resolve) => {
+          refreshResolve = resolve;
+        });
+      }
+    }
+  );
+
+  await refreshStarted;
+
+  assert.equal(gate.current, true);
+  assert.deepEqual(states, [{ phase: "running", label: "Connecting Instagram..." }]);
+
+  const second = await runSingleFlightInlineAction(
+    gate,
+    () => {
+      secondStarts += 1;
+      return Promise.resolve("reset");
+    },
+    {
+      pending: "Resetting Instagram...",
+      success: "Instagram disconnected",
+      failure: "Instagram reset failed",
+      setState: (state) => states.push(state)
+    }
+  );
+
+  assert.equal(second, null);
+  assert.equal(secondStarts, 0);
+
+  refreshResolve();
+  const outcome = await first;
+
+  assert.equal(outcome?.ok, true);
+  assert.equal(gate.current, false);
+  assert.deepEqual(states, [
+    { phase: "running", label: "Connecting Instagram..." },
+    { phase: "success", label: "Instagram connected" }
+  ]);
+});
+
 test("inline action button renders running and successful states accessibly", () => {
   const running = renderToStaticMarkup(
     React.createElement(InlineActionButton, {
