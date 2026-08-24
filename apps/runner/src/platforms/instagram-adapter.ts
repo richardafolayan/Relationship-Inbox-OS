@@ -1928,9 +1928,10 @@ export class InstagramAdapter extends BetaAdapter {
             return fail("composer_text_mismatch_before_send");
           }
           composerElement.focus();
-          if (!currentThreadMatches()) return fail("thread_changed_before_send");
+          const ownershipAfterFocus = verifyOwnership();
+          if (!ownershipAfterFocus.ok) return ownershipAfterFocus;
           composerElement.click();
-          return currentThreadMatches() ? { ok: true } : fail("thread_changed_before_send");
+          return verifyOwnership();
         }
 
         if (action === "type") {
@@ -1938,7 +1939,8 @@ export class InstagramAdapter extends BetaAdapter {
             return fail("composer_text_mismatch_before_send");
           }
           composerElement.focus();
-          if (!currentThreadMatches()) return fail("thread_changed_before_send");
+          const ownershipAfterFocus = verifyOwnership();
+          if (!ownershipAfterFocus.ok) return ownershipAfterFocus;
 
           const priorValue = typeof composerElement.value === "string"
             ? composerElement.value
@@ -2022,6 +2024,25 @@ export class InstagramAdapter extends BetaAdapter {
         if (!finalOwnership.ok) return finalOwnership;
         const conversationEvidence = resolveConversationEvidence();
         if (!conversationEvidence?.container.contains(sendElement)) {
+          return fail("send_button_not_owned");
+        }
+        const composerForm = composerElement.closest("form");
+        const sendForm = sendElement.closest("form");
+        if ((composerForm || sendForm) && composerForm !== sendForm) {
+          return fail("send_button_not_owned");
+        }
+        const composerRect = composerElement.getBoundingClientRect();
+        const associatedSendRect = sendElement.getBoundingClientRect();
+        const composerCenterY = composerRect.top + composerRect.height / 2;
+        const sendCenterY = associatedSendRect.top + associatedSendRect.height / 2;
+        const sendCenterX = associatedSendRect.left + associatedSendRect.width / 2;
+        const sameRow =
+          Math.abs(sendCenterY - composerCenterY) <= Math.max(36, composerRect.height);
+        const maxHorizontalGap = Math.max(160, composerRect.height * 4);
+        const horizontallyAssociated =
+          sendCenterX >= composerRect.left &&
+          sendCenterX <= composerRect.right + maxHorizontalGap;
+        if (!sameRow || !horizontallyAssociated) {
           return fail("send_button_not_owned");
         }
         if (

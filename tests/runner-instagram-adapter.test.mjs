@@ -1647,6 +1647,148 @@ test("Instagram atomic composer actions validate and mutate in one browser task"
   assert.equal(await page.evaluate(() => window.submitted), 1);
 });
 
+test("Instagram atomic typing revalidates recipient ownership after focus handlers run", async (t) => {
+  let browser;
+  try {
+    browser = await chromium.launch({ headless: true });
+  } catch (error) {
+    t.skip(`Playwright Chromium unavailable: ${error instanceof Error ? error.message : String(error)}`);
+    return;
+  }
+
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  t.after(async () => {
+    await context.close();
+    await browser.close();
+  });
+  await page.route("https://www.instagram.com/**", async (route) => {
+    await route.fulfill({
+      contentType: "text/html",
+      body: `<!doctype html>
+        <main>
+          <header><h1>Safe thread</h1></header>
+          <form style="display:flex;align-items:center;gap:8px">
+            <div id="composer" role="textbox" contenteditable="true" style="width:300px;height:40px"></div>
+            <button id="send" type="button" aria-label="Send">Send</button>
+          </form>
+        </main>`
+    });
+  });
+  await page.goto("https://www.instagram.com/direct/t/safe-thread/");
+  await page.evaluate(() => {
+    window.inputObserved = [];
+    document.querySelector("#composer")?.addEventListener("input", (event) => {
+      window.inputObserved.push(event.currentTarget?.textContent ?? "");
+    });
+    document.querySelector("#composer")?.addEventListener("focus", () => {
+      const header = document.querySelector("header h1");
+      if (header) header.textContent = "Wrong person";
+    }, { once: true });
+  });
+
+  const adapter = new InstagramAdapter({
+    screenshotDir: "/tmp",
+    domDumpDir: "/tmp",
+    resolveSelectors: async () => ({}),
+    sessionManager: {},
+    personKey: "instagram",
+    connectTimeoutMs: 50
+  });
+  const composer = await page.locator("#composer").elementHandle();
+
+  assert.deepEqual(
+    await adapter.runAtomicComposerAction({
+      composer,
+      selectors: { conversation_header: "main header h1" },
+      thread: {
+        platformThreadId: "safe-thread",
+        displayName: "Safe thread",
+        recipientVerificationLabel: "Safe thread"
+      },
+      platformThreadId: "safe-thread",
+      action: "type",
+      expectedText: "",
+      unit: "private text"
+    }),
+    { ok: false, reason: "recipient_changed_before_send" }
+  );
+  assert.equal(await composer.textContent(), "");
+  assert.deepEqual(await page.evaluate(() => window.inputObserved), []);
+});
+
+test("Instagram atomic send rejects a bound Send moved to another composer", async (t) => {
+  let browser;
+  try {
+    browser = await chromium.launch({ headless: true });
+  } catch (error) {
+    t.skip(`Playwright Chromium unavailable: ${error instanceof Error ? error.message : String(error)}`);
+    return;
+  }
+
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  t.after(async () => {
+    await context.close();
+    await browser.close();
+  });
+  await page.route("https://www.instagram.com/**", async (route) => {
+    await route.fulfill({
+      contentType: "text/html",
+      body: `<!doctype html>
+        <main>
+          <header><h1>Safe thread</h1></header>
+          <form id="original" style="display:flex;align-items:center;gap:8px">
+            <div id="composer" role="textbox" contenteditable="true" style="width:300px;height:40px">Approved text</div>
+            <button id="send" type="button" aria-label="Send">Send</button>
+          </form>
+          <form id="other" style="display:flex;align-items:center;gap:8px;margin-top:80px">
+            <div role="textbox" contenteditable="true" style="width:300px;height:40px"></div>
+          </form>
+        </main>`
+    });
+  });
+  await page.goto("https://www.instagram.com/direct/t/safe-thread/");
+  await page.evaluate(() => {
+    window.submitted = 0;
+    document.querySelector("#send")?.addEventListener("click", () => {
+      window.submitted += 1;
+    });
+  });
+
+  const adapter = new InstagramAdapter({
+    screenshotDir: "/tmp",
+    domDumpDir: "/tmp",
+    resolveSelectors: async () => ({}),
+    sessionManager: {},
+    personKey: "instagram",
+    connectTimeoutMs: 50
+  });
+  const composer = await page.locator("#composer").elementHandle();
+  const sendButton = await adapter.requireComposerSendButton(page, composer, "#send");
+  await sendButton.evaluate((button) => {
+    document.querySelector("#other")?.append(button);
+  });
+
+  assert.deepEqual(
+    await adapter.runAtomicComposerAction({
+      composer,
+      sendButton,
+      selectors: { conversation_header: "main header h1" },
+      thread: {
+        platformThreadId: "safe-thread",
+        displayName: "Safe thread",
+        recipientVerificationLabel: "Safe thread"
+      },
+      platformThreadId: "safe-thread",
+      action: "send",
+      expectedText: "Approved text"
+    }),
+    { ok: false, reason: "send_button_not_owned" }
+  );
+  assert.equal(await page.evaluate(() => window.submitted), 0);
+});
+
 test("Instagram atomic composer actions bind recipient evidence to the active composer pane", async (t) => {
   let browser;
   try {

@@ -64,19 +64,29 @@ export class IMessageAdapter implements PlatformAdapter {
       this.collectionUnreadFound = 0;
       this.collectionRecentFound = 0;
       this.collectionUnreadHitCap = false;
+      this.collectionRecentHitCap = false;
     },
     getMetrics: () => ({
       totalFound: Math.max(this.collectionUnreadFound, this.collectionRecentFound),
       unreadFound: this.collectionUnreadFound,
-      completeness: this.collectionUnreadHitCap ? "candidate_cap" : "complete",
-      nativeStopReason: this.collectionUnreadHitCap
-        ? "imessage_unread_limit_reached"
-        : "imessage_database_query_complete"
+      completeness:
+        this.collectionUnreadHitCap || this.collectionRecentHitCap
+          ? "candidate_cap"
+          : "complete",
+      nativeStopReason:
+        this.collectionUnreadHitCap && this.collectionRecentHitCap
+          ? "imessage_candidate_limits_reached"
+          : this.collectionUnreadHitCap
+            ? "imessage_unread_limit_reached"
+            : this.collectionRecentHitCap
+              ? "imessage_recent_limit_reached"
+              : "imessage_database_query_complete"
     })
   };
   private collectionUnreadFound = 0;
   private collectionRecentFound = 0;
   private collectionUnreadHitCap = false;
+  private collectionRecentHitCap = false;
   private db?: IMessageDb;
   private resolverCache: { resolver: ContactResolver; builtAt: number } | null = null;
 
@@ -258,6 +268,10 @@ export class IMessageAdapter implements PlatformAdapter {
     const db = this.getDb();
     const rows = db.listThreads(limit, { unreadOnly: false });
     this.collectionRecentFound = rows.length;
+    this.collectionRecentHitCap =
+      Number.isFinite(limit) && limit > 0
+        ? rows.length >= Math.floor(limit)
+        : true;
     return rows.map((r) => this.toThreadStub(r, false, true));
   }
 

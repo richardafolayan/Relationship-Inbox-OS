@@ -191,6 +191,41 @@ test("adapter watermark round-trips and collectChangedThreads returns exactly th
   }
 });
 
+test("adapter marks a saturated recent-thread query as a candidate cap", async () => {
+  const f = makeFixture();
+  try {
+    for (let chatId = 3; chatId <= 11; chatId += 1) {
+      const handle = `+44770090${String(chatId).padStart(4, "0")}`;
+      f.db.prepare("INSERT INTO handle (ROWID, id, service) VALUES (?, ?, ?)").run(
+        chatId,
+        handle,
+        "iMessage"
+      );
+      f.db.prepare(
+        "INSERT INTO chat (ROWID, guid, chat_identifier, display_name, service_name, style, last_read_message_timestamp) VALUES (?, ?, ?, ?, ?, ?, ?)"
+      ).run(chatId, `iMessage;-;${handle}`, handle, null, "iMessage", 45, 10_000);
+      f.db.prepare("INSERT INTO chat_handle_join (chat_id, handle_id) VALUES (?, ?)").run(
+        chatId,
+        chatId
+      );
+      f.insertMessage(chatId + 10, chatId, `message ${chatId}`, true, chatId);
+    }
+
+    const adapter = new IMessageAdapter({ dbPath: f.path, useAddressBook: false });
+    adapter.collectionBoundary.beginCycle();
+    const recent = await adapter.fetchRecentThreads(10);
+    const metrics = adapter.collectionBoundary.getMetrics();
+
+    assert.equal(recent.length, 10);
+    assert.equal(metrics.completeness, "candidate_cap");
+    assert.equal(metrics.nativeStopReason, "imessage_recent_limit_reached");
+
+    await adapter.closeSession();
+  } finally {
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+
 test("adapter requests a full sweep when message rows disappeared (unsend/deletion)", async () => {
   const f = makeFixture();
   try {

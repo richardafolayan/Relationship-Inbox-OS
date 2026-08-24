@@ -4,11 +4,12 @@ import { mkdtemp } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-test("scan queue keeps bounded adapter freshness degraded without advancing lastScanAt", async () => {
+test("scan queue keeps incomplete and capped adapters degraded without advancing freshness", async () => {
   const tempDir = await mkdtemp(join(tmpdir(), "scan-boundary-"));
   process.env.DATABASE_URL = `file:${join(tempDir, "queue.sqlite")}`;
 
   const platformState = new Map();
+  const settingWrites = [];
   const applyDefined = (target, values) => {
     for (const [key, value] of Object.entries(values ?? {})) {
       if (value !== undefined) target[key] = value;
@@ -26,39 +27,43 @@ test("scan queue keeps bounded adapter freshness degraded without advancing last
     },
     setting: {
       findUnique: async () => null,
-      upsert: async () => ({})
+      upsert: async (input) => {
+        settingWrites.push(input);
+        return {};
+      }
     }
   };
   globalThis.__inboxPrisma = prisma;
 
-  const [{ createScanQueue }, { PLATFORM_SCAN_COLLECTION_INCOMPLETE_ERROR }] =
+  const [
+    { createScanQueue },
+    {
+      PLATFORM_SCAN_CANDIDATE_CAP_ERROR,
+      PLATFORM_SCAN_COLLECTION_INCOMPLETE_ERROR
+    }
+  ] =
     await Promise.all([
       import("../apps/runner/dist/services/scan-queue.js"),
       import("../apps/runner/dist/services/message-identity-reconciliation.js")
     ]);
 
   const originalLastScanAt = new Date("2026-08-20T10:00:00.000Z");
-  platformState.set("INSTAGRAM", {
-    name: "INSTAGRAM",
-    status: "CONNECTED",
-    lastError: null,
-    lastScanAt: originalLastScanAt
-  });
-  let began = false;
-  const adapter = {
-    platform: "INSTAGRAM",
+  const began = new Set();
+  const createAdapter = (platform, completeness, nativeStopReason) => ({
+    platform,
     collectionBoundary: {
       beginCycle: () => {
-        began = true;
+        began.add(platform);
       },
       getMetrics: () => ({
         totalFound: 0,
         unreadFound: 0,
-        completeness: "incomplete",
-        nativeStopReason: "bounded_snapshot"
+        completeness,
+        nativeStopReason
       })
     },
     ensureConnected: async () => undefined,
+    getScanWatermark: async () => `${platform.toLowerCase()}-watermark`,
     scanUnreadThreads: async () => [],
     fetchRecentThreads: async () => [],
     fetchThreadMessages: async () => [],
@@ -67,9 +72,21 @@ test("scan queue keeps bounded adapter freshness degraded without advancing last
     },
     openThread: async () => undefined,
     closeSession: async () => undefined
+  });
+  const adapters = {
+    INSTAGRAM: createAdapter("INSTAGRAM", "incomplete", "bounded_snapshot"),
+    IMESSAGE: createAdapter("IMESSAGE", "candidate_cap", "imessage_recent_limit_reached")
   };
+  for (const platform of Object.keys(adapters)) {
+    platformState.set(platform, {
+      name: platform,
+      status: "CONNECTED",
+      lastError: null,
+      lastScanAt: originalLastScanAt
+    });
+  }
   const queue = createScanQueue({
-    adapters: { INSTAGRAM: adapter },
+    adapters,
     eventBus: { emit: () => undefined },
     settingsStore: {
       getSettings: async () => ({
@@ -89,15 +106,23 @@ test("scan queue keeps bounded adapter freshness degraded without advancing last
     auditLog: async () => "audit"
   });
 
-  await queue.runJob({
-    jobId: "bounded-instagram",
-    platform: "INSTAGRAM",
-    scope: "full"
-  });
+  for (const platform of Object.keys(adapters)) {
+    await queue.runJob({
+      jobId: `bounded-${platform.toLowerCase()}`,
+      platform,
+      scope: "full"
+    });
 
-  const finalState = platformState.get("INSTAGRAM");
-  assert.equal(began, true);
-  assert.equal(finalState.status, "DEGRADED");
-  assert.equal(finalState.lastError, PLATFORM_SCAN_COLLECTION_INCOMPLETE_ERROR);
-  assert.equal(finalState.lastScanAt, originalLastScanAt);
+    const finalState = platformState.get(platform);
+    assert.equal(began.has(platform), true);
+    assert.equal(finalState.status, "DEGRADED");
+    assert.equal(
+      finalState.lastError,
+      platform === "IMESSAGE"
+        ? PLATFORM_SCAN_CANDIDATE_CAP_ERROR
+        : PLATFORM_SCAN_COLLECTION_INCOMPLETE_ERROR
+    );
+    assert.equal(finalState.lastScanAt, originalLastScanAt);
+  }
+  assert.deepEqual(settingWrites, []);
 });

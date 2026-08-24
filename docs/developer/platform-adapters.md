@@ -102,6 +102,8 @@ Source:
 - Reads unread/recent chats, a generous message window, attachments,
   reactions, native reply metadata, group names, delivery error state, and
   cheap change-watermark values.
+- Treats a saturated unread or recent query as a candidate cap. A capped cycle
+  stays degraded and cannot advance the database watermark past omitted chats.
 - Filters known Messages system events before they affect presentation or AI.
 - Resolves raw handles through live macOS Contacts and optional
   `data/contacts.vcf`, preserving manual names.

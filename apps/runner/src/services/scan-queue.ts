@@ -534,6 +534,31 @@ export function resolveEffectiveCount(rawCount: number, max?: number): number {
   return Math.min(safeRawCount, cap);
 }
 
+export function resolveObservedCollectionCount(
+  observedCount: number,
+  boundaryCount: unknown
+): number {
+  const safeObserved =
+    Number.isFinite(observedCount) && observedCount > 0
+      ? Math.floor(observedCount)
+      : 0;
+  const safeBoundary =
+    typeof boundaryCount === "number" &&
+    Number.isFinite(boundaryCount) &&
+    boundaryCount > 0
+      ? Math.floor(boundaryCount)
+      : 0;
+  return Math.max(safeObserved, safeBoundary);
+}
+
+export function resolveCollectionNativeStopReason(
+  metrics: Record<string, unknown> | null | undefined
+): string | undefined {
+  return typeof metrics?.nativeStopReason === "string"
+    ? metrics.nativeStopReason
+    : undefined;
+}
+
 export function beginAdapterCollectionBoundary(
   adapter: PlatformAdapter
 ): PlatformCollectionBoundaryCapability {
@@ -2423,18 +2448,18 @@ export function createScanQueue(deps: ScanQueueDeps) {
             candidateCapBroke = true;
           }
           candidatesCount = candidatesToSync.length;
-          if (threadsScannedCount <= 0) {
-            threadsScannedCount =
-              typeof collectionMetrics?.totalFound === "number"
-                ? (collectionMetrics.totalFound as number)
-                : candidatesBeforeCap;
-          }
-          if (unreadCandidatesCount <= 0 && typeof collectionMetrics?.unreadFound === "number") {
-            unreadCandidatesCount = collectionMetrics.unreadFound as number;
-          }
-          if (needsReplyCandidatesCount <= 0 && typeof collectionMetrics?.needsReplyFound === "number") {
-            needsReplyCandidatesCount = collectionMetrics.needsReplyFound as number;
-          }
+          threadsScannedCount = resolveObservedCollectionCount(
+            Math.max(threadsScannedCount, candidatesBeforeCap),
+            collectionMetrics?.totalFound
+          );
+          unreadCandidatesCount = resolveObservedCollectionCount(
+            unreadCandidatesCount,
+            collectionMetrics?.unreadFound
+          );
+          needsReplyCandidatesCount = resolveObservedCollectionCount(
+            needsReplyCandidatesCount,
+            collectionMetrics?.needsReplyFound
+          );
 
           deps.eventBus.emit({
             type: "SCAN_PROGRESS",
@@ -2459,8 +2484,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
             effectiveThreadCount,
             rows: candidatesBeforeCap,
             candidates: candidatesCount,
-            stopReason:
-              typeof collectionMetrics?.stopReason === "string" ? (collectionMetrics.stopReason as string) : undefined
+            stopReason: resolveCollectionNativeStopReason(collectionMetrics)
           });
 
           rawCandidateCount = candidatesToSync.length;
@@ -2736,9 +2760,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
           });
 
           runStopReason = freshnessComplete
-            ? typeof collectionMetrics?.nativeStopReason === "string"
-              ? (collectionMetrics.nativeStopReason as string)
-              : runStopReason
+            ? resolveCollectionNativeStopReason(collectionMetrics) ?? runStopReason
             : freshness.stopReason;
           runLogger.setStopReason(runStopReason ?? "scan_complete");
           headline(
@@ -2772,18 +2794,9 @@ export function createScanQueue(deps: ScanQueueDeps) {
               updatedThreads: platformUpdatedThreads,
               processed: platformUpdatedThreads,
               skipped: Math.max(0, candidatesCount - platformUpdatedThreads),
-              totalFound:
-                typeof collectionMetrics?.totalFound === "number"
-                  ? (collectionMetrics.totalFound as number)
-                  : threadsScannedCount,
-              unreadFound:
-                typeof collectionMetrics?.unreadFound === "number"
-                  ? (collectionMetrics.unreadFound as number)
-                  : unreadCandidatesCount,
-              needsReplyFound:
-                typeof collectionMetrics?.needsReplyFound === "number"
-                  ? (collectionMetrics.needsReplyFound as number)
-                  : needsReplyCandidatesCount,
+              totalFound: threadsScannedCount,
+              unreadFound: unreadCandidatesCount,
+              needsReplyFound: needsReplyCandidatesCount,
               iterations:
                 typeof collectionMetrics?.iterations === "number" ? (collectionMetrics.iterations as number) : undefined,
               stopReason: runStopReason,

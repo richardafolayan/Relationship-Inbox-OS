@@ -5,6 +5,8 @@ import {
   enqueueScanJobByPriority,
   jobCoversTriggeredScan,
   promoteQueuedJob,
+  resolveCollectionNativeStopReason,
+  resolveObservedCollectionCount,
   resolveEnqueueStatus
 } from "../apps/runner/dist/services/scan-queue.js";
 import {
@@ -104,4 +106,19 @@ test("a runtime adapter missing its required boundary declaration fails closed",
     resolveCollectionBoundaryFreshness(metrics.completeness).collectionIncomplete,
     true
   );
+});
+
+test("static boundary metrics cannot erase observed scan counts", () => {
+  assert.equal(resolveObservedCollectionCount(4, 0), 4);
+  assert.equal(resolveObservedCollectionCount(4, 7), 7);
+  assert.equal(resolveObservedCollectionCount(4, undefined), 4);
+  assert.equal(resolveObservedCollectionCount(4, Number.NaN), 4);
+});
+
+test("collection diagnostics use the normalized native stop reason", () => {
+  assert.equal(
+    resolveCollectionNativeStopReason({ nativeStopReason: "imessage_recent_limit_reached" }),
+    "imessage_recent_limit_reached"
+  );
+  assert.equal(resolveCollectionNativeStopReason({ stopReason: "legacy_field" }), undefined);
 });

@@ -29,16 +29,20 @@ Browser sends bind the exact composer element before recipient verification.
 After humanized delays, the final route, recipient, composer, and control
 ownership checks run in the same synchronous browser task as each composer
 mutation and the Send click. It binds a send-control handle before measuring
-locality, then measures and clicks that same handle. The active conversation
-container must own the visible recipient evidence, composer, and Send control.
-The control must have exact Send semantics, remain enabled and visible, and
-pass a final hit test immediately before the synchronous click.
+locality, then measures and clicks that same handle. Recipient ownership is
+rechecked after focus handlers run and before any text mutation or input event.
+The active conversation container and local composer form or row must still own
+the visible recipient evidence, composer, and Send control. The control must
+have exact Send semantics, remain enabled and visible, and pass a final hit
+test immediately before the synchronous click.
 
 Every adapter declares a typed collection-boundary capability. Adapters whose
 source query is exhaustive declare authoritative completeness. Bounded or
 stateful collectors report `complete`, `incomplete`, or `candidate_cap` after
 each cycle. Native stop reasons remain opaque diagnostic strings and never
 drive shared freshness policy. Missing or unknown completeness fails closed.
+A saturated unread or recent iMessage query reports `candidate_cap`, retains the
+previous fully fresh time, and cannot advance its incremental watermark.
 A bounded Instagram network and DOM snapshot remains useful for ingest, but it
 cannot publish platform-wide freshness unless every collection view proves the
 inbox is empty. Positive empty evidence is scoped to the inbox shell. Negative
