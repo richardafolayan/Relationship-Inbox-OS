@@ -85,9 +85,8 @@ before claiming those guarantees still hold.
 - Reviewed local integration branch: `fix/instagram-integration-gate`.
 - Base: `origin/develop` at
   `ddfba09f44470852c349e0a7f82c12230ba7d32d`.
-- Latest verified corrective commit: `b6b0b7e6`.
-- The complete bounded-concurrency suite passes under Node 20.20.0: 3,033
-  tests, zero failures,
+- Latest verified corrective commit: `61182465`.
+- The complete repository suite passes under Node 20.20.0: 3,035 tests, zero failures,
   zero skips, zero cancellations, and zero todos.
 - Dashboard, runner, and core type checks pass. The production dashboard build,
   Prisma generation, documentation checks, schema-upgrade checks, and diff
@@ -193,6 +192,18 @@ before claiming those guarantees still hold.
   The synchronous click task requires every bound relationship to remain
   connected and unchanged. The same-owner sibling reparent regression performs
   zero clicks in real Chromium.
+- An eleventh exact-head adversarial review moved the complete bound Send
+  wrapper inside its original branch and reproduced a click in the wrong
+  composer subtree. Send now binds and revalidates every ordered ancestor edge
+  from the composer and control to their shared owner. Accepted, rejected, and
+  ambiguous browser handles are released on success and failure. The intact
+  wrapper reparent regression performs zero clicks in real Chromium.
+- A twelfth exact-head adversarial review found that the production collection
+  path limited DOM and network candidates before unread ordering and
+  deduplication. The adapter now captures all currently rendered candidates,
+  puts unread DOM rows first, deduplicates identities, and applies the caller's
+  distinct-thread limit only at the end. A production-path Chromium regression
+  proves that later unread rows cannot be starved by earlier recent rows.
 - Scheduled sends, attachments, polls, focus acknowledgements, and other
   automated Instagram sends are rejected at the durable worker boundary. The
   dashboard no longer offers those unsupported actions.
