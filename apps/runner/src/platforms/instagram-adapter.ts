@@ -1,4 +1,4 @@
-import type { BrowserContext, ElementHandle, Locator, Page } from "patchright";
+import type { BrowserContext, ElementHandle, JSHandle, Locator, Page } from "patchright";
 import {
   stableHash,
   type NormalizedMessage,
@@ -54,9 +54,8 @@ export interface InstagramMessageSnapshot {
 interface InstagramComposerSendBinding {
   button: ElementHandle;
   owner: ElementHandle;
-  composerBranch: ElementHandle;
-  sendBranch: ElementHandle;
-  sendParent: ElementHandle;
+  composerPath: ElementHandle[];
+  sendPath: ElementHandle[];
 }
 
 export class InstagramParsingError extends Error {
@@ -1791,9 +1790,8 @@ export class InstagramAdapter extends BetaAdapter {
     composer: ElementHandle;
     sendButton?: ElementHandle;
     sendOwner?: ElementHandle;
-    sendComposerBranch?: ElementHandle;
-    sendBranch?: ElementHandle;
-    sendParent?: ElementHandle;
+    sendComposerPath?: ElementHandle[];
+    sendPath?: ElementHandle[];
     selectors: SelectorRegistry;
     thread: ThreadStub;
     platformThreadId: string;
@@ -1807,9 +1805,8 @@ export class InstagramAdapter extends BetaAdapter {
         {
           sendButton,
           sendOwner,
-          sendComposerBranch,
-          sendBranch,
-          sendParent,
+          sendComposerPath,
+          sendPath,
           headerSelector,
           recipientVerificationLabel,
           platformThreadId,
@@ -2046,28 +2043,31 @@ export class InstagramAdapter extends BetaAdapter {
           !sendOwner ||
           !sendOwner.isConnected ||
           sendOwner.ownerDocument !== document ||
-          !sendComposerBranch ||
-          !sendComposerBranch.isConnected ||
-          sendComposerBranch.ownerDocument !== document ||
-          !sendBranch ||
-          !sendBranch.isConnected ||
-          sendBranch.ownerDocument !== document ||
-          !sendParent ||
-          !sendParent.isConnected ||
-          sendParent.ownerDocument !== document
+          !Array.isArray(sendComposerPath) ||
+          !Array.isArray(sendPath)
         ) {
           return fail("send_button_not_owned");
         }
         const ownerElement = sendOwner as Element;
-        const composerBranchElement = sendComposerBranch as Element;
-        const sendBranchElement = sendBranch as Element;
-        const sendParentElement = sendParent as Element;
-        const branchUnderOwner = (node: Element): Element | null => {
-          let branch = node;
-          while (branch.parentElement && branch.parentElement !== ownerElement) {
-            branch = branch.parentElement;
+        const ancestorPath = (node: Element): Element[] | null => {
+          const path: Element[] = [];
+          let ancestor = node.parentElement;
+          while (ancestor && ancestor !== ownerElement) {
+            path.push(ancestor);
+            ancestor = ancestor.parentElement;
           }
-          return branch.parentElement === ownerElement ? branch : null;
+          return ancestor === ownerElement ? path : null;
+        };
+        const pathMatches = (boundPath: Element[], currentPath: Element[] | null): boolean => {
+          if (!currentPath || boundPath.length !== currentPath.length) {
+            return false;
+          }
+          return boundPath.every(
+            (element, index) =>
+              element.isConnected &&
+              element.ownerDocument === document &&
+              element === currentPath[index]
+          );
         };
         let currentLocalOwner: Element | null = sendElement.parentElement;
         while (currentLocalOwner && !currentLocalOwner.contains(composerNode as Element)) {
@@ -2080,12 +2080,8 @@ export class InstagramAdapter extends BetaAdapter {
           currentLocalOwner !== ownerElement ||
           !ownerElement.contains(composerNode as Element) ||
           !ownerElement.contains(sendElement) ||
-          !ownerElement.contains(composerBranchElement) ||
-          !ownerElement.contains(sendBranchElement) ||
-          !sendParentElement.contains(sendElement) ||
-          sendElement.parentElement !== sendParentElement ||
-          branchUnderOwner(composerNode as Element) !== composerBranchElement ||
-          branchUnderOwner(sendElement) !== sendBranchElement
+          !pathMatches(sendComposerPath as Element[], ancestorPath(composerNode as Element)) ||
+          !pathMatches(sendPath as Element[], ancestorPath(sendElement))
         ) {
           return fail("send_button_not_owned");
         }
@@ -2141,9 +2137,8 @@ export class InstagramAdapter extends BetaAdapter {
       {
         sendButton: input.sendButton,
         sendOwner: input.sendOwner,
-        sendComposerBranch: input.sendComposerBranch,
-        sendBranch: input.sendBranch,
-        sendParent: input.sendParent,
+        sendComposerPath: input.sendComposerPath,
+        sendPath: input.sendPath,
         headerSelector:
           input.selectors.conversation_header ?? "header h1, header h2, header span[title]",
         recipientVerificationLabel: input.thread.recipientVerificationLabel,
@@ -2175,6 +2170,59 @@ export class InstagramAdapter extends BetaAdapter {
       );
     }
     throw new InstagramParsingError(result.reason);
+  }
+
+  private async disposeElementHandles(
+    handles: Array<ElementHandle | null | undefined>
+  ): Promise<void> {
+    const uniqueHandles = [
+      ...new Set(handles.filter((handle): handle is ElementHandle => Boolean(handle)))
+    ];
+    await Promise.all(
+      uniqueHandles.map((handle) => handle.dispose().catch(() => undefined))
+    );
+  }
+
+  private async disposeComposerSendBinding(
+    binding: InstagramComposerSendBinding
+  ): Promise<void> {
+    await this.disposeElementHandles([
+      binding.button,
+      binding.owner,
+      ...binding.composerPath,
+      ...binding.sendPath
+    ]);
+  }
+
+  private async readElementHandlePath(
+    pathHandle: JSHandle | undefined
+  ): Promise<ElementHandle[] | null> {
+    if (!pathHandle) {
+      return null;
+    }
+    const properties = await pathHandle.getProperties().catch(() => null);
+    await pathHandle.dispose().catch(() => undefined);
+    if (!properties) {
+      return null;
+    }
+    const indexed = [...properties.entries()]
+      .filter(([key]) => /^\d+$/.test(key))
+      .sort(([left], [right]) => Number(left) - Number(right));
+    const elements = indexed.map(([, handle]) => handle.asElement());
+    const complete = indexed.every(([key], index) => Number(key) === index);
+    if (!complete || elements.some((element) => !element)) {
+      await Promise.all(
+        [...properties.values()].map((handle) => handle.dispose().catch(() => undefined))
+      );
+      return null;
+    }
+    const retained = new Set(indexed.map(([, handle]) => handle));
+    await Promise.all(
+      [...properties.values()]
+        .filter((handle) => !retained.has(handle))
+        .map((handle) => handle.dispose().catch(() => undefined))
+    );
+    return elements as ElementHandle[];
   }
 
   private async requireComposerSendButton(
@@ -2226,6 +2274,7 @@ export class InstagramAdapter extends BetaAdapter {
         }, composerHandle)
         .catch(() => null);
       if (!association?.exactSend) {
+        await candidateHandle.dispose().catch(() => undefined);
         continue;
       }
       const structureHandle = await candidateHandle
@@ -2244,43 +2293,41 @@ export class InstagramAdapter extends BetaAdapter {
           ) {
             return {};
           }
-          const branchUnderOwner = (node: Element): Element | null => {
-            let branch = node;
-            while (branch.parentElement && branch.parentElement !== owner) {
-              branch = branch.parentElement;
+          const ancestorPath = (node: Element): Element[] | null => {
+            const path: Element[] = [];
+            let ancestor = node.parentElement;
+            while (ancestor && ancestor !== owner) {
+              path.push(ancestor);
+              ancestor = ancestor.parentElement;
             }
-            return branch.parentElement === owner ? branch : null;
+            return ancestor === owner ? path : null;
           };
-          const composerBranch = branchUnderOwner(composerElement);
-          const sendBranch = branchUnderOwner(buttonElement);
-          const sendParent = buttonElement.parentElement;
-          if (!composerBranch || !sendBranch || !sendParent) {
+          const composerPath = ancestorPath(composerElement);
+          const sendPath = ancestorPath(buttonElement);
+          if (!composerPath || !sendPath) {
             return {};
           }
-          return { owner, composerBranch, sendBranch, sendParent };
+          return { owner, composerPath, sendPath };
         }, composerHandle)
         .catch(() => null);
       const structure = await structureHandle?.getProperties().catch(() => null);
       await structureHandle?.dispose().catch(() => undefined);
       const owner = structure?.get("owner")?.asElement() ?? null;
-      const composerBranch = structure?.get("composerBranch")?.asElement() ?? null;
-      const sendBranch = structure?.get("sendBranch")?.asElement() ?? null;
-      const sendParent = structure?.get("sendParent")?.asElement() ?? null;
-      if (!owner || !composerBranch || !sendBranch || !sendParent) {
-        await Promise.all(
-          [...(structure?.values() ?? [])].map((handle) =>
-            handle.dispose().catch(() => undefined)
-          )
-        );
+      const composerPath = await this.readElementHandlePath(structure?.get("composerPath"));
+      const sendPath = await this.readElementHandlePath(structure?.get("sendPath"));
+      if (!owner || !composerPath || !sendPath) {
+        await this.disposeElementHandles([
+          candidateHandle,
+          owner,
+          ...(composerPath ?? []),
+          ...(sendPath ?? [])
+        ]);
         continue;
       }
+      const binding = { button: candidateHandle, owner, composerPath, sendPath };
       const box = await candidateHandle.boundingBox();
       if (!box) {
-        await Promise.all(
-          [owner, composerBranch, sendBranch, sendParent].map((handle) =>
-            handle.dispose().catch(() => undefined)
-          )
-        );
+        await this.disposeComposerSendBinding(binding);
         continue;
       }
       const centerY = box.y + box.height / 2;
@@ -2289,16 +2336,13 @@ export class InstagramAdapter extends BetaAdapter {
       const horizontallyAssociated =
         centerX >= composerBox.x && centerX <= composerRight + maxHorizontalGap;
       if (sameRow && horizontallyAssociated) {
-        nearby.push({ button: candidateHandle, owner, composerBranch, sendBranch, sendParent });
+        nearby.push(binding);
       } else {
-        await Promise.all(
-          [owner, composerBranch, sendBranch, sendParent].map((handle) =>
-            handle.dispose().catch(() => undefined)
-          )
-        );
+        await this.disposeComposerSendBinding(binding);
       }
     }
     if (nearby.length !== 1) {
+      await Promise.all(nearby.map((binding) => this.disposeComposerSendBinding(binding)));
       throw new InstagramParsingError("send_button_not_unique");
     }
     return nearby[0]!;
@@ -2473,30 +2517,33 @@ export class InstagramAdapter extends BetaAdapter {
         composer,
         selectors.send_button
       );
-      await humanClick(page, boundSend.button, {
-        timeout: 10_000,
-        reading: null,
-        performClick: async () => {
-          submissionMayHaveOccurred = true;
-          const result = await this.runAtomicComposerAction({
-            composer,
-            sendButton: boundSend.button,
-            sendOwner: boundSend.owner,
-            sendComposerBranch: boundSend.composerBranch,
-            sendBranch: boundSend.sendBranch,
-            sendParent: boundSend.sendParent,
-            selectors,
-            thread,
-            platformThreadId: platformThreadId!,
-            action: "send",
-            expectedText: normalizedText
-          });
-          if (!result.ok) {
-            submissionMayHaveOccurred = false;
+      try {
+        await humanClick(page, boundSend.button, {
+          timeout: 10_000,
+          reading: null,
+          performClick: async () => {
+            submissionMayHaveOccurred = true;
+            const result = await this.runAtomicComposerAction({
+              composer,
+              sendButton: boundSend.button,
+              sendOwner: boundSend.owner,
+              sendComposerPath: boundSend.composerPath,
+              sendPath: boundSend.sendPath,
+              selectors,
+              thread,
+              platformThreadId: platformThreadId!,
+              action: "send",
+              expectedText: normalizedText
+            });
+            if (!result.ok) {
+              submissionMayHaveOccurred = false;
+            }
+            this.assertAtomicComposerAction(result, platformThreadId!);
           }
-          this.assertAtomicComposerAction(result, platformThreadId!);
-        }
-      });
+        });
+      } finally {
+        await this.disposeComposerSendBinding(boundSend);
+      }
 
       const deadline =
         Date.now() + (this.instagramDeps.sendVerificationTimeoutMs ?? 12_000);

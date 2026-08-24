@@ -1610,9 +1610,8 @@ test("Instagram atomic composer actions validate and mutate in one browser task"
       composer,
       sendButton: unrelated,
       sendOwner: resolvedSend.owner,
-      sendComposerBranch: resolvedSend.composerBranch,
-      sendBranch: resolvedSend.sendBranch,
-      sendParent: resolvedSend.sendParent,
+      sendComposerPath: resolvedSend.composerPath,
+      sendPath: resolvedSend.sendPath,
       selectors,
       thread,
       platformThreadId: "safe-thread",
@@ -1627,9 +1626,8 @@ test("Instagram atomic composer actions validate and mutate in one browser task"
       composer,
       sendButton,
       sendOwner: resolvedSend.owner,
-      sendComposerBranch: resolvedSend.composerBranch,
-      sendBranch: resolvedSend.sendBranch,
-      sendParent: resolvedSend.sendParent,
+      sendComposerPath: resolvedSend.composerPath,
+      sendPath: resolvedSend.sendPath,
       selectors,
       thread,
       platformThreadId: "safe-thread",
@@ -1645,9 +1643,8 @@ test("Instagram atomic composer actions validate and mutate in one browser task"
       composer,
       sendButton,
       sendOwner: resolvedSend.owner,
-      sendComposerBranch: resolvedSend.composerBranch,
-      sendBranch: resolvedSend.sendBranch,
-      sendParent: resolvedSend.sendParent,
+      sendComposerPath: resolvedSend.composerPath,
+      sendPath: resolvedSend.sendPath,
       selectors,
       thread,
       platformThreadId: "safe-thread",
@@ -1788,9 +1785,8 @@ test("Instagram atomic send rejects a bound Send moved to another composer", asy
       composer,
       sendButton,
       sendOwner: sendBinding.owner,
-      sendComposerBranch: sendBinding.composerBranch,
-      sendBranch: sendBinding.sendBranch,
-      sendParent: sendBinding.sendParent,
+      sendComposerPath: sendBinding.composerPath,
+      sendPath: sendBinding.sendPath,
       selectors: { conversation_header: "main header h1" },
       thread: {
         platformThreadId: "safe-thread",
@@ -1865,9 +1861,8 @@ test("Instagram atomic send rejects coordinate-preserving reparenting without fo
       composer,
       sendButton,
       sendOwner: sendBinding.owner,
-      sendComposerBranch: sendBinding.composerBranch,
-      sendBranch: sendBinding.sendBranch,
-      sendParent: sendBinding.sendParent,
+      sendComposerPath: sendBinding.composerPath,
+      sendPath: sendBinding.sendPath,
       selectors: { conversation_header: "main header h1" },
       thread: {
         platformThreadId: "safe-thread",
@@ -1947,9 +1942,91 @@ test("Instagram atomic send rejects reparenting within the same shared owner", a
       composer,
       sendButton,
       sendOwner: sendBinding.owner,
-      sendComposerBranch: sendBinding.composerBranch,
-      sendBranch: sendBinding.sendBranch,
-      sendParent: sendBinding.sendParent,
+      sendComposerPath: sendBinding.composerPath,
+      sendPath: sendBinding.sendPath,
+      selectors: { conversation_header: "main header h1" },
+      thread: {
+        platformThreadId: "safe-thread",
+        displayName: "Safe thread",
+        recipientVerificationLabel: "Safe thread"
+      },
+      platformThreadId: "safe-thread",
+      action: "send",
+      expectedText: "Approved text"
+    }),
+    { ok: false, reason: "send_button_not_owned" }
+  );
+  assert.equal(await page.evaluate(() => window.submitted), 0);
+});
+
+test("Instagram atomic send rejects a bound wrapper moved within the same branch", async (t) => {
+  let browser;
+  try {
+    browser = await chromium.launch({ headless: true });
+  } catch (error) {
+    t.skip(`Playwright Chromium unavailable: ${error instanceof Error ? error.message : String(error)}`);
+    return;
+  }
+
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  t.after(async () => {
+    await context.close();
+    await browser.close();
+  });
+  await page.route("https://www.instagram.com/**", async (route) => {
+    await route.fulfill({
+      contentType: "text/html",
+      body: `<!doctype html>
+        <main>
+          <header><h1>Safe thread</h1></header>
+          <div id="shared-owner">
+            <div id="composer-branch">
+              <div id="composer" role="textbox" contenteditable="true" style="position:fixed;left:100px;top:100px;width:300px;height:40px">Approved text</div>
+            </div>
+            <div id="send-branch">
+              <div id="send-parent">
+                <button id="send" type="button" aria-label="Send" style="position:fixed;left:420px;top:100px;width:80px;height:40px">Send</button>
+              </div>
+              <div id="other-composer-slot">
+                <div role="textbox" contenteditable="true" style="position:fixed;left:100px;top:300px;width:300px;height:40px"></div>
+              </div>
+            </div>
+          </div>
+        </main>`
+    });
+  });
+  await page.goto("https://www.instagram.com/direct/t/safe-thread/");
+  await page.evaluate(() => {
+    window.submitted = 0;
+    document.querySelector("#send")?.addEventListener("click", () => {
+      window.submitted += 1;
+    });
+  });
+
+  const adapter = new InstagramAdapter({
+    screenshotDir: "/tmp",
+    domDumpDir: "/tmp",
+    resolveSelectors: async () => ({}),
+    sessionManager: {},
+    personKey: "instagram",
+    connectTimeoutMs: 50
+  });
+  const composer = await page.locator("#composer").elementHandle();
+  const sendBinding = await adapter.requireComposerSendButton(page, composer, "#send");
+  assert.equal(await sendBinding.owner.getAttribute("id"), "shared-owner");
+  assert.equal(await sendBinding.sendPath[0].getAttribute("id"), "send-parent");
+  await page.locator("#send-parent").evaluate((wrapper) => {
+    document.querySelector("#other-composer-slot")?.append(wrapper);
+  });
+
+  assert.deepEqual(
+    await adapter.runAtomicComposerAction({
+      composer,
+      sendButton: sendBinding.button,
+      sendOwner: sendBinding.owner,
+      sendComposerPath: sendBinding.composerPath,
+      sendPath: sendBinding.sendPath,
       selectors: { conversation_header: "main header h1" },
       thread: {
         platformThreadId: "safe-thread",
@@ -2185,13 +2262,23 @@ function sendTestHarness({
       return composer;
     }
   };
-  const boundElement = () => ({ dispose: async () => undefined });
-  const boundSendOwner = boundElement();
-  const boundComposerBranch = boundElement();
-  const boundSendBranch = boundElement();
-  const boundSendParent = boundElement();
-  const elementProperty = (element) => ({
-    asElement: () => element,
+  const bindingDisposals = [];
+  const boundElement = (name) => {
+    const handle = {
+      asElement: () => handle,
+      dispose: async () => {
+        bindingDisposals.push(name);
+      }
+    };
+    return handle;
+  };
+  const boundSendOwner = boundElement("owner");
+  const boundComposerBranch = boundElement("composer-branch");
+  const boundSendBranch = boundElement("send-branch");
+  const boundSendParent = boundElement("send-parent");
+  const pathProperty = (elements) => ({
+    getProperties: async () =>
+      new Map(elements.map((element, index) => [String(index), element])),
     dispose: async () => undefined
   });
   const boundSendButton = {
@@ -2219,13 +2306,15 @@ function sendTestHarness({
     evaluateHandle: async () => ({
       getProperties: async () =>
         new Map([
-          ["owner", elementProperty(boundSendOwner)],
-          ["composerBranch", elementProperty(boundComposerBranch)],
-          ["sendBranch", elementProperty(boundSendBranch)],
-          ["sendParent", elementProperty(boundSendParent)]
+          ["owner", boundSendOwner],
+          ["composerPath", pathProperty([boundComposerBranch])],
+          ["sendPath", pathProperty([boundSendParent, boundSendBranch])]
         ]),
       dispose: async () => undefined
-    })
+    }),
+    dispose: async () => {
+      bindingDisposals.push("button");
+    }
   };
   const sendButton = {
     count: async () => {
@@ -2331,7 +2420,8 @@ function sendTestHarness({
     adapter,
     wasSubmitted: () => submitted,
     typedUnits: () => [...typedUnits],
-    composerMutations: () => [...composerMutations]
+    composerMutations: () => [...composerMutations],
+    bindingDisposals: () => [...bindingDisposals]
   };
 }
 
@@ -2353,6 +2443,10 @@ test("Instagram adapter reports success only after an exact new outgoing bubble"
     normalizeInstagramMessageSnapshots("safe-thread", [
       { nativeId: "new-out", nativeIdStable: true, direction: "OUT", text: "x" }
     ])[0].platformMessageKey
+  );
+  assert.deepEqual(
+    harness.bindingDisposals().sort(),
+    ["button", "composer-branch", "owner", "send-branch", "send-parent"].sort()
   );
 });
 
@@ -2479,6 +2573,10 @@ test("Instagram revalidates the exact thread after typing and before clicking Se
     (error) => error?.details?.reason === "thread_changed_before_send"
   );
   assert.equal(harness.wasSubmitted(), false);
+  assert.deepEqual(
+    harness.bindingDisposals().sort(),
+    ["button", "composer-branch", "owner", "send-branch", "send-parent"].sort()
+  );
 });
 
 test("Instagram does not mutate a composer when navigation occurs while binding it", async () => {
@@ -2658,6 +2756,10 @@ test("Instagram never treats a lone distant submit as the composer Send button",
     (error) => error?.details?.reason === "send_button_not_unique"
   );
   assert.equal(harness.wasSubmitted(), false);
+  assert.deepEqual(
+    harness.bindingDisposals().sort(),
+    ["button", "composer-branch", "owner", "send-branch", "send-parent"].sort()
+  );
 });
 
 test("Instagram rejects a same-row Send control far from the composer", async () => {
@@ -2700,6 +2802,7 @@ test("Instagram rejects a nearby unrelated submit beside the composer", async ()
     (error) => error?.details?.reason === "send_button_not_unique"
   );
   assert.equal(harness.wasSubmitted(), false);
+  assert.deepEqual(harness.bindingDisposals(), ["button"]);
 });
 
 test("Instagram measures and clicks the same bound Send handle", async () => {
