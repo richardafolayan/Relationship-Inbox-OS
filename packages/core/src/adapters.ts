@@ -14,24 +14,17 @@ export interface PollVoteRecord {
   votedAt: string | null;
 }
 
-export type CollectionBoundaryStopReason =
-  | "max_threads"
-  | "max_duration"
-  | "max_iterations"
-  | "no_scroll_container"
-  | "deep_scroll_disabled"
-  | "end_of_list_no_progress"
-  | "instagram_bounded_snapshot"
-  | "zero_threads_found"
-  | "end_of_list_reached"
-  | "deep_scroll_exhausted"
-  | "unchanged_streak";
+export type CollectionBoundaryCompleteness =
+  | "complete"
+  | "incomplete"
+  | "candidate_cap";
 
 export interface PlatformCollectionBoundaryMetrics {
   totalFound: number;
   unreadFound: number;
   failures?: number;
-  stopReason: CollectionBoundaryStopReason;
+  completeness: CollectionBoundaryCompleteness;
+  nativeStopReason?: string;
   [key: string]: unknown;
 }
 
@@ -53,10 +46,10 @@ export interface PlatformAdapter {
   scanUnreadThreads(): Promise<ThreadStub[]>;
   fetchRecentThreads(limit: number): Promise<ThreadStub[]>;
   /**
-   * Optional proof about whether candidate discovery reached an authoritative
-   * inbox boundary. When present, scan freshness must respect its result.
+   * Required proof about whether candidate discovery reached the adapter's
+   * authoritative inbox boundary. Missing or unknown evidence fails closed.
    */
-  collectionBoundary?: PlatformCollectionBoundaryCapability;
+  collectionBoundary: PlatformCollectionBoundaryCapability;
   /**
    * Optional targeted lookup used when a platform event identifies the exact
    * conversation that changed. Falls back to the normal unread/recent scan

@@ -27,6 +27,7 @@ import type {
   SendReceipt,
   ThreadStub
 } from "@inbox-os/core";
+import { AUTHORITATIVE_COLLECTION_BOUNDARY } from "./collection-boundary";
 import type { Client, Message as WaMessage } from "whatsapp-web.js";
 import { createWhatsAppClient } from "./whatsapp/client";
 import { chatToThreadStub, type WhatsAppChatLike } from "./whatsapp/groupResolver";
@@ -90,6 +91,7 @@ export function isWhatsAppSessionUnavailableError(error: unknown): boolean {
 
 export class WhatsAppAdapter implements PlatformAdapter {
   readonly platform: PlatformName = PLATFORM_WHATSAPP;
+  readonly collectionBoundary = AUTHORITATIVE_COLLECTION_BOUNDARY;
   private client: Client | null = null;
   private ready = false;
   private readyPromise: Promise<void> | null = null;

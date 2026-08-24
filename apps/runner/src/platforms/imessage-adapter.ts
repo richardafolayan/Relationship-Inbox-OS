@@ -6,6 +6,7 @@ import type {
   NormalizedMessage,
   OutboundAttachment,
   PlatformAdapter,
+  PlatformCollectionBoundaryCapability,
   PlatformName,
   SendReceipt,
   ThreadStub
@@ -58,6 +59,24 @@ const CONTACT_RESOLVER_TTL_MS = 5 * 60_000;
  */
 export class IMessageAdapter implements PlatformAdapter {
   readonly platform: PlatformName = "IMESSAGE";
+  readonly collectionBoundary: PlatformCollectionBoundaryCapability = {
+    beginCycle: () => {
+      this.collectionUnreadFound = 0;
+      this.collectionRecentFound = 0;
+      this.collectionUnreadHitCap = false;
+    },
+    getMetrics: () => ({
+      totalFound: Math.max(this.collectionUnreadFound, this.collectionRecentFound),
+      unreadFound: this.collectionUnreadFound,
+      completeness: this.collectionUnreadHitCap ? "candidate_cap" : "complete",
+      nativeStopReason: this.collectionUnreadHitCap
+        ? "imessage_unread_limit_reached"
+        : "imessage_database_query_complete"
+    })
+  };
+  private collectionUnreadFound = 0;
+  private collectionRecentFound = 0;
+  private collectionUnreadHitCap = false;
   private db?: IMessageDb;
   private resolverCache: { resolver: ContactResolver; builtAt: number } | null = null;
 
@@ -171,6 +190,8 @@ export class IMessageAdapter implements PlatformAdapter {
   async scanUnreadThreads(): Promise<ThreadStub[]> {
     const db = this.getDb();
     const rows = db.listThreads(200, { unreadOnly: true });
+    this.collectionUnreadFound = rows.length;
+    this.collectionUnreadHitCap = rows.length >= 200;
     return rows.map((r) => this.toThreadStub(r, true, false));
   }
 
@@ -236,6 +257,7 @@ export class IMessageAdapter implements PlatformAdapter {
   async fetchRecentThreads(limit: number): Promise<ThreadStub[]> {
     const db = this.getDb();
     const rows = db.listThreads(limit, { unreadOnly: false });
+    this.collectionRecentFound = rows.length;
     return rows.map((r) => this.toThreadStub(r, false, true));
   }
 

@@ -101,9 +101,8 @@ export function resolvePlatformScanFreshness(input: {
 }
 
 export function resolveCollectionBoundaryFreshness(
-  stopReason: unknown,
-  failures: unknown = 0,
-  boundaryReported = false
+  completeness: unknown,
+  failures: unknown = 0
 ): {
   candidateCapBroke: boolean;
   collectionIncomplete: boolean;
@@ -113,31 +112,16 @@ export function resolveCollectionBoundaryFreshness(
     typeof failures === "number" && Number.isFinite(failures) && failures > 0
       ? Math.floor(failures)
       : 0;
-  if (stopReason === "max_threads") {
+  if (completeness === "candidate_cap") {
     return { candidateCapBroke: true, collectionIncomplete: false, collectionFailures };
   }
-  if (
-    stopReason === "max_duration" ||
-    stopReason === "max_iterations" ||
-    stopReason === "no_scroll_container" ||
-    stopReason === "deep_scroll_disabled" ||
-    stopReason === "end_of_list_no_progress" ||
-    stopReason === "instagram_bounded_snapshot"
-  ) {
+  if (completeness === "incomplete") {
     return { candidateCapBroke: false, collectionIncomplete: true, collectionFailures };
   }
-  if (
-    stopReason === "zero_threads_found" ||
-    stopReason === "end_of_list_reached" ||
-    stopReason === "deep_scroll_exhausted" ||
-    stopReason === "unchanged_streak"
-  ) {
+  if (completeness === "complete") {
     return { candidateCapBroke: false, collectionIncomplete: false, collectionFailures };
   }
-  if (boundaryReported) {
-    return { candidateCapBroke: false, collectionIncomplete: true, collectionFailures };
-  }
-  return { candidateCapBroke: false, collectionIncomplete: false, collectionFailures };
+  return { candidateCapBroke: false, collectionIncomplete: true, collectionFailures };
 }
 
 export function resolvePlatformScanStartFreshness(input: {

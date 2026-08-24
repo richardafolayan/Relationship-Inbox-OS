@@ -12,6 +12,7 @@ import type {
   SendReceipt,
   ThreadStub
 } from "@inbox-os/core";
+import { BOUNDED_COLLECTION_BOUNDARY } from "./collection-boundary";
 import type { SessionManager } from "../services/session-manager";
 import { AdapterFailure, cleanMessageText, toStageFailure } from "./utils";
 
@@ -72,6 +73,7 @@ export function googleMessagesReactions(labels: string[]): Array<{
 
 export class GoogleMessagesAdapter implements PlatformAdapter {
   readonly platform: PlatformName = PLATFORM;
+  readonly collectionBoundary = BOUNDED_COLLECTION_BOUNDARY;
 
   constructor(private readonly deps: GoogleMessagesAdapterDeps) {}
 

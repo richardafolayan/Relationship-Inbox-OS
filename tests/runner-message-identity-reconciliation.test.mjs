@@ -107,7 +107,7 @@ test("a capped scan cannot publish authoritative freshness", () => {
 });
 
 test("a collector-level cap is carried into the platform freshness gate", () => {
-  assert.deepEqual(resolveCollectionBoundaryFreshness("max_threads"), {
+  assert.deepEqual(resolveCollectionBoundaryFreshness("candidate_cap"), {
     candidateCapBroke: true,
     collectionIncomplete: false,
     collectionFailures: 0
@@ -116,7 +116,7 @@ test("a collector-level cap is carried into the platform freshness gate", () => 
     resolvePlatformScanFreshness({
       quarantinedMessages: 0,
       threadFailures: 0,
-      candidateCapBroke: resolveCollectionBoundaryFreshness("max_threads").candidateCapBroke,
+      candidateCapBroke: resolveCollectionBoundaryFreshness("candidate_cap").candidateCapBroke,
       collectionIncomplete: false
     }).lastError,
     PLATFORM_SCAN_CANDIDATE_CAP_ERROR
@@ -124,36 +124,32 @@ test("a collector-level cap is carried into the platform freshness gate", () => 
 });
 
 test("a collector that cannot prove the inbox boundary stays degraded", () => {
-  for (const stopReason of [
-    "max_duration",
-    "max_iterations",
-    "no_scroll_container",
-    "deep_scroll_disabled",
-    "end_of_list_no_progress",
-    "instagram_bounded_snapshot"
-  ]) {
-    const boundary = resolveCollectionBoundaryFreshness(stopReason);
-    assert.deepEqual(boundary, {
+  const boundary = resolveCollectionBoundaryFreshness("incomplete");
+  assert.deepEqual(boundary, {
+    candidateCapBroke: false,
+    collectionIncomplete: true,
+    collectionFailures: 0
+  });
+  assert.equal(
+    resolvePlatformScanFreshness({
+      quarantinedMessages: 0,
+      threadFailures: 0,
       candidateCapBroke: false,
-      collectionIncomplete: true,
-      collectionFailures: 0
-    });
-    assert.equal(
-      resolvePlatformScanFreshness({
-        quarantinedMessages: 0,
-        threadFailures: 0,
-        candidateCapBroke: false,
-        collectionIncomplete: boundary.collectionIncomplete
-      }).lastError,
-      PLATFORM_SCAN_COLLECTION_INCOMPLETE_ERROR
-    );
-  }
-  assert.deepEqual(resolveCollectionBoundaryFreshness("deep_scroll_exhausted"), {
+      collectionIncomplete: boundary.collectionIncomplete
+    }).lastError,
+    PLATFORM_SCAN_COLLECTION_INCOMPLETE_ERROR
+  );
+  assert.deepEqual(resolveCollectionBoundaryFreshness("complete"), {
     candidateCapBroke: false,
     collectionIncomplete: false,
     collectionFailures: 0
   });
-  assert.deepEqual(resolveCollectionBoundaryFreshness("renamed_boundary", 0, true), {
+  assert.deepEqual(resolveCollectionBoundaryFreshness(undefined), {
+    candidateCapBroke: false,
+    collectionIncomplete: true,
+    collectionFailures: 0
+  });
+  assert.deepEqual(resolveCollectionBoundaryFreshness("renamed_boundary"), {
     candidateCapBroke: false,
     collectionIncomplete: true,
     collectionFailures: 0
@@ -161,7 +157,7 @@ test("a collector that cannot prove the inbox boundary stays degraded", () => {
 });
 
 test("collector row failures are included in the platform failure gate", () => {
-  const boundary = resolveCollectionBoundaryFreshness("deep_scroll_exhausted", 1);
+  const boundary = resolveCollectionBoundaryFreshness("complete", 1);
   assert.deepEqual(boundary, {
     candidateCapBroke: false,
     collectionIncomplete: false,

@@ -29,6 +29,12 @@ platform can verify.
 The UI must check optional methods before exposing reactions, edit, poll, or
 profile actions. A schema enum value does not prove a usable adapter.
 
+Every adapter also declares collection completeness. Exhaustive adapters use
+an authoritative-by-construction boundary. Bounded collectors report
+`complete`, `incomplete`, or `candidate_cap` after each collection cycle and
+may attach an opaque native stop reason for diagnostics. The scan queue treats
+missing or unknown completeness as incomplete and does not advance freshness.
+
 ## Shared contract and factory
 
 [`platform-factory.ts`](../../apps/runner/src/services/platform-factory.ts)

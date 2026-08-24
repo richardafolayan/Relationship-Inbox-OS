@@ -36,6 +36,15 @@ export function createNotImplementedAdapter(platform: PlatformName): PlatformAda
   };
   return {
     platform,
+    collectionBoundary: {
+      beginCycle: () => undefined,
+      getMetrics: () => ({
+        totalFound: 0,
+        unreadFound: 0,
+        completeness: "incomplete",
+        nativeStopReason: "adapter_not_implemented"
+      })
+    },
     ensureConnected: () => reject("ensureConnected"),
     scanUnreadThreads: () => reject("scanUnreadThreads"),
     fetchRecentThreads: () => reject("fetchRecentThreads"),

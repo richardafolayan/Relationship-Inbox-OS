@@ -232,6 +232,14 @@ function instagramString(record: Record<string, unknown>, keys: string[]): strin
   return undefined;
 }
 
+export function instagramGraphQlPayloadHasErrors(payload: unknown): boolean {
+  const entries = Array.isArray(payload) ? payload : [payload];
+  return entries.some((entry) => {
+    const record = instagramRecord(entry);
+    return Boolean(record && Array.isArray(record.errors) && record.errors.length > 0);
+  });
+}
+
 export function extractInstagramThreadSnapshotsFromPayload(
   payload: unknown
 ): InstagramThreadSnapshot[] {
@@ -716,7 +724,7 @@ export function isInstagramExplicitEmptyInbox(
 }
 
 export class InstagramAdapter extends BetaAdapter {
-  readonly collectionBoundary: PlatformCollectionBoundaryCapability = {
+  override readonly collectionBoundary: PlatformCollectionBoundaryCapability = {
     beginCycle: () => this.beginCollectionCycle(),
     getMetrics: () => this.getLastCollectionMetrics()
   };
@@ -811,6 +819,10 @@ export class InstagramAdapter extends BetaAdapter {
         .json()
         .then((payload: unknown) => {
           if (this.settledNetworkRequests.has(request)) {
+            return;
+          }
+          if (instagramGraphQlPayloadHasErrors(payload)) {
+            settle(false);
             return;
           }
           capture.accept(
@@ -1318,27 +1330,26 @@ export class InstagramAdapter extends BetaAdapter {
                   .map((element) => (element.textContent ?? "").replace(/\s+/g, " ").trim())
                   .filter((text) => /^(no messages|no conversations)$/i.test(text))
               : [];
-            const errorSignalCount = main
-              ? Array.from(main.querySelectorAll("[role='alert'], [aria-live='assertive']")).filter(
-                  (element) =>
-                    visible(element) &&
-                    /try again|could(?:n't| not) load|something went wrong|\berror\b|log in|verify/i.test(
-                      element.textContent ?? ""
-                    )
-                ).length
-              : 0;
             return {
               documentRootPresent: Boolean(main),
               scopedEmptyLabels,
-              threadItemCount: count(main, selectors.thread_item),
-              directThreadLinkCount: count(main, "a[href*='/direct/t/']"),
-              composerCount: count(main, selectors.composer_input),
-              messageItemCount: count(main, selectors.message_item),
+              threadItemCount: count(document, selectors.thread_item),
+              directThreadLinkCount: count(document, "a[href*='/direct/t/']"),
+              composerCount: count(document, selectors.composer_input),
+              messageItemCount: count(document, selectors.message_item),
               loadingSignalCount: count(
-                main,
+                document,
                 "[aria-busy='true'], [role='progressbar'], [data-visualcompletion='loading-state'], [aria-label*='Loading']"
               ),
-              errorSignalCount
+              errorSignalCount: Array.from(
+                document.querySelectorAll("[role='alert'], [aria-live='assertive']")
+              ).filter(
+                (element) =>
+                  visible(element) &&
+                  /try again|could(?:n't| not) load|something went wrong|\berror\b|log in|verify/i.test(
+                    element.textContent ?? ""
+                  )
+              ).length
             };
           }, { selectors })
           .catch(() => null);
@@ -1412,17 +1423,20 @@ export class InstagramAdapter extends BetaAdapter {
     totalFound: number;
     unreadFound: number;
     failures: number;
-    stopReason: "zero_threads_found" | "instagram_bounded_snapshot";
+    completeness: "complete" | "incomplete";
+    nativeStopReason: "zero_threads_found" | "instagram_bounded_snapshot";
   } {
+    const nativeStopReason = resolveInstagramCollectionStopReason({
+      collectionCalls: this.collectionCalls,
+      observedRows: this.collectionObservedRows,
+      explicitlyEmpty: this.collectionExplicitlyEmpty
+    });
     return {
       totalFound: this.collectionTotalFound,
       unreadFound: this.collectionUnreadFound,
       failures: 0,
-      stopReason: resolveInstagramCollectionStopReason({
-        collectionCalls: this.collectionCalls,
-        observedRows: this.collectionObservedRows,
-        explicitlyEmpty: this.collectionExplicitlyEmpty
-      })
+      completeness: nativeStopReason === "zero_threads_found" ? "complete" : "incomplete",
+      nativeStopReason
     };
   }
 
@@ -1810,21 +1824,60 @@ export class InstagramAdapter extends BetaAdapter {
             return false;
           }
         };
-        const currentRecipientMatches = (): { ok: true } | { ok: false; reason: string } => {
-          let header: Element | null = null;
-          try {
-            header = document.querySelector(headerSelector);
-          } catch {
-            return fail("recipient_unverified_before_send");
+        const isElementVisible = (element: Element): boolean => {
+          if (
+            !element.isConnected ||
+            element.closest("[hidden], [aria-hidden='true'], [inert]")
+          ) {
+            return false;
           }
-          const normalizedHeader = normalizeIdentity(
-            header?.getAttribute("title") || header?.textContent
+          const style = window.getComputedStyle(element);
+          return (
+            style.display !== "none" &&
+            style.visibility !== "hidden" &&
+            style.opacity !== "0" &&
+            element.getClientRects().length > 0
           );
+        };
+        const resolveConversationEvidence = (): {
+          container: Element;
+          labels: string[];
+        } | null => {
+          let headerCandidates: Element[];
+          try {
+            headerCandidates = Array.from(document.querySelectorAll(headerSelector));
+          } catch {
+            return null;
+          }
+          let container: Element | null = composerNode as Element;
+          while (container) {
+            if (container.matches("main, [role='main']") && isElementVisible(container)) {
+              const labels = headerCandidates
+                .filter((header) => container?.contains(header) && isElementVisible(header))
+                .map((header) =>
+                  normalizeIdentity(header.getAttribute("title") || header.textContent)
+                )
+                .filter((label) => label.length > 0);
+              if (labels.length > 0) {
+                return { container, labels: [...new Set(labels)] };
+              }
+            }
+            container = container.parentElement;
+          }
+          return null;
+        };
+        const currentRecipientMatches = (): { ok: true } | { ok: false; reason: string } => {
+          const evidence = resolveConversationEvidence();
           const normalizedRecipient = normalizeIdentity(recipientVerificationLabel);
-          if (!normalizedRecipient || normalizedRecipient === "instagram conversation" || !normalizedHeader) {
+          if (
+            !normalizedRecipient ||
+            normalizedRecipient === "instagram conversation" ||
+            !evidence ||
+            evidence.labels.length === 0
+          ) {
             return fail("recipient_unverified_before_send");
           }
-          return normalizedHeader === normalizedRecipient
+          return evidence.labels.length === 1 && evidence.labels[0] === normalizedRecipient
             ? { ok: true }
             : fail("recipient_changed_before_send");
         };
@@ -1842,17 +1895,18 @@ export class InstagramAdapter extends BetaAdapter {
             .replace(/\n{3,}/g, "\n\n")
             .trim();
         const verifyOwnership = (): { ok: true } | { ok: false; reason: string } => {
+          if (
+            !composerNode.isConnected ||
+            composerNode.ownerDocument !== document ||
+            !isElementVisible(composerNode as Element)
+          ) {
+            return fail("composer_detached");
+          }
           if (!currentThreadMatches()) {
             return fail("thread_changed_before_send");
           }
           const recipient = currentRecipientMatches();
           if (!recipient.ok) return recipient;
-          if (
-            !composerNode.isConnected ||
-            composerNode.ownerDocument !== document
-          ) {
-            return fail("composer_detached");
-          }
           return currentThreadMatches() ? { ok: true } : fail("thread_changed_before_send");
         };
         const ownership = verifyOwnership();
@@ -1961,13 +2015,42 @@ export class InstagramAdapter extends BetaAdapter {
           (sendElement as HTMLInputElement).value
         ];
         const exactSend = labels.some((value) => normalizeControlLabel(value) === "send");
-        const composerForm = composerElement.closest("form");
-        const sendForm = sendElement.closest("form");
-        if (!exactSend && (!composerForm || composerForm !== sendForm)) {
+        if (!exactSend) {
           return fail("send_button_not_owned");
         }
         const finalOwnership = verifyOwnership();
         if (!finalOwnership.ok) return finalOwnership;
+        const conversationEvidence = resolveConversationEvidence();
+        if (!conversationEvidence?.container.contains(sendElement)) {
+          return fail("send_button_not_owned");
+        }
+        if (
+          sendElement.hasAttribute("disabled") ||
+          Boolean((sendElement as HTMLButtonElement).disabled) ||
+          normalizeControlLabel(sendElement.getAttribute("aria-disabled")) === "true" ||
+          sendElement.closest("[inert]")
+        ) {
+          return fail("send_button_disabled");
+        }
+        if (!isElementVisible(sendElement)) {
+          return fail("send_button_not_actionable");
+        }
+        const sendStyle = window.getComputedStyle(sendElement);
+        const sendRect = sendElement.getBoundingClientRect();
+        const centerX = sendRect.left + sendRect.width / 2;
+        const centerY = sendRect.top + sendRect.height / 2;
+        const hitTarget = document.elementFromPoint(centerX, centerY);
+        if (
+          sendStyle.pointerEvents === "none" ||
+          centerX < 0 ||
+          centerY < 0 ||
+          centerX > window.innerWidth ||
+          centerY > window.innerHeight ||
+          !hitTarget ||
+          (hitTarget !== sendElement && !sendElement.contains(hitTarget))
+        ) {
+          return fail("send_button_not_actionable");
+        }
         (sendElement as HTMLElement).click();
         return { ok: true };
       },
@@ -2044,15 +2127,10 @@ export class InstagramAdapter extends BetaAdapter {
             (buttonElement as HTMLInputElement).value
           ];
           const exactSend = labels.some((value) => normalize(value) === "send");
-          const composerForm = (composerNode as Element).closest("form");
-          const buttonForm = buttonElement.closest("form");
-          return {
-            exactSend,
-            sameForm: Boolean(composerForm && composerForm === buttonForm)
-          };
+          return { exactSend };
         }, composer as ElementHandle)
         .catch(() => null);
-      if (!association || (!association.exactSend && !association.sameForm)) {
+      if (!association?.exactSend) {
         continue;
       }
       const box = await candidateHandle.boundingBox();

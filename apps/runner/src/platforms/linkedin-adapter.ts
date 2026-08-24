@@ -18,7 +18,11 @@ import {
   linkedInVoicePath,
   writeLinkedInVoice
 } from "../services/linkedin-voice-store.js";
-import { stableHash } from "@inbox-os/core";
+import {
+  stableHash,
+  type CollectionBoundaryCompleteness,
+  type PlatformCollectionBoundaryCapability
+} from "@inbox-os/core";
 import {
   classifyLinkedInSendVerification,
   type LinkedInSendBubble
@@ -1949,6 +1953,23 @@ export type LinkedInCollectionStopReason =
   // reached the high-water mark and everything below is already scanned.
   | "unchanged_streak";
 
+export function linkedInCollectionCompleteness(
+  stopReason: LinkedInCollectionStopReason
+): CollectionBoundaryCompleteness {
+  if (stopReason === "max_threads") {
+    return "candidate_cap";
+  }
+  if (
+    stopReason === "zero_threads_found" ||
+    stopReason === "end_of_list_reached" ||
+    stopReason === "deep_scroll_exhausted" ||
+    stopReason === "unchanged_streak"
+  ) {
+    return "complete";
+  }
+  return "incomplete";
+}
+
 export function resolveLinkedInEmptyCollectionStopReason(
   stopReason: LinkedInCollectionStopReason
 ): LinkedInCollectionStopReason {
@@ -2166,6 +2187,27 @@ export function classifyPostLoginUrl(url: string): "verification" | "still_on_lo
 
 export class LinkedInAdapter implements PlatformAdapter {
   platform = "LINKEDIN" as const;
+  readonly collectionBoundary: PlatformCollectionBoundaryCapability = {
+    beginCycle: () => {
+      this.lastCollectionMetrics = null;
+    },
+    getMetrics: () => {
+      const metrics = this.lastCollectionMetrics;
+      if (!metrics) {
+        return {
+          totalFound: 0,
+          unreadFound: 0,
+          completeness: "incomplete",
+          nativeStopReason: "collection_boundary_not_reported"
+        };
+      }
+      return {
+        ...metrics,
+        completeness: linkedInCollectionCompleteness(metrics.stopReason),
+        nativeStopReason: metrics.stopReason
+      };
+    }
+  };
   private lastCollectionMetrics: {
     totalFound: number;
     unreadFound: number;

@@ -426,7 +426,8 @@ test("Instagram exposes its collection boundary through the typed adapter capabi
     totalFound: 0,
     unreadFound: 0,
     failures: 0,
-    stopReason: "instagram_bounded_snapshot"
+    completeness: "incomplete",
+    nativeStopReason: "instagram_bounded_snapshot"
   });
 });
 
@@ -803,6 +804,116 @@ test("Instagram empty-inbox certification requires scoped structural evidence", 
       explicitlyEmpty: false
     }),
     "instagram_bounded_snapshot"
+  );
+});
+
+test("Instagram cannot certify an empty inbox while another document region contains a live thread", async (t) => {
+  let browser;
+  try {
+    browser = await chromium.launch({ headless: true });
+  } catch (error) {
+    t.skip(`Playwright Chromium unavailable: ${error instanceof Error ? error.message : String(error)}`);
+    return;
+  }
+
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  t.after(async () => {
+    await context.close();
+    await browser.close();
+  });
+  await page.setContent(`<!doctype html>
+    <main><h2>No messages</h2></main>
+    <main><a href="/direct/t/live-thread/">Live thread</a></main>`);
+
+  const adapter = new InstagramAdapter({
+    screenshotDir: "/tmp",
+    domDumpDir: "/tmp",
+    resolveSelectors: async () => ({
+      inbox_url: "https://www.instagram.com/direct/inbox/",
+      thread_list: "main",
+      thread_item: "[data-stale-thread-selector]",
+      message_container: "[data-message-container]",
+      message_item: "[data-message]",
+      message_text: "[data-text]",
+      composer_input: "[contenteditable='true']",
+      send_button: "[aria-label='Send']"
+    }),
+    sessionManager: { getManagedPage: async () => page },
+    personKey: "instagram",
+    connectTimeoutMs: 50
+  });
+  adapter.navigateToInbox = async () => undefined;
+  adapter.waitForCapturedNetworkThreads = async () => undefined;
+
+  await assert.rejects(
+    () => adapter.collectThreads(10),
+    (error) =>
+      error?.kind === "SELECTOR_MISMATCH" &&
+      error?.details?.reason === "thread_selector_returned_no_rows"
+  );
+});
+
+test("Instagram cannot certify an empty inbox after a GraphQL application error", async (t) => {
+  let browser;
+  try {
+    browser = await chromium.launch({ headless: true });
+  } catch (error) {
+    t.skip(`Playwright Chromium unavailable: ${error instanceof Error ? error.message : String(error)}`);
+    return;
+  }
+
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  t.after(async () => {
+    await context.close();
+    await browser.close();
+  });
+  await page.route("https://www.instagram.com/**", async (route) => {
+    if (/\/api\/graphql$/.test(new URL(route.request().url()).pathname)) {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ errors: [{ message: "inbox query failed" }] })
+      });
+      return;
+    }
+    await route.fulfill({
+      contentType: "text/html",
+      body: `<!doctype html>
+        <main><h2>No messages</h2></main>
+        <script>fetch('/api/graphql', { method: 'POST' })</script>`
+    });
+  });
+
+  const adapter = new InstagramAdapter({
+    screenshotDir: "/tmp",
+    domDumpDir: "/tmp",
+    resolveSelectors: async () => ({
+      inbox_url: "https://www.instagram.com/direct/inbox/",
+      thread_list: "main",
+      thread_item: "[data-stale-thread-selector]",
+      message_container: "[data-message-container]",
+      message_item: "[data-message]",
+      message_text: "[data-text]",
+      composer_input: "[contenteditable='true']",
+      send_button: "[aria-label='Send']"
+    }),
+    sessionManager: { getManagedPage: async () => page },
+    personKey: "instagram",
+    connectTimeoutMs: 50
+  });
+  adapter.navigateToInbox = async (managedPage) => {
+    await managedPage.goto("https://www.instagram.com/direct/inbox/");
+    await managedPage.waitForTimeout(100);
+  };
+  adapter.waitForCapturedNetworkThreads = async () => undefined;
+
+  await assert.rejects(
+    () => adapter.collectThreads(10),
+    (error) =>
+      error?.kind === "SELECTOR_MISMATCH" &&
+      error?.details?.reason === "thread_selector_returned_no_rows"
   );
 });
 
@@ -1400,11 +1511,11 @@ test("Instagram atomic composer actions validate and mutate in one browser task"
       body: `<!doctype html>
         <main>
           <header><h1>Safe thread</h1></header>
-          <div style="display:flex;align-items:center;gap:8px">
+          <form style="display:flex;align-items:center;gap:8px">
             <div id="composer" role="textbox" contenteditable="true" style="width:300px;height:40px"></div>
             <button id="send" type="button" aria-label="Send">Send</button>
-            <button id="unrelated" type="submit"></button>
-          </div>
+            <button id="unrelated" type="submit" aria-label="Upload">Upload</button>
+          </form>
         </main>`
     });
   });
@@ -1434,8 +1545,12 @@ test("Instagram atomic composer actions validate and mutate in one browser task"
     recipientVerificationLabel: "Safe thread"
   };
 
-  const resolvedSend = await adapter.requireComposerSendButton(page, composer, "button");
+  const resolvedSend = await adapter.requireComposerSendButton(page, composer, "#send");
   assert.equal(await resolvedSend.getAttribute("id"), "send");
+  await assert.rejects(
+    () => adapter.requireComposerSendButton(page, composer, "#unrelated"),
+    (error) => error?.reason === "send_button_not_unique"
+  );
 
   assert.deepEqual(
     await adapter.runAtomicComposerAction({
@@ -1502,6 +1617,21 @@ test("Instagram atomic composer actions validate and mutate in one browser task"
     }),
     { ok: false, reason: "send_button_not_owned" }
   );
+  await sendButton.evaluate((button) => button.setAttribute("aria-disabled", "true"));
+  assert.deepEqual(
+    await adapter.runAtomicComposerAction({
+      composer,
+      sendButton,
+      selectors,
+      thread,
+      platformThreadId: "safe-thread",
+      action: "send",
+      expectedText: "hi"
+    }),
+    { ok: false, reason: "send_button_disabled" }
+  );
+  assert.equal(await page.evaluate(() => window.submitted), 0);
+  await sendButton.evaluate((button) => button.setAttribute("aria-disabled", "false"));
   assert.deepEqual(
     await adapter.runAtomicComposerAction({
       composer,
@@ -1515,6 +1645,92 @@ test("Instagram atomic composer actions validate and mutate in one browser task"
     { ok: true }
   );
   assert.equal(await page.evaluate(() => window.submitted), 1);
+});
+
+test("Instagram atomic composer actions bind recipient evidence to the active composer pane", async (t) => {
+  let browser;
+  try {
+    browser = await chromium.launch({ headless: true });
+  } catch (error) {
+    t.skip(`Playwright Chromium unavailable: ${error instanceof Error ? error.message : String(error)}`);
+    return;
+  }
+
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  t.after(async () => {
+    await context.close();
+    await browser.close();
+  });
+  await page.route("https://www.instagram.com/**", async (route) => {
+    await route.fulfill({
+      contentType: "text/html",
+      body: `<!doctype html>
+        <main hidden>
+          <header><h1>Safe thread</h1></header>
+        </main>
+        <main>
+          <header><h1>Wrong person</h1></header>
+          <form style="display:flex;align-items:center;gap:8px">
+            <div id="composer" role="textbox" contenteditable="true" style="width:300px;height:40px"></div>
+            <button id="send" type="button" aria-label="Send">Send</button>
+          </form>
+        </main>`
+    });
+  });
+  await page.goto("https://www.instagram.com/direct/t/safe-thread/");
+  await page.evaluate(() => {
+    window.submitted = 0;
+    document.querySelector("#send")?.addEventListener("click", () => {
+      window.submitted += 1;
+    });
+  });
+
+  const adapter = new InstagramAdapter({
+    screenshotDir: "/tmp",
+    domDumpDir: "/tmp",
+    resolveSelectors: async () => ({}),
+    sessionManager: {},
+    personKey: "instagram",
+    connectTimeoutMs: 50
+  });
+  const composer = await page.locator("#composer").elementHandle();
+  const sendButton = await page.locator("#send").elementHandle();
+  const input = {
+    composer,
+    selectors: { conversation_header: "main header h1" },
+    thread: {
+      platformThreadId: "safe-thread",
+      displayName: "Safe thread",
+      recipientVerificationLabel: "Safe thread"
+    },
+    platformThreadId: "safe-thread"
+  };
+
+  assert.deepEqual(
+    await adapter.runAtomicComposerAction({
+      ...input,
+      action: "type",
+      expectedText: "",
+      unit: "x"
+    }),
+    { ok: false, reason: "recipient_changed_before_send" }
+  );
+  assert.equal(await composer.textContent(), "");
+
+  await composer.evaluate((element) => {
+    element.textContent = "x";
+  });
+  assert.deepEqual(
+    await adapter.runAtomicComposerAction({
+      ...input,
+      sendButton,
+      action: "send",
+      expectedText: "x"
+    }),
+    { ok: false, reason: "recipient_changed_before_send" }
+  );
+  assert.equal(await page.evaluate(() => window.submitted), 0);
 });
 
 function sendTestHarness({

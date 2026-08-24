@@ -7,6 +7,7 @@ import type {
   SendReceipt,
   ThreadStub
 } from "@inbox-os/core";
+import { BOUNDED_COLLECTION_BOUNDARY } from "./collection-boundary";
 import { AdapterFailure, cleanMessageText, humanDelay, toStageFailure } from "./utils";
 import { humanClick, humanType, readingPause } from "./humanize";
 import type { SessionManager } from "../services/session-manager";
@@ -64,6 +65,7 @@ export interface BetaAdapterDependencies {
 
 export class BetaAdapter implements PlatformAdapter {
   platform: PlatformName;
+  readonly collectionBoundary = BOUNDED_COLLECTION_BOUNDARY;
 
   constructor(protected readonly deps: BetaAdapterDependencies) {
     this.platform = deps.platform;

@@ -29,17 +29,24 @@ Browser sends bind the exact composer element before recipient verification.
 After humanized delays, the final route, recipient, composer, and control
 ownership checks run in the same synchronous browser task as each composer
 mutation and the Send click. It binds a send-control handle before measuring
-locality, then measures and clicks that same handle. A send control must have
-an exact Send semantic or share the composer's form, and must also be uniquely
-and horizontally associated with the composer.
+locality, then measures and clicks that same handle. The active conversation
+container must own the visible recipient evidence, composer, and Send control.
+The control must have exact Send semantics, remain enabled and visible, and
+pass a final hit test immediately before the synchronous click.
 
-Candidate discovery exposes a typed optional collection-boundary capability.
+Every adapter declares a typed collection-boundary capability. Adapters whose
+source query is exhaustive declare authoritative completeness. Bounded or
+stateful collectors report `complete`, `incomplete`, or `candidate_cap` after
+each cycle. Native stop reasons remain opaque diagnostic strings and never
+drive shared freshness policy. Missing or unknown completeness fails closed.
 A bounded Instagram network and DOM snapshot remains useful for ingest, but it
 cannot publish platform-wide freshness unless every collection view proves the
-inbox is empty. Empty evidence must be scoped and structural, with no thread,
-loading, error, or failed network signal. Current DOM candidates, with unread
-rows first, take priority before network and DOM identities are deduplicated and
-the distinct-thread limit is applied.
+inbox is empty. Positive empty evidence is scoped to the inbox shell. Negative
+thread, composer, message, loading, error, and failed network evidence covers
+the document so sibling live panes veto an empty claim. GraphQL application
+errors count as failed collection evidence. Current DOM candidates, with
+unread rows first, take priority before network and DOM identities are
+deduplicated and the distinct-thread limit is applied.
 
 Unsupported operations fail clearly and callers check optional capabilities
 before offering them.

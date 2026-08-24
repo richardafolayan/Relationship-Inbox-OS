@@ -71,7 +71,8 @@ test("a typed bounded collector cannot publish freshness as complete", () => {
       getMetrics: () => ({
         totalFound: 3,
         unreadFound: 1,
-        stopReason: "instagram_bounded_snapshot"
+        completeness: "incomplete",
+        nativeStopReason: "instagram_bounded_snapshot"
       })
     }
   });
@@ -79,9 +80,8 @@ test("a typed bounded collector cannot publish freshness as complete", () => {
   assert.equal(began, true);
   const metrics = capability.getMetrics();
   const boundary = resolveCollectionBoundaryFreshness(
-    metrics.stopReason,
-    metrics.failures,
-    true
+    metrics.completeness,
+    metrics.failures
   );
   const freshness = resolvePlatformScanFreshness({
     quarantinedMessages: 0,
@@ -93,4 +93,15 @@ test("a typed bounded collector cannot publish freshness as complete", () => {
   assert.equal(freshness.freshnessComplete, false);
   assert.equal(freshness.advanceLastScanAt, false);
   assert.equal(freshness.lastError, PLATFORM_SCAN_COLLECTION_INCOMPLETE_ERROR);
+});
+
+test("a runtime adapter missing its required boundary declaration fails closed", () => {
+  const capability = beginAdapterCollectionBoundary({});
+  const metrics = capability.getMetrics();
+  assert.equal(metrics.completeness, "incomplete");
+  assert.equal(metrics.nativeStopReason, "collection_boundary_not_declared");
+  assert.equal(
+    resolveCollectionBoundaryFreshness(metrics.completeness).collectionIncomplete,
+    true
+  );
 });

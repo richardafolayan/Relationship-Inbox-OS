@@ -1,4 +1,5 @@
 import type {
+  CollectionBoundaryCompleteness,
   NormalizedMessage,
   PlatformAdapter,
   PlatformCollectionBoundaryCapability,
@@ -21,7 +22,11 @@ import { effectiveLastOutboundAt } from "./reaction-effects.js";
 import type { AiService, EventBus, ScanJobOutcome, SettingsStore } from "../types/runtime";
 import { AdapterFailure, cleanMessageText, cleanText, humanDelay, stripUnpairedSurrogates } from "../platforms/utils";
 import { shouldRefreshGroupDisplayName } from "../platforms/imessage-group-name";
-import type { LinkedInStreamPreOpenDecision } from "../platforms/linkedin-adapter";
+import {
+  linkedInCollectionCompleteness,
+  type LinkedInCollectionStopReason,
+  type LinkedInStreamPreOpenDecision
+} from "../platforms/linkedin-adapter";
 import { resolveAdapterFailureKind, shouldStopScanForFailureKind } from "./failure-routing";
 import { isAiVisibleMessage, prismaMessageToPrompt } from "./ai";
 import { buildMessageUpsertPayload } from "./message-upsert-payload";
@@ -194,7 +199,7 @@ interface LinkedInScanAdapter extends PlatformAdapter {
     }) => Promise<void>;
     onProgress?: (snapshot: { processedRows: number; openedRows: number; total: number }) => void;
   }): Promise<{
-    stopReason: string;
+    stopReason: LinkedInCollectionStopReason;
     iterations: number;
     scrollIterations: number;
     processedRows: number;
@@ -224,7 +229,7 @@ interface LinkedInScanAdapter extends PlatformAdapter {
       messages: NormalizedMessage[];
     }) => Promise<void>;
   }): Promise<{
-    stopReason: string;
+    stopReason: LinkedInCollectionStopReason;
     threadsScanned: number;
     actionableRows: number;
     unreadRows: number;
@@ -531,9 +536,17 @@ export function resolveEffectiveCount(rawCount: number, max?: number): number {
 
 export function beginAdapterCollectionBoundary(
   adapter: PlatformAdapter
-): PlatformCollectionBoundaryCapability | null {
-  const capability = adapter.collectionBoundary ?? null;
-  capability?.beginCycle();
+): PlatformCollectionBoundaryCapability {
+  const capability = adapter.collectionBoundary ?? {
+    beginCycle: () => undefined,
+    getMetrics: () => ({
+      totalFound: 0,
+      unreadFound: 0,
+      completeness: "incomplete" as const,
+      nativeStopReason: "collection_boundary_not_declared"
+    })
+  };
+  capability.beginCycle();
   return capability;
 }
 
@@ -1646,6 +1659,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
 
           let candidatesBeforeCap = 0;
           let collectionMetrics: Record<string, unknown> | null = null;
+          let collectionCompleteness: CollectionBoundaryCompleteness | undefined;
           let candidatesToSync: Array<{ thread: ThreadStub; messages?: NormalizedMessage[] }> = [];
           // Lifted to the outer scope so the per-candidate persistence loop
           // (further down) can read it. Populated by the streaming-scan
@@ -1732,7 +1746,8 @@ export function createScanQueue(deps: ScanQueueDeps) {
                 unreadFound: fallbackResult.unreadRows,
                 needsReplyFound: fallbackResult.needsReplyRows,
                 candidatesFound: fallbackResult.actionableRows,
-                stopReason: fallbackResult.stopReason,
+                completeness: linkedInCollectionCompleteness(fallbackResult.stopReason),
+                nativeStopReason: fallbackResult.stopReason,
                 collectorMode,
                 selectorThreadItemCount,
                 selectorThreadSnippetCount,
@@ -1740,6 +1755,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
                 fallbackTriggered,
                 fallbackTriggerReason
               };
+              collectionCompleteness = linkedInCollectionCompleteness(fallbackResult.stopReason);
               runLogger.logDecision({
                 stage: "collect_threads",
                 decision: "Collected LinkedIn direct fallback candidates",
@@ -2151,13 +2167,15 @@ export function createScanQueue(deps: ScanQueueDeps) {
                 needsReplyFound: streamMetrics.needsReplyRows,
                 candidatesFound: streamMetrics.actionableRows,
                 iterations: streamMetrics.iterations,
-                stopReason: streamMetrics.stopReason,
+                completeness: linkedInCollectionCompleteness(streamMetrics.stopReason),
+                nativeStopReason: streamMetrics.stopReason,
                 collectorMode,
                 selectorThreadItemCount,
                 selectorThreadSnippetCount,
                 fallbackEligible: streamMetrics.fallbackEligible,
                 fallbackTriggered: streamMetrics.fallbackTriggered
               };
+              collectionCompleteness = linkedInCollectionCompleteness(streamMetrics.stopReason);
               runLogger.logDecision({
                 stage: "collect_threads",
                 decision: "Collected LinkedIn stream candidates",
@@ -2283,11 +2301,13 @@ export function createScanQueue(deps: ScanQueueDeps) {
             }
 
             if (job.platformThreadId && adapter.fetchThreadById) {
+              collectionCompleteness = "complete";
               headline("COLLECT_TARGETED_OK", "event-targeted candidate collection complete", {
                 platformThreadId: job.platformThreadId,
                 candidatesCount: candidatesToSync.length
               });
             } else if (incrementalPlan && incrementalPlan.mode === "skip") {
+              collectionCompleteness = "complete";
               // Nothing changed upstream since the last completed scan -
               // finish the tick with zero candidates. Same flow/events as a
               // scan that found no work, so consumers see a normal scan.
@@ -2300,6 +2320,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
                 watermark: incrementalPlan.watermark
               });
             } else if (incrementalPlan && incrementalPlan.mode === "delta") {
+              collectionCompleteness = "complete";
               // Only these conversations changed - sync exactly them. The
               // usual thread cap still applies (deltas are typically 1-2).
               const changedStubs = incrementalPlan.stubs;
@@ -2385,14 +2406,15 @@ export function createScanQueue(deps: ScanQueueDeps) {
                 }
               });
 
-              collectionMetrics =
-                collectionBoundaryCapability?.getMetrics() ?? null;
+              collectionMetrics = collectionBoundaryCapability.getMetrics();
+              collectionCompleteness = collectionMetrics.completeness as
+                | CollectionBoundaryCompleteness
+                | undefined;
             }
           }
           const collectionBoundary = resolveCollectionBoundaryFreshness(
-            collectionMetrics?.stopReason,
-            collectionFailures,
-            collectionMetrics !== null
+            collectionCompleteness,
+            collectionFailures
           );
           candidateCapBroke ||= collectionBoundary.candidateCapBroke;
           collectionIncomplete ||= collectionBoundary.collectionIncomplete;
@@ -2714,8 +2736,8 @@ export function createScanQueue(deps: ScanQueueDeps) {
           });
 
           runStopReason = freshnessComplete
-            ? typeof collectionMetrics?.stopReason === "string"
-              ? (collectionMetrics.stopReason as string)
+            ? typeof collectionMetrics?.nativeStopReason === "string"
+              ? (collectionMetrics.nativeStopReason as string)
               : runStopReason
             : freshness.stopReason;
           runLogger.setStopReason(runStopReason ?? "scan_complete");
