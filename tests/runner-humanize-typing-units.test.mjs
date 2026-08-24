@@ -69,3 +69,31 @@ test("humanType types each emoji as one whole keystroke, never a lone surrogate"
   assert.ok(typed.includes("\u{1F44D}"), "👍 must be typed as one keystroke");
   assert.equal(typed.join(""), text);
 });
+
+test("humanType can bind every keystroke to the verified element handle", async () => {
+  const keyboardTyped = [];
+  const targetTyped = [];
+  const page = {
+    keyboard: {
+      type: async (value) => keyboardTyped.push(value)
+    },
+    mouse: { move: async () => {} }
+  };
+  const target = {
+    type: async (value) => targetTyped.push(value),
+    click: async () => {},
+    focus: async () => {},
+    boundingBox: async () => null
+  };
+
+  await humanType(page, target, "safe", {
+    alreadyFocused: true,
+    bindKeystrokesToTarget: true,
+    reading: null,
+    delay: { min: 0, max: 0 },
+    noThink: true
+  });
+
+  assert.deepEqual(targetTyped, ["s", "a", "f", "e"]);
+  assert.deepEqual(keyboardTyped, []);
+});

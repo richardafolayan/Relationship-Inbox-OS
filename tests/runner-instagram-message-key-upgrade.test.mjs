@@ -45,8 +45,48 @@ function existingRow(overrides = {}) {
 
 function inMemoryDatabase(initialRows) {
   let rows = structuredClone(initialRows);
+  const settings = new Map();
   return {
     rows: () => structuredClone(rows),
+    replaceRows(nextRows) {
+      rows = structuredClone(nextRows);
+    },
+    settings: () => structuredClone([...settings.values()]),
+    message: {
+      async findMany() {
+        return structuredClone(rows);
+      }
+    },
+    setting: {
+      async findUnique(input) {
+        return structuredClone(settings.get(input.where.key) ?? null);
+      },
+      async findMany(input = {}) {
+        const prefix = input.where?.key?.startsWith;
+        return structuredClone(
+          [...settings.values()].filter((row) => !prefix || row.key.startsWith(prefix))
+        );
+      },
+      async upsert(input) {
+        const key = input.where.key;
+        const existing = settings.get(key);
+        const next = existing
+          ? { ...existing, ...input.update }
+          : { id: `setting-${settings.size + 1}`, ...input.create };
+        settings.set(key, next);
+        return structuredClone(next);
+      },
+      async deleteMany(input) {
+        let count = 0;
+        for (const key of [...settings.keys()]) {
+          if (key === input.where.key) {
+            settings.delete(key);
+            count += 1;
+          }
+        }
+        return { count };
+      }
+    },
     async $transaction(callback) {
       const transactionRows = structuredClone(rows);
       const transaction = {
@@ -532,4 +572,52 @@ test("the scan reconciler quarantines an apply race without aborting unrelated p
     storage.rows().map((row) => row.platformMessageKey).sort(),
     ["instagram:legacy-0", "instagram:stable"]
   );
+});
+
+test("identity quarantine survives a later scan whose sliding window omits the conflict", async () => {
+  const legacy = existingRow();
+  const canonical = existingRow({
+    id: "canonical",
+    platformMessageKey: "instagram:stable",
+    rawJson: JSON.stringify({
+      timestampSource: "source",
+      contentKind: "text",
+      messageIdentityVersion: "instagram_stable_v2"
+    })
+  });
+  const database = inMemoryDatabase([legacy, canonical]);
+  const reconciler = createInstagramMessageIdentityReconciler(database);
+
+  const first = await reconciler({
+    threadId: "thread-1",
+    currentMessages: [currentMessage()]
+  });
+  assert.deepEqual(first, {
+    blockedMessageKeys: [],
+    quarantinedMessageKeys: ["instagram:stable"]
+  });
+  assert.equal(await reconciler.getOutstandingQuarantineCount(), 1);
+  assert.equal(database.settings().length, 1);
+  assert.doesNotMatch(database.settings()[0].valueJson, /instagram:stable|Hello/);
+
+  const second = await reconciler({
+    threadId: "thread-1",
+    currentMessages: []
+  });
+  assert.equal(second.blockedMessageKeys.length, 0);
+  assert.equal(second.quarantinedMessageKeys.length, 1);
+  assert.match(second.quarantinedMessageKeys[0], /^instagram-quarantine:/);
+  assert.equal(await reconciler.getOutstandingQuarantineCount(), 1);
+
+  database.replaceRows([canonical]);
+  const repaired = await reconciler({
+    threadId: "thread-1",
+    currentMessages: [currentMessage()]
+  });
+  assert.deepEqual(repaired, {
+    blockedMessageKeys: [],
+    quarantinedMessageKeys: []
+  });
+  assert.equal(await reconciler.getOutstandingQuarantineCount(), 0);
+  assert.equal(database.settings().length, 0);
 });

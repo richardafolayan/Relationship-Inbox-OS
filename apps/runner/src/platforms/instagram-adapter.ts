@@ -1,4 +1,4 @@
-import type { BrowserContext, Locator, Page } from "patchright";
+import type { BrowserContext, ElementHandle, Locator, Page } from "patchright";
 import {
   stableHash,
   type NormalizedMessage,
@@ -1494,7 +1494,7 @@ export class InstagramAdapter extends BetaAdapter {
     return enabled[0]!;
   }
 
-  private async readComposerText(composer: Locator): Promise<string> {
+  private async readComposerText(composer: Locator | ElementHandle): Promise<string> {
     const inputValue = await composer.inputValue().catch(() => null);
     if (inputValue !== null) {
       return cleanMessageText(inputValue);
@@ -1502,7 +1502,10 @@ export class InstagramAdapter extends BetaAdapter {
     return cleanMessageText((await composer.textContent().catch(() => "")) ?? "");
   }
 
-  private async verifyComposerText(composer: Locator, expectedText: string): Promise<void> {
+  private async verifyComposerText(
+    composer: Locator | ElementHandle,
+    expectedText: string
+  ): Promise<void> {
     if ((await this.readComposerText(composer)) !== expectedText) {
       throw new InstagramParsingError("composer_text_mismatch_before_send");
     }
@@ -1510,7 +1513,7 @@ export class InstagramAdapter extends BetaAdapter {
 
   private async requireComposerSendButton(
     page: Page,
-    composer: Locator,
+    composer: Locator | ElementHandle,
     selector: string
   ): Promise<Locator> {
     let candidates = await this.enabledCandidates(page.locator(selector));
@@ -1647,19 +1650,43 @@ export class InstagramAdapter extends BetaAdapter {
         selectors,
         normalizedText
       );
-      const composer = await this.requireEnabled(
+      const composerLocator = await this.requireEnabled(
         page.locator(selectors.composer_input),
         "composer"
+      );
+      const composer = await composerLocator.elementHandle();
+      if (!composer) {
+        throw new InstagramParsingError("composer_detached");
+      }
+      await this.verifyCurrentThreadIdentity(
+        page,
+        selectors,
+        thread,
+        platformThreadId,
+        true,
+        "before_send"
       );
       const existingComposerText = await this.readComposerText(composer);
       if (existingComposerText && existingComposerText !== normalizedText) {
         throw new InstagramParsingError("composer_contains_unsent_text");
       }
+      await this.verifyCurrentThreadIdentity(
+        page,
+        selectors,
+        thread,
+        platformThreadId,
+        true,
+        "before_send"
+      );
       if (existingComposerText === normalizedText) {
         await composer.fill("");
       }
       await humanClick(page, composer, { timeout: 10_000 });
-      await humanType(page, composer, normalizedText, { alreadyFocused: true, reading: null });
+      await humanType(page, composer, normalizedText, {
+        alreadyFocused: true,
+        bindKeystrokesToTarget: true,
+        reading: null
+      });
       await this.verifyComposerText(composer, normalizedText);
       await readingPause(500, 1_100);
 

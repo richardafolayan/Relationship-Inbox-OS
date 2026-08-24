@@ -4772,14 +4772,22 @@ app.post("/control/thread/:threadId/rescan", asyncRoute(async (req, res) => {
         ...result
       }
     });
-    res.json({
+    const responseBody = {
       ok: result.freshnessComplete,
       requestId,
       threadId: target.threadId,
       scope: "single_thread",
       warning: result.freshnessComplete ? undefined : MESSAGE_IDENTITY_FRESHNESS_ERROR,
       ...result
-    });
+    };
+    if (!result.freshnessComplete) {
+      res.status(409).json({
+        ...responseBody,
+        error: "Message check incomplete. Some historical messages could not be verified safely."
+      });
+      return;
+    }
+    res.json(responseBody);
   } catch (error) {
     eventBus.emit({
       type: "SCAN_THREAD_FINISHED",

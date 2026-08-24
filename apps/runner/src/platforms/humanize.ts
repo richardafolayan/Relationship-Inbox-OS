@@ -201,6 +201,8 @@ export interface HumanTypeOptions {
   reading?: { min: number; max: number } | null;
   /** Disable mid-word "thinking" pauses (use for short fields like passwords). */
   noThink?: boolean;
+  /** Type through this exact target instead of the page's current keyboard focus. */
+  bindKeystrokesToTarget?: boolean;
 }
 
 /**
@@ -244,7 +246,12 @@ export async function humanType(
   const maxDelay = options.delay?.max ?? TYPING_DELAY_MAX_MS;
   const units = toTypingUnits(text);
   for (let i = 0; i < units.length; i += 1) {
-    await page.keyboard.type(units[i] ?? "");
+    const unit = units[i] ?? "";
+    if (options.bindKeystrokesToTarget) {
+      await (target as Locator | ElementHandle).type(unit);
+    } else {
+      await page.keyboard.type(unit);
+    }
     await sleep(randInt(minDelay, maxDelay));
     if (!options.noThink && Math.random() < TYPING_THINK_CHANCE && i < units.length - 1) {
       await sleep(randInt(TYPING_THINK_MIN_MS, TYPING_THINK_MAX_MS));

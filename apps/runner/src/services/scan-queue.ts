@@ -25,7 +25,10 @@ import { resolveAdapterFailureKind, shouldStopScanForFailureKind } from "./failu
 import { isAiVisibleMessage, prismaMessageToPrompt } from "./ai";
 import { buildMessageUpsertPayload } from "./message-upsert-payload";
 import {
+  PLATFORM_SCAN_IN_PROGRESS_ERROR,
   resolveMessageIdentityFreshness,
+  resolvePlatformScanFreshness,
+  resolvePlatformScanStartFreshness,
   reconcilePlatformMessageIdentity,
   type MessageIdentityReconciler
 } from "./message-identity-reconciliation";
@@ -1482,6 +1485,10 @@ export function createScanQueue(deps: ScanQueueDeps) {
         let capturedScanWatermark: string | null = null;
         let candidateCapBroke = false;
         let runError: unknown;
+        let platformStateBeforeScan: {
+          status: "CONNECTED" | "NOT_CONNECTED" | "DEGRADED" | "ERROR";
+          lastError: string | null;
+        } | null = null;
 
         runLogger.logEvent({
           level: "info",
@@ -1587,7 +1594,25 @@ export function createScanQueue(deps: ScanQueueDeps) {
             runStopReason = "aborted";
             return;
           }
-          await setPlatformStatus({ platform, status: "CONNECTED", connected: true });
+          platformStateBeforeScan = await prisma.platform.findUnique({
+            where: { name: platform },
+            select: { status: true, lastError: true }
+          });
+          const outstandingIdentityQuarantines =
+            await deps.messageIdentityReconcilers?.[
+              platform
+            ]?.getOutstandingQuarantineCount?.() ?? 0;
+          const scanStartFreshness = resolvePlatformScanStartFreshness({
+            outstandingIdentityQuarantines,
+            previousStatus: platformStateBeforeScan?.status,
+            previousLastError: platformStateBeforeScan?.lastError
+          });
+          await setPlatformStatus({
+            platform,
+            status: scanStartFreshness.status,
+            lastError: scanStartFreshness.lastError ?? undefined,
+            connected: true
+          });
           headline("CONNECT_OK", "connection ready", {
             platform
           });
@@ -2355,6 +2380,9 @@ export function createScanQueue(deps: ScanQueueDeps) {
                   : null;
             }
           }
+          if (rawThreadCount > effectiveThreadCount) {
+            candidateCapBroke = true;
+          }
           candidatesCount = candidatesToSync.length;
           if (threadsScannedCount <= 0) {
             threadsScannedCount =
@@ -2627,20 +2655,45 @@ export function createScanQueue(deps: ScanQueueDeps) {
             return;
           }
 
-          const freshness = resolveMessageIdentityFreshness(messageIdentityQuarantines);
+          const durableIdentityQuarantines =
+            await deps.messageIdentityReconcilers?.[
+              platform
+            ]?.getOutstandingQuarantineCount?.();
+          const freshnessIdentityQuarantines =
+            durableIdentityQuarantines ?? messageIdentityQuarantines;
+          const freshness = resolvePlatformScanFreshness({
+            quarantinedMessages: freshnessIdentityQuarantines,
+            threadFailures,
+            candidateCapBroke
+          });
           const freshnessComplete = freshness.freshnessComplete;
+          const publishedFreshness =
+            job.platformThreadId && freshnessComplete
+              ? platformStateBeforeScan?.status === "CONNECTED"
+                ? {
+                    status: "CONNECTED" as const,
+                    lastError: null,
+                    advanceLastScanAt: false
+                  }
+                : {
+                    status: "DEGRADED" as const,
+                    lastError:
+                      platformStateBeforeScan?.lastError ?? PLATFORM_SCAN_IN_PROGRESS_ERROR,
+                    advanceLastScanAt: false
+                  }
+              : freshness;
           await setPlatformStatus({
             platform,
-            status: freshness.status,
-            lastError: freshness.lastError ?? undefined,
-            markScanComplete: freshness.advanceLastScanAt
+            status: publishedFreshness.status,
+            lastError: publishedFreshness.lastError ?? undefined,
+            markScanComplete: publishedFreshness.advanceLastScanAt
           });
 
           runStopReason = freshnessComplete
             ? typeof collectionMetrics?.stopReason === "string"
               ? (collectionMetrics.stopReason as string)
               : runStopReason
-            : "message_identity_quarantine";
+            : freshness.stopReason;
           runLogger.setStopReason(runStopReason ?? "scan_complete");
           headline(
             freshnessComplete ? "SCAN_END_OK" : "SCAN_END_PARTIAL",
@@ -2648,7 +2701,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
             {
               stopReason: runStopReason ?? "scan_complete",
               updatedThreads: platformUpdatedThreads,
-              messagesQuarantined: messageIdentityQuarantines,
+              messagesQuarantined: freshnessIdentityQuarantines,
               LOG_DIR: logDir
             }
           );
@@ -2669,7 +2722,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
               freshnessComplete,
               messagesParsed: messagesParsedCount,
               messagesPersisted: messagesPersistedCount,
-              messagesQuarantined: messageIdentityQuarantines,
+              messagesQuarantined: freshnessIdentityQuarantines,
               updatedThreads: platformUpdatedThreads,
               processed: platformUpdatedThreads,
               skipped: Math.max(0, candidatesCount - platformUpdatedThreads),
@@ -2707,11 +2760,14 @@ export function createScanQueue(deps: ScanQueueDeps) {
               rawCandidateCount,
               effectiveOpenCount,
               threadFailures,
-              threadFailureKinds
+              threadFailureKinds,
+              candidateCapBroke
             }
           });
-          retryController.markSuccess(platform);
-          runError = undefined;
+          if (freshnessComplete) {
+            retryController.markSuccess(platform);
+            runError = undefined;
+          }
           runSuccess = freshnessComplete;
 
           // Advance the incremental-scan watermark ONLY now: clean

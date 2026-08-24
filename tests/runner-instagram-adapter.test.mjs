@@ -1250,6 +1250,8 @@ function sendTestHarness({
   observeSubmittedBubble,
   observeExactLayoutBubble = false,
   switchThreadBeforeClick = false,
+  switchThreadDuringComposerHandle = false,
+  switchThreadAfterComposerBound = false,
   switchThreadDuringClick = false,
   dropTypedUnit = false,
   failAfterClick = false,
@@ -1260,7 +1262,9 @@ function sendTestHarness({
   let submitted = false;
   let typed = "";
   const typedUnits = [];
+  const composerMutations = [];
   let messageSnapshots = 0;
+  let composerTextReads = 0;
   const headerLocator = {
     getAttribute: async () => headerLabel,
     textContent: async () => headerLabel
@@ -1270,13 +1274,39 @@ function sendTestHarness({
     isVisible: async () => true,
     isEnabled: async () => true,
     getAttribute: async () => null,
-    click: async () => undefined,
+    click: async () => {
+      composerMutations.push("click");
+    },
     first: () => composer,
     boundingBox: async () => ({ x: 100, y: 900, width: 700, height: 40 }),
-    inputValue: async () => typed,
+    inputValue: async () => {
+      composerTextReads += 1;
+      if (switchThreadAfterComposerBound && composerTextReads === 1) {
+        currentUrl = "https://www.instagram.com/direct/t/wrong-thread/";
+      }
+      return typed;
+    },
     textContent: async () => typed,
     fill: async (value) => {
+      composerMutations.push("fill");
       typed = value;
+    },
+    type: async (unit) => {
+      composerMutations.push("type");
+      typedUnits.push(unit);
+      if (submitOnTypedNewline && unit === "\n") {
+        submitted = true;
+        typed = "";
+        return;
+      }
+      if (dropTypedUnit && typed.length === 0) return;
+      typed += unit;
+    },
+    elementHandle: async () => {
+      if (switchThreadDuringComposerHandle) {
+        currentUrl = "https://www.instagram.com/direct/t/wrong-thread/";
+      }
+      return composer;
     }
   };
   const boundSendButton = {
@@ -1384,7 +1414,12 @@ function sendTestHarness({
     connectTimeoutMs: 50,
     sendVerificationTimeoutMs: 5
   });
-  return { adapter, wasSubmitted: () => submitted, typedUnits: () => [...typedUnits] };
+  return {
+    adapter,
+    wasSubmitted: () => submitted,
+    typedUnits: () => [...typedUnits],
+    composerMutations: () => [...composerMutations]
+  };
 }
 
 test("Instagram adapter reports success only after an exact new outgoing bubble", async () => {
@@ -1530,6 +1565,52 @@ test("Instagram revalidates the exact thread after typing and before clicking Se
       ),
     (error) => error?.details?.reason === "thread_changed_before_send"
   );
+  assert.equal(harness.wasSubmitted(), false);
+});
+
+test("Instagram does not mutate a composer when navigation occurs while binding it", async () => {
+  const harness = sendTestHarness({
+    observeSubmittedBubble: false,
+    switchThreadDuringComposerHandle: true
+  });
+
+  await assert.rejects(
+    () =>
+      harness.adapter.sendMessage(
+        {
+          platformThreadId: "safe-thread",
+          displayName: "Safe thread",
+          recipientVerificationLabel: "Safe thread"
+        },
+        "approved private text"
+      ),
+    (error) => error?.details?.reason === "thread_changed_before_send"
+  );
+  assert.deepEqual(harness.composerMutations(), []);
+  assert.deepEqual(harness.typedUnits(), []);
+  assert.equal(harness.wasSubmitted(), false);
+});
+
+test("Instagram revalidates after binding and before the first composer mutation", async () => {
+  const harness = sendTestHarness({
+    observeSubmittedBubble: false,
+    switchThreadAfterComposerBound: true
+  });
+
+  await assert.rejects(
+    () =>
+      harness.adapter.sendMessage(
+        {
+          platformThreadId: "safe-thread",
+          displayName: "Safe thread",
+          recipientVerificationLabel: "Safe thread"
+        },
+        "approved private text"
+      ),
+    (error) => error?.details?.reason === "thread_changed_before_send"
+  );
+  assert.deepEqual(harness.composerMutations(), []);
+  assert.deepEqual(harness.typedUnits(), []);
   assert.equal(harness.wasSubmitted(), false);
 });
 

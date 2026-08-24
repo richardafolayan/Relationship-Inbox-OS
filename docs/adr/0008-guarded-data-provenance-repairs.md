@@ -42,9 +42,28 @@ the thread continue to persist. The scan reports parsed, persisted, and
 quarantined counts separately, marks the platform `DEGRADED`, retains the last
 fully fresh `lastScanAt`, and does not advance its incremental watermark. A
 per-thread check returns and emits `freshnessComplete: false`, so the dashboard
-cannot turn a quarantined result into "No new messages". A source-change event
-is not labelled `MESSAGES_PERSISTED` when every parsed message was blocked. A
-later scan may resolve the mapping if stronger evidence appears.
+cannot turn a quarantined result into "No new messages". The HTTP route also
+returns a non-success status, so bulk callers cannot count an incomplete check
+as fulfilled. A source-change event is not labelled `MESSAGES_PERSISTED` when
+every parsed message was blocked. A later scan may resolve the mapping if
+stronger evidence appears.
+
+An unresolved Instagram mapping is also recorded in a versioned `Setting` row.
+The row key contains a hash of the thread identity and its value contains only
+hashes of message keys. It contains no display name, message text, or raw
+platform identifier. The marker is written before a planned rekey or quarantine
+is applied and is cleared only after the same canonical identity is visible and
+the database evidence is clean. A crash can therefore retain a conservative
+marker, but cannot erase the warning. Platform-wide completion consults every
+durable marker, including markers for conversations outside Instagram's current
+sliding DOM window.
+
+Platform freshness requires more than clean identity reconciliation. Every
+selected candidate must fit within the configured caps and every selected
+conversation must sync successfully. A thread failure or candidate cap keeps
+the platform degraded, retains `lastScanAt`, leaves retry success state uncleared,
+and records an unsuccessful run. Connecting to the browser does not clear an
+existing degraded state before this completion decision.
 
 A verified Instagram rekey preserves the Message ID and changes the message key
 and any embedded audio fingerprint in one database transaction. Message rekeys
@@ -72,6 +91,10 @@ mapping performs no message mutation.
   or a future manual repair exists, but it cannot stop unrelated thread updates
   or produce a false full-freshness claim. Product surfaces retain the last
   known fully fresh scan time and show the degraded-platform warning.
+- Sliding browser history and runner restarts cannot erase an unresolved
+  quarantine. Corrupt quarantine state fails closed.
+- Capped and partially failed scans are explicitly incomplete rather than
+  publishing a new fully fresh time.
 - The message identity lock coordinates one runner process. The runner remains a
   singleton for a pilot data directory.
 

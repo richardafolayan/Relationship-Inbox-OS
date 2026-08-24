@@ -1,4 +1,4 @@
-import type { NormalizedMessage } from "@inbox-os/core";
+import { stableHash, type NormalizedMessage } from "@inbox-os/core";
 import type { Prisma, PrismaClient } from "@prisma/client";
 import { cleanMessageText } from "../platforms/utils";
 import { withMessageIdentityLocks } from "./message-identity-lock";
@@ -7,6 +7,13 @@ import type { MessageIdentityReconciler } from "./message-identity-reconciliatio
 const STABLE_IDENTITY_VERSION = "instagram_stable_v2";
 const RECEIPT_TIMESTAMP_TOLERANCE_MS = 2 * 60 * 1000;
 const FIRST_SEEN_CLOCK_SKEW_MARGIN_MS = 5 * 60 * 1000;
+const QUARANTINE_SETTING_PREFIX = "instagram_message_identity_quarantine_v1:";
+const QUARANTINE_VERSION = 1;
+
+interface InstagramIdentityQuarantineState {
+  version: 1;
+  messageKeyHashes: string[];
+}
 
 export interface ExistingInstagramMessageRow {
   id: string;
@@ -46,6 +53,64 @@ export class InstagramMessageKeyUpgradeError extends Error {
     super(`Instagram message-key upgrade failed: ${reason}`);
     this.name = "InstagramMessageKeyUpgradeError";
   }
+}
+
+function quarantineSettingKey(threadId: string): string {
+  return `${QUARANTINE_SETTING_PREFIX}${stableHash(threadId)}`;
+}
+
+function messageKeyHash(platformMessageKey: string): string {
+  return stableHash(platformMessageKey);
+}
+
+function quarantineToken(hash: string): string {
+  return `instagram-quarantine:${hash}`;
+}
+
+function parseQuarantineState(valueJson: string): InstagramIdentityQuarantineState | null {
+  try {
+    const value = JSON.parse(valueJson) as Record<string, unknown>;
+    if (
+      value.version !== QUARANTINE_VERSION ||
+      !Array.isArray(value.messageKeyHashes) ||
+      value.messageKeyHashes.some(
+        (hash) => typeof hash !== "string" || !/^[a-f0-9]{64}$/.test(hash)
+      )
+    ) {
+      return null;
+    }
+    return {
+      version: QUARANTINE_VERSION,
+      messageKeyHashes: [...new Set(value.messageKeyHashes as string[])].sort()
+    };
+  } catch {
+    return null;
+  }
+}
+
+function sameStringSet(left: Set<string>, right: Set<string>): boolean {
+  return left.size === right.size && [...left].every((value) => right.has(value));
+}
+
+async function persistQuarantineState(
+  database: PrismaClient,
+  threadId: string,
+  messageKeyHashes: Set<string>
+): Promise<void> {
+  const key = quarantineSettingKey(threadId);
+  if (messageKeyHashes.size === 0) {
+    await database.setting.deleteMany({ where: { key } });
+    return;
+  }
+  const state: InstagramIdentityQuarantineState = {
+    version: QUARANTINE_VERSION,
+    messageKeyHashes: [...messageKeyHashes].sort()
+  };
+  await database.setting.upsert({
+    where: { key },
+    update: { valueJson: JSON.stringify(state) },
+    create: { key, valueJson: JSON.stringify(state) }
+  });
 }
 
 function parseRawJson(rawJson: string | null): Record<string, unknown> | null {
@@ -339,36 +404,68 @@ export async function applyInstagramMessageKeyUpgradePlan(
 export function createInstagramMessageIdentityReconciler(
   database: PrismaClient
 ): MessageIdentityReconciler {
-  return async ({ threadId, currentMessages }) => {
-    if (
-      !currentMessages.some(
-        (message) => message.platformMessageKeyMigration?.scheme === "instagram_occurrence_v1"
-      )
-    ) {
-      return { blockedMessageKeys: [], quarantinedMessageKeys: [] };
+  const reconciler: MessageIdentityReconciler = async ({ threadId, currentMessages }) => {
+    const stateRecord = await database.setting.findUnique({
+      where: { key: quarantineSettingKey(threadId) },
+      select: { valueJson: true }
+    });
+    const state = stateRecord ? parseQuarantineState(stateRecord.valueJson) : {
+      version: QUARANTINE_VERSION,
+      messageKeyHashes: []
+    } satisfies InstagramIdentityQuarantineState;
+    if (!state) {
+      return {
+        blockedMessageKeys: [],
+        quarantinedMessageKeys: ["instagram-quarantine:state-corrupt"]
+      };
     }
 
-    const existingRows = await database.message.findMany({
-      where: { threadId },
-      select: {
-        id: true,
-        platformMessageKey: true,
-        direction: true,
-        timestamp: true,
-        text: true,
-        rawJson: true,
-        attachmentsJson: true,
-        sentVia: true,
-        audioTranscription: {
-          select: { id: true, audioFingerprint: true }
-        }
-      }
-    });
+    const migrationMessages = currentMessages.filter(
+      (message) => message.platformMessageKeyMigration?.scheme === "instagram_occurrence_v1"
+    );
+    const existingRows = migrationMessages.length > 0
+      ? await database.message.findMany({
+          where: { threadId },
+          select: {
+            id: true,
+            platformMessageKey: true,
+            direction: true,
+            timestamp: true,
+            text: true,
+            rawJson: true,
+            attachmentsJson: true,
+            sentVia: true,
+            audioTranscription: {
+              select: { id: true, audioFingerprint: true }
+            }
+          }
+        })
+      : [];
     const plan = planInstagramMessageKeyUpgrades({
       threadId,
-      currentMessages,
+      currentMessages: migrationMessages,
       existingRows
     });
+    const storedHashes = new Set(state.messageKeyHashes);
+    const visibleHashes = new Set(
+      migrationMessages.flatMap((message) =>
+        message.platformMessageKey ? [messageKeyHash(message.platformMessageKey)] : []
+      )
+    );
+    const quarantinedKeyByHash = new Map(
+      plan.quarantinedCanonicalKeys.map((key) => [messageKeyHash(key), key])
+    );
+    const plannedQuarantineHashes = new Set(quarantinedKeyByHash.keys());
+    const plannedRekeyHashes = new Set(plan.rekeys.map((rekey) => messageKeyHash(rekey.toKey)));
+    const provisionalHashes = new Set([
+      ...storedHashes,
+      ...plannedQuarantineHashes,
+      ...plannedRekeyHashes
+    ]);
+    if (!sameStringSet(storedHashes, provisionalHashes)) {
+      await persistQuarantineState(database, threadId, provisionalHashes);
+    }
+
     try {
       await applyInstagramMessageKeyUpgradePlan(database, plan);
     } catch (error) {
@@ -381,9 +478,38 @@ export function createInstagramMessageIdentityReconciler(
         ]
       };
     }
+
+    const resolvedVisibleHashes = new Set(
+      [...visibleHashes].filter((hash) => !plannedQuarantineHashes.has(hash))
+    );
+    const finalHashes = new Set(
+      [...storedHashes].filter((hash) => !resolvedVisibleHashes.has(hash))
+    );
+    for (const hash of plannedQuarantineHashes) {
+      finalHashes.add(hash);
+    }
+    if (!sameStringSet(provisionalHashes, finalHashes)) {
+      await persistQuarantineState(database, threadId, finalHashes);
+    }
+
     return {
       blockedMessageKeys: plan.blockedCanonicalKeys,
-      quarantinedMessageKeys: plan.quarantinedCanonicalKeys
+      quarantinedMessageKeys: [...finalHashes].map(
+        (hash) => quarantinedKeyByHash.get(hash) ?? quarantineToken(hash)
+      )
     };
   };
+
+  reconciler.getOutstandingQuarantineCount = async () => {
+    const records = await database.setting.findMany({
+      where: { key: { startsWith: QUARANTINE_SETTING_PREFIX } },
+      select: { valueJson: true }
+    });
+    return records.reduce((count, record) => {
+      const state = parseQuarantineState(record.valueJson);
+      return count + (state ? state.messageKeyHashes.length : 1);
+    }, 0);
+  };
+
+  return reconciler;
 }

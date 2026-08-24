@@ -53,6 +53,16 @@ export type StatusSurfaceSignals = {
   tickerKind: string;
 };
 
+export function shouldRenderStatusTicker(tickerKind: string, tickerIsActive: boolean): boolean {
+  return (
+    tickerIsActive ||
+    tickerKind === "send_failed" ||
+    tickerKind === "send_succeeded" ||
+    tickerKind === "thread_checked" ||
+    tickerKind === "thread_check_incomplete"
+  );
+}
+
 /**
  * When mobile chrome is "hidden", only mount the status row if something
  * needs operator attention. Healthy idle state stays invisible so thread
@@ -70,6 +80,7 @@ export function shouldSurfaceHiddenStatus(signals: StatusSurfaceSignals): boolea
     case "reassessing":
     case "sending_report":
     case "checking_thread":
+    case "thread_check_incomplete":
     case "send_failed":
       return true;
     default:

@@ -87,7 +87,19 @@ test("platform recipient verification identity is persisted separately from Pers
 
 test("identity quarantine remains visible and cannot publish a false persisted-message event", () => {
   assert.match(scanQueueSource, /if \(syncTiming && persistedMessages > 0\)/);
-  assert.match(scanQueueSource, /markScanComplete: freshness\.advanceLastScanAt/);
+  assert.match(
+    scanQueueSource,
+    /resolvePlatformScanFreshness\(\{\s*quarantinedMessages: freshnessIdentityQuarantines,\s*threadFailures,\s*candidateCapBroke/
+  );
+  assert.match(scanQueueSource, /markScanComplete: publishedFreshness\.advanceLastScanAt/);
+  assert.match(
+    scanQueueSource,
+    /if \(freshnessComplete\) \{\s*retryController\.markSuccess\(platform\);\s*runError = undefined;/
+  );
   assert.match(runnerSource, /freshnessComplete: result\.freshnessComplete/);
   assert.match(runnerSource, /status: result\.freshnessComplete \? "OK" : "FAIL"/);
+  assert.match(
+    runnerSource,
+    /if \(!result\.freshnessComplete\) \{\s*res\.status\(409\)\.json\(/
+  );
 });
