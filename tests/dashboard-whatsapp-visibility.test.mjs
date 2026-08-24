@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import React from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { visibleImplementedPlatforms, IMPLEMENTED_PLATFORMS } from "../apps/dashboard/lib/risk.ts";
+import { SiblingPlatformFilter } from "../apps/dashboard/components/common/sibling-platform-filter.tsx";
 
 // The runner's /data/platforms response is the availability boundary. The
 // dashboard must mirror that exact set, including an enabled platform that
@@ -74,12 +77,13 @@ test("unsupported host platforms are excluded from connected totals", () => {
   assert.deepEqual(visible, ["LINKEDIN"]);
 });
 
-test("thread page sibling filter offers WhatsApp behind the same opt-in idea (#820)", async () => {
-  const { readFile } = await import("node:fs/promises");
-  const source = await readFile(
-    new URL("../apps/dashboard/app/thread/[id]/page.tsx", import.meta.url),
-    "utf8"
+test("thread page sibling filter offers WhatsApp behind the same opt-in idea (#820)", () => {
+  const markup = renderToStaticMarkup(
+    React.createElement(SiblingPlatformFilter, {
+      value: "all",
+      siblings: [{ platform: "WHATSAPP" }],
+      onChange: () => undefined
+    })
   );
-  assert.match(source, /<option value="WHATSAPP">WhatsApp<\/option>/);
-  assert.match(source, /siblings\.some\(\(row\) => row\.platform === "WHATSAPP"\)/);
+  assert.match(markup, /value="WHATSAPP">WhatsApp<\/option>/);
 });

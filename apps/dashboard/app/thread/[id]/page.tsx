@@ -43,6 +43,10 @@ import { Menu } from "@/components/ui/menu";
 import { ActionSheet, type ActionSheetGroup } from "@/components/ui/action-sheet";
 import { apiGet, apiPost, apiPostForm, peekCache, runAction } from "@/lib/api";
 import { BrandLoader } from "@/components/common/brand-loader";
+import {
+  SiblingPlatformFilter,
+  type SiblingPlatformFilterValue
+} from "@/components/common/sibling-platform-filter";
 import { APP_NAME } from "@/lib/branding";
 import { setFavourite } from "@/lib/favourites";
 import { runActionWithFeedback, showToast } from "@/lib/feedback";
@@ -568,9 +572,8 @@ export default function ThreadPage() {
     () => peekCache<ThreadResponse>(`/runner/data/thread/${threadId}`) ?? null
   );
   const [siblings, setSiblings] = useState<InboxRow[]>([]);
-  const [siblingPlatform, setSiblingPlatform] = useState<
-    "all" | "LINKEDIN" | "INSTAGRAM" | "IMESSAGE" | "WHATSAPP" | "GOOGLE_MESSAGES"
-  >("all");
+  const [siblingPlatform, setSiblingPlatform] =
+    useState<SiblingPlatformFilterValue>("all");
   const [platforms, setPlatforms] = useState<PlatformCard[]>([]);
   const [logs, setLogs] = useState<AuditLogRow[]>([]);
   // Focused thread: cuid of the parent message whose thread we're zoomed
@@ -4041,32 +4044,11 @@ export default function ThreadPage() {
                 Threads
               </p>
               <div className="flex items-center gap-1">
-                <select
+                <SiblingPlatformFilter
                   value={siblingPlatform}
-                  onChange={(e) =>
-                    setSiblingPlatform(
-                      e.target.value as
-                        | "all"
-                        | "LINKEDIN"
-                        | "INSTAGRAM"
-                        | "IMESSAGE"
-                        | "WHATSAPP"
-                        | "GOOGLE_MESSAGES"
-                    )
-                  }
-                  className="rounded border border-hairline bg-paper px-1 py-[2px] font-mono text-[10px] uppercase tracking-[0.06em] text-ink-2 focus:border-ink-3 focus:outline-none"
-                  aria-label="Filter sibling threads by platform"
-                >
-                  <option value="all">All</option>
-                  <option value="LINKEDIN">LinkedIn</option>
-                  <option value="IMESSAGE">iMessage</option>
-                  {siblings.some((row) => row.platform === "GOOGLE_MESSAGES") ? (
-                    <option value="GOOGLE_MESSAGES">Google Messages</option>
-                  ) : null}
-                  {siblings.some((row) => row.platform === "WHATSAPP") ? (
-                    <option value="WHATSAPP">WhatsApp</option>
-                  ) : null}
-                </select>
+                  siblings={siblings}
+                  onChange={setSiblingPlatform}
+                />
                 <button
                   type="button"
                   onClick={() => setThreadsCollapsed(true)}

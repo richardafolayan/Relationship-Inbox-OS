@@ -27,6 +27,11 @@ import {
 } from "@/lib/setup-wizard";
 import type { OperatorProfile, PlatformCard } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import {
+  runActionWithInlineFeedback,
+  type InlineActionState
+} from "@/lib/feedback";
+import { InlineActionButton } from "@/components/common/inline-action-button";
 
 type SetupPlatform =
   | "IMESSAGE"
@@ -261,13 +266,49 @@ function ConnectStep({ selected, onBack, onNext }: { selected: SetupPlatform[]; 
   const [rows, setRows] = useState<PlatformCard[]>([]);
   const [busy, setBusy] = useState<SetupPlatform | null>(null);
   const [notice, setNotice] = useState("");
+  const [actionState, setActionState] = useState<{
+    platform: SetupPlatform;
+    state: InlineActionState;
+  } | null>(null);
   const refresh = useCallback(() => apiGetRaw<PlatformCard[]>("/runner/data/platforms").then(setRows).catch(() => undefined), []);
   useEffect(() => { void refresh(); const timer = window.setInterval(() => void refresh(), 3000); return () => window.clearInterval(timer); }, [refresh]);
   const act = async (platform: SetupPlatform, path: string, body: unknown) => {
-    setBusy(platform); setNotice("");
-    try { const result = await apiPost<{ message?: string }>(path, body); setNotice(result.message ?? "Done. Checking the connection now."); await refresh(); }
-    catch { setNotice("That did not finish. Follow the instructions below, then try again."); }
-    finally { setBusy(null); }
+    const display = {
+      IMESSAGE: "iMessage",
+      GOOGLE_MESSAGES: "Google Messages",
+      LINKEDIN: "LinkedIn",
+      INSTAGRAM: "Instagram",
+      WHATSAPP: "WhatsApp"
+    }[platform];
+    const scanning = path.endsWith("/scan");
+    const openingPermission = path.endsWith("/full-disk-access");
+    setBusy(platform);
+    try {
+      const outcome = await runActionWithInlineFeedback(
+        apiPost<{ message?: string }>(path, body),
+        {
+          pending: openingPermission
+            ? "Opening permission settings..."
+            : scanning
+              ? `Scanning ${display}...`
+              : `Connecting ${display}...`,
+          success: openingPermission
+            ? "Permission settings opened"
+            : scanning
+              ? `${display} scan queued`
+              : `${display} connected`,
+          failure: `Couldn't finish ${display}`,
+          setState: (state) => setActionState({ platform, state }),
+          setError: (message) => setNotice(message ?? ""),
+          onDone: refresh
+        }
+      );
+      if (outcome.ok) {
+        setNotice(outcome.value.message ?? "Done. Checking the connection now.");
+      }
+    } finally {
+      setBusy(null);
+    }
   };
   if (selected.length === 0) return <Card icon={<MessageSquareText />} eyebrow="Messages" title="No message sources selected." body="That is fine. You can add iMessage, Google Messages, LinkedIn, Instagram, or WhatsApp later in Settings."><Actions><Back onClick={onBack} /><Primary onClick={onNext}>Continue</Primary></Actions></Card>;
   const imessage = rows.find((row) => row.platform === "IMESSAGE");
@@ -278,10 +319,10 @@ function ConnectStep({ selected, onBack, onNext }: { selected: SetupPlatform[]; 
   return <Card icon={<MessageSquareText />} eyebrow="Connect messages" title="Connect each source you chose." body={`Complete one card at a time. ${APP_NAME} reads conversations into your inbox. Replies only send when you choose. A focus note can send automatically only when you turn it on for that focus window.`}>
     {notice ? <Notice>{notice}</Notice> : null}
     <div className="mt-5 grid gap-3">
-      {selected.includes("IMESSAGE") ? <Platform title="iMessage" connected={imessage?.status === "CONNECTED"} body={needsAccess ? `Press Open Mac permission. In Full Disk Access, turn on ${APP_NAME} or ${LEGACY_APP_NAME}. Then quit and reopen ${APP_NAME}.` : "Press Scan iMessage. macOS may ask for permission the first time."} action={needsAccess ? "Open Mac permission" : "Scan iMessage"} busy={busy === "IMESSAGE"} onClick={() => void act("IMESSAGE", needsAccess ? "/runner/control/imessage/full-disk-access" : "/runner/control/scan", needsAccess ? {} : { platform: "IMESSAGE" })} /> : null}
-      {selected.includes("GOOGLE_MESSAGES") ? <Platform title="Google Messages" connected={googleMessages?.status === "CONNECTED"} body={`Press Pair Android phone. Sign in to Google Messages in the window, then confirm the matching emoji on your phone if asked. Keep the window open until ${APP_NAME} says connected.`} action="Pair Android phone" busy={busy === "GOOGLE_MESSAGES"} onClick={() => void act("GOOGLE_MESSAGES", "/runner/control/platform/connect", { platform: "GOOGLE_MESSAGES" })} /> : null}
-      {selected.includes("LINKEDIN") ? <Platform title="LinkedIn" connected={linkedin?.status === "CONNECTED"} body={`Press Connect LinkedIn. A Chrome window opens. Sign in yourself if asked, then leave the window open until ${APP_NAME} says connected.`} action="Connect LinkedIn" busy={busy === "LINKEDIN"} onClick={() => void act("LINKEDIN", "/runner/control/platform/connect", { platform: "LINKEDIN" })} /> : null}
-      {selected.includes("INSTAGRAM") ? <Platform title="Instagram" connected={instagram?.status === "CONNECTED"} body={`Press Connect Instagram. A dedicated standard Chrome window opens. Sign in yourself and complete any security check, then leave it open until ${APP_NAME} says connected.`} action="Connect Instagram" busy={busy === "INSTAGRAM"} onClick={() => void act("INSTAGRAM", "/runner/control/platform/connect", { platform: "INSTAGRAM" })} /> : null}
+      {selected.includes("IMESSAGE") ? <Platform title="iMessage" connected={imessage?.status === "CONNECTED"} body={needsAccess ? `Press Open Mac permission. In Full Disk Access, turn on ${APP_NAME} or ${LEGACY_APP_NAME}. Then quit and reopen ${APP_NAME}.` : "Press Scan iMessage. macOS may ask for permission the first time."} action={needsAccess ? "Open Mac permission" : "Scan iMessage"} busy={busy === "IMESSAGE"} state={actionState?.platform === "IMESSAGE" ? actionState.state : null} onClick={() => void act("IMESSAGE", needsAccess ? "/runner/control/imessage/full-disk-access" : "/runner/control/scan", needsAccess ? {} : { platform: "IMESSAGE" })} /> : null}
+      {selected.includes("GOOGLE_MESSAGES") ? <Platform title="Google Messages" connected={googleMessages?.status === "CONNECTED"} body={`Press Pair Android phone. Sign in to Google Messages in the window, then confirm the matching emoji on your phone if asked. Keep the window open until ${APP_NAME} says connected.`} action="Pair Android phone" busy={busy === "GOOGLE_MESSAGES"} state={actionState?.platform === "GOOGLE_MESSAGES" ? actionState.state : null} onClick={() => void act("GOOGLE_MESSAGES", "/runner/control/platform/connect", { platform: "GOOGLE_MESSAGES" })} /> : null}
+      {selected.includes("LINKEDIN") ? <Platform title="LinkedIn" connected={linkedin?.status === "CONNECTED"} body={`Press Connect LinkedIn. A Chrome window opens. Sign in yourself if asked, then leave the window open until ${APP_NAME} says connected.`} action="Connect LinkedIn" busy={busy === "LINKEDIN"} state={actionState?.platform === "LINKEDIN" ? actionState.state : null} onClick={() => void act("LINKEDIN", "/runner/control/platform/connect", { platform: "LINKEDIN" })} /> : null}
+      {selected.includes("INSTAGRAM") ? <Platform title="Instagram" connected={instagram?.status === "CONNECTED"} body={`Press Connect Instagram. A dedicated standard Chrome window opens. Sign in yourself and complete any security check, then leave it open until ${APP_NAME} says connected.`} action="Connect Instagram" busy={busy === "INSTAGRAM"} state={actionState?.platform === "INSTAGRAM" ? actionState.state : null} onClick={() => void act("INSTAGRAM", "/runner/control/platform/connect", { platform: "INSTAGRAM" })} /> : null}
       {selected.includes("WHATSAPP") ? <div className="rounded-[10px] border border-hairline bg-paper-2/45 p-4"><WhatsAppConnect /><ol className="mb-0 mt-3 pl-5 text-[12.5px] leading-6 text-ink-2"><li>Open WhatsApp on your phone.</li><li>Open Settings, then Linked Devices.</li><li>Press Link a Device and scan the code shown here.</li></ol></div> : null}
     </div>
     <Actions><Back onClick={onBack} /><Primary onClick={onNext}>Continue</Primary><Quiet onClick={onNext}>Finish connections later</Quiet></Actions>
@@ -356,5 +397,5 @@ function Back({ onClick }: { onClick: () => void }) { return <Quiet onClick={onC
 function Notice({ children }: { children: React.ReactNode }) { return <p className="m-0 mt-4 rounded-[8px] border border-hairline bg-paper-2/55 px-3 py-2.5 text-[12.5px] leading-5 text-ink-2" aria-live="polite">{children}</p>; }
 function InfoRows({ rows }: { rows: Array<[string, string]> }) { return <div className="mt-5 divide-y divide-hairline rounded-[10px] border border-hairline bg-paper-2/35">{rows.map(([label, body]) => <div key={label} className="px-4 py-3"><p className="m-0 text-[13.5px] font-medium text-ink">{label}</p><p className="m-0 mt-0.5 text-[12.5px] text-ink-3">{body}</p></div>)}</div>; }
 function Choice({ selected, title, body, onClick }: { selected: boolean; title: string; body: string; onClick: () => void }) { return <button type="button" aria-pressed={selected} onClick={onClick} className={cn("rounded-[10px] border px-4 py-3 text-left", selected ? "border-accent bg-accent/5" : "border-hairline bg-paper-2/35")}><span className="flex items-center gap-2 text-[14px] font-medium text-ink">{selected ? <Check className="h-4 w-4 text-accent" /> : <span className="h-4 w-4 rounded-full border border-hairline-strong" />}{title}</span><span className="mt-1 block pl-6 text-[12.5px] leading-5 text-ink-3">{body}</span></button>; }
-function Platform({ title, body, connected, action, busy, onClick }: { title: string; body: string; connected: boolean; action: string; busy: boolean; onClick: () => void }) { return <div className="flex flex-col items-stretch gap-3 rounded-[10px] border border-hairline bg-paper-2/40 p-4 sm:flex-row sm:items-center"><div className="min-w-0 flex-1"><p className="m-0 flex items-center gap-2 text-[15px] font-medium text-ink">{title}{connected ? <span className="rounded-pill bg-risk-fresh/15 px-2 py-0.5 font-mono text-[10px] text-risk-fresh">Connected</span> : null}</p><p className="m-0 mt-1 text-[12.5px] leading-5 text-ink-3">{body}</p></div>{!connected ? <div className="self-start sm:self-auto"><Primary disabled={busy} onClick={onClick}>{busy ? "Working..." : action}</Primary></div> : null}</div>; }
+function Platform({ title, body, connected, action, busy, state, onClick }: { title: string; body: string; connected: boolean; action: string; busy: boolean; state?: InlineActionState | null; onClick: () => void }) { return <div className="flex flex-col items-stretch gap-3 rounded-[10px] border border-hairline bg-paper-2/40 p-4 sm:flex-row sm:items-center"><div className="min-w-0 flex-1"><p className="m-0 flex items-center gap-2 text-[15px] font-medium text-ink">{title}{connected ? <span className="rounded-pill bg-risk-fresh/15 px-2 py-0.5 font-mono text-[10px] text-risk-fresh">Connected</span> : null}</p><p className="m-0 mt-1 text-[12.5px] leading-5 text-ink-3">{body}</p></div>{!connected ? <div className="self-start sm:self-auto"><InlineActionButton idleLabel={action} state={state ?? (busy ? { phase: "running", label: "Working..." } : null)} disabled={busy} onClick={onClick} className="inline-flex items-center gap-1.5 rounded-pill bg-ink px-4 py-[9px] text-[13.5px] font-medium text-paper hover:bg-ink-2 disabled:opacity-50" /></div> : null}</div>; }
 function Summary({ label, value, ok }: { label: string; value: string; ok: boolean }) { return <div className="flex items-center justify-between gap-3 px-4 py-3"><span className="text-[13px] text-ink-2">{label}</span><span className={cn("flex items-center gap-1.5 font-mono text-[11px]", ok ? "text-risk-fresh" : "text-ink-3")}>{ok ? <Check className="h-3.5 w-3.5" /> : null}{value}</span></div>; }

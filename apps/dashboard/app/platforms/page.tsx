@@ -3,6 +3,10 @@
 import { useCallback, useEffect, useState } from "react";
 import { Info, MoreVertical } from "lucide-react";
 import { apiGet, apiPost, runAction } from "@/lib/api";
+import {
+  runActionWithInlineFeedback,
+  type InlineActionState
+} from "@/lib/feedback";
 import type { AuditLogRow, PlatformCard } from "@/lib/types";
 import { formatRelative } from "@/lib/time";
 import { Button } from "@/components/ui/button";
@@ -161,10 +165,7 @@ function PlatformCardView({
   setActionError,
   refresh
 }: PlatformCardViewProps) {
-  const [actionState, setActionState] = useState<{
-    phase: "running" | "success" | "error";
-    label: string;
-  } | null>(null);
+  const [actionState, setActionState] = useState<InlineActionState | null>(null);
   const display = PLATFORM_DISPLAY[row.platform];
   const glyph = PLATFORM_GLYPH[row.platform];
   const supported = row.supported !== false;
@@ -212,23 +213,20 @@ function PlatformCardView({
         ? "Reconnect"
         : "Connect";
 
-  const runInline = async (
+  const runInline = (
     work: Promise<unknown>,
     pending: string,
     success: string,
     failure: string
-  ) => {
-    setActionError(null);
-    setActionState({ phase: "running", label: pending });
-    try {
-      await work;
-      await refresh();
-      setActionState({ phase: "success", label: success });
-    } catch {
-      setActionState({ phase: "error", label: failure });
-      setActionError(failure);
-    }
-  };
+  ) =>
+    runActionWithInlineFeedback(work, {
+      pending,
+      success,
+      failure,
+      setState: setActionState,
+      setError: setActionError,
+      onDone: refresh
+    });
 
   const openBrowser = () =>
     void runInline(

@@ -18,6 +18,11 @@ import {
   type LucideIcon
 } from "lucide-react";
 import { apiGet, apiPost } from "@/lib/api";
+import {
+  runActionWithInlineFeedback,
+  type InlineActionState
+} from "@/lib/feedback";
+import { InlineActionButton } from "@/components/common/inline-action-button";
 import { Canvas, PageHead } from "@/components/common/canvas";
 import { UserVoiceProfile } from "@/components/settings/UserVoiceProfile";
 import { FocusSettingsSection } from "@/components/settings/FocusSettingsSection";
@@ -273,6 +278,10 @@ export default function SettingsPage() {
   const [platformBusy, setPlatformBusy] = useState<PlatformCard["platform"] | null>(null);
   const [platformBusyEndpoint, setPlatformBusyEndpoint] =
     useState<PlatformActionEndpoint | null>(null);
+  const [platformActionState, setPlatformActionState] = useState<{
+    platform: PlatformCard["platform"];
+    state: InlineActionState;
+  } | null>(null);
   const [platformError, setPlatformError] = useState("");
   const [platformNotice, setPlatformNotice] = useState("");
 
@@ -466,38 +475,66 @@ export default function SettingsPage() {
     setPlatformNotice("");
     try {
       if (endpoint === "full-disk-access") {
-        const result = await apiPost<FullDiskAccessResponse>("/runner/control/imessage/full-disk-access", {});
-        const name = result.runnerProcess?.executableName ?? "node";
-        const path = result.runnerProcess?.executablePath;
-        setPlatformNotice(
-          path
-            ? `Opened Full Disk Access. Toggle ${name}. macOS may show it as ${name}: ${path}`
-            : result.message ?? "Opened Full Disk Access. Toggle the runner app, then restart."
+        const outcome = await runActionWithInlineFeedback(
+          apiPost<FullDiskAccessResponse>("/runner/control/imessage/full-disk-access", {}),
+          {
+            pending: "Opening Full Disk Access...",
+            success: "Full Disk Access opened",
+            failure: "Couldn't open Full Disk Access",
+            setState: (state) => setPlatformActionState({ platform, state }),
+            setError: (message) => setPlatformError(message ?? ""),
+            onDone: refreshPlatforms
+          }
         );
+        if (outcome.ok) {
+          const name = outcome.value.runnerProcess?.executableName ?? "node";
+          const path = outcome.value.runnerProcess?.executablePath;
+          setPlatformNotice(
+            path
+              ? `Opened Full Disk Access. Toggle ${name}. macOS may show it as ${name}: ${path}`
+              : outcome.value.message ?? "Opened Full Disk Access. Toggle the runner app, then restart."
+          );
+          setSavedAt(Date.now());
+        }
       } else {
         const path =
           endpoint === "scan" ? "/runner/control/scan" : `/runner/control/platform/${endpoint}`;
-        await apiPost(path, { platform });
-      }
-      await refreshPlatforms();
-      if (endpoint !== "full-disk-access") {
         const display = PLATFORM_DISPLAY[platform];
-        setPlatformNotice(
+        const pending =
           endpoint === "scan"
-            ? `${display} scan queued.`
+            ? `Scanning ${display}...`
             : endpoint === "open-browser"
-              ? `${display} opened.`
+              ? `Opening ${display}...`
               : endpoint === "reset-session"
-                ? `${display} disconnected.`
-                : `${display} connected.`
-        );
+                ? `Resetting ${display}...`
+                : `Connecting ${display}...`;
+        const success =
+          endpoint === "scan"
+            ? `${display} scan queued`
+            : endpoint === "open-browser"
+              ? `${display} opened`
+              : endpoint === "reset-session"
+                ? `${display} disconnected`
+                : `${display} connected`;
+        const outcome = await runActionWithInlineFeedback(apiPost(path, { platform }), {
+          pending,
+          success,
+          failure:
+            platform === "INSTAGRAM" && (endpoint === "connect" || endpoint === "open-browser")
+              ? "Finish Instagram sign-in, then try again"
+              : `Couldn't update ${display}`,
+          setState: (state) => setPlatformActionState({ platform, state }),
+          setError: (message) => setPlatformError(message ?? ""),
+          onDone: refreshPlatforms
+        });
+        if (outcome.ok) {
+          setPlatformNotice(`${success}.`);
+          setSavedAt(Date.now());
+        }
       }
-      setSavedAt(Date.now());
-    } catch {
+    } catch (error) {
       setPlatformError(
-        platform === "INSTAGRAM" && (endpoint === "connect" || endpoint === "open-browser")
-          ? "Finish signing in or any Instagram security check in Chrome, then try Connect again."
-          : `Couldn't update ${PLATFORM_DISPLAY[platform]}. Is the runner online?`
+        error instanceof Error ? error.message : `Couldn't update ${PLATFORM_DISPLAY[platform]}.`
       );
     } finally {
       setPlatformBusy(null);
@@ -610,6 +647,7 @@ export default function SettingsPage() {
               error={platformError}
               notice={platformNotice}
               busyEndpoint={platformBusyEndpoint}
+              actionState={platformActionState}
               onAction={platformAction}
               host={host}
               phoneLayout={phoneLayout}
@@ -922,6 +960,7 @@ function PlatformSettingsSection({
   rows,
   busy,
   busyEndpoint,
+  actionState,
   error,
   notice,
   onAction,
@@ -931,6 +970,10 @@ function PlatformSettingsSection({
   rows: PlatformCard[];
   busy: PlatformCard["platform"] | null;
   busyEndpoint: PlatformActionEndpoint | null;
+  actionState: {
+    platform: PlatformCard["platform"];
+    state: InlineActionState;
+  } | null;
   error: string;
   notice: string;
   onAction: (platform: PlatformCard["platform"], endpoint: PlatformActionEndpoint) => void;
@@ -988,6 +1031,7 @@ function PlatformSettingsSection({
             remoteDisabled={remoteDisabled}
             offlineExplanation={host.offlineExplanation}
             busy={busy === "IMESSAGE"}
+            actionState={actionState?.platform === "IMESSAGE" ? actionState.state : null}
             onPrimary={() =>
               onAction("IMESSAGE", imessageNeedsFullDiskAccess ? "full-disk-access" : "scan")
             }
@@ -1028,6 +1072,7 @@ function PlatformSettingsSection({
             remoteDisabled={remoteDisabled}
             offlineExplanation={host.offlineExplanation}
             busy={busy === "GOOGLE_MESSAGES"}
+            actionState={actionState?.platform === "GOOGLE_MESSAGES" ? actionState.state : null}
             onPrimary={() =>
               onAction(
                 "GOOGLE_MESSAGES",
@@ -1087,6 +1132,7 @@ function PlatformSettingsSection({
             remoteDisabled={remoteDisabled}
             offlineExplanation={host.offlineExplanation}
             busy={busy === "LINKEDIN"}
+            actionState={actionState?.platform === "LINKEDIN" ? actionState.state : null}
             onPrimary={() =>
               onAction("LINKEDIN", linkedinPrimary === "scan" ? "scan" : "connect")
             }
@@ -1142,6 +1188,7 @@ function PlatformSettingsSection({
             remoteDisabled={remoteDisabled}
             offlineExplanation={host.offlineExplanation}
             busy={busy === "INSTAGRAM"}
+            actionState={actionState?.platform === "INSTAGRAM" ? actionState.state : null}
             onPrimary={() =>
               onAction("INSTAGRAM", instagramPrimary === "scan" ? "scan" : "connect")
             }
@@ -1208,6 +1255,7 @@ function PlatformSetupCard({
   remoteDisabled = false,
   offlineExplanation,
   busy,
+  actionState,
   onPrimary,
   moreItems
 }: {
@@ -1221,6 +1269,7 @@ function PlatformSetupCard({
   remoteDisabled?: boolean;
   offlineExplanation?: string;
   busy: boolean;
+  actionState?: InlineActionState | null;
   onPrimary: () => void;
   moreItems?: MenuItem[];
 }) {
@@ -1290,15 +1339,14 @@ function PlatformSetupCard({
         </p>
       ) : null}
       <div className="mt-4 flex flex-wrap items-center gap-2">
-        <button
-          type="button"
+        <InlineActionButton
           onClick={onPrimary}
           disabled={busy || !enabled || !supported || remoteDisabled}
+          idleLabel={primaryLabel}
+          state={actionState ?? (busy ? { phase: "running", label: busyLabel } : null)}
           title={remoteDisabled ? offlineExplanation : undefined}
           className="inline-flex min-h-[40px] items-center rounded-pill bg-ink px-4 py-[8px] text-[12.5px] font-medium text-paper hover:bg-ink-2 disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          {busy ? busyLabel : primaryLabel}
-        </button>
+        />
         {secondaryItems.length > 0 && supported ? (
           <Menu
             trigger={

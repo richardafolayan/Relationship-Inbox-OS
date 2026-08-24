@@ -83,7 +83,7 @@ function makeHarness(initialRows, opts = {}) {
       async findUnique({ where }) {
         return {
           id: where.id,
-          platform: "LINKEDIN",
+          platform: opts.platform ?? "LINKEDIN",
           platformThreadId: "pt1",
           threadUrl: null,
           lastMessageAt: null,
@@ -120,7 +120,7 @@ function makeHarness(initialRows, opts = {}) {
   };
 
   const svc = createSendService({
-    adapters: { LINKEDIN: adapter },
+    adapters: { LINKEDIN: adapter, INSTAGRAM: adapter },
     eventBus: { emit: () => {}, nextEventId: () => 1, subscribe: () => () => {} },
     settingsStore: {
       getSettings: async () => ({
@@ -148,6 +148,7 @@ const pendingRow = (over = {}) => ({
   errorJson: null,
   attachmentsJson: null,
   replyToMessageId: null,
+  scheduledFor: null,
   ...over
 });
 
@@ -162,6 +163,19 @@ test("happy path: a PENDING row sends exactly once and lands SENT", async () => 
   await svc.processSendRequest("sr1");
   assert.equal(sends.length, 1, "exactly one physical send");
   assert.equal(rows[0].status, "SENT");
+});
+
+test("worker refuses a stale scheduled Instagram row before any physical send", async () => {
+  const { svc, rows, sends } = makeHarness(
+    [pendingRow({ scheduledFor: new Date(Date.now() - 60_000) })],
+    { platform: "INSTAGRAM" }
+  );
+
+  await svc.processSendRequest("sr1");
+
+  assert.equal(sends.length, 0);
+  assert.equal(rows[0].status, "FAILED");
+  assert.match(rows[0].errorJson, /user-triggered sends only/);
 });
 
 test("re-dispatch of an already-SENT row does NOT re-send (resume after a completed send)", async () => {

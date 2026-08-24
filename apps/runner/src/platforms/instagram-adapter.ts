@@ -7,7 +7,7 @@ import {
   type SendReceipt,
   type ThreadStub
 } from "@inbox-os/core";
-import { BetaAdapter, betaIdentityMatch, type BetaAdapterDependencies } from "./beta-adapter";
+import { BetaAdapter, type BetaAdapterDependencies } from "./beta-adapter";
 import { ChromeCookieBridge } from "./chrome-cookie-bridge";
 import { AdapterFailure, cleanMessageText } from "./utils";
 import { humanClick, humanType, readingPause } from "./humanize";
@@ -218,12 +218,6 @@ export function extractInstagramThreadSnapshotsFromPayload(
 
     const record = value as Record<string, unknown>;
     const typeName = instagramString(record, ["__typename", "type", "item_type"]);
-    const explicitThreadId = instagramString(record, [
-      "thread_v2_id",
-      "threadV2Id",
-      "thread_id",
-      "threadId"
-    ]);
     const hasThreadStructure = [
       "thread_fbid",
       "thread_key",
@@ -235,7 +229,7 @@ export function extractInstagramThreadSnapshotsFromPayload(
     const typedThreadId = isThreadRecord
       ? instagramString(record, ["id"])
       : undefined;
-    const stableId = isThreadRecord ? typedThreadId ?? explicitThreadId : undefined;
+    const stableId = typedThreadId;
     if (isStableInstagramId(stableId)) {
       const participants = [record.users, record.participants]
         .flatMap((candidate) => (Array.isArray(candidate) ? candidate : []))
@@ -377,12 +371,11 @@ export function normalizeInstagramMessageSnapshots(
     const item = prepared[index]!;
     const occurrence = occurrences.get(item.signature) ?? 0;
     occurrences.set(item.signature, occurrence + 1);
-    const previous = prepared[index - 1]?.signature ?? "";
     const nativeId = item.snapshot.nativeId?.trim();
     const key = nativeId
       ? `instagram:${nativeId}`
       : `instagram:${stableHash(
-          [platformThreadId, item.signature, previous, String(occurrence)].join("\u001e")
+          [platformThreadId, item.signature, String(occurrence)].join("\u001e")
         )}`;
 
     if (seenKeys.has(key)) {
@@ -792,14 +785,8 @@ export class InstagramAdapter extends BetaAdapter {
             identity?.getAttribute("alt") ||
             identity?.textContent ||
             "";
-          const stableId =
-            row.getAttribute("data-thread-id") ||
-            row.getAttribute("data-conversation-id") ||
-            link?.getAttribute("data-thread-id") ||
-            undefined;
           return {
             href: link?.href,
-            stableId,
             displayName: clean(identityText),
             preview: clean(preview?.textContent),
             unread: Boolean(query(row, selectors.unread_badge))
@@ -1045,11 +1032,16 @@ export class InstagramAdapter extends BetaAdapter {
           .first()
           .textContent()
           .catch(() => "");
+    const normalizedHeader = fallbackHeader?.replace(/\s+/g, " ").trim().normalize("NFKC").toLocaleLowerCase();
+    const normalizedRecipient = thread.displayName
+      ?.replace(/\s+/g, " ")
+      .trim()
+      .normalize("NFKC")
+      .toLocaleLowerCase();
     if (
-      thread.displayName &&
-      thread.displayName !== "Instagram conversation" &&
-      fallbackHeader?.trim() &&
-      !betaIdentityMatch(fallbackHeader, thread.displayName)
+      normalizedRecipient &&
+      normalizedRecipient !== "instagram conversation" &&
+      normalizedHeader !== normalizedRecipient
     ) {
       throw this.safeFailure(
         "THREAD_NOT_FOUND",

@@ -253,11 +253,15 @@ export async function launchPersistentContextForPlatform(input: {
     ...baseOptions,
     channel: "chrome",
     args: buildPersonalChromeArgs(baseArgs, input.browserProfile.personalChromeProfileDirectory),
-    ignoreDefaultArgs: [
-      ...(baseOptions.ignoreDefaultArgs ?? []),
-      "--password-store=basic",
-      "--use-mock-keychain"
-    ]
+    ...(input.platform === "INSTAGRAM"
+      ? {
+          ignoreDefaultArgs: [
+            ...(baseOptions.ignoreDefaultArgs ?? []),
+            "--password-store=basic",
+            "--use-mock-keychain"
+          ]
+        }
+      : {})
   };
 
   await input.onConnectStep?.({

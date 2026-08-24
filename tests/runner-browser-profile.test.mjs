@@ -269,7 +269,7 @@ test("launchPersistentContextForPlatform uses installed Chrome for an isolated I
   assert.equal(calls[0]?.userDataDir, "/tmp/isolated/instagram");
 });
 
-test("launchPersistentContextForPlatform uses mirrored target directory for personal launch", async () => {
+test("launchPersistentContextForPlatform keeps non-Instagram personal Chrome defaults unchanged", async () => {
   const calls = [];
   const context = { kind: "personal-context" };
   const prepared = [];
@@ -306,6 +306,35 @@ test("launchPersistentContextForPlatform uses mirrored target directory for pers
   assert.equal(calls[0]?.userDataDir, "/tmp/isolated/linkedin");
   assert.equal(calls[0]?.options.channel, "chrome");
   assert.ok(calls[0]?.options.args.includes("--profile-directory=Person 1"));
+  assert.equal(calls[0]?.options.ignoreDefaultArgs.includes("--password-store=basic"), false);
+  assert.equal(calls[0]?.options.ignoreDefaultArgs.includes("--use-mock-keychain"), false);
+});
+
+test("launchPersistentContextForPlatform applies keychain flags only to Instagram personal launch", async () => {
+  const calls = [];
+  await launchPersistentContextForPlatform({
+    platform: "INSTAGRAM",
+    launchPersistentContext: async (userDataDir, options) => {
+      calls.push({ userDataDir, options });
+      return { kind: "instagram-personal-context" };
+    },
+    isolatedProfileDir: "/tmp/isolated/instagram",
+    headless: false,
+    browserProfile: basePersonalConfig(),
+    preparePersonalProfileMirror: async (input) => ({
+      syncPerformed: true,
+      syncReason: "target_missing",
+      sourceUserDataDir: input.sourceUserDataDir,
+      targetUserDataDir: input.targetUserDataDir,
+      profileDirectory: input.profileDirectory,
+      sourceProfileDir: "/tmp/source/Person 1",
+      targetProfileDir: "/tmp/isolated/instagram/Person 1",
+      sourceMarkerMtimeMs: 100,
+      lastMirroredSourceMarkerMtimeMs: undefined,
+      durationMs: 10
+    })
+  });
+
   assert.ok(calls[0]?.options.ignoreDefaultArgs.includes("--password-store=basic"));
   assert.ok(calls[0]?.options.ignoreDefaultArgs.includes("--use-mock-keychain"));
 });

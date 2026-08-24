@@ -355,6 +355,12 @@ export function createSendService(deps: SendServiceDeps) {
       const stagedAttachments = sendRequest.attachmentsJson
         ? (JSON.parse(sendRequest.attachmentsJson) as Array<{ absolutePath: string; displayName: string; mimeType?: string; kind?: string }>)
         : [];
+      assertInstagramManualTextSend({
+        platform: thread.platform,
+        scheduled: Boolean(sendRequest.scheduledFor),
+        attachmentCount: stagedAttachments.length,
+        source: "manual"
+      });
       if (inSandbox) {
         const manifest = await deps.settingsStore.getDemoSeedManifest();
         if (!manifest || !manifest.threadIds.includes(thread.id)) {

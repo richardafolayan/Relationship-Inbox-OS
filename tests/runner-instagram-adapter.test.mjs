@@ -333,7 +333,7 @@ test("thread identity is stable across row order and duplicate rows", () => {
   assert.equal(first.find((thread) => thread.platformThreadId === "two")?.unreadCount, 1);
 });
 
-test("GraphQL thread payloads use stable IDs and ignore unrelated object IDs", () => {
+test("GraphQL thread payloads use only typed thread IDs and ignore unsupported fallbacks", () => {
   const payload = {
     data: {
       inbox: {
@@ -387,7 +387,7 @@ test("GraphQL thread payloads use stable IDs and ignore unrelated object IDs", (
 
   assert.deepEqual(
     first.map((thread) => thread.platformThreadId).sort(),
-    ["thread-one", "thread-two-url", "typed-thread"]
+    ["thread-two-url", "typed-thread"]
   );
   assert.deepEqual(
     first.map((thread) => thread.platformThreadId).sort(),
@@ -397,7 +397,7 @@ test("GraphQL thread payloads use stable IDs and ignore unrelated object IDs", (
     first.find((thread) => thread.platformThreadId === "thread-two-url")?.unreadCount,
     1
   );
-  assert.equal(first.find((thread) => thread.platformThreadId === "thread-one")?.unreadCount, 1);
+  assert.equal(first.some((thread) => thread.platformThreadId === "thread-one"), false);
   assert.equal(first.find((thread) => thread.platformThreadId === "typed-thread")?.unreadCount, 1);
 });
 
@@ -552,6 +552,24 @@ test("opening Instagram uses the exact thread URL and rejects identity mismatche
       error?.kind === "THREAD_NOT_FOUND" &&
       error?.details?.reason === "opened_recipient_mismatch"
   );
+
+  for (const header of ["", "Joanne"]) {
+    const unverifiedRecipientPage = makePage({
+      openedUrl: "https://www.instagram.com/direct/t/safe-thread/",
+      header
+    });
+    await assert.rejects(
+      () =>
+        makeAdapter(unverifiedRecipientPage).openThread({
+          platformThreadId: "safe-thread",
+          displayName: header ? "Ann" : "Safe thread"
+        }),
+      (error) =>
+        error?.kind === "THREAD_NOT_FOUND" &&
+        error?.details?.reason === "opened_recipient_mismatch",
+      `header ${JSON.stringify(header)} must fail closed`
+    );
+  }
 });
 
 test("message normalization preserves direction, exact timestamps and first-seen fallback", () => {
@@ -615,6 +633,20 @@ test("message keys are stable across rescans and deduplicate native ids", () => 
   );
   assert.equal(first.length, 3);
   assert.notEqual(first[0].platformMessageKey, first[1].platformMessageKey);
+});
+
+test("fallback message keys stay attached to the same message when row order changes", () => {
+  const snapshots = [
+    { direction: "IN", text: "First", senderName: "Ann" },
+    { direction: "OUT", text: "Second", senderName: "Me" },
+    { direction: "IN", text: "Third", senderName: "Ann" }
+  ];
+  const first = normalizeInstagramMessageSnapshots("thread-order", snapshots);
+  const reversed = normalizeInstagramMessageSnapshots("thread-order", [...snapshots].reverse());
+  const keysByText = (messages) =>
+    Object.fromEntries(messages.map((message) => [message.text, message.platformMessageKey]));
+
+  assert.deepEqual(keysByText(first), keysByText(reversed));
 });
 
 test("ambiguous Instagram direction fails instead of defaulting incoming", () => {

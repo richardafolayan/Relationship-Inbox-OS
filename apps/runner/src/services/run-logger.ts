@@ -8,6 +8,10 @@ import {
 import { join, resolve } from "node:path";
 import type { PlatformName } from "@inbox-os/core";
 import { getDevLoggingFlags } from "../dev-flags.js";
+import {
+  platformDiagnosticArtifactsAllowed,
+  sanitizePlatformDiagnosticValue
+} from "./platform-diagnostics.js";
 
 export type RunTraceLevel = "debug" | "info" | "warn" | "error";
 
@@ -301,6 +305,7 @@ function noOpLogger(input: {
   emitConsole?: boolean;
 }): RunLogger {
   const emitConsole = input.emitConsole ?? true;
+  const privateDiagnostics = !platformDiagnosticArtifactsAllowed(input.platform);
   const stageHeadlinesEnabled = getDevLoggingFlags().stageHeadlines;
   const emitHeadline = (headlineInput: {
     platform: string;
@@ -312,10 +317,13 @@ function noOpLogger(input: {
     if (!stageHeadlinesEnabled) {
       return;
     }
-    const detailsSuffix = headlineInput.details ? ` details=${stringifyJson(headlineInput.details)}` : "";
+    const safeDetails = headlineInput.details
+      ? sanitizePlatformDiagnosticValue(input.platform, headlineInput.details)
+      : undefined;
+    const detailsSuffix = safeDetails ? ` details=${stringifyJson(safeDetails)}` : "";
     const line =
       `[${headlineInput.platform}][SCAN][req=${headlineInput.requestId}][stage=${headlineInput.stage}] ` +
-      `${headlineInput.message}${detailsSuffix}`;
+      `${privateDiagnostics ? redactedTag : headlineInput.message}${detailsSuffix}`;
     if (emitConsole) {
       // eslint-disable-next-line no-console
       console.info(line);
@@ -399,6 +407,8 @@ export function createRunLogger(input: {
   }
 
   const piiEnabled = isEnabled(process.env.RUN_TRACE_PII);
+  const privateDiagnostics = !platformDiagnosticArtifactsAllowed(input.platform);
+  const effectivePiiEnabled = piiEnabled && !privateDiagnostics;
   const eventsPath = join(runDir, "events.ndjson");
   const actionsPath = join(runDir, "actions.csv");
   const summaryPath = join(runDir, "summary.json");
@@ -439,26 +449,35 @@ export function createRunLogger(input: {
   function writeEvent(event: Omit<RunTraceEvent, "requestId" | "platform">): void {
     const normalizedEvent: RunTraceEvent = {
       ...event,
+      ...(privateDiagnostics ? { url: undefined, pageId: undefined } : {}),
       requestId: input.requestId,
       platform: input.platform,
-      details: sanitizeValue(event.details ?? {}, piiEnabled, "details") as Record<string, unknown>
+      details: sanitizeValue(
+        sanitizePlatformDiagnosticValue(input.platform, event.details ?? {}),
+        effectivePiiEnabled,
+        "details"
+      ) as Record<string, unknown>
     };
     appendLine(eventsPath, stringifyJson(normalizedEvent));
     prettyPrint(normalizedEvent, emitConsole);
   }
 
   function summarizeError(error: unknown): Record<string, unknown> {
+    if (privateDiagnostics) {
+      const message = error instanceof Error ? error.message : String(error);
+      return { name: "Error", reason: resolveReason(message) };
+    }
     if (error instanceof Error) {
       return {
         name: error.name,
-        message: sanitizeString(error.message, piiEnabled, "message"),
-        stack: sanitizeString(error.stack ?? "", piiEnabled, "stack"),
+        message: sanitizeString(error.message, effectivePiiEnabled, "message"),
+        stack: sanitizeString(error.stack ?? "", effectivePiiEnabled, "stack"),
         reason: resolveReason(error.message)
       };
     }
     const message = String(error);
     return {
-      message: sanitizeString(message, piiEnabled, "message"),
+      message: sanitizeString(message, effectivePiiEnabled, "message"),
       reason: resolveReason(message)
     };
   }
@@ -474,19 +493,31 @@ export function createRunLogger(input: {
     counts?: Record<string, unknown>;
     note?: string;
   }): void {
-    const countsJson = stringifyJson(sanitizeValue(action.counts ?? {}, piiEnabled, "counts"));
+    const countsJson = stringifyJson(
+      sanitizeValue(
+        sanitizePlatformDiagnosticValue(input.platform, action.counts ?? {}),
+        effectivePiiEnabled,
+        "counts"
+      )
+    );
     const row = [
       csvEscape(action.ts ?? nowIso()),
       csvEscape(input.requestId),
       csvEscape(input.platform),
       csvEscape(action.stage ?? ""),
       csvEscape(action.action),
-      csvEscape(action.selector ?? ""),
-      csvEscape(action.url ?? ""),
+      csvEscape(privateDiagnostics ? "" : action.selector ?? ""),
+      csvEscape(privateDiagnostics ? "" : action.url ?? ""),
       csvEscape(action.result),
       csvEscape(action.elapsedMs ?? ""),
       csvEscape(countsJson),
-      csvEscape(sanitizeString(action.note ?? "", piiEnabled, "note"))
+      csvEscape(
+        privateDiagnostics
+          ? action.note
+            ? redactedTag
+            : ""
+          : sanitizeString(action.note ?? "", effectivePiiEnabled, "note")
+      )
     ].join(",");
     appendLine(actionsPath, row);
   }
@@ -502,12 +533,16 @@ export function createRunLogger(input: {
       return;
     }
     const safeDetails = headlineInput.details
-      ? (sanitizeValue(headlineInput.details, piiEnabled, "details") as Record<string, unknown>)
+      ? (sanitizeValue(
+          sanitizePlatformDiagnosticValue(input.platform, headlineInput.details),
+          effectivePiiEnabled,
+          "details"
+        ) as Record<string, unknown>)
       : undefined;
     const detailsSuffix = safeDetails ? ` details=${stringifyJson(safeDetails)}` : "";
     const line =
       `[${headlineInput.platform}][SCAN][req=${headlineInput.requestId}][stage=${headlineInput.stage}] ` +
-      `${headlineInput.message}${detailsSuffix}`;
+      `${privateDiagnostics ? redactedTag : headlineInput.message}${detailsSuffix}`;
     if (emitConsole) {
       // eslint-disable-next-line no-console
       console.info(line);
@@ -600,13 +635,20 @@ export function createRunLogger(input: {
     },
     mergeCounters: (nextCounters) => {
       for (const [key, value] of Object.entries(nextCounters)) {
-        counters[key] = sanitizeValue(value, piiEnabled, key);
+        counters[key] = sanitizeValue(
+          sanitizePlatformDiagnosticValue(input.platform, value),
+          effectivePiiEnabled,
+          key
+        );
       }
     },
     setStopReason: (reason) => {
-      stopReason = reason;
+      stopReason = privateDiagnostics ? resolveReason(reason) : reason;
     },
     attachArtifact: (artifactInput) => {
+      if (privateDiagnostics) {
+        return;
+      }
       if (artifactInput.playwrightTracePath) {
         artifacts.playwrightTracePath = artifactInput.playwrightTracePath;
       }
@@ -622,6 +664,9 @@ export function createRunLogger(input: {
         failureScreenshotPath?: string;
         failureDomDumpPath?: string;
       } = {};
+      if (privateDiagnostics) {
+        return copied;
+      }
       if (artifactInput.screenshotPath && existsSync(artifactInput.screenshotPath)) {
         copyFileSync(artifactInput.screenshotPath, defaultFailureScreenshotPath);
         copied.failureScreenshotPath = defaultFailureScreenshotPath;
@@ -655,7 +700,9 @@ export function createRunLogger(input: {
       }
       flushed = true;
       if (flushInput?.stopReason) {
-        stopReason = flushInput.stopReason;
+        stopReason = privateDiagnostics
+          ? resolveReason(flushInput.stopReason)
+          : flushInput.stopReason;
       }
       if (flushInput?.counters) {
         logger.mergeCounters(flushInput.counters);
@@ -673,11 +720,17 @@ export function createRunLogger(input: {
         runDir,
         eventsPath,
         actionsPath,
-        playwrightTracePath: artifacts.playwrightTracePath ?? (existsSync(defaultPlaywrightTracePath) ? defaultPlaywrightTracePath : undefined),
+        playwrightTracePath: privateDiagnostics
+          ? undefined
+          : artifacts.playwrightTracePath ?? (existsSync(defaultPlaywrightTracePath) ? defaultPlaywrightTracePath : undefined),
         failureScreenshotPath:
-          artifacts.failureScreenshotPath ?? (existsSync(defaultFailureScreenshotPath) ? defaultFailureScreenshotPath : undefined),
+          privateDiagnostics
+            ? undefined
+            : artifacts.failureScreenshotPath ?? (existsSync(defaultFailureScreenshotPath) ? defaultFailureScreenshotPath : undefined),
         failureDomDumpPath:
-          artifacts.failureDomDumpPath ?? (existsSync(defaultFailureDomDumpPath) ? defaultFailureDomDumpPath : undefined),
+          privateDiagnostics
+            ? undefined
+            : artifacts.failureDomDumpPath ?? (existsSync(defaultFailureDomDumpPath) ? defaultFailureDomDumpPath : undefined),
         counters,
         error: flushInput?.error ? summarizeError(flushInput.error) : undefined
       };
