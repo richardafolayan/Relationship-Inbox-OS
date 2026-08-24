@@ -85,7 +85,8 @@ before claiming those guarantees still hold.
 - Reviewed local integration branch: `fix/instagram-integration-gate`.
 - Base: `origin/develop` at
   `ddfba09f44470852c349e0a7f82c12230ba7d32d`.
-- The complete bounded-concurrency suite passes: 2,978 tests, zero failures,
+- Latest verified corrective commit: `ecaf18ae`.
+- The complete bounded-concurrency suite passes: 2,988 tests, zero failures,
   zero skips, zero cancellations, and zero todos.
 - Dashboard, runner, and core type checks pass. The production dashboard build,
   Prisma generation, documentation checks, schema-upgrade checks, and diff
@@ -140,6 +141,15 @@ before claiming those guarantees still hold.
   external composer mutation, leaves identity-quarantined platforms degraded
   without advancing their fully fresh scan time, and surfaces incomplete
   per-thread checks instead of claiming there were no new messages.
+- A fourth exact-head adversarial review reopened six claims. The composer is
+  now bound before recipient verification, and every read, clear, click, and
+  keystroke uses that exact handle. Unresolved identity quarantine is stored as
+  privacy-safe hashes and remains authoritative when the conflicting message
+  leaves Instagram's sliding DOM window or the runner restarts. Thread failures
+  and candidate caps retain the previous fully fresh time and cannot clear
+  retry state. Incomplete per-thread checks return HTTP 409, so dashboard bulk
+  actions count them as failures. The mobile and desktop status bar renders the
+  incomplete result after active work has ended.
 - Scheduled sends, attachments, polls, focus acknowledgements, and other
   automated Instagram sends are rejected at the durable worker boundary. The
   dashboard no longer offers those unsupported actions.
@@ -148,6 +158,10 @@ before claiming those guarantees still hold.
   1024 by 768, 390 by 844, and 320 by 568. It found no horizontal overflow or
   fresh console errors. The pass did not open a live platform session or send
   a real message.
+- The current production build also rendered the incomplete-check result at
+  390 by 844 and 1440 by 900 in dark and light themes. The warning remained
+  visible after the active ticker ended. This used a browser-local synthetic
+  event only and performed no live scan, send, reset, or database mutation.
 - The earlier live Instagram login, restart persistence, 30-thread scan,
   canonical thread opening, one user-approved harmless send, and read-only
   deduplication checks remain historical evidence from earlier branch commits.
