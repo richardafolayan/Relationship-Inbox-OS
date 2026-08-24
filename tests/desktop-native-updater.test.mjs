@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
+import { EventEmitter } from "node:events";
 import {
   existsSync,
   mkdirSync,
@@ -18,9 +19,24 @@ const {
   acknowledgeNativeUpdateRequest,
   beginNativeReplacement,
   claimNativeUpdateRequest,
+  createNativeUpdateLifecycle,
   nativeUpdaterConfiguration,
   signingCertificatePath
 } = require("../apps/desktop/updater.cjs");
+
+async function within(promise, message, timeoutMs = 500) {
+  let timeout;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timeout = setTimeout(() => reject(new Error(message)), timeoutMs);
+      })
+    ]);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
 
 test("native replacement keeps its durable claim when quitAndInstall throws", () => {
   let acknowledged = false;
@@ -139,28 +155,82 @@ test("quarantining malformed request A cannot move a newly published request B",
   }
 });
 
-test("native replacement requires verified backend shutdown and request failures stay retryable", () => {
+test("download shutdown failure pauses native update polling until process restart", async () => {
+  const root = mkdtempSync(join(tmpdir(), "tovi-native-shutdown-failure-"));
+  const path = join(root, "request.json");
+  const request = { fromVersion: "1", toVersion: "2" };
+  const autoUpdater = new EventEmitter();
+  let checks = 0;
+  let resolveChecked;
+  let resolveFailed;
+  let resolveStopping;
+  let rejectShutdown;
+  const checked = new Promise((resolve) => { resolveChecked = resolve; });
+  const failed = new Promise((resolve) => { resolveFailed = resolve; });
+  const stopping = new Promise((resolve) => { resolveStopping = resolve; });
+  autoUpdater.checkForUpdates = () => {
+    checks += 1;
+    resolveChecked();
+  };
+  autoUpdater.quitAndInstall = () => assert.fail("replacement must not start before verified shutdown");
+  writeFileSync(path, JSON.stringify(request));
+
+  const lifecycle = createNativeUpdateLifecycle({
+    autoUpdater,
+    requestPath: path,
+    intervalMs: 5,
+    host: {
+      beginShutdown() {},
+      stopRuntime() {
+        resolveStopping();
+        return new Promise((_, reject) => { rejectShutdown = reject; });
+      },
+      markReplacementReady() {},
+      recoverReplacementFailure() { assert.fail("replacement did not start"); },
+      recoverShutdownFailure(error) {
+        assert.match(error.message, /runtime still active/);
+        resolveFailed();
+      },
+      log() {}
+    }
+  });
+
+  try {
+    lifecycle.start();
+    await within(checked, "update check did not start");
+    autoUpdater.emit("update-downloaded");
+    await within(stopping, "verified shutdown did not start");
+    autoUpdater.emit("error", new Error("late updater error"));
+    rejectShutdown(new Error("runtime still active"));
+    await within(failed, "shutdown failure was not handled");
+
+    autoUpdater.emit("update-not-available");
+
+    lifecycle.stop();
+    lifecycle.start();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.equal(checks, 1);
+
+    const retained = claimNativeUpdateRequest(path);
+    assert.deepEqual(retained.request, request);
+    acknowledgeNativeUpdateRequest(retained);
+  } finally {
+    lifecycle.stop();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("desktop wires native replacement through the executable lifecycle module", () => {
   const main = readFileSync(new URL("../apps/desktop/main.cjs", import.meta.url), "utf8");
-  const downloadedStart = main.indexOf('autoUpdater.on("update-downloaded"');
-  const downloaded = main.slice(
-    downloadedStart,
-    main.indexOf("\n  startNativeUpdateTimer();", downloadedStart)
-  );
-  assert.match(downloaded, /stopLocalApp\(\{ verifyRuntimeTree: true \}\)[\s\S]*\.then\(\(\) => \{[\s\S]*beginNativeReplacement/);
-  assert.doesNotMatch(downloaded, /stopLocalApp\([^)]*\)\.finally\([\s\S]*quitAndInstall/);
-  assert.ok(
-    downloaded.indexOf("stopLocalApp({ verifyRuntimeTree: true })") <
-      downloaded.indexOf("beginNativeReplacement(autoUpdater, nativeUpdateClaim)"),
-    "the request claim must remain retryable until verified shutdown succeeds"
-  );
-  assert.doesNotMatch(downloaded, /acknowledgeNativeUpdateRequest\(nativeUpdateClaim\)/);
-  assert.match(downloaded, /beginNativeReplacement\(autoUpdater, nativeUpdateClaim\)[\s\S]*nativeUpdateClaim = null/);
-  assert.match(downloaded, /catch \(error\)[\s\S]*quitReady = false[\s\S]*startLocalApp\(\)/);
-  assert.doesNotMatch(downloaded, /clearInterval\(nativeUpdateTimer\)/);
+  assert.match(main, /nativeUpdateLifecycle = createNativeUpdateLifecycle\(\{/);
+  assert.match(main, /stopRuntime\(\) \{[\s\S]*stopLocalApp\(\{ verifyRuntimeTree: true \}\)/);
+  assert.match(main, /recoverReplacementFailure\(error\)[\s\S]*startLocalApp\(\)/);
+  assert.match(main, /recoverShutdownFailure\(error\)/);
+  assert.doesNotMatch(main, /autoUpdater\.on\("update-downloaded"/);
+  assert.doesNotMatch(main, /nativeUpdateTimer/);
   assert.match(main, /stop-existing-install\.mjs/);
   assert.match(main, /"--backend-only"/);
   assert.match(main, /"--preserve-pid",\s*String\(process\.pid\)/);
-  assert.match(main, /autoUpdater\.on\("error"[\s\S]*acknowledgeNativeUpdateRequest/);
 
   const restart = main.slice(main.indexOf("async function restartLocalApp"), main.indexOf("async function showStartupRecovery"));
   assert.match(restart, /stopLocalApp\(\{ verifyRuntimeTree: true \}\)/);
@@ -171,7 +241,8 @@ test("native replacement requires verified backend shutdown and request failures
   assert.doesNotMatch(quitting, /stopLocalApp\([^)]*\)\.finally/);
   assert.match(quitting, /Refused quit because the local runtime did not stop/);
   assert.match(quitting, /quitInProgress = false[\s\S]*shuttingDown = false/);
-  assert.match(quitting, /shuttingDown = false[\s\S]*startMenuRefreshTimer\(\)[\s\S]*startNativeUpdateTimer\(\)/);
+  assert.match(quitting, /nativeUpdateLifecycle\?\.stop\(\)[\s\S]*stopLocalApp/);
+  assert.match(quitting, /shuttingDown = false[\s\S]*startMenuRefreshTimer\(\)[\s\S]*nativeUpdateLifecycle\?\.start\(\)/);
 
   const runner = readFileSync(new URL("../apps/runner/src/index.ts", import.meta.url), "utf8");
   assert.match(

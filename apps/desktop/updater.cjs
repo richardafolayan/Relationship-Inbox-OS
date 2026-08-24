@@ -78,6 +78,100 @@ function beginNativeReplacement(autoUpdater, claim, acknowledge = acknowledgeNat
   return !claim || acknowledge(claim);
 }
 
+function createNativeUpdateLifecycle({
+  autoUpdater,
+  requestPath,
+  host,
+  intervalMs = 500,
+  claimRequest = claimNativeUpdateRequest,
+  acknowledgeRequest = acknowledgeNativeUpdateRequest,
+  replace = beginNativeReplacement
+}) {
+  let timer = null;
+  let currentClaim = null;
+  let inProgress = false;
+  let pausedUntilRestart = false;
+
+  const stop = () => {
+    if (!timer) return;
+    clearInterval(timer);
+    timer = null;
+  };
+
+  const pauseUntilRestart = () => {
+    pausedUntilRestart = true;
+    stop();
+  };
+
+  const acknowledgeCurrentRequest = (failureMessage) => {
+    if (currentClaim && !acknowledgeRequest(currentClaim)) {
+      host.log(failureMessage);
+    } else {
+      currentClaim = null;
+    }
+    inProgress = false;
+  };
+
+  const start = () => {
+    if (timer || pausedUntilRestart || !requestPath) return;
+    timer = setInterval(() => {
+      if (inProgress) return;
+      const claim = claimRequest(requestPath);
+      if (!claim) return;
+      currentClaim = claim;
+      inProgress = true;
+      host.log(`Downloading signed update ${claim.request.fromVersion || ""} -> ${claim.request.toVersion}.`);
+      try {
+        autoUpdater.checkForUpdates();
+      } catch (error) {
+        acknowledgeCurrentRequest("Could not clear the native update request after startup failed; the desktop will retry it.");
+        host.log(`Could not start native update: ${error.message}`);
+      }
+    }, intervalMs);
+    timer.unref?.();
+  };
+
+  autoUpdater.on("error", (error) => {
+    if (pausedUntilRestart) return;
+    host.log(`Native update failed: ${error.message}`);
+    acknowledgeCurrentRequest("Could not clear the failed native update request; the desktop will retry it.");
+  });
+
+  autoUpdater.on("update-not-available", () => {
+    if (pausedUntilRestart) return;
+    acknowledgeCurrentRequest("Could not clear the no-update request; the desktop will retry it.");
+  });
+
+  autoUpdater.on("update-downloaded", () => {
+    if (pausedUntilRestart || !inProgress) return;
+    pauseUntilRestart();
+    host.beginShutdown();
+    void (async () => {
+      try {
+        await host.stopRuntime();
+      } catch (error) {
+        inProgress = false;
+        await host.recoverShutdownFailure(error);
+        return;
+      }
+
+      host.markReplacementReady();
+      try {
+        if (!replace(autoUpdater, currentClaim)) {
+          host.log("Could not clear the completed native update request after replacement started.");
+        } else {
+          currentClaim = null;
+        }
+      } catch (error) {
+        inProgress = false;
+        await host.recoverReplacementFailure(error);
+      }
+    })();
+  });
+
+  return { start, stop };
+}
+
 function signingCertificatePath(appDir, release) {
   if (typeof release?.signingCertificate !== "string" || !release.signingCertificate) return "";
   return join(appDir, release.signingCertificate);
@@ -108,6 +202,7 @@ module.exports = {
   acknowledgeNativeUpdateRequest,
   beginNativeReplacement,
   claimNativeUpdateRequest,
+  createNativeUpdateLifecycle,
   isSigningCertificateTrusted,
   nativeUpdateRequestPath,
   nativeUpdaterConfiguration,

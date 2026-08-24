@@ -156,6 +156,46 @@ test("recoverPriorRuntime does not reclaim a foreign process with a recycled pid
   }
 });
 
+test("recoverPriorRuntime refuses a live app-owned version-1 launcher", async () => {
+  const appDir = mkdtempSync(join(tmpdir(), "rios-appdir-v1-"));
+  const statePath = join(appDir, "processes.json");
+  const child = spawn("sleep", ["30"], { cwd: appDir, stdio: "ignore" });
+  try {
+    await new Promise((resolveSpawn) => child.once("spawn", resolveSpawn));
+    writeRuntimeState(statePath, { version: 1, parentPid: child.pid, children: [] });
+
+    const result = await recoverPriorRuntime({ statePath, appDir, reclaim: true, graceMs: 100 });
+
+    assert.deepEqual(result, { status: "already_running", recovered: ["launcher"] });
+    assert.equal(processIsAlive(child.pid), true);
+    assert.equal(existsSync(statePath), true);
+  } finally {
+    child.kill("SIGKILL");
+    rmSync(appDir, { recursive: true, force: true });
+  }
+});
+
+test("recoverPriorRuntime preserves version-1 state when a live process cannot be inspected", async () => {
+  const appDir = mkdtempSync(join(tmpdir(), "rios-appdir-v1-uninspectable-"));
+  const statePath = join(appDir, "processes.json");
+  try {
+    writeRuntimeState(statePath, { version: 1, parentPid: process.pid, children: [] });
+
+    const result = await recoverPriorRuntime({
+      statePath,
+      appDir,
+      reclaim: true,
+      isAlive: () => true,
+      inspectProcess: (pid) => ({ pid, cwd: "", command: "" })
+    });
+
+    assert.deepEqual(result, { status: "already_running", recovered: ["launcher"] });
+    assert.equal(existsSync(statePath), true);
+  } finally {
+    rmSync(appDir, { recursive: true, force: true });
+  }
+});
+
 test("recoverPriorRuntime does not kill a reused pid even when its cwd is the app", async () => {
   const appDir = mkdtempSync(join(tmpdir(), "rios-reused-appdir-"));
   const statePath = join(appDir, "processes.json");

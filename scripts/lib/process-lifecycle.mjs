@@ -263,7 +263,14 @@ function delay(ms) {
   return new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
 }
 
-export async function recoverPriorRuntime({ statePath, appDir, reclaim = false, graceMs = 2500 } = {}) {
+export async function recoverPriorRuntime({
+  statePath,
+  appDir,
+  reclaim = false,
+  graceMs = 2500,
+  isAlive = processIsAlive,
+  inspectProcess = processSnapshot
+} = {}) {
   if (!existsSync(statePath)) return { status: "none", recovered: [] };
   const state = readRuntimeState(statePath);
   if (!state) {
@@ -271,19 +278,28 @@ export async function recoverPriorRuntime({ statePath, appDir, reclaim = false, 
     return { status: "invalid", recovered: [] };
   }
 
+  if (state.version === 1) {
+    if (!isAlive(state.parentPid)) {
+      rmSync(statePath, { force: true });
+      return { status: "stale", recovered: [] };
+    }
+    const snapshot = inspectProcess(state.parentPid);
+    if (processBelongsToApp(snapshot, appDir) || (!snapshot.cwd && !snapshot.command)) {
+      return { status: "already_running", recovered: ["launcher"] };
+    }
+    rmSync(statePath, { force: true });
+    return { status: "stale", recovered: [] };
+  }
+
   const records = [
-    ...(state.version === 2
-      ? state.children.map((child) => ({ ...child, group: true, appDir }))
-      : []),
-    ...(state.version === 2
-      ? [{
-          name: "launcher",
-          pid: state.parentPid,
-          identity: state.parentIdentity,
-          group: false,
-          appDir
-        }]
-      : [])
+    ...state.children.map((child) => ({ ...child, group: true, appDir })),
+    {
+      name: "launcher",
+      pid: state.parentPid,
+      identity: state.parentIdentity,
+      group: false,
+      appDir
+    }
   ];
   const liveOwned = records.filter((record) => {
     if (!processIsAlive(record.pid)) return false;

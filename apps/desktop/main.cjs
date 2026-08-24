@@ -36,9 +36,7 @@ const {
   startAppEnvironment
 } = require("./launcher.cjs");
 const {
-  acknowledgeNativeUpdateRequest,
-  beginNativeReplacement,
-  claimNativeUpdateRequest,
+  createNativeUpdateLifecycle,
   isSigningCertificateTrusted,
   nativeUpdateRequestPath,
   nativeUpdaterConfiguration,
@@ -78,10 +76,8 @@ let shuttingDown = false;
 let favouriteContacts = [];
 let currentTextSize = "normal";
 let menuRefreshTimer = null;
-let nativeUpdateInProgress = false;
-let nativeUpdateClaim = null;
+let nativeUpdateLifecycle = null;
 let nativeUpdateRequest = "";
-let nativeUpdateTimer = null;
 
 function startMenuRefreshTimer() {
   if (menuRefreshTimer || shuttingDown) return;
@@ -91,31 +87,6 @@ function startMenuRefreshTimer() {
     }
   }, MENU_REFRESH_INTERVAL_MS);
   menuRefreshTimer.unref?.();
-}
-
-function startNativeUpdateTimer() {
-  if (nativeUpdateTimer || !nativeUpdateRequest || shuttingDown) return;
-  nativeUpdateTimer = setInterval(() => {
-    if (nativeUpdateInProgress) return;
-    const claim = claimNativeUpdateRequest(nativeUpdateRequest);
-    if (!claim) return;
-    nativeUpdateClaim = claim;
-    const request = claim.request;
-    nativeUpdateInProgress = true;
-    writeLog(`Downloading signed update ${request.fromVersion || ""} -> ${request.toVersion}.`);
-    try {
-      autoUpdater.checkForUpdates();
-    } catch (error) {
-      if (!acknowledgeNativeUpdateRequest(claim)) {
-        writeLog("Could not clear the native update request after startup failed; the desktop will retry it.");
-      } else {
-        nativeUpdateClaim = null;
-      }
-      nativeUpdateInProgress = false;
-      writeLog(`Could not start native update: ${error.message}`);
-    }
-  }, 500);
-  nativeUpdateTimer.unref?.();
 }
 
 app.setName(APP_NAME);
@@ -461,56 +432,38 @@ async function configureNativeUpdater() {
 
   nativeUpdateRequest = nativeUpdateRequestPath(storagePaths().stateDir);
   autoUpdater.setFeedURL({ url: configuration.feedUrl, serverType: "json" });
-  autoUpdater.on("error", (error) => {
-    writeLog(`Native update failed: ${error.message}`);
-    if (nativeUpdateClaim && !acknowledgeNativeUpdateRequest(nativeUpdateClaim)) {
-      writeLog("Could not clear the failed native update request; the desktop will retry it.");
-    } else {
-      nativeUpdateClaim = null;
-    }
-    nativeUpdateInProgress = false;
-  });
-  autoUpdater.on("update-not-available", () => {
-    if (nativeUpdateClaim && !acknowledgeNativeUpdateRequest(nativeUpdateClaim)) {
-      writeLog("Could not clear the no-update request; the desktop will retry it.");
-    } else {
-      nativeUpdateClaim = null;
-    }
-    nativeUpdateInProgress = false;
-  });
-  autoUpdater.on("update-downloaded", () => {
-    shuttingDown = true;
-    ++lifecycleGeneration;
-    void stopLocalApp({ verifyRuntimeTree: true })
-      .then(() => {
+  nativeUpdateLifecycle = createNativeUpdateLifecycle({
+    autoUpdater,
+    requestPath: nativeUpdateRequest,
+    host: {
+      log: writeLog,
+      beginShutdown() {
+        shuttingDown = true;
+        ++lifecycleGeneration;
+      },
+      stopRuntime() {
+        return stopLocalApp({ verifyRuntimeTree: true });
+      },
+      markReplacementReady() {
         quitReady = true;
-        try {
-          if (!beginNativeReplacement(autoUpdater, nativeUpdateClaim)) {
-            writeLog("Could not clear the completed native update request after replacement started.");
-          } else {
-            nativeUpdateClaim = null;
-          }
-        } catch (error) {
-          quitReady = false;
-          shuttingDown = false;
-          nativeUpdateInProgress = false;
-          writeLog(`Native replacement could not start: ${error.message}`);
-          startMenuRefreshTimer();
-          startNativeUpdateTimer();
-          const generation = startLocalApp();
-          if (generation) void loadDashboardWhenReady(mainWindow, dashboardUrl(process.env), generation);
-          void showMessageBox({
-            type: "warning",
-            title: `${APP_NAME} updates`,
-            message: "The update was downloaded, but macOS could not start the replacement.",
-            detail: "Tovi restarted its local services and kept the update ready to retry. Quit Tovi completely, reopen it, then try the update again.",
-            buttons: ["OK"]
-          });
-        }
-      })
-      .catch(async (error) => {
+      },
+      async recoverReplacementFailure(error) {
+        quitReady = false;
         shuttingDown = false;
-        nativeUpdateInProgress = false;
+        writeLog(`Native replacement could not start: ${error.message}`);
+        startMenuRefreshTimer();
+        const generation = startLocalApp();
+        if (generation) void loadDashboardWhenReady(mainWindow, dashboardUrl(process.env), generation);
+        await showMessageBox({
+          type: "warning",
+          title: `${APP_NAME} updates`,
+          message: "The update was downloaded, but macOS could not start the replacement.",
+          detail: "Tovi restarted its local services and kept the update ready to retry. Quit Tovi completely, reopen it, then try the update again.",
+          buttons: ["OK"]
+        });
+      },
+      async recoverShutdownFailure(error) {
+        shuttingDown = false;
         writeLog(`Refused native replacement because the local runtime did not stop: ${error.message}`);
         await showMessageBox({
           type: "warning",
@@ -519,9 +472,10 @@ async function configureNativeUpdater() {
           detail: "Quit Tovi completely and try the update again. No app files were replaced.",
           buttons: ["OK"]
         });
-      });
+      }
+    }
   });
-  startNativeUpdateTimer();
+  nativeUpdateLifecycle.start();
 }
 
 async function showPortConflictRecovery(conflict) {
@@ -1163,10 +1117,7 @@ if (!gotLock) {
       clearInterval(menuRefreshTimer);
       menuRefreshTimer = null;
     }
-    if (nativeUpdateTimer) {
-      clearInterval(nativeUpdateTimer);
-      nativeUpdateTimer = null;
-    }
+    nativeUpdateLifecycle?.stop();
     void stopLocalApp({ verifyRuntimeTree: true })
       .then(() => {
         quitReady = true;
@@ -1181,7 +1132,7 @@ if (!gotLock) {
         shuttingDown = false;
         writeLog(`Refused quit because the local runtime did not stop: ${error.message}`);
         startMenuRefreshTimer();
-        startNativeUpdateTimer();
+        nativeUpdateLifecycle?.start();
         if (!mainWindow || mainWindow.isDestroyed()) createWindow();
         await showMessageBox({
           type: "warning",
