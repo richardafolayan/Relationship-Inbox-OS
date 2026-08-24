@@ -140,10 +140,12 @@ export interface ScheduleSendResult {
   replayed: boolean;
 }
 
-export type SendSource = "manual" | "focus_auto_ack";
+export type SendSource = "manual" | "focus_ack" | "focus_auto_ack";
 
 export function parsePersistedSendSource(value: unknown): SendSource | null {
-  return value === "manual" || value === "focus_auto_ack" ? value : null;
+  return value === "manual" || value === "focus_ack" || value === "focus_auto_ack"
+    ? value
+    : null;
 }
 
 export function assertInstagramManualTextSend(input: {
@@ -155,7 +157,7 @@ export function assertInstagramManualTextSend(input: {
   if (input.platform !== "INSTAGRAM") {
     return;
   }
-  if (input.scheduled || input.source === "focus_auto_ack") {
+  if (input.scheduled || (input.source !== undefined && input.source !== "manual")) {
     throw new Error("Instagram supports user-triggered sends only. Send this message now instead.");
   }
   if ((input.attachmentCount ?? 0) > 0) {

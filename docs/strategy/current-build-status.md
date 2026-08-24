@@ -85,7 +85,7 @@ before claiming those guarantees still hold.
 - Reviewed local integration branch: `fix/instagram-integration-gate`.
 - Base: `origin/develop` at
   `ddfba09f44470852c349e0a7f82c12230ba7d32d`.
-- The complete bounded-concurrency suite passes: 2,927 tests, zero failures,
+- The complete bounded-concurrency suite passes: 2,940 tests, zero failures,
   zero skips, zero cancellations, and zero todos.
 - Dashboard, runner, and core type checks pass. The production dashboard build,
   Prisma generation, documentation checks, schema-upgrade checks, and diff
@@ -95,6 +95,15 @@ before claiming those guarantees still hold.
   reconciliation, delivery-uncertain failures, persisted send provenance,
   retry safety, session-reset isolation, privacy-safe diagnostics, and the
   explicit selector-diagnostics limitation.
+- The final adversarial pass reopened eight integration claims. The corrected
+  branch now fails closed on ambiguous message identity, prevents message-shaped
+  GraphQL objects from becoming threads, preserves request-start ordering across
+  out-of-order responses, verifies the exact composer text, binds Send to the
+  verified document, and treats every post-click error as delivery uncertain.
+- Focus acknowledgements are excluded from Instagram and persist their own
+  provenance instead of appearing manual. Existing send rows with unknown
+  legacy provenance are relabelled transactionally and fail closed at the
+  worker boundary.
 - Scheduled sends, attachments, polls, focus acknowledgements, and other
   automated Instagram sends are rejected at the durable worker boundary. The
   dashboard no longer offers those unsupported actions.

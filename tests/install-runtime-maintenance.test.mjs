@@ -464,11 +464,15 @@ test("runtime discovery finds the real pre-bind start-student launcher", () => {
 });
 
 test("updater ancestry preserves control wrappers but not app runtimes", () => {
+  const runnerPid = 2_147_483_640;
+  const startAppPid = runnerPid + 1;
+  const npmPid = runnerPid + 2;
+  const startStudentPid = runnerPid + 3;
   const commands = new Map([
-    [4303, "4302 /usr/bin/node /Applications/Tovi/scripts/start-student.mjs"],
-    [4302, "4301 npm run start:student"],
-    [4301, "4300 /usr/bin/node /Applications/Tovi/scripts/start-app.mjs"],
-    [4300, "1 /usr/bin/node /Applications/Tovi/apps/runner/dist/index.js"]
+    [startStudentPid, `${npmPid} /usr/bin/node /Applications/Tovi/scripts/start-student.mjs`],
+    [npmPid, `${startAppPid} npm run start:student`],
+    [startAppPid, `${runnerPid} /usr/bin/node /Applications/Tovi/scripts/start-app.mjs`],
+    [runnerPid, "1 /usr/bin/node /Applications/Tovi/apps/runner/dist/index.js"]
   ]);
   const fakeExec = (command, args) => {
     assert.equal(command, "ps");
@@ -479,8 +483,8 @@ test("updater ancestry preserves control wrappers but not app runtimes", () => {
   assert.equal(updateControlCommand("node C:\\Tovi\\scripts\\apply-update-and-restart.mjs"), true);
   assert.equal(updateControlCommand("node C:\\Tovi\\scripts\\start-app.mjs"), false);
   assert.deepEqual(
-    updateControlAncestorPids({ startPid: 4303, platform: "darwin", exec: fakeExec }),
-    [4303, 4302]
+    updateControlAncestorPids({ startPid: startStudentPid, platform: "darwin", exec: fakeExec }),
+    [startStudentPid, npmPid]
   );
 });
 
@@ -739,6 +743,8 @@ test("verified desktop quit stops a launcher and its listening backend child", a
         stdio: ["ignore", "ignore", "inherit", "ipc"]
       });
       child.on("message", (message) => process.send?.({ ...message, pid: child.pid }));
+      child.on("error", (error) => process.send?.({ childError: error.message }));
+      child.on("exit", (code, signal) => process.send?.({ childExit: { code, signal } }));
       setInterval(() => {}, 1000);
     `);
     launcher = spawn(process.execPath, [launcherScript], {
@@ -747,9 +753,38 @@ test("verified desktop quit stops a launcher and its listening backend child", a
       stdio: ["ignore", "ignore", "inherit", "ipc"]
     });
     const ready = await new Promise((resolveReady, reject) => {
-      launcher.once("message", resolveReady);
-      launcher.once("error", reject);
-      launcher.once("exit", (code, signal) => reject(new Error(`launcher exited early (${code ?? signal})`)));
+      let timeout;
+      const settle = (callback, value) => {
+        clearTimeout(timeout);
+        launcher.off("message", onMessage);
+        launcher.off("error", onError);
+        launcher.off("exit", onExit);
+        callback(value);
+      };
+      const onMessage = (message) => {
+        if (message?.port) {
+          settle(resolveReady, message);
+        } else if (message?.childError) {
+          settle(reject, new Error(`launcher backend failed: ${message.childError}`));
+        } else if (message?.childExit) {
+          settle(
+            reject,
+            new Error(
+              `launcher backend exited early (${message.childExit.code ?? message.childExit.signal})`
+            )
+          );
+        }
+      };
+      const onError = (error) => settle(reject, error);
+      const onExit = (code, signal) =>
+        settle(reject, new Error(`launcher exited early (${code ?? signal})`));
+      timeout = setTimeout(
+        () => settle(reject, new Error("launcher backend did not become ready")),
+        8_000
+      );
+      launcher.on("message", onMessage);
+      launcher.on("error", onError);
+      launcher.on("exit", onExit);
     });
     listenerPid = ready.pid;
 

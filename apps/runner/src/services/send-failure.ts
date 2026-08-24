@@ -18,7 +18,7 @@ export function classifySendFailureKind(input: {
   adapterKind?: string;
 }): SendFailureKind {
   if (
-    /could not confirm.*deliver|no new outbound bubble|delivery (?:could not be confirmed|.*unconfirm)|delivery status.*unknown|send interrupted|interrupted.*send|submitted message not observed|thread changed during send/i.test(
+    /could not confirm.*deliver|no new outbound bubble|delivery (?:could not be confirmed|.*unconfirm|uncertain)|delivery status.*unknown|send interrupted|interrupted.*send|submitted message not observed|thread changed during send/i.test(
       input.message
     )
   ) {

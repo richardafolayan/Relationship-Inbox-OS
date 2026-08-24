@@ -3887,6 +3887,7 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
       // when the time elapses. When absent, the send is enqueued
       // immediately (existing behaviour).
       scheduledFor: z.string().datetime().optional(),
+      source: z.literal("focus_ack").optional(),
       // App-level threading. When the dashboard's focused-thread composer
       // sends a reply, it includes the parent Message.id here. The send
       // itself still goes out as a regular text bubble — the threading is
@@ -3903,6 +3904,10 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
   }));
   if (stagedAttachments.length === 0 && payload.text.trim().length === 0) {
     res.status(400).json({ error: "send must have text, attachments, or both" });
+    return;
+  }
+  if (payload.source && payload.scheduledFor) {
+    res.status(400).json({ error: "focus acknowledgements cannot be scheduled" });
     return;
   }
 
@@ -3971,6 +3976,7 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
       text: payload.text,
       clientSendId: payload.clientSendId,
       attachments: stagedAttachments,
+      source: payload.source ?? "manual",
       replyToMessageId: payload.replyToMessageId
     });
     res.json(queueResult);

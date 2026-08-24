@@ -72,6 +72,15 @@ test("favourite LinkedIn contact is covered at the professional tier", () => {
   assert.equal(tierForRow(row({ platform: "LINKEDIN" })), "professional");
 });
 
+test("Instagram is excluded from every focus acknowledgement surface", () => {
+  const instagram = row({ platform: "INSTAGRAM", personFavourite: true });
+  assert.equal(coverageForRow(instagram, "favourites").covered, false);
+  assert.equal(
+    focusAckExclusion(instagram, baseWindow(), settings(), { now: NOW }),
+    "platform_unsupported"
+  );
+});
+
 test("LinkedIn is never covered unless favourited, even with 'all personal'", () => {
   const r = row({ platform: "LINKEDIN", personFavourite: false, personName: "Ceri Jones" });
   assert.equal(coverageForRow(r, "favourites").covered, false);

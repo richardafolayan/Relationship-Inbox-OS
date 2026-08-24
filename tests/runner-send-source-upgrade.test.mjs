@@ -18,7 +18,7 @@ test("a database without send requests needs no provenance repair", () => {
   }
 });
 
-test("legacy send requests gain durable manual provenance before Prisma sync", () => {
+test("legacy send requests fail closed with unknown provenance before Prisma sync", () => {
   const database = new Database(":memory:");
   try {
     database.exec(`
@@ -36,14 +36,41 @@ test("legacy send requests gain durable manual provenance before Prisma sync", (
 
     assert.equal(hasSendRequestSourceColumn(database), false);
     assert.equal(sendRequestSourceRequiresRepair(database), true);
-    assert.deepEqual(repairSendRequestSource(database), { columnAdded: true });
+    assert.deepEqual(repairSendRequestSource(database), {
+      columnAdded: true,
+      legacyRowsMarkedUnknown: 1
+    });
     assert.equal(hasSendRequestSourceColumn(database), true);
     assert.equal(sendRequestSourceRequiresRepair(database), false);
     assert.equal(
       database.prepare('SELECT "source" FROM "send_requests" WHERE "id" = ?').get("send-1").source,
-      "manual"
+      "legacy_unknown"
     );
     assert.deepEqual(repairSendRequestSource(database), { columnAdded: false });
+  } finally {
+    database.close();
+  }
+});
+
+test("provenance upgrade rolls back the new column when legacy relabelling fails", () => {
+  const database = new Database(":memory:");
+  try {
+    database.exec(`
+      CREATE TABLE "send_requests" (
+        "id" TEXT NOT NULL PRIMARY KEY,
+        "source_guard" TEXT
+      );
+      INSERT INTO "send_requests" ("id") VALUES ('send-1');
+      CREATE TRIGGER "reject_source_repair"
+      BEFORE UPDATE ON "send_requests"
+      BEGIN
+        SELECT RAISE(ABORT, 'source repair rejected');
+      END;
+    `);
+
+    assert.throws(() => repairSendRequestSource(database), /source repair rejected/);
+    assert.equal(hasSendRequestSourceColumn(database), false);
+    assert.equal(sendRequestSourceRequiresRepair(database), true);
   } finally {
     database.close();
   }

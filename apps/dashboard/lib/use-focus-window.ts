@@ -100,7 +100,11 @@ async function reconcileExpiredWindow(windowId: string): Promise<void> {
  */
 export async function sendAcknowledgement(threadId: string, text: string): Promise<void> {
   const clientSendId = newWindowId();
-  await apiPost(`/runner/control/thread/${threadId}/send`, { text, clientSendId });
+  await apiPost(`/runner/control/thread/${threadId}/send`, {
+    text,
+    clientSendId,
+    source: "focus_ack"
+  });
 }
 
 export interface UseFocusWindow {

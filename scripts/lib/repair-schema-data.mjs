@@ -120,13 +120,18 @@ export function repairSendRequestSource(database) {
     throw new Error("Existing send request source column has an incompatible definition");
   }
 
-  database.exec(
-    'ALTER TABLE "send_requests" ADD COLUMN "source" TEXT NOT NULL DEFAULT \'manual\''
-  );
-  if (!hasSendRequestSourceColumn(database)) {
-    throw new Error("Send request source column could not be validated");
-  }
-  return { columnAdded: true };
+  return database.transaction(() => {
+    database.exec(
+      'ALTER TABLE "send_requests" ADD COLUMN "source" TEXT NOT NULL DEFAULT \'manual\''
+    );
+    const legacyRowsMarkedUnknown = database
+      .prepare('UPDATE "send_requests" SET "source" = ?')
+      .run("legacy_unknown").changes;
+    if (!hasSendRequestSourceColumn(database)) {
+      throw new Error("Send request source column could not be validated");
+    }
+    return { columnAdded: true, legacyRowsMarkedUnknown };
+  }).immediate();
 }
 
 function runCli() {

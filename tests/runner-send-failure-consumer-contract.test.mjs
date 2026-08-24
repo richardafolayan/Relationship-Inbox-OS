@@ -34,7 +34,8 @@ test("a missing WhatsApp send result blocks blind retry", () => {
 
 for (const message of [
   "Instagram submitted message not observed",
-  "Instagram thread changed during send"
+  "Instagram thread changed during send",
+  "Instagram delivery uncertain after submit"
 ]) {
   test(`Instagram post-click failure blocks blind retry: ${message}`, () => {
     const kind = classifySendFailureKind({ message });

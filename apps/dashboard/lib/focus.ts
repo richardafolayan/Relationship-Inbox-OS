@@ -226,6 +226,7 @@ export function coverageForRow(
   audience: FocusAudience
 ): { covered: boolean; tier: FocusTier } {
   const tier = tierForRow(row);
+  if (row.platform === "INSTAGRAM") return { covered: false, tier };
   if (row.isGroup) return { covered: false, tier };
   // Outreach / business threads are never acknowledged, in any audience.
   if (row.category === "outreach") return { covered: false, tier };
@@ -288,6 +289,7 @@ export function isAcked(row: FocusRow, window: FocusWindowState): boolean {
 export type FocusAckExclusion =
   | "candidate"
   | "not_during" // window inactive/lapsed, or their message predates it
+  | "platform_unsupported" // the platform cannot safely carry focus notes
   | "handled" // needsReply === false: nothing is waiting on the operator
   | "already_heard" // operator's last reply is at/after their last message
   | "not_covered" // outside this window's audience (or outreach/business)
@@ -310,6 +312,7 @@ export function focusAckExclusion(
   // 9pm reads as nonsense, so the gate closes the moment endsAt passes.
   if (!isFocusActive(window, now)) return "not_during";
   if (!arrivedDuringFocus(row, window, now)) return "not_during";
+  if (row.platform === "INSTAGRAM") return "platform_unsupported";
   // Only unanswered inbound threads. needsReply === false means handled.
   if (row.needsReply === false) return "handled";
   if (alreadyHeardSinceInbound(row)) return "already_heard";

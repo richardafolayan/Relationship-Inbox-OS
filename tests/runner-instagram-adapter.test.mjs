@@ -340,6 +340,11 @@ test("thread identity is stable across row order and duplicate rows", () => {
 test("GraphQL thread payloads use only typed thread IDs and ignore unsupported fallbacks", () => {
   const payload = {
     data: {
+      threadDetail: {
+        __typename: "XDTDirectThread",
+        id: "unrelated-thread-detail",
+        thread_title: "Unrelated detail"
+      },
       inbox: {
         threads: [
           {
@@ -358,6 +363,21 @@ test("GraphQL thread payloads use only typed thread IDs and ignore unsupported f
           {
             id: "not-a-thread",
             title: "Unrelated object"
+          },
+          {
+            id: "message-shaped-untyped",
+            thread_key: { thread_fbid: "thread-two-url" }
+          },
+          {
+            __typename: "XDTDirectMessage",
+            id: "message-shaped-typed",
+            thread_fbid: "thread-two-url",
+            items: [
+              {
+                id: "message-child-shaped-like-thread",
+                thread_title: "Nested message metadata"
+              }
+            ]
           },
           {
             __typename: "XDTDirectThread",
@@ -403,6 +423,39 @@ test("GraphQL thread payloads use only typed thread IDs and ignore unsupported f
   );
   assert.equal(first.some((thread) => thread.platformThreadId === "thread-one"), false);
   assert.equal(first.find((thread) => thread.platformThreadId === "typed-thread")?.unreadCount, 1);
+});
+
+test("GraphQL message records cannot impersonate direct-thread identities", () => {
+  const snapshots = extractInstagramThreadSnapshotsFromPayload({
+    data: {
+      inbox: {
+        threads: [
+          {
+            __typename: "XDTDirectThread",
+            id: "real-thread",
+            thread_title: "Safe thread",
+            messages: [
+              {
+                __typename: "XDTDirectMessage",
+                id: "message-id",
+                thread_key: { thread_fbid: "real-thread" }
+              }
+            ],
+            message_container: {
+              items: [
+                {
+                  id: "nested-message-id",
+                  thread_title: "Message metadata is not a thread"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    }
+  });
+
+  assert.deepEqual(snapshots.map((snapshot) => snapshot.stableId), ["real-thread"]);
 });
 
 test("thread rows never fall back to mutable text or row position", () => {
@@ -612,6 +665,8 @@ test("message normalization preserves direction, exact timestamps and first-seen
       sourceTimestamp: "2026-07-30T09:10:11.000Z"
     },
     {
+      nativeId: "native-out",
+      nativeIdStable: true,
       direction: "OUT",
       text: "Hi",
       sourceTimestamp: "5m"
@@ -629,10 +684,10 @@ test("message normalization preserves direction, exact timestamps and first-seen
 
 test("unsupported Instagram content becomes safe placeholders", () => {
   const messages = normalizeInstagramMessageSnapshots("thread-2", [
-    { direction: "IN", mediaKind: "photo" },
-    { direction: "OUT", mediaKind: "video", text: "Caption" },
-    { direction: "IN", mediaKind: "voice_message" },
-    { direction: "OUT", deleted: true, text: "Message was deleted" }
+    { nativeId: "photo", nativeIdStable: true, direction: "IN", mediaKind: "photo" },
+    { nativeId: "video", nativeIdStable: true, direction: "OUT", mediaKind: "video", text: "Caption" },
+    { nativeId: "voice", nativeIdStable: true, direction: "IN", mediaKind: "voice_message" },
+    { nativeId: "deleted", nativeIdStable: true, direction: "OUT", deleted: true, text: "Message was deleted" }
   ]);
 
   assert.deepEqual(
@@ -650,8 +705,8 @@ test("unsupported Instagram content becomes safe placeholders", () => {
 
 test("message keys are stable across rescans and deduplicate native ids", () => {
   const snapshots = [
-    { direction: "IN", text: "Same text" },
-    { direction: "IN", text: "Same text" },
+    { nativeId: "native-1", nativeIdStable: true, direction: "IN", text: "Same text" },
+    { nativeId: "native-2", nativeIdStable: true, direction: "IN", text: "Same text" },
     { nativeId: "native-3", nativeIdStable: true, direction: "OUT", text: "Reply" },
     { nativeId: "native-3", nativeIdStable: true, direction: "OUT", text: "Reply" }
   ];
@@ -666,12 +721,96 @@ test("message keys are stable across rescans and deduplicate native ids", () => 
   assert.notEqual(first[0].platformMessageKey, first[1].platformMessageKey);
 });
 
+test("stable native message ids remain authoritative across sliding history windows", () => {
+  const january = normalizeInstagramMessageSnapshots("thread-window", [
+    {
+      nativeId: "message-january",
+      nativeIdStable: true,
+      direction: "OUT",
+      text: "Thanks"
+    }
+  ]);
+  const august = normalizeInstagramMessageSnapshots("thread-window", [
+    {
+      nativeId: "message-august",
+      nativeIdStable: true,
+      direction: "OUT",
+      text: "Thanks"
+    }
+  ]);
+  const combined = normalizeInstagramMessageSnapshots("thread-window", [
+    {
+      nativeId: "message-january",
+      nativeIdStable: true,
+      direction: "OUT",
+      text: "Thanks"
+    },
+    {
+      nativeId: "message-august",
+      nativeIdStable: true,
+      direction: "OUT",
+      text: "Thanks"
+    }
+  ]);
+
+  assert.notEqual(january[0].platformMessageKey, august[0].platformMessageKey);
+  assert.equal(combined[0].platformMessageKey, january[0].platformMessageKey);
+  assert.equal(combined[1].platformMessageKey, august[0].platformMessageKey);
+});
+
+test("exact source timestamps distinguish repeated text across sliding history windows", () => {
+  const january = normalizeInstagramMessageSnapshots("thread-window", [
+    {
+      direction: "OUT",
+      text: "Thanks",
+      sourceTimestamp: "2026-01-03T10:00:00.000Z"
+    }
+  ]);
+  const august = normalizeInstagramMessageSnapshots("thread-window", [
+    {
+      direction: "OUT",
+      text: "Thanks",
+      sourceTimestamp: "2026-08-19T10:00:00.000Z"
+    }
+  ]);
+  const combined = normalizeInstagramMessageSnapshots("thread-window", [
+    {
+      direction: "OUT",
+      text: "Thanks",
+      sourceTimestamp: "2026-01-03T10:00:00.000Z"
+    },
+    {
+      direction: "OUT",
+      text: "Thanks",
+      sourceTimestamp: "2026-08-19T10:00:00.000Z"
+    }
+  ]);
+
+  assert.notEqual(january[0].platformMessageKey, august[0].platformMessageKey);
+  assert.equal(combined[0].platformMessageKey, january[0].platformMessageKey);
+  assert.equal(combined[1].platformMessageKey, august[0].platformMessageKey);
+});
+
+test("indistinguishable repeated messages fail closed instead of shifting persisted identity", () => {
+  assert.throws(
+    () =>
+      normalizeInstagramMessageSnapshots("thread-window", [
+        { direction: "IN", text: "Same" },
+        { direction: "IN", text: "Same" }
+      ]),
+    (error) =>
+      error instanceof InstagramParsingError &&
+      error.reason === "ambiguous_message_identity"
+  );
+});
+
 test("volatile Instagram message metadata cannot impersonate a new outgoing message", () => {
   const before = normalizeInstagramMessageSnapshots("thread-volatile", [
     {
       nativeId: "mount-a",
       direction: "OUT",
-      text: "Reply"
+      text: "Reply",
+      sourceTimestamp: "2026-08-24T08:00:00.000Z"
     }
   ]);
   const after = normalizeInstagramMessageSnapshots("thread-volatile", [
@@ -688,23 +827,23 @@ test("volatile Instagram message metadata cannot impersonate a new outgoing mess
   assert.equal(findNewVerifiedInstagramOutgoing(before, after, "Reply"), null);
 });
 
-test("exact-layout receipts use the same key as later timestamp-less scans", () => {
-  const normalized = normalizeInstagramMessageSnapshots("thread-layout", [
-    { direction: "OUT", text: "Reply" },
-    { direction: "OUT", text: "Reply" }
-  ]);
-
+test("exact-layout receipt fallback keys are deterministic and occurrence-scoped", () => {
+  const key = instagramMessageFallbackKey("thread-layout", "OUT", "Reply", undefined, 1);
   assert.equal(
-    instagramMessageFallbackKey("thread-layout", "OUT", "Reply", undefined, 1),
-    normalized[1].platformMessageKey
+    key,
+    instagramMessageFallbackKey("thread-layout", "OUT", "Reply", undefined, 1)
+  );
+  assert.notEqual(
+    key,
+    instagramMessageFallbackKey("thread-layout", "OUT", "Reply", undefined, 0)
   );
 });
 
 test("fallback message keys stay attached to the same message when row order changes", () => {
   const snapshots = [
-    { direction: "IN", text: "First", senderName: "Ann" },
-    { direction: "OUT", text: "Second", senderName: "Me" },
-    { direction: "IN", text: "Third", senderName: "Ann" }
+    { nativeId: "first", nativeIdStable: true, direction: "IN", text: "First", senderName: "Ann" },
+    { nativeId: "second", nativeIdStable: true, direction: "OUT", text: "Second", senderName: "Me" },
+    { nativeId: "third", nativeIdStable: true, direction: "IN", text: "Third", senderName: "Ann" }
   ];
   const first = normalizeInstagramMessageSnapshots("thread-order", snapshots);
   const reversed = normalizeInstagramMessageSnapshots("thread-order", [...snapshots].reverse());
@@ -753,18 +892,18 @@ test("Instagram rejects scheduled and attachment sends", () => {
 
 test("send verification requires a new exact outgoing bubble", () => {
   const before = normalizeInstagramMessageSnapshots("thread-5", [
-    { nativeId: "old", direction: "OUT", text: "Approved smoke message" }
+    { nativeId: "old", nativeIdStable: true, direction: "OUT", text: "Approved smoke message" }
   ]);
   const unchanged = normalizeInstagramMessageSnapshots("thread-5", [
-    { nativeId: "old", direction: "OUT", text: "Approved smoke message" }
+    { nativeId: "old", nativeIdStable: true, direction: "OUT", text: "Approved smoke message" }
   ]);
   const submitted = normalizeInstagramMessageSnapshots("thread-5", [
-    { nativeId: "old", direction: "OUT", text: "Approved smoke message" },
-    { nativeId: "new", direction: "OUT", text: "Approved smoke message" }
+    { nativeId: "old", nativeIdStable: true, direction: "OUT", text: "Approved smoke message" },
+    { nativeId: "new", nativeIdStable: true, direction: "OUT", text: "Approved smoke message" }
   ]);
   const wrongDirection = normalizeInstagramMessageSnapshots("thread-5", [
-    { nativeId: "old", direction: "OUT", text: "Approved smoke message" },
-    { nativeId: "new", direction: "IN", text: "Approved smoke message" }
+    { nativeId: "old", nativeIdStable: true, direction: "OUT", text: "Approved smoke message" },
+    { nativeId: "new", nativeIdStable: true, direction: "IN", text: "Approved smoke message" }
   ]);
 
   assert.equal(
@@ -844,7 +983,10 @@ test("Instagram refuses to send through a disabled composer", async () => {
 function sendTestHarness({
   observeSubmittedBubble,
   observeExactLayoutBubble = false,
-  switchThreadBeforeClick = false
+  switchThreadBeforeClick = false,
+  switchThreadDuringClick = false,
+  dropTypedUnit = false,
+  failAfterClick = false
 }) {
   let currentUrl = "about:blank";
   let submitted = false;
@@ -862,9 +1004,20 @@ function sendTestHarness({
     click: async () => undefined,
     first: () => composer,
     boundingBox: async () => ({ x: 100, y: 900, width: 700, height: 40 }),
+    inputValue: async () => typed,
     textContent: async () => typed,
     fill: async (value) => {
       typed = value;
+    }
+  };
+  const boundSendButton = {
+    boundingBox: async () => ({ x: 850, y: 900, width: 80, height: 40 }),
+    click: async () => {
+      if (switchThreadDuringClick) {
+        currentUrl = "https://www.instagram.com/direct/t/wrong-thread/";
+        throw new Error("Element is not attached to the DOM");
+      }
+      submitted = true;
     }
   };
   const sendButton = {
@@ -878,8 +1031,14 @@ function sendTestHarness({
     isEnabled: async () => true,
     getAttribute: async () => null,
     click: async () => {
+      if (switchThreadDuringClick) {
+        currentUrl = "https://www.instagram.com/direct/t/wrong-thread/";
+        submitted = true;
+        return;
+      }
       submitted = true;
-    }
+    },
+    elementHandle: async () => boundSendButton
   };
   const messageContainer = {
     first: () => messageContainer,
@@ -897,8 +1056,11 @@ function sendTestHarness({
         return { fieldNames: [], bodyText: "" };
       }
       messageSnapshots += 1;
+      if (submitted && failAfterClick) {
+        throw new Error("Execution context was destroyed");
+      }
       return submitted && observeSubmittedBubble
-        ? [{ nativeId: "new-out", direction: "OUT", text: typed }]
+        ? [{ nativeId: "new-out", nativeIdStable: true, direction: "OUT", text: typed }]
         : [];
     },
     getByText: () => ({
@@ -916,6 +1078,7 @@ function sendTestHarness({
     },
     keyboard: {
       type: async (unit) => {
+        if (dropTypedUnit && typed.length === 0) return;
         typed += unit;
       }
     },
@@ -960,7 +1123,9 @@ test("Instagram adapter reports success only after an exact new outgoing bubble"
   assert.equal(receipt.verifiedBy, "bubble_detected");
   assert.equal(
     receipt.platformMessageKey,
-    instagramMessageFallbackKey("safe-thread", "OUT", "x", undefined, 0)
+    normalizeInstagramMessageSnapshots("safe-thread", [
+      { nativeId: "new-out", nativeIdStable: true, direction: "OUT", text: "x" }
+    ])[0].platformMessageKey
   );
 });
 
@@ -975,7 +1140,7 @@ test("Instagram adapter fails when submission produces no outgoing bubble", asyn
       ),
     (error) =>
       error?.kind === "THREAD_FETCH_FAILED" &&
-      error?.details?.reason === "submitted_message_not_observed"
+      error?.details?.reason === "delivery_uncertain_after_submit"
   );
   assert.equal(harness.wasSubmitted(), true);
 });
@@ -1016,6 +1181,57 @@ test("Instagram revalidates the exact thread after typing and before clicking Se
   assert.equal(harness.wasSubmitted(), false);
 });
 
+test("Instagram refuses to click Send when the composer lost approved text", async () => {
+  const harness = sendTestHarness({
+    observeSubmittedBubble: false,
+    dropTypedUnit: true
+  });
+
+  await assert.rejects(
+    () =>
+      harness.adapter.sendMessage(
+        { platformThreadId: "safe-thread", displayName: "Safe thread" },
+        "approved"
+      ),
+    (error) => error?.details?.reason === "composer_text_mismatch_before_send"
+  );
+  assert.equal(harness.wasSubmitted(), false);
+});
+
+test("Instagram binds Send to the verified document instead of re-resolving after navigation", async () => {
+  const harness = sendTestHarness({
+    observeSubmittedBubble: false,
+    switchThreadDuringClick: true
+  });
+
+  await assert.rejects(
+    () =>
+      harness.adapter.sendMessage(
+        { platformThreadId: "safe-thread", displayName: "Safe thread" },
+        "approved"
+      ),
+    (error) => error?.details?.reason === "delivery_uncertain_after_submit"
+  );
+  assert.equal(harness.wasSubmitted(), false);
+});
+
+test("every Instagram failure after the Send click is delivery uncertain", async () => {
+  const harness = sendTestHarness({
+    observeSubmittedBubble: false,
+    failAfterClick: true
+  });
+
+  await assert.rejects(
+    () =>
+      harness.adapter.sendMessage(
+        { platformThreadId: "safe-thread", displayName: "Safe thread" },
+        "approved"
+      ),
+    (error) => error?.details?.reason === "delivery_uncertain_after_submit"
+  );
+  assert.equal(harness.wasSubmitted(), true);
+});
+
 test("Instagram thread snapshots reject conflicting URL and record identities", () => {
   assert.throws(
     () =>
@@ -1032,7 +1248,7 @@ test("Instagram thread snapshots reject conflicting URL and record identities", 
   );
 });
 
-test("Instagram GraphQL capture isolates generations and prioritizes later responses", () => {
+test("Instagram GraphQL capture isolates generations without promoting later partial responses", () => {
   const capture = new InstagramNetworkThreadCapture();
   const firstGeneration = capture.begin();
   capture.accept(firstGeneration, [
@@ -1052,7 +1268,26 @@ test("Instagram GraphQL capture isolates generations and prioritizes later respo
 
   assert.deepEqual(
     capture.current(2).map((snapshot) => snapshot.stableId),
-    ["newest", "current-1"]
+    ["current-1", "current-2"]
+  );
+});
+
+test("Instagram GraphQL capture preserves request order when responses complete out of order", () => {
+  const capture = new InstagramNetworkThreadCapture();
+  const generation = capture.begin();
+  const currentInboxOrder = capture.reserveRequestOrder(generation);
+  const olderPageOrder = capture.reserveRequestOrder(generation);
+
+  capture.accept(generation, [{ stableId: "older-page" }], olderPageOrder ?? undefined);
+  capture.accept(
+    generation,
+    [{ stableId: "recent-a" }, { stableId: "recent-b" }],
+    currentInboxOrder ?? undefined
+  );
+
+  assert.deepEqual(
+    capture.current(2).map((snapshot) => snapshot.stableId),
+    ["recent-a", "recent-b"]
   );
 });
 
