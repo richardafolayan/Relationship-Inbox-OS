@@ -280,6 +280,60 @@ test("a canonical row plus a verified legacy twin quarantines reconciliation onl
   assert.deepEqual(plan.quarantinedCanonicalKeys, ["instagram:stable"]);
 });
 
+test("a canonical row plus a near-time first-seen predecessor quarantines reconciliation only", () => {
+  const plan = planInstagramMessageKeyUpgrades({
+    threadId: "thread-1",
+    currentMessages: [currentMessage()],
+    existingRows: [
+      existingRow({
+        rawJson: JSON.stringify({ timestampSource: "first_seen", contentKind: "text" })
+      }),
+      existingRow({
+        id: "canonical",
+        platformMessageKey: "instagram:stable",
+        rawJson: JSON.stringify({
+          timestampSource: "source",
+          contentKind: "text",
+          messageIdentityVersion: "instagram_stable_v2"
+        })
+      })
+    ]
+  });
+
+  assert.deepEqual(plan.rekeys, []);
+  assert.deepEqual(plan.blockedCanonicalKeys, []);
+  assert.deepEqual(plan.quarantinedCanonicalKeys, ["instagram:stable"]);
+});
+
+test("a canonical row plus a long-before first-seen predecessor is fully reconciled", () => {
+  const plan = planInstagramMessageKeyUpgrades({
+    threadId: "thread-1",
+    currentMessages: [currentMessage({ timestamp: "2026-08-24T10:00:00.000Z" })],
+    existingRows: [
+      existingRow({
+        timestamp: new Date("2026-01-01T10:00:00.000Z"),
+        rawJson: JSON.stringify({ timestampSource: "first_seen", contentKind: "text" })
+      }),
+      existingRow({
+        id: "canonical",
+        platformMessageKey: "instagram:stable",
+        timestamp: new Date("2026-08-24T10:00:00.000Z"),
+        rawJson: JSON.stringify({
+          timestampSource: "source",
+          contentKind: "text",
+          messageIdentityVersion: "instagram_stable_v2"
+        })
+      })
+    ]
+  });
+
+  assert.deepEqual(plan, {
+    rekeys: [],
+    blockedCanonicalKeys: [],
+    quarantinedCanonicalKeys: []
+  });
+});
+
 test("a later exact-layout receipt scan reconciles outside the outbound time window", () => {
   const plan = planInstagramMessageKeyUpgrades({
     threadId: "thread-1",

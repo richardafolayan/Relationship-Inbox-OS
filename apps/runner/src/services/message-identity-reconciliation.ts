@@ -5,6 +5,31 @@ export interface MessageIdentityReconciliationResult {
   quarantinedMessageKeys: string[];
 }
 
+export const MESSAGE_IDENTITY_FRESHNESS_ERROR =
+  "Platform freshness is incomplete because historical message identity could not be reconciled safely.";
+
+export function resolveMessageIdentityFreshness(quarantinedMessages: number): {
+  freshnessComplete: boolean;
+  status: "CONNECTED" | "DEGRADED";
+  lastError: string | null;
+  advanceLastScanAt: boolean;
+} {
+  if (quarantinedMessages > 0) {
+    return {
+      freshnessComplete: false,
+      status: "DEGRADED",
+      lastError: MESSAGE_IDENTITY_FRESHNESS_ERROR,
+      advanceLastScanAt: false
+    };
+  }
+  return {
+    freshnessComplete: true,
+    status: "CONNECTED",
+    lastError: null,
+    advanceLastScanAt: true
+  };
+}
+
 export type MessageIdentityReconciler = (input: {
   threadId: string;
   currentMessages: NormalizedMessage[];

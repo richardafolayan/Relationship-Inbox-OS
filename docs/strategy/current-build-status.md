@@ -85,7 +85,7 @@ before claiming those guarantees still hold.
 - Reviewed local integration branch: `fix/instagram-integration-gate`.
 - Base: `origin/develop` at
   `ddfba09f44470852c349e0a7f82c12230ba7d32d`.
-- The complete bounded-concurrency suite passes: 2,971 tests, zero failures,
+- The complete bounded-concurrency suite passes: 2,978 tests, zero failures,
   zero skips, zero cancellations, and zero todos.
 - Dashboard, runner, and core type checks pass. The production dashboard build,
   Prisma generation, documentation checks, schema-upgrade checks, and diff
@@ -129,10 +129,17 @@ before claiming those guarantees still hold.
   stored separately from the mutable person display name. Physical sends fail
   closed when that authoritative label is unavailable.
 - The production Instagram selector registry is exercised against a realistic
-  DOM fixture. Sidebar links and linked profile images are excluded from message
-  ingestion while genuine message media remains attached to the correct bubble.
-  A legacy SQLite database was upgraded with the new nullable recipient label
-  column and its existing person and thread rows remained intact.
+  DOM fixture. Linkless control-only sidebar rows, linked profile images, and
+  unlinked semantic avatars are excluded from message ingestion. Genuine post,
+  reel, and audio media remain attached to the correct bubble. A legacy SQLite
+  database was upgraded with the new nullable recipient label column and its
+  existing person and thread rows remained intact.
+- The latest exact-head adversarial review reopened four claims. The corrected
+  branch now quarantines a canonical row when nearby first-seen predecessor
+  history is still ambiguous, verifies the authoritative recipient before any
+  external composer mutation, leaves identity-quarantined platforms degraded
+  without advancing their fully fresh scan time, and surfaces incomplete
+  per-thread checks instead of claiming there were no new messages.
 - Scheduled sends, attachments, polls, focus acknowledgements, and other
   automated Instagram sends are rejected at the durable worker boundary. The
   dashboard no longer offers those unsupported actions.

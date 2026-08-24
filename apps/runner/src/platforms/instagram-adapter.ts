@@ -1181,7 +1181,8 @@ export class InstagramAdapter extends BetaAdapter {
     page: Page,
     selectors: SelectorRegistry,
     thread: ThreadStub,
-    requireRecipientHeader = false
+    requireRecipientHeader = false,
+    verificationPhase: "open" | "before_send" = "open"
   ): Promise<string> {
     const platformThreadId = threadIdForStub(thread);
     await page.goto(canonicalInstagramThreadUrl(platformThreadId), {
@@ -1202,7 +1203,7 @@ export class InstagramAdapter extends BetaAdapter {
       thread,
       platformThreadId,
       requireRecipientHeader,
-      "open"
+      verificationPhase
     );
 
     return platformThreadId;
@@ -1302,6 +1303,17 @@ export class InstagramAdapter extends BetaAdapter {
           }
         };
         const isRecipientImage = (candidate: Element): boolean => {
+          const semantic = [
+            candidate.getAttribute("alt"),
+            candidate.getAttribute("aria-label"),
+            candidate.getAttribute("data-testid"),
+            candidate.className?.toString()
+          ]
+            .filter(Boolean)
+            .join(" ");
+          if (/\b(?:profile\s+(?:picture|photo)|avatar)\b/i.test(semantic)) {
+            return true;
+          }
           const anchor = candidate.closest("a[href]");
           const href = anchor?.getAttribute("href")?.trim();
           if (!href) return false;
@@ -1312,11 +1324,26 @@ export class InstagramAdapter extends BetaAdapter {
             return false;
           }
         };
-        const container =
+        const broadContainer =
           root.querySelector(selectors.message_container) ??
           root.querySelector("main, div[role='main']");
-        if (!container) {
+        if (!broadContainer) {
           return [];
+        }
+        let container = broadContainer;
+        const conversationAnchor =
+          query(root, selectors.composer_input) ?? query(root, selectors.conversation_header);
+        let candidateContainer = conversationAnchor?.parentElement ?? null;
+        while (candidateContainer && candidateContainer !== broadContainer) {
+          try {
+            if (candidateContainer.querySelector(selectors.message_item)) {
+              container = candidateContainer;
+              break;
+            }
+          } catch {
+            break;
+          }
+          candidateContainer = candidateContainer.parentElement;
         }
         const containerRect = container.getBoundingClientRect();
         return Array.from(container.querySelectorAll(selectors.message_item)).map((node) => {
@@ -1604,7 +1631,13 @@ export class InstagramAdapter extends BetaAdapter {
     let platformThreadId: string | undefined;
     let submissionMayHaveOccurred = false;
     try {
-      platformThreadId = await this.openExactThread(page, selectors, thread);
+      platformThreadId = await this.openExactThread(
+        page,
+        selectors,
+        thread,
+        true,
+        "before_send"
+      );
       const before = normalizeInstagramMessageSnapshots(
         platformThreadId,
         await this.snapshotMessages(page, selectors)

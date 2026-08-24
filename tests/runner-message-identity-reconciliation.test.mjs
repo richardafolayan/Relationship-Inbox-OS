@@ -1,6 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  MESSAGE_IDENTITY_FRESHNESS_ERROR,
+  resolveMessageIdentityFreshness,
   reconcilePlatformMessageIdentity
 } from "../apps/runner/dist/services/message-identity-reconciliation.js";
 
@@ -42,4 +44,22 @@ test("platforms without an identity reconciler use the no-op contract", async ()
     }),
     { blockedMessageKeys: [], quarantinedMessageKeys: [] }
   );
+});
+
+test("a quarantine degrades platform freshness without advancing scan time", () => {
+  assert.deepEqual(resolveMessageIdentityFreshness(1), {
+    freshnessComplete: false,
+    status: "DEGRADED",
+    lastError: MESSAGE_IDENTITY_FRESHNESS_ERROR,
+    advanceLastScanAt: false
+  });
+});
+
+test("a clean reconciliation can advance platform freshness", () => {
+  assert.deepEqual(resolveMessageIdentityFreshness(0), {
+    freshnessComplete: true,
+    status: "CONNECTED",
+    lastError: null,
+    advanceLastScanAt: true
+  });
 });

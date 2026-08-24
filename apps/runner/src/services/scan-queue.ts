@@ -25,6 +25,7 @@ import { resolveAdapterFailureKind, shouldStopScanForFailureKind } from "./failu
 import { isAiVisibleMessage, prismaMessageToPrompt } from "./ai";
 import { buildMessageUpsertPayload } from "./message-upsert-payload";
 import {
+  resolveMessageIdentityFreshness,
   reconcilePlatformMessageIdentity,
   type MessageIdentityReconciler
 } from "./message-identity-reconciliation";
@@ -1065,6 +1066,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
     status: "CONNECTED" | "NOT_CONNECTED" | "DEGRADED" | "ERROR";
     lastError?: string;
     connected?: boolean;
+    markScanComplete?: boolean;
   }): Promise<void> {
     const resolvedLastError = input.status === "CONNECTED" ? null : input.lastError;
 
@@ -1074,14 +1076,14 @@ export function createScanQueue(deps: ScanQueueDeps) {
         status: input.status,
         lastError: resolvedLastError,
         connectedAt: input.connected ? new Date() : undefined,
-        lastScanAt: input.status === "CONNECTED" ? new Date() : undefined
+        lastScanAt: input.markScanComplete ? new Date() : undefined
       },
       create: {
         name: input.platform,
         status: input.status,
         lastError: resolvedLastError,
         connectedAt: input.connected ? new Date() : undefined,
-        lastScanAt: input.status === "CONNECTED" ? new Date() : undefined
+        lastScanAt: input.markScanComplete ? new Date() : undefined
       }
     });
 
@@ -2625,16 +2627,13 @@ export function createScanQueue(deps: ScanQueueDeps) {
             return;
           }
 
-          const freshnessComplete = messageIdentityQuarantines === 0;
-          await prisma.platform.update({
-            where: { name: platform },
-            data: {
-              status: "CONNECTED",
-              lastScanAt: new Date(),
-              lastError: freshnessComplete
-                ? null
-                : "Platform freshness is incomplete because historical message identity could not be reconciled safely."
-            }
+          const freshness = resolveMessageIdentityFreshness(messageIdentityQuarantines);
+          const freshnessComplete = freshness.freshnessComplete;
+          await setPlatformStatus({
+            platform,
+            status: freshness.status,
+            lastError: freshness.lastError ?? undefined,
+            markScanComplete: freshness.advanceLastScanAt
           });
 
           runStopReason = freshnessComplete
@@ -3299,6 +3298,10 @@ export function createScanQueue(deps: ScanQueueDeps) {
     });
     const blockedMessageKeys = new Set(identityReconciliation.blockedMessageKeys);
     const quarantinedMessageKeys = new Set(identityReconciliation.quarantinedMessageKeys);
+    const persistedMessages = messages.filter(
+      (message) =>
+        !message.platformMessageKey || !blockedMessageKeys.has(message.platformMessageKey)
+    ).length;
 
     const timestampFallback = candidateListTimestamp ?? new Date();
     const batchedMessageWrites: Array<ReturnType<typeof prisma.message.upsert>> = [];
@@ -3609,7 +3612,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
           trigger: trigger.kind
         }
       : undefined;
-    if (syncTiming) {
+    if (syncTiming && persistedMessages > 0) {
       deps.recordLatency?.({
         metric: "source_change_to_persisted_message",
         durationMs: Date.parse(syncTiming.persistedAt) - Date.parse(syncTiming.sourceChangedAt),
@@ -4065,6 +4068,15 @@ export function createScanQueue(deps: ScanQueueDeps) {
       syncTiming
     });
 
+    if (quarantinedMessageKeys.size > 0) {
+      const freshness = resolveMessageIdentityFreshness(quarantinedMessageKeys.size);
+      await setPlatformStatus({
+        platform,
+        status: freshness.status,
+        lastError: freshness.lastError ?? undefined
+      });
+    }
+
     await deps.auditLog({
       platform,
       stage: "Parse",
@@ -4097,7 +4109,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
     return {
       updatedThreads: 1,
       parsedMessages: messages.length,
-      persistedMessages: messages.length - blockedMessageKeys.size,
+      persistedMessages,
       quarantinedMessages: quarantinedMessageKeys.size
     };
   }

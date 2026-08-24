@@ -39,9 +39,12 @@ the affected planned mappings at the scan boundary.
 When identity cannot be proved, the scan preserves the legacy row and skips only
 an unresolved canonical write that does not already exist. Other messages in
 the thread continue to persist. The scan reports parsed, persisted, and
-quarantined counts separately, marks freshness incomplete, and does not advance
-its incremental watermark. A later scan may resolve the mapping if stronger
-evidence appears.
+quarantined counts separately, marks the platform `DEGRADED`, retains the last
+fully fresh `lastScanAt`, and does not advance its incremental watermark. A
+per-thread check returns and emits `freshnessComplete: false`, so the dashboard
+cannot turn a quarantined result into "No new messages". A source-change event
+is not labelled `MESSAGES_PERSISTED` when every parsed message was blocked. A
+later scan may resolve the mapping if stronger evidence appears.
 
 A verified Instagram rekey preserves the Message ID and changes the message key
 and any embedded audio fingerprint in one database transaction. Message rekeys
@@ -67,7 +70,8 @@ mapping performs no message mutation.
   reply references or orphaning transcription state.
 - Unprovable Instagram history can remain on its predecessor key until evidence
   or a future manual repair exists, but it cannot stop unrelated thread updates
-  or produce a false full-freshness claim.
+  or produce a false full-freshness claim. Product surfaces retain the last
+  known fully fresh scan time and show the degraded-platform warning.
 - The message identity lock coordinates one runner process. The runner remains a
   singleton for a pilot data directory.
 

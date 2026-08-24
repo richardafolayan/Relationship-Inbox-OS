@@ -781,7 +781,8 @@ test("shipped Instagram selectors exclude sidebar rows and preserve message boun
     descendants = {},
     closest = null,
     left = 0,
-    width = 280
+    width = 280,
+    parentElement = null
   } = {}) => ({
     tagName,
     className: "",
@@ -795,15 +796,18 @@ test("shipped Instagram selectors exclude sidebar rows and preserve message boun
         .filter(([candidate]) => selectorParts(selector).includes(candidate))
         .map(([, descendant]) => descendant),
     closest: () => closest,
+    parentElement,
     getBoundingClientRect: () => ({ left, width })
   });
 
-  const sidebarAvatar = node({ tagName: "IMG", attributes: { alt: "Joanne" } });
+  const sidebarAvatar = node({
+    tagName: "IMG",
+    attributes: { alt: "Joanne's profile picture" }
+  });
   const sidebar = node({
     text: "Joanne Latest preview",
     matched: ["div[role='row']"],
     descendants: {
-      "a[href^='/direct/t/']": node({ tagName: "A" }),
       "div[dir='auto']": node({ text: "Joanne Latest preview" }),
       "img[alt]:not([alt=''])": sidebarAvatar
     },
@@ -817,8 +821,7 @@ test("shipped Instagram selectors exclude sidebar rows and preserve message boun
       "div[dir='auto']": node({ text: "Hello" }),
       "img[alt]:not([alt=''])": node({
         tagName: "IMG",
-        attributes: { alt: "Joanne" },
-        closest: node({ tagName: "A", attributes: { href: "/joanne/" } })
+        attributes: { alt: "Joanne's profile picture" }
       })
     },
     left: 260
@@ -833,6 +836,20 @@ test("shipped Instagram selectors exclude sidebar rows and preserve message boun
     },
     left: 700
   });
+  const linkedProfile = node({
+    text: "Profile-linked avatar",
+    attributes: { "data-id": "message-profile", "data-direction": "incoming" },
+    matched: ["div[role='row']", "[data-id]", "[data-direction='incoming']"],
+    descendants: {
+      "div[dir='auto']": node({ text: "Profile-linked avatar" }),
+      "img[alt]:not([alt=''])": node({
+        tagName: "IMG",
+        attributes: { alt: "Joanne" },
+        closest: node({ tagName: "A", attributes: { href: "/joanne/" } })
+      })
+    },
+    left: 260
+  });
   const photo = node({
     tagName: "IMG",
     attributes: { alt: "Photo" },
@@ -844,11 +861,45 @@ test("shipped Instagram selectors exclude sidebar rows and preserve message boun
     descendants: { "img[alt]:not([alt=''])": photo },
     left: 260
   });
-  const rows = [sidebar, inbound, outbound, media];
+  const reel = node({
+    tagName: "IMG",
+    attributes: { alt: "Reel preview" },
+    closest: node({ tagName: "A", attributes: { href: "/reel/reel-1/" } })
+  });
+  const reelMedia = node({
+    attributes: { "data-id": "message-reel", "data-direction": "incoming" },
+    matched: ["div[role='row']", "[data-id]", "[data-direction='incoming']"],
+    descendants: { "img[alt]:not([alt=''])": reel },
+    left: 260
+  });
+  const voice = node({
+    attributes: { "data-id": "message-voice", "data-direction": "incoming" },
+    matched: ["div[role='row']", "[data-id]", "[data-direction='incoming']"],
+    descendants: {
+      "img[alt]:not([alt=''])": node({
+        tagName: "IMG",
+        attributes: { alt: "Joanne's profile picture" }
+      }),
+      audio: node({ tagName: "AUDIO", attributes: { "aria-label": "Voice message" } })
+    },
+    left: 260
+  });
+  const conversationRows = [inbound, outbound, linkedProfile, voice, media, reelMedia];
+  const rows = [sidebar, ...conversationRows];
   const container = node({ left: 200, width: 800 });
   container.querySelectorAll = (selector) => selector === selectors.message_item ? rows : [];
+  const conversationPane = node({ left: 400, width: 600, parentElement: container });
+  conversationPane.querySelector = (selector) =>
+    selector === selectors.message_item ? conversationRows[0] : null;
+  conversationPane.querySelectorAll = (selector) =>
+    selector === selectors.message_item ? conversationRows : [];
+  const composer = node({ parentElement: conversationPane });
   const body = node();
-  body.querySelector = (selector) => selector === selectors.message_container ? container : null;
+  body.querySelector = (selector) => {
+    if (selector === selectors.message_container) return container;
+    if (selector === selectors.composer_input) return composer;
+    return null;
+  };
   const documentRoot = {
     evaluate: async (callback, argument) =>
       typeof callback === "string" ? undefined : callback(body, argument)
@@ -870,7 +921,15 @@ test("shipped Instagram selectors exclude sidebar rows and preserve message boun
     [
       { nativeId: "message-in", direction: "IN", text: "Hello", mediaKind: undefined },
       { nativeId: undefined, direction: "OUT", text: "Hi", mediaKind: undefined },
-      { nativeId: "message-photo", direction: "IN", text: "", mediaKind: "photo" }
+      {
+        nativeId: "message-profile",
+        direction: "IN",
+        text: "Profile-linked avatar",
+        mediaKind: undefined
+      },
+      { nativeId: "message-voice", direction: "IN", text: "", mediaKind: "voice_message" },
+      { nativeId: "message-photo", direction: "IN", text: "", mediaKind: "photo" },
+      { nativeId: "message-reel", direction: "IN", text: "", mediaKind: "photo" }
     ]
   );
 });
@@ -1194,7 +1253,8 @@ function sendTestHarness({
   switchThreadDuringClick = false,
   dropTypedUnit = false,
   failAfterClick = false,
-  submitOnTypedNewline = false
+  submitOnTypedNewline = false,
+  headerLabel = "Safe thread"
 }) {
   let currentUrl = "about:blank";
   let submitted = false;
@@ -1202,8 +1262,8 @@ function sendTestHarness({
   const typedUnits = [];
   let messageSnapshots = 0;
   const headerLocator = {
-    getAttribute: async () => "Safe thread",
-    textContent: async () => "Safe thread"
+    getAttribute: async () => headerLabel,
+    textContent: async () => headerLabel
   };
   const composer = {
     count: async () => 1,
@@ -1359,6 +1419,29 @@ test("Instagram refuses a physical send without a platform-authoritative recipie
       ),
     (error) => error?.details?.reason === "recipient_unverified_before_send"
   );
+  assert.deepEqual(harness.typedUnits(), []);
+  assert.equal(harness.wasSubmitted(), false);
+});
+
+test("Instagram refuses a stale recipient label before mutating the external composer", async () => {
+  const harness = sendTestHarness({
+    observeSubmittedBubble: true,
+    headerLabel: "Different recipient"
+  });
+
+  await assert.rejects(
+    () =>
+      harness.adapter.sendMessage(
+        {
+          platformThreadId: "safe-thread",
+          displayName: "Safe thread",
+          recipientVerificationLabel: "Safe thread"
+        },
+        "x"
+      ),
+    (error) => error?.details?.reason === "recipient_changed_before_send"
+  );
+  assert.deepEqual(harness.typedUnits(), []);
   assert.equal(harness.wasSubmitted(), false);
 });
 

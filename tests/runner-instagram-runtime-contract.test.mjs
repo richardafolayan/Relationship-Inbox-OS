@@ -84,3 +84,10 @@ test("platform recipient verification identity is persisted separately from Pers
     /recipientVerificationLabel: candidate\.recipientVerificationLabel/
   );
 });
+
+test("identity quarantine remains visible and cannot publish a false persisted-message event", () => {
+  assert.match(scanQueueSource, /if \(syncTiming && persistedMessages > 0\)/);
+  assert.match(scanQueueSource, /markScanComplete: freshness\.advanceLastScanAt/);
+  assert.match(runnerSource, /freshnessComplete: result\.freshnessComplete/);
+  assert.match(runnerSource, /status: result\.freshnessComplete \? "OK" : "FAIL"/);
+});

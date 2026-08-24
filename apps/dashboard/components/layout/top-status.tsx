@@ -153,6 +153,10 @@ type TickerState =
       kind: "thread_checked";
       personName: string | null;
       newMessages: number | null;
+    }
+  | {
+      kind: "thread_check_incomplete";
+      personName: string | null;
     };
 
 function formatRelativeScan(lastScanAt: string | null): string {
@@ -264,6 +268,12 @@ function computeTicker(input: {
       newMessages: threadCheck.newMessages
     };
   }
+  if (threadCheck.kind === "incomplete") {
+    return {
+      kind: "thread_check_incomplete",
+      personName: threadCheck.personName
+    };
+  }
   if (blockedByScan) {
     const platform = input.health?.currentScanPlatform ?? null;
     const progress = input.health?.scanProgress;
@@ -355,6 +365,11 @@ function tickerLabel(state: TickerState): string {
         kind: "checked",
         personName: state.personName,
         newMessages: state.newMessages
+      });
+    case "thread_check_incomplete":
+      return threadCheckLabel({
+        kind: "incomplete",
+        personName: state.personName
       });
     default:
       return "";

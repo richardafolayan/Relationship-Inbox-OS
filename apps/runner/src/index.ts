@@ -93,6 +93,7 @@ import {
 } from "./services/imessage-voice-store";
 import { createScanQueue, type ScanTrigger } from "./services/scan-queue";
 import { createInstagramMessageIdentityReconciler } from "./services/instagram-message-key-upgrade";
+import { MESSAGE_IDENTITY_FRESHNESS_ERROR } from "./services/message-identity-reconciliation";
 import { runReassessForThread } from "./services/reassess-thread";
 import { resolveSseResumeCursor } from "./services/sse-resume-cursor";
 import { resummarizeThread } from "./services/resummarize-thread";
@@ -552,7 +553,12 @@ type ScanQueueWithSmokeIngest = ReturnType<typeof createScanQueue> & {
     requestId: string;
     messages?: NormalizedMessage[];
     trigger?: ScanTrigger;
-  }) => Promise<{ updatedThreads: number; parsedMessages: number }>;
+  }) => Promise<{
+    updatedThreads: number;
+    parsedMessages: number;
+    persistedMessages: number;
+    quarantinedMessages: number;
+  }>;
 };
 
 // Lock-key helpers used both by control endpoints and the enrichment
@@ -4688,7 +4694,14 @@ app.post("/control/thread/:threadId/rescan", asyncRoute(async (req, res) => {
   });
   try {
     const result = await withPlatformControlLock(target.platform, async () => {
-      const aggregate = { updatedThreads: 0, parsedMessages: 0, newMessages: 0 };
+      const aggregate = {
+        updatedThreads: 0,
+        parsedMessages: 0,
+        persistedMessages: 0,
+        quarantinedMessages: 0,
+        newMessages: 0,
+        freshnessComplete: true
+      };
       eventBus.emit({
         type: "SCAN_THREAD_PROGRESS",
         jobId: requestId,
@@ -4719,6 +4732,8 @@ app.post("/control/thread/:threadId/rescan", asyncRoute(async (req, res) => {
         });
         aggregate.updatedThreads += partial.updatedThreads ?? 0;
         aggregate.parsedMessages += partial.parsedMessages ?? 0;
+        aggregate.persistedMessages += partial.persistedMessages ?? 0;
+        aggregate.quarantinedMessages += partial.quarantinedMessages ?? 0;
       }
       eventBus.emit({
         type: "SCAN_THREAD_PROGRESS",
@@ -4730,6 +4745,7 @@ app.post("/control/thread/:threadId/rescan", asyncRoute(async (req, res) => {
       });
       const messagesAfter = await prisma.message.count({ where: { threadId: { in: targetIds } } });
       aggregate.newMessages = Math.max(0, messagesAfter - messagesBefore);
+      aggregate.freshnessComplete = aggregate.quarantinedMessages === 0;
       return aggregate;
     });
     eventBus.emit({
@@ -4740,13 +4756,14 @@ app.post("/control/thread/:threadId/rescan", asyncRoute(async (req, res) => {
       updatedThreads: result.updatedThreads,
       parsedMessages: result.parsedMessages,
       personName: target.displayName,
-      newMessages: result.newMessages
+      newMessages: result.newMessages,
+      freshnessComplete: result.freshnessComplete
     });
     await auditService.log({
       platform: target.platform,
       stage: "Scan",
       action: "RESCAN_THREAD",
-      status: "OK",
+      status: result.freshnessComplete ? "OK" : "FAIL",
       details: {
         requestId,
         threadId: target.threadId,
@@ -4756,10 +4773,11 @@ app.post("/control/thread/:threadId/rescan", asyncRoute(async (req, res) => {
       }
     });
     res.json({
-      ok: true,
+      ok: result.freshnessComplete,
       requestId,
       threadId: target.threadId,
       scope: "single_thread",
+      warning: result.freshnessComplete ? undefined : MESSAGE_IDENTITY_FRESHNESS_ERROR,
       ...result
     });
   } catch (error) {

@@ -232,6 +232,10 @@ export type RunnerEvent =
       // True when the check errored. The ticker suppresses its result
       // line in that case instead of claiming "No new messages".
       failed?: boolean;
+      // False when parsing completed but one or more message identities
+      // were quarantined. The ticker must surface the incomplete check
+      // instead of claiming the conversation is current.
+      freshnessComplete?: boolean;
     })
   | (RunnerEventBase & {
       type: "MESSAGES_PERSISTED";

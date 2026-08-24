@@ -207,11 +207,15 @@ export function planInstagramMessageKeyUpgrades(input: {
       if (!canonical) blockedCanonicalKeys.add(canonicalKey);
       continue;
     }
-    if (canonical && verified.length > 0) {
-      quarantinedCanonicalKeys.add(canonicalKey);
+    if (canonical) {
+      if (
+        verified.length > 0 ||
+        legacyRows.some(({ row, raw }) => !hasDistinctTimestampEvidence(message, row, raw!))
+      ) {
+        quarantinedCanonicalKeys.add(canonicalKey);
+      }
       continue;
     }
-    if (canonical) continue;
     if (verified.length === 0) {
       if (legacyRows.some(({ row, raw }) => !hasDistinctTimestampEvidence(message, row, raw!))) {
         blockedCanonicalKeys.add(canonicalKey);

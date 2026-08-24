@@ -155,11 +155,18 @@ Source:
   previews, and row order never become identifiers.
 - Browser-side parsing installs the same runtime compatibility shim used by
   LinkedIn before evaluating row or message normalizers.
+- Message parsing scopes broad `main` selectors to the active conversation pane
+  identified by its composer or header. Control-only sidebar rows are excluded
+  even when they expose no thread link. Profile images and avatars are excluded
+  by both link destination and semantic labels, while linked post and reel media
+  remain message content.
 - Ambiguous message direction fails the fetch. Exact source datetimes are
   stored when exposed; otherwise persistence retains first-seen time.
 - Unsupported or deleted content is represented by a safe placeholder.
 - Opening and sending navigate to the exact thread ID and verify the resulting
-  URL. Sending is manual text only and succeeds only after a new matching
+  URL. A send also verifies the adapter-captured recipient label before any
+  composer mutation and again immediately before clicking the bound Send
+  control. Sending is manual text only and succeeds only after a new matching
   outbound bubble appears.
 - Revealing Instagram foregrounds the installed stable Chrome bundle used by
   its session. It does not launch Patchright's Chrome for Testing as a second
