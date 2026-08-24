@@ -85,8 +85,8 @@ before claiming those guarantees still hold.
 - Reviewed local integration branch: `fix/instagram-integration-gate`.
 - Base: `origin/develop` at
   `ddfba09f44470852c349e0a7f82c12230ba7d32d`.
-- Latest verified corrective commit: `6cd4fbb4`.
-- The complete bounded-concurrency suite passes under Node 20.20.0: 3,032
+- Latest verified corrective commit: `b6b0b7e6`.
+- The complete bounded-concurrency suite passes under Node 20.20.0: 3,033
   tests, zero failures,
   zero skips, zero cancellations, and zero todos.
 - Dashboard, runner, and core type checks pass. The production dashboard build,
@@ -186,6 +186,13 @@ before claiming those guarantees still hold.
   The no-form coordinate-preserving reparent case performs zero clicks. The
   queue regression now proves the watermark was captured and still not saved
   after incomplete or candidate-capped collection.
+- A tenth exact-head adversarial review found that a fixed-position Send
+  control could move between sibling composer branches while retaining the
+  same shared owner and geometry. Send now binds the original composer branch,
+  control branch, and immediate control parent as well as the shared owner.
+  The synchronous click task requires every bound relationship to remain
+  connected and unchanged. The same-owner sibling reparent regression performs
+  zero clicks in real Chromium.
 - Scheduled sends, attachments, polls, focus acknowledgements, and other
   automated Instagram sends are rejected at the durable worker boundary. The
   dashboard no longer offers those unsupported actions.
