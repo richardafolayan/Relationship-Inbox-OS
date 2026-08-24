@@ -133,7 +133,7 @@ test("admin reset applies platform-scoped deletes and removes only orphan people
   assert.deepEqual(personDelete.args.where.id.in, ["orphan-person"]);
 });
 
-test("Instagram reset clears identity quarantine before deleting its graph", async () => {
+test("Instagram reset clears identity quarantine only after deleting its graph", async () => {
   const calls = [];
   const emptyDelete = async () => ({ count: 0 });
   const mockPrisma = {
@@ -167,7 +167,39 @@ test("Instagram reset clears identity quarantine before deleting its graph", asy
     /^instagram_message_identity_quarantine_v1:/
   );
   assert.ok(
-    calls.findIndex((entry) => entry.model === "setting.deleteMany") <
+    calls.findIndex((entry) => entry.model === "setting.deleteMany") >
       calls.findIndex((entry) => entry.model === "thread.deleteMany")
   );
+});
+
+test("a failed Instagram reset preserves identity quarantine evidence", async () => {
+  let quarantineDeletes = 0;
+  const emptyDelete = async () => ({ count: 0 });
+  const mockPrisma = {
+    setting: {
+      deleteMany: async () => {
+        quarantineDeletes += 1;
+        return { count: 1 };
+      }
+    },
+    thread: {
+      findMany: async () => [{ id: "instagram-thread" }],
+      deleteMany: async () => {
+        throw new Error("graph delete failed");
+      }
+    },
+    sendRequest: { deleteMany: emptyDelete },
+    draft: { deleteMany: emptyDelete },
+    message: { deleteMany: emptyDelete },
+    person: {
+      findMany: async () => [],
+      deleteMany: emptyDelete
+    }
+  };
+
+  await assert.rejects(
+    () => resetPlatformInboxGraph("INSTAGRAM", mockPrisma),
+    /graph delete failed/
+  );
+  assert.equal(quarantineDeletes, 0);
 });

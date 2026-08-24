@@ -15,9 +15,11 @@ import {
   InstagramAdapter,
   InstagramParsingError,
   instagramThreadUrlMatches,
+  mergeInstagramThreadSnapshotSources,
   normalizeInstagramMessageSnapshots,
   normalizeInstagramThreadSnapshots,
-  parseInstagramSourceTimestamp
+  parseInstagramSourceTimestamp,
+  resolveInstagramCollectionStopReason
 } from "../apps/runner/dist/platforms/instagram-adapter.js";
 import { assertInstagramManualTextSend } from "../apps/runner/dist/services/send.js";
 import {
@@ -339,6 +341,51 @@ test("thread identity is stable across row order and duplicate rows", () => {
   assert.equal(
     first.find((thread) => thread.platformThreadId === "two")?.recipientVerificationLabel,
     "Person Two"
+  );
+});
+
+test("network and DOM overlap is deduplicated before the distinct-thread limit", () => {
+  const merged = mergeInstagramThreadSnapshotSources({
+    networkSnapshots: [
+      { stableId: "a", displayName: "A", unread: false },
+      { stableId: "b", displayName: "B", unread: false }
+    ],
+    domSnapshots: [
+      { href: "/direct/t/a/", displayName: "A", unread: true },
+      { href: "/direct/t/c/", displayName: "C", unread: false },
+      { href: "/direct/t/d/", displayName: "D", unread: false }
+    ],
+    limit: 3
+  });
+
+  assert.deepEqual(merged.map((thread) => thread.platformThreadId), ["a", "b", "c"]);
+  assert.equal(merged[0].unreadCount, 1);
+});
+
+test("Instagram collection stays incomplete unless every collection view proves empty", () => {
+  assert.equal(
+    resolveInstagramCollectionStopReason({
+      collectionCalls: 2,
+      observedRows: true,
+      explicitlyEmpty: false
+    }),
+    "instagram_bounded_snapshot"
+  );
+  assert.equal(
+    resolveInstagramCollectionStopReason({
+      collectionCalls: 2,
+      observedRows: false,
+      explicitlyEmpty: true
+    }),
+    "zero_threads_found"
+  );
+  assert.equal(
+    resolveInstagramCollectionStopReason({
+      collectionCalls: 0,
+      observedRows: false,
+      explicitlyEmpty: true
+    }),
+    "instagram_bounded_snapshot"
   );
 });
 
@@ -1254,7 +1301,9 @@ function sendTestHarness({
   switchThreadAfterComposerBound = false,
   switchThreadDuringComposerApproach = false,
   switchThreadAfterFirstTypedUnit = false,
+  switchThreadDuringHeaderReadAt = null,
   switchThreadDuringClick = false,
+  reorderSendCandidateAfterGeometry = false,
   dropTypedUnit = false,
   failAfterClick = false,
   submitOnTypedNewline = false,
@@ -1268,8 +1317,15 @@ function sendTestHarness({
   const composerMutations = [];
   let messageSnapshots = 0;
   let composerTextReads = 0;
+  let headerReads = 0;
   const headerLocator = {
-    getAttribute: async () => headerLabel,
+    getAttribute: async () => {
+      headerReads += 1;
+      if (headerReads === switchThreadDuringHeaderReadAt) {
+        currentUrl = "https://www.instagram.com/direct/t/wrong-thread/";
+      }
+      return headerLabel;
+    },
     textContent: async () => headerLabel
   };
   const composer = {
@@ -1316,7 +1372,10 @@ function sendTestHarness({
     }
   };
   const boundSendButton = {
-    boundingBox: async () => sendButtonBox,
+    boundingBox: async () =>
+      reorderSendCandidateAfterGeometry
+        ? { x: 4_000, y: 900, width: 80, height: 40 }
+        : sendButtonBox,
     click: async () => {
       if (switchThreadDuringClick) {
         currentUrl = "https://www.instagram.com/direct/t/wrong-thread/";
@@ -1648,6 +1707,29 @@ test("Instagram revalidates after the composer pointer approach before clicking"
   assert.equal(harness.wasSubmitted(), false);
 });
 
+test("Instagram catches navigation during the composer recipient-header check", async () => {
+  const harness = sendTestHarness({
+    observeSubmittedBubble: false,
+    switchThreadDuringHeaderReadAt: 4
+  });
+
+  await assert.rejects(
+    () =>
+      harness.adapter.sendMessage(
+        {
+          platformThreadId: "safe-thread",
+          displayName: "Safe thread",
+          recipientVerificationLabel: "Safe thread"
+        },
+        "approved private text"
+      ),
+    (error) => error?.details?.reason === "thread_changed_before_send"
+  );
+  assert.deepEqual(harness.composerMutations(), []);
+  assert.deepEqual(harness.typedUnits(), []);
+  assert.equal(harness.wasSubmitted(), false);
+});
+
 test("Instagram stops bound typing when the active thread changes", async () => {
   const harness = sendTestHarness({
     observeSubmittedBubble: false,
@@ -1670,10 +1752,74 @@ test("Instagram stops bound typing when the active thread changes", async () => 
   assert.equal(harness.wasSubmitted(), false);
 });
 
+test("Instagram catches navigation during a mid-typing recipient-header check", async () => {
+  const harness = sendTestHarness({
+    observeSubmittedBubble: false,
+    switchThreadDuringHeaderReadAt: 6
+  });
+
+  await assert.rejects(
+    () =>
+      harness.adapter.sendMessage(
+        {
+          platformThreadId: "safe-thread",
+          displayName: "Safe thread",
+          recipientVerificationLabel: "Safe thread"
+        },
+        "private"
+      ),
+    (error) => error?.details?.reason === "thread_changed_before_send"
+  );
+  assert.deepEqual(harness.typedUnits(), ["p"]);
+  assert.equal(harness.wasSubmitted(), false);
+});
+
 test("Instagram never treats a lone distant submit as the composer Send button", async () => {
   const harness = sendTestHarness({
     observeSubmittedBubble: false,
     sendButtonBox: { x: 850, y: 0, width: 80, height: 40 }
+  });
+
+  await assert.rejects(
+    () =>
+      harness.adapter.sendMessage(
+        {
+          platformThreadId: "safe-thread",
+          displayName: "Safe thread",
+          recipientVerificationLabel: "Safe thread"
+        },
+        "approved"
+      ),
+    (error) => error?.details?.reason === "send_button_not_unique"
+  );
+  assert.equal(harness.wasSubmitted(), false);
+});
+
+test("Instagram rejects a same-row Send control far from the composer", async () => {
+  const harness = sendTestHarness({
+    observeSubmittedBubble: false,
+    sendButtonBox: { x: 4_000, y: 900, width: 80, height: 40 }
+  });
+
+  await assert.rejects(
+    () =>
+      harness.adapter.sendMessage(
+        {
+          platformThreadId: "safe-thread",
+          displayName: "Safe thread",
+          recipientVerificationLabel: "Safe thread"
+        },
+        "approved"
+      ),
+    (error) => error?.details?.reason === "send_button_not_unique"
+  );
+  assert.equal(harness.wasSubmitted(), false);
+});
+
+test("Instagram measures and clicks the same bound Send handle", async () => {
+  const harness = sendTestHarness({
+    observeSubmittedBubble: false,
+    reorderSendCandidateAfterGeometry: true
   });
 
   await assert.rejects(
@@ -1730,6 +1876,28 @@ test("Instagram binds Send to the verified document instead of re-resolving afte
       ),
     (error) => error?.details?.reason === "delivery_uncertain_after_submit"
   );
+  assert.equal(harness.wasSubmitted(), false);
+});
+
+test("Instagram catches navigation during the final recipient-header check", async () => {
+  const harness = sendTestHarness({
+    observeSubmittedBubble: false,
+    switchThreadDuringHeaderReadAt: 6
+  });
+
+  await assert.rejects(
+    () =>
+      harness.adapter.sendMessage(
+        {
+          platformThreadId: "safe-thread",
+          displayName: "Safe thread",
+          recipientVerificationLabel: "Safe thread"
+        },
+        "x"
+      ),
+    (error) => error?.details?.reason === "thread_changed_before_send"
+  );
+  assert.deepEqual(harness.typedUnits(), ["x"]);
   assert.equal(harness.wasSubmitted(), false);
 });
 

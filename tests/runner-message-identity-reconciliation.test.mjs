@@ -124,7 +124,14 @@ test("a collector-level cap is carried into the platform freshness gate", () => 
 });
 
 test("a collector that cannot prove the inbox boundary stays degraded", () => {
-  for (const stopReason of ["max_duration", "max_iterations", "no_scroll_container"]) {
+  for (const stopReason of [
+    "max_duration",
+    "max_iterations",
+    "no_scroll_container",
+    "deep_scroll_disabled",
+    "end_of_list_no_progress",
+    "instagram_bounded_snapshot"
+  ]) {
     const boundary = resolveCollectionBoundaryFreshness(stopReason);
     assert.deepEqual(boundary, {
       candidateCapBroke: false,
@@ -219,4 +226,53 @@ test("a pre-marker identity failure is adopted before scan start", async () => {
     status: "DEGRADED",
     lastError: MESSAGE_IDENTITY_FRESHNESS_ERROR
   });
+});
+
+test("marker count failure preserves the identity quarantine floor", async () => {
+  const result = await preparePlatformScanIdentityFreshness({
+    reconciler: {
+      async getOutstandingQuarantineCount() {
+        throw new Error("setting read unavailable");
+      },
+      async preserveUntrackedQuarantine() {}
+    },
+    previousStatus: "DEGRADED",
+    previousLastError: MESSAGE_IDENTITY_FRESHNESS_ERROR
+  });
+
+  assert.deepEqual(result, {
+    outstandingIdentityQuarantines: 1,
+    untrackedIdentityQuarantineFloor: 1,
+    status: "DEGRADED",
+    lastError: MESSAGE_IDENTITY_FRESHNESS_ERROR
+  });
+});
+
+test("failed sentinel persistence cannot erase predecessor identity degradation", async () => {
+  let reads = 0;
+  const reconciler = {
+    async getOutstandingQuarantineCount() {
+      reads += 1;
+      return 0;
+    },
+    async preserveUntrackedQuarantine() {
+      throw new Error("setting write unavailable");
+    }
+  };
+
+  const first = await preparePlatformScanIdentityFreshness({
+    reconciler,
+    previousStatus: "DEGRADED",
+    previousLastError: MESSAGE_IDENTITY_FRESHNESS_ERROR
+  });
+  const second = await preparePlatformScanIdentityFreshness({
+    reconciler,
+    previousStatus: first.status,
+    previousLastError: first.lastError
+  });
+
+  assert.equal(reads, 2);
+  assert.equal(first.outstandingIdentityQuarantines, 1);
+  assert.equal(second.outstandingIdentityQuarantines, 1);
+  assert.equal(second.lastError, MESSAGE_IDENTITY_FRESHNESS_ERROR);
 });

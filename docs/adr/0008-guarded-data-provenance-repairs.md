@@ -61,10 +61,15 @@ sliding DOM window.
 A database upgraded from a markerless build may already record the identity
 freshness error. If no marker exists, the first scan adopts that state into a
 privacy-safe untracked marker before connecting can publish freshness. That
-marker is not guessed away from a limited browser window. A destructive
-Instagram graph reset clears all Instagram quarantine markers before rebuilding
-the graph. Empty marker payloads, malformed payloads, and malformed marker keys
-are corrupt state and count as unresolved.
+marker is not guessed away from a limited browser window. It makes every
+targeted Instagram check incomplete because the affected conversation is not
+known. Marker read or write failure retains an in-memory quarantine floor and
+the identity freshness error instead of falling through to a clean result. A
+destructive Instagram graph reset deletes the graph and the complete marker
+namespace in one database transaction. Marker deletion is last in the fallback
+ordering, so a failed graph deletion cannot erase its safety evidence. Empty
+marker payloads, malformed payloads, and malformed marker keys are corrupt
+state and count as unresolved.
 
 Platform freshness requires more than clean identity reconciliation. Every
 selected candidate must fit within the configured caps and every selected
@@ -75,7 +80,9 @@ existing degraded state before this completion decision.
 Collector-level row failures also count as failed conversations. A collector
 that stops at its own cap, duration, iteration, or scroll-container boundary
 cannot publish full freshness even when its returned candidate array fits the
-queue-level cap.
+queue-level cap. Disabling deep scroll and exhausting a no-progress boundary
+remain explicitly incomplete. A zero-row hard-limit result keeps its causal
+stop reason instead of being relabelled as a proven empty inbox.
 
 A verified Instagram rekey preserves the Message ID and changes the message key
 and any embedded audio fingerprint in one database transaction. Message rekeys

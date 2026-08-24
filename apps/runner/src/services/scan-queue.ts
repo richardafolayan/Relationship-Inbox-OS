@@ -2312,6 +2312,11 @@ export function createScanQueue(deps: ScanQueueDeps) {
                 cappedCandidatesCount: candidatesToSync.length
               });
             } else {
+              const metricsProvider = adapter as unknown as {
+                beginCollectionCycle?: () => void;
+                getLastCollectionMetrics?: () => Record<string, unknown> | null;
+              };
+              metricsProvider.beginCollectionCycle?.();
               const unread = await adapter.scanUnreadThreads();
               unreadCandidatesCount = unread.length;
               runLogger.logAction({
@@ -2375,9 +2380,6 @@ export function createScanQueue(deps: ScanQueueDeps) {
                 }
               });
 
-              const metricsProvider = adapter as unknown as {
-                getLastCollectionMetrics?: () => Record<string, unknown> | null;
-              };
               collectionMetrics =
                 typeof metricsProvider.getLastCollectionMetrics === "function"
                   ? metricsProvider.getLastCollectionMetrics()
@@ -2666,10 +2668,14 @@ export function createScanQueue(deps: ScanQueueDeps) {
             return;
           }
 
-          const durableIdentityQuarantines =
-            await deps.messageIdentityReconcilers?.[
-              platform
-            ]?.getOutstandingQuarantineCount?.();
+          let durableIdentityQuarantines: number | undefined;
+          const quarantineCounter =
+            deps.messageIdentityReconcilers?.[platform]?.getOutstandingQuarantineCount;
+          try {
+            durableIdentityQuarantines = await quarantineCounter?.();
+          } catch {
+            durableIdentityQuarantines = quarantineCounter ? 1 : undefined;
+          }
           const freshnessIdentityQuarantines = Math.max(
             durableIdentityQuarantines ?? messageIdentityQuarantines,
             untrackedIdentityQuarantineFloor

@@ -118,7 +118,10 @@ export function resolveCollectionBoundaryFreshness(
   if (
     stopReason === "max_duration" ||
     stopReason === "max_iterations" ||
-    stopReason === "no_scroll_container"
+    stopReason === "no_scroll_container" ||
+    stopReason === "deep_scroll_disabled" ||
+    stopReason === "end_of_list_no_progress" ||
+    stopReason === "instagram_bounded_snapshot"
   ) {
     return { candidateCapBroke: false, collectionIncomplete: true, collectionFailures };
   }
@@ -170,19 +173,38 @@ export async function preparePlatformScanIdentityFreshness(input: {
   status: "CONNECTED" | "DEGRADED";
   lastError: string | null;
 }> {
-  let outstandingIdentityQuarantines =
-    await input.reconciler?.getOutstandingQuarantineCount?.() ?? 0;
+  let outstandingIdentityQuarantines = 0;
+  let quarantineStorageUnavailable = false;
+  try {
+    outstandingIdentityQuarantines =
+      await input.reconciler?.getOutstandingQuarantineCount?.() ?? 0;
+  } catch {
+    quarantineStorageUnavailable = true;
+  }
   const untrackedIdentityQuarantineFloor =
-    outstandingIdentityQuarantines === 0 &&
-    input.previousLastError === MESSAGE_IDENTITY_FRESHNESS_ERROR
+    quarantineStorageUnavailable ||
+    (outstandingIdentityQuarantines === 0 &&
+      input.previousLastError === MESSAGE_IDENTITY_FRESHNESS_ERROR)
       ? 1
       : 0;
 
   if (untrackedIdentityQuarantineFloor > 0) {
-    await input.reconciler?.preserveUntrackedQuarantine?.();
+    try {
+      await input.reconciler?.preserveUntrackedQuarantine?.();
+    } catch {
+      quarantineStorageUnavailable = true;
+    }
+    if (!quarantineStorageUnavailable) {
+      try {
+        outstandingIdentityQuarantines =
+          await input.reconciler?.getOutstandingQuarantineCount?.() ?? 0;
+      } catch {
+        quarantineStorageUnavailable = true;
+      }
+    }
     outstandingIdentityQuarantines = Math.max(
       untrackedIdentityQuarantineFloor,
-      await input.reconciler?.getOutstandingQuarantineCount?.() ?? 0
+      outstandingIdentityQuarantines
     );
   }
 

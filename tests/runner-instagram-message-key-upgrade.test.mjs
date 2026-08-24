@@ -649,7 +649,8 @@ test("a pre-marker identity failure survives restart and an empty sliding window
     threadId: "thread-1",
     currentMessages: []
   });
-  assert.equal(omitted.quarantinedMessageKeys.length, 0);
+  assert.equal(omitted.quarantinedMessageKeys.length, 1);
+  assert.match(omitted.quarantinedMessageKeys[0], /^instagram-quarantine:/);
   assert.equal(await restarted.getOutstandingQuarantineCount(), 1);
   assert.doesNotMatch(database.settings()[0].valueJson, /instagram:stable|Hello|thread-1/);
 });

@@ -190,6 +190,27 @@ export function normalizeInstagramThreadSnapshots(
   return [...byId.values()];
 }
 
+export function mergeInstagramThreadSnapshotSources(input: {
+  networkSnapshots: InstagramThreadSnapshot[];
+  domSnapshots: InstagramThreadSnapshot[];
+  limit: number;
+}): ThreadStub[] {
+  return normalizeInstagramThreadSnapshots([
+    ...input.networkSnapshots,
+    ...input.domSnapshots
+  ]).slice(0, Math.max(0, input.limit));
+}
+
+export function resolveInstagramCollectionStopReason(input: {
+  collectionCalls: number;
+  observedRows: boolean;
+  explicitlyEmpty: boolean;
+}): "zero_threads_found" | "instagram_bounded_snapshot" {
+  return input.collectionCalls > 0 && !input.observedRows && input.explicitlyEmpty
+    ? "zero_threads_found"
+    : "instagram_bounded_snapshot";
+}
+
 function instagramRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -630,6 +651,11 @@ export class InstagramAdapter extends BetaAdapter {
     object,
     { generation: number; requestOrder: number }
   >();
+  private collectionCalls = 0;
+  private collectionObservedRows = false;
+  private collectionExplicitlyEmpty = true;
+  private collectionTotalFound = 0;
+  private collectionUnreadFound = 0;
 
   constructor(deps: InstagramAdapterDependencies) {
     super({ ...deps, platform: "INSTAGRAM" });
@@ -950,7 +976,7 @@ export class InstagramAdapter extends BetaAdapter {
     page: Page,
     selectors: SelectorRegistry,
     limit: number
-  ): Promise<InstagramThreadSnapshot[]> {
+  ): Promise<ThreadStub[]> {
     const documentRoot = await page.$("body");
     if (!documentRoot) {
       throw new InstagramParsingError("instagram_document_missing");
@@ -995,7 +1021,11 @@ export class InstagramAdapter extends BetaAdapter {
       },
       { selectors, limit }
     );
-    return [...this.capturedNetworkThreads(page, limit), ...domSnapshots].slice(0, limit);
+    return mergeInstagramThreadSnapshotSources({
+      networkSnapshots: this.capturedNetworkThreads(page, limit),
+      domSnapshots,
+      limit
+    });
   }
 
   private async probeThreadDom(page: Page): Promise<Record<string, unknown>> {
@@ -1129,14 +1159,16 @@ export class InstagramAdapter extends BetaAdapter {
           .catch(() => undefined),
         this.waitForCapturedNetworkThreads(page, 8_000)
       ]);
-      const snapshots = await this.snapshotThreads(page, selectors, limit);
-      if (snapshots.length === 0) {
+      const threads = await this.snapshotThreads(page, selectors, limit);
+      let explicitlyEmpty = false;
+      if (threads.length === 0) {
         const emptyInbox = await page
           .evaluate(() => {
             const text = document.body?.innerText?.toLowerCase() ?? "";
             return /\bno messages\b|\bno conversations\b/i.test(text);
           })
           .catch(() => false);
+        explicitlyEmpty = emptyInbox;
         if (!emptyInbox) {
           const structuralDetails = await this.probeThreadDom(page).catch(() => ({
             documentProbeFailed: true
@@ -1155,7 +1187,15 @@ export class InstagramAdapter extends BetaAdapter {
           );
         }
       }
-      return normalizeInstagramThreadSnapshots(snapshots);
+      this.collectionCalls += 1;
+      this.collectionObservedRows ||= threads.length > 0;
+      this.collectionExplicitlyEmpty &&= explicitlyEmpty;
+      this.collectionTotalFound = Math.max(this.collectionTotalFound, threads.length);
+      this.collectionUnreadFound = Math.max(
+        this.collectionUnreadFound,
+        threads.filter((thread) => (thread.unreadCount ?? 0) > 0).length
+      );
+      return threads;
     } catch (error) {
       if (error instanceof AdapterFailure) {
         throw error;
@@ -1175,6 +1215,32 @@ export class InstagramAdapter extends BetaAdapter {
   async fetchRecentThreads(limit: number): Promise<ThreadStub[]> {
     const threads = await this.collectThreads(limit);
     return threads.map((thread) => ({ ...thread, isRecentCandidate: true }));
+  }
+
+  beginCollectionCycle(): void {
+    this.collectionCalls = 0;
+    this.collectionObservedRows = false;
+    this.collectionExplicitlyEmpty = true;
+    this.collectionTotalFound = 0;
+    this.collectionUnreadFound = 0;
+  }
+
+  getLastCollectionMetrics(): {
+    totalFound: number;
+    unreadFound: number;
+    failures: number;
+    stopReason: "zero_threads_found" | "instagram_bounded_snapshot";
+  } {
+    return {
+      totalFound: this.collectionTotalFound,
+      unreadFound: this.collectionUnreadFound,
+      failures: 0,
+      stopReason: resolveInstagramCollectionStopReason({
+        collectionCalls: this.collectionCalls,
+        observedRows: this.collectionObservedRows,
+        explicitlyEmpty: this.collectionExplicitlyEmpty
+      })
+    };
   }
 
   private async openExactThread(
@@ -1217,20 +1283,24 @@ export class InstagramAdapter extends BetaAdapter {
     requireRecipientHeader: boolean,
     phase: "open" | "before_send"
   ): Promise<void> {
-    if (!instagramThreadUrlMatches(page.url(), platformThreadId)) {
-      throw this.safeFailure(
-        "THREAD_NOT_FOUND",
-        "open_thread",
-        phase === "before_send" ? "thread_changed_before_send" : "opened_thread_id_mismatch",
-        platformThreadId
-      );
-    }
+    const assertCurrentThreadUrl = (): void => {
+      if (!instagramThreadUrlMatches(page.url(), platformThreadId)) {
+        throw this.safeFailure(
+          "THREAD_NOT_FOUND",
+          "open_thread",
+          phase === "before_send" ? "thread_changed_before_send" : "opened_thread_id_mismatch",
+          platformThreadId
+        );
+      }
+    };
+    assertCurrentThreadUrl();
 
     const headerText = await page
       .locator(selectors.conversation_header ?? "header h1, header h2, header span[title]")
       .first()
       .getAttribute("title")
       .catch(() => null);
+    assertCurrentThreadUrl();
     const fallbackHeader = headerText
       ? headerText
       : await page
@@ -1238,6 +1308,7 @@ export class InstagramAdapter extends BetaAdapter {
           .first()
           .textContent()
           .catch(() => "");
+    assertCurrentThreadUrl();
     const normalizedHeader = fallbackHeader?.replace(/\s+/g, " ").trim().normalize("NFKC").toLocaleLowerCase();
     const normalizedRecipient = thread.recipientVerificationLabel
       ?.replace(/\s+/g, " ")
@@ -1515,7 +1586,7 @@ export class InstagramAdapter extends BetaAdapter {
     page: Page,
     composer: Locator | ElementHandle,
     selector: string
-  ): Promise<Locator> {
+  ): Promise<ElementHandle> {
     let candidates = await this.enabledCandidates(page.locator(selector));
     if (candidates.length === 0) {
       candidates = await this.enabledCandidates(
@@ -1531,15 +1602,21 @@ export class InstagramAdapter extends BetaAdapter {
       throw new InstagramParsingError("composer_not_visible");
     }
     const composerCenterY = composerBox.y + composerBox.height / 2;
-    const nearby: Locator[] = [];
+    const composerRight = composerBox.x + composerBox.width;
+    const maxHorizontalGap = Math.max(160, composerBox.height * 4);
+    const nearby: ElementHandle[] = [];
     for (const candidate of candidates) {
-      const box = await candidate.boundingBox();
+      const candidateHandle = await candidate.elementHandle();
+      if (!candidateHandle) continue;
+      const box = await candidateHandle.boundingBox();
       if (!box) continue;
       const centerY = box.y + box.height / 2;
+      const centerX = box.x + box.width / 2;
       const sameRow = Math.abs(centerY - composerCenterY) <= Math.max(36, composerBox.height);
-      const atOrAfterComposer = box.x + box.width >= composerBox.x;
-      if (sameRow && atOrAfterComposer) {
-        nearby.push(candidate);
+      const horizontallyAssociated =
+        centerX >= composerBox.x && centerX <= composerRight + maxHorizontalGap;
+      if (sameRow && horizontallyAssociated) {
+        nearby.push(candidateHandle);
       }
     }
     if (nearby.length !== 1) {
@@ -1709,15 +1786,11 @@ export class InstagramAdapter extends BetaAdapter {
       await this.verifyComposerText(composer, normalizedText);
       await readingPause(500, 1_100);
 
-      const sendButton = await this.requireComposerSendButton(
+      const boundSendButton = await this.requireComposerSendButton(
         page,
         composer,
         selectors.send_button
       );
-      const boundSendButton = await sendButton.elementHandle();
-      if (!boundSendButton) {
-        throw new InstagramParsingError("send_button_detached");
-      }
       await humanClick(page, boundSendButton, {
         timeout: 10_000,
         reading: null,

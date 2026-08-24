@@ -1939,6 +1939,7 @@ export type LinkedInCollectionStopReason =
   | "end_of_list_reached"
   | "deep_scroll_exhausted"
   | "no_scroll_container"
+  | "deep_scroll_disabled"
   | "max_iterations"
   | "max_duration"
   | "zero_threads_found"
@@ -1947,6 +1948,21 @@ export type LinkedInCollectionStopReason =
   // lists most-recent-first, so a streak of unchanged rows means we've
   // reached the high-water mark and everything below is already scanned.
   | "unchanged_streak";
+
+export function resolveLinkedInEmptyCollectionStopReason(
+  stopReason: LinkedInCollectionStopReason
+): LinkedInCollectionStopReason {
+  if (
+    stopReason === "max_duration" ||
+    stopReason === "max_iterations" ||
+    stopReason === "deep_scroll_disabled" ||
+    stopReason === "no_scroll_container" ||
+    stopReason === "end_of_list_no_progress"
+  ) {
+    return stopReason;
+  }
+  return "zero_threads_found";
+}
 
 export function updateLinkedInCollectionStability(input: {
   previousCount: number;
@@ -4464,7 +4480,7 @@ export class LinkedInAdapter implements PlatformAdapter {
         break;
       }
       if (options?.disableDeepScroll) {
-        stopReason = merged.size > 0 ? "end_of_list_reached" : "zero_threads_found";
+        stopReason = "deep_scroll_disabled";
         this.logTraceDecision({
           stage: "collect_threads",
           decision: "Stopped collection because deep scroll is disabled for this run",
@@ -4526,7 +4542,7 @@ export class LinkedInAdapter implements PlatformAdapter {
     }
 
     if (merged.size <= 0 && stopReason !== "max_threads") {
-      stopReason = "zero_threads_found";
+      stopReason = resolveLinkedInEmptyCollectionStopReason(stopReason);
     }
 
     this.logTraceEvent({
@@ -8058,8 +8074,8 @@ export class LinkedInAdapter implements PlatformAdapter {
           }
         }
 
-        if (metrics.processedRows <= 0 && metrics.stopReason === "max_iterations") {
-          metrics.stopReason = "zero_threads_found";
+        if (metrics.processedRows <= 0) {
+          metrics.stopReason = resolveLinkedInEmptyCollectionStopReason(metrics.stopReason);
         }
 
         this.lastCollectionMetrics = {

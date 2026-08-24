@@ -412,10 +412,24 @@ export function createInstagramMessageIdentityReconciler(
   database: PrismaClient
 ): MessageIdentityReconciler {
   const reconciler: MessageIdentityReconciler = async ({ threadId, currentMessages }) => {
-    const stateRecord = await database.setting.findUnique({
-      where: { key: quarantineSettingKey(threadId) },
-      select: { valueJson: true }
-    });
+    const [stateRecord, untrackedStateRecord] = await Promise.all([
+      database.setting.findUnique({
+        where: { key: quarantineSettingKey(threadId) },
+        select: { valueJson: true }
+      }),
+      database.setting.findUnique({
+        where: { key: UNTRACKED_QUARANTINE_SETTING_KEY },
+        select: { valueJson: true }
+      })
+    ]);
+    const untrackedState = untrackedStateRecord
+      ? parseQuarantineState(untrackedStateRecord.valueJson)
+      : null;
+    const untrackedQuarantineTokens = untrackedStateRecord
+      ? untrackedState
+        ? untrackedState.messageKeyHashes.map(quarantineToken)
+        : ["instagram-quarantine:untracked-state-corrupt"]
+      : [];
     const state = stateRecord ? parseQuarantineState(stateRecord.valueJson) : {
       version: QUARANTINE_VERSION,
       messageKeyHashes: []
@@ -423,7 +437,10 @@ export function createInstagramMessageIdentityReconciler(
     if (!state) {
       return {
         blockedMessageKeys: [],
-        quarantinedMessageKeys: ["instagram-quarantine:state-corrupt"]
+        quarantinedMessageKeys: [
+          "instagram-quarantine:state-corrupt",
+          ...untrackedQuarantineTokens
+        ]
       };
     }
 
@@ -481,7 +498,11 @@ export function createInstagramMessageIdentityReconciler(
       return {
         blockedMessageKeys: [...new Set([...plan.blockedCanonicalKeys, ...unresolvedKeys])],
         quarantinedMessageKeys: [
-          ...new Set([...plan.quarantinedCanonicalKeys, ...unresolvedKeys])
+          ...new Set([
+            ...plan.quarantinedCanonicalKeys,
+            ...unresolvedKeys,
+            ...untrackedQuarantineTokens
+          ])
         ]
       };
     }
@@ -501,9 +522,14 @@ export function createInstagramMessageIdentityReconciler(
 
     return {
       blockedMessageKeys: plan.blockedCanonicalKeys,
-      quarantinedMessageKeys: [...finalHashes].map(
-        (hash) => quarantinedKeyByHash.get(hash) ?? quarantineToken(hash)
-      )
+      quarantinedMessageKeys: [
+        ...new Set([
+          ...[...finalHashes].map(
+            (hash) => quarantinedKeyByHash.get(hash) ?? quarantineToken(hash)
+          ),
+          ...untrackedQuarantineTokens
+        ])
+      ]
     };
   };
 

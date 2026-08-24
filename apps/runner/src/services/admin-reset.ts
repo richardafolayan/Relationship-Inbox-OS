@@ -29,6 +29,7 @@ export interface AdminResetResult {
 }
 
 interface AdminResetPrisma {
+  $transaction?: <T>(callback: (transaction: AdminResetPrisma) => Promise<T>) => Promise<T>;
   setting?: {
     deleteMany: (args: unknown) => Promise<{ count: number }>;
   };
@@ -105,15 +106,22 @@ export async function resetPlatformInboxGraph(
   prismaClient?: AdminResetPrisma
 ): Promise<AdminResetResult> {
   const client = prismaClient ?? (await resolvePrismaClient());
+  if (platform === "INSTAGRAM" && client.$transaction) {
+    return client.$transaction((transaction) =>
+      resetPlatformInboxGraphWithinClient(platform, transaction)
+    );
+  }
+  return resetPlatformInboxGraphWithinClient(platform, client);
+}
+
+async function resetPlatformInboxGraphWithinClient(
+  platform: PlatformName,
+  client: AdminResetPrisma
+): Promise<AdminResetResult> {
   if (platform === "INSTAGRAM") {
     if (!client.setting) {
       throw new Error("Instagram identity quarantine storage is unavailable.");
     }
-    await client.setting.deleteMany({
-      where: {
-        key: { startsWith: INSTAGRAM_IDENTITY_QUARANTINE_SETTING_PREFIX }
-      }
-    });
   }
   const matchedThreadIds = await client.thread.findMany({
     where: { platform },
@@ -178,6 +186,14 @@ export async function resetPlatformInboxGraph(
           }
         })
       : { count: 0 };
+
+  if (platform === "INSTAGRAM") {
+    await client.setting!.deleteMany({
+      where: {
+        key: { startsWith: INSTAGRAM_IDENTITY_QUARANTINE_SETTING_PREFIX }
+      }
+    });
+  }
 
   return {
     platform,
