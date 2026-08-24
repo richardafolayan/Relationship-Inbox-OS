@@ -17,6 +17,13 @@ import { fileURLToPath } from "node:url";
 import { loadAppEnv } from "./lib/env-file.mjs";
 import { resolveAppName } from "./lib/branding.mjs";
 import { reconcileEnvWithExample } from "./lib/release-manifest.mjs";
+import {
+  acquireInstallOperation,
+  acquireInstallPreparation,
+  releaseInstallOperation,
+  releaseInstallPreparation
+} from "./lib/install-maintenance.mjs";
+import { readInstallTransaction, recoverInstallTransaction } from "./lib/install-transaction.mjs";
 
 const APP_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const APP_NAME = resolveAppName();
@@ -31,6 +38,21 @@ const C = process.stdout.isTTY
 
 function say(msg) {
   process.stdout.write(msg + "\n");
+}
+
+function recoverInterruptedInstall() {
+  if (!readInstallTransaction(APP_DIR)) return;
+  let operationToken = "";
+  let preparationToken = "";
+  try {
+    operationToken = acquireInstallOperation(APP_DIR);
+    preparationToken = acquireInstallPreparation(APP_DIR);
+    const recovered = recoverInstallTransaction(APP_DIR);
+    say(`  Recovered an interrupted update (${recovered.status}).`);
+  } finally {
+    if (preparationToken) releaseInstallPreparation(APP_DIR, preparationToken);
+    if (operationToken) releaseInstallOperation(APP_DIR, operationToken);
+  }
 }
 
 async function dashboardUp() {
@@ -74,8 +96,8 @@ function runUpdaterApply(feedUrl) {
       [resolve(APP_DIR, "scripts/update-student.mjs"), "--apply", "--url", feedUrl, "--dir", APP_DIR],
       { cwd: APP_DIR, stdio: "inherit" }
     );
-    child.on("error", () => doneResolve(false));
-    child.on("close", (code) => doneResolve(code === 0));
+    child.on("error", () => doneResolve(null));
+    child.on("close", (code) => doneResolve(code));
   });
 }
 
@@ -100,11 +122,13 @@ async function applyPendingUpdate() {
     return;
   }
   say(`\n${C.bold}Applying a prepared update before starting…${C.reset}`);
-  const ok = await runUpdaterApply(feedUrl);
+  const code = await runUpdaterApply(feedUrl);
   say(
-    ok
+    code === 0
       ? `  ${C.green}Update applied.${C.reset}`
-      : `  The update could not be applied and was rolled back; starting your current version.`
+      : code === 42
+        ? `  Database recovery is required. The new recovery-capable version was kept and will continue recovery now.`
+        : `  The update did not complete. Starting the installed app so it can report its current state.`
   );
 }
 
@@ -133,6 +157,7 @@ function reconcileEnvFile() {
   }
 }
 
+recoverInterruptedInstall();
 await applyPendingUpdate();
 reconcileEnvFile();
 

@@ -5,6 +5,7 @@ import { dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { DEFAULT_APP_NAME, resolveAppName, LEGACY_APP_NAME } from "./lib/branding.mjs";
+import { installRecoveryBootstrapPath } from "./lib/install-transaction.mjs";
 
 // Display name only — driven by RIOS_APP_NAME (default "Tovi").
 export const APP_NAME = resolveAppName();
@@ -91,11 +92,13 @@ export function buildInfoPlist({ bundleId = DEFAULT_BUNDLE_ID, version = "0.0.0"
 }
 
 export function buildLauncherScript({ appDir, nodeDir }) {
+  const recoveryScript = installRecoveryBootstrapPath(appDir);
   return `#!/bin/bash
 set -u
 
 APP_DIR=${shellSingleQuote(appDir)}
 NODE_DIR=${shellSingleQuote(nodeDir || "")}
+RECOVERY_SCRIPT=${shellSingleQuote(recoveryScript)}
 DASHBOARD_PORT="\${DASHBOARD_PORT:-3100}"
 DASHBOARD_URL="http://localhost:\${DASHBOARD_PORT}"
 LOG_DIR="$HOME/Library/Logs/RelationshipInboxOS"
@@ -111,11 +114,6 @@ if /usr/bin/curl -fsS --max-time 2 "$DASHBOARD_URL" >/dev/null 2>&1; then
   exit 0
 fi
 
-if [ ! -f "$APP_DIR/scripts/start-student.mjs" ]; then
-  alert "${APP_NAME} is not installed where this app expects it. Run the installer again."
-  exit 1
-fi
-
 NODE=""
 if [ -n "\${RIOS_NODE_PATH:-}" ] && [ -x "\${RIOS_NODE_PATH:-}" ]; then
   NODE="$RIOS_NODE_PATH"
@@ -129,6 +127,15 @@ fi
 
 if [ -z "$NODE" ]; then
   alert "Node.js is missing. Run the ${APP_NAME} installer again so it can repair the app."
+  exit 1
+fi
+
+if [ ! -f "$APP_DIR/scripts/start-student.mjs" ] && [ -f "$RECOVERY_SCRIPT" ]; then
+  "$NODE" "$RECOVERY_SCRIPT" recover-serialized --app-dir "$APP_DIR" >>"$LOG_FILE" 2>&1 || true
+fi
+
+if [ ! -f "$APP_DIR/scripts/start-student.mjs" ]; then
+  alert "${APP_NAME} is not installed where this app expects it. Run the installer again."
   exit 1
 fi
 
