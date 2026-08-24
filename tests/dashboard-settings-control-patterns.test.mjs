@@ -8,6 +8,10 @@ const optional = readFileSync(
 );
 const settings = readFileSync("apps/dashboard/app/settings/page.tsx", "utf8");
 const platforms = readFileSync("apps/dashboard/app/platforms/page.tsx", "utf8");
+const degradedBanner = readFileSync(
+  "apps/dashboard/components/common/degraded-banner.tsx",
+  "utf8"
+);
 const whatsapp = readFileSync(
   "apps/dashboard/components/settings/WhatsAppConnect.tsx",
   "utf8"
@@ -97,6 +101,17 @@ test("platforms page uses Scan as primary when connected and recovery in More", 
   assert.match(moreBlock, /Open browser/);
   assert.match(moreBlock, /Reconnect/);
   assert.match(moreBlock, /Run selector tests/);
+  assert.match(platforms, /disabled=\{actionRunning\}/);
+  assert.match(moreBlock, /disabled: actionRunning/);
+  assert.match(platforms, /runSingleFlightInlineAction/);
+  assert.doesNotMatch(platforms, /\brunAction\(/);
+  assert.match(platforms, /selectorActionState=\{actionStates\[row\.platform\]/);
+  assert.match(degradedBanner, /<InlineActionButton/);
+  assert.match(degradedBanner, /state=\{selectorActionState\}/);
+  assert.match(
+    degradedBanner,
+    /<div className="flex flex-wrap items-center gap-2">/
+  );
 });
 
 test("platforms and settings classify recovery from error state, not status alone", () => {

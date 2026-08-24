@@ -1,10 +1,10 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Info, MoreVertical } from "lucide-react";
-import { apiGet, apiPost, runAction } from "@/lib/api";
+import { apiGet, apiPost } from "@/lib/api";
 import {
-  runActionWithInlineFeedback,
+  runSingleFlightInlineAction,
   type InlineActionState
 } from "@/lib/feedback";
 import type { AuditLogRow, PlatformCard } from "@/lib/types";
@@ -40,12 +40,30 @@ const PLATFORM_GLYPH: Record<PlatformCard["platform"], string> = {
   GOOGLE_MESSAGES: "gm"
 };
 
+interface PlatformActionCopy {
+  pending: string;
+  success: string;
+  failure: string;
+}
+
+type RunPlatformAction = (
+  platform: PlatformCard["platform"],
+  work: () => Promise<unknown>,
+  copy: PlatformActionCopy
+) => void;
+
 // Platforms - 2-up card grid. Each card: glyph, name, connection status,
 // last scan, one primary action, and a secondary More menu for recovery.
 export default function PlatformsPage() {
   const [rows, setRows] = useState<PlatformCard[]>([]);
   const [logs, setLogs] = useState<AuditLogRow[]>([]);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [actionStates, setActionStates] = useState<
+    Partial<Record<PlatformCard["platform"], InlineActionState>>
+  >({});
+  const actionGatesRef = useRef(
+    new Map<PlatformCard["platform"], { current: boolean }>()
+  );
   const [receiptsOpen, setReceiptsOpen] = useState(false);
   const [detailOpen, setDetailOpen] = useState<PlatformCard["platform"] | null>(null);
 
@@ -64,6 +82,24 @@ export default function PlatformsPage() {
     window.addEventListener("runner-resync", onResync);
     return () => window.removeEventListener("runner-resync", onResync);
   }, [refresh]);
+
+  const runPlatformAction = useCallback<RunPlatformAction>(
+    (platform, work, copy) => {
+      let gate = actionGatesRef.current.get(platform);
+      if (!gate) {
+        gate = { current: false };
+        actionGatesRef.current.set(platform, gate);
+      }
+      void runSingleFlightInlineAction(gate, work, {
+        ...copy,
+        setState: (state) =>
+          setActionStates((current) => ({ ...current, [platform]: state })),
+        setError: setActionError,
+        onDone: refresh
+      });
+    },
+    [refresh]
+  );
 
   const visibleRows = rows;
   const connected = visibleRows.filter((row) => row.status === "CONNECTED").length;
@@ -108,12 +144,20 @@ export default function PlatformsPage() {
               row.platform === "INSTAGRAM"
                 ? undefined
                 : () =>
-                    runAction(
-                      apiPost("/runner/control/platform/test-selectors", { platform: row.platform }),
-                      setActionError,
-                      refresh
+                    runPlatformAction(
+                      row.platform,
+                      () =>
+                        apiPost("/runner/control/platform/test-selectors", {
+                          platform: row.platform
+                        }),
+                      {
+                        pending: `Checking ${PLATFORM_DISPLAY[row.platform]}...`,
+                        success: `${PLATFORM_DISPLAY[row.platform]} connection checked`,
+                        failure: `${PLATFORM_DISPLAY[row.platform]} connection check failed`
+                      }
                     )
             }
+            selectorActionState={actionStates[row.platform] ?? null}
             onOpenReceipts={() => setReceiptsOpen(true)}
           />
         ))}
@@ -127,8 +171,8 @@ export default function PlatformsPage() {
             onToggleDetail={() =>
               setDetailOpen((cur) => (cur === row.platform ? null : row.platform))
             }
-            setActionError={setActionError}
-            refresh={refresh}
+            actionState={actionStates[row.platform] ?? null}
+            runPlatformAction={runPlatformAction}
           />
         ))}
       </div>
@@ -157,18 +201,17 @@ interface PlatformCardViewProps {
   row: PlatformCard;
   detailOpen: boolean;
   onToggleDetail: () => void;
-  setActionError: (message: string | null) => void;
-  refresh: () => Promise<void> | void;
+  actionState: InlineActionState | null;
+  runPlatformAction: RunPlatformAction;
 }
 
 function PlatformCardView({
   row,
   detailOpen,
   onToggleDetail,
-  setActionError,
-  refresh
+  actionState,
+  runPlatformAction
 }: PlatformCardViewProps) {
-  const [actionState, setActionState] = useState<InlineActionState | null>(null);
   const display = PLATFORM_DISPLAY[row.platform];
   const glyph = PLATFORM_GLYPH[row.platform];
   const supported = row.supported !== false;
@@ -215,33 +258,27 @@ function PlatformCardView({
       : primaryAction === "reconnect"
         ? "Reconnect"
         : "Connect";
+  const actionRunning = actionState?.phase === "running";
 
   const runInline = (
-    work: Promise<unknown>,
+    work: () => Promise<unknown>,
     pending: string,
     success: string,
     failure: string
   ) =>
-    runActionWithInlineFeedback(work, {
-      pending,
-      success,
-      failure,
-      setState: setActionState,
-      setError: setActionError,
-      onDone: refresh
-    });
+    runPlatformAction(row.platform, work, { pending, success, failure });
 
   const openBrowser = () =>
-    void runInline(
-      apiPost("/runner/control/platform/open-browser", { platform: row.platform }),
+    runInline(
+      () => apiPost("/runner/control/platform/open-browser", { platform: row.platform }),
       `Opening ${display}...`,
       `${display} opened`,
       `Couldn't open ${display}`
     );
 
   const runConnect = () =>
-    void runInline(
-      apiPost("/runner/control/platform/connect", { platform: row.platform }),
+    runInline(
+      () => apiPost("/runner/control/platform/connect", { platform: row.platform }),
       `Connecting ${display}...`,
       `${display} connected`,
       row.platform === "INSTAGRAM"
@@ -250,8 +287,8 @@ function PlatformCardView({
     );
 
   const runScan = () =>
-    void runInline(
-      apiPost("/runner/control/scan", { platform: row.platform }),
+    runInline(
+      () => apiPost("/runner/control/scan", { platform: row.platform }),
       `Scanning ${display}...`,
       `${display} scan queued`,
       `${display} scan failed`
@@ -275,10 +312,12 @@ function PlatformCardView({
       ? [
           {
             label: "Open browser",
+            disabled: actionRunning,
             onSelect: openBrowser
           },
           {
             label: "Reconnect",
+            disabled: actionRunning,
             onSelect: runConnect
           }
         ]
@@ -286,10 +325,12 @@ function PlatformCardView({
         ? [
             {
               label: "Open browser",
+              disabled: actionRunning,
               onSelect: openBrowser
             },
             {
               label: "Scan now",
+              disabled: actionRunning,
               onSelect: runScan
             }
           ]
@@ -299,25 +340,31 @@ function PlatformCardView({
       : [
           {
             label: "Run selector tests",
+            disabled: actionRunning,
             onSelect: () =>
-              runAction(
-                apiPost("/runner/control/platform/test-selectors", { platform: row.platform }),
-                setActionError,
-                refresh
+              runInline(
+                () =>
+                  apiPost("/runner/control/platform/test-selectors", {
+                    platform: row.platform
+                  }),
+                `Checking ${display}...`,
+                `${display} connection checked`,
+                `${display} connection check failed`
               )
           }
         ]),
     {
       label: "Reset session…",
       danger: true,
+      disabled: actionRunning,
       onSelect: () => {
         if (
           !window.confirm(`Reset the ${display} session? You'll need to sign in again.`)
         ) {
           return;
         }
-        void runInline(
-          apiPost("/runner/control/platform/reset-session", { platform: row.platform }),
+        runInline(
+          () => apiPost("/runner/control/platform/reset-session", { platform: row.platform }),
           `Resetting ${display}...`,
           `${display} disconnected`,
           `Couldn't reset ${display}`
@@ -386,7 +433,7 @@ function PlatformCardView({
               variant="quiet"
               className="min-h-[40px] px-[14px] py-[8px] text-[12.5px]"
               onClick={runPrimary}
-              disabled={actionState?.phase === "running"}
+              disabled={actionRunning}
             >
               {actionState?.phase === "running" ? actionState.label : primaryLabel}
             </Button>
@@ -401,7 +448,8 @@ function PlatformCardView({
                 <button
                   type="button"
                   aria-label="More actions"
-                  className="grid h-[40px] w-[40px] place-items-center rounded-[10px] border border-hairline text-ink-3 transition-colors duration-calm hover:bg-paper-2 hover:text-ink"
+                  disabled={actionRunning}
+                  className="grid h-[40px] w-[40px] place-items-center rounded-[10px] border border-hairline text-ink-3 transition-colors duration-calm hover:bg-paper-2 hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
                   title="More"
                 >
                   <MoreVertical className="h-[14px] w-[14px]" strokeWidth={2} />

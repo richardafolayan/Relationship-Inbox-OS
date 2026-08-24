@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import {
-  runActionWithInlineFeedback
+  runActionWithInlineFeedback,
+  runSingleFlightInlineAction
 } from "../apps/dashboard/lib/feedback.ts";
 import {
   InlineActionButton
@@ -50,6 +51,59 @@ test("shared inline action feedback reports success after the work resolves", as
 
   assert.equal(outcome.ok, true);
   assert.equal(refreshed, 1);
+  assert.deepEqual(states, [
+    { phase: "running", label: "Connecting Instagram..." },
+    { phase: "success", label: "Instagram connected" }
+  ]);
+});
+
+test("single-flight inline actions do not start overlapping work", async () => {
+  const gate = { current: false };
+  const states = [];
+  let firstResolve;
+  let firstStarts = 0;
+  let secondStarts = 0;
+
+  const first = runSingleFlightInlineAction(
+    gate,
+    () => {
+      firstStarts += 1;
+      return new Promise((resolve) => {
+        firstResolve = resolve;
+      });
+    },
+    {
+      pending: "Connecting Instagram...",
+      success: "Instagram connected",
+      failure: "Instagram needs attention",
+      setState: (state) => states.push(state)
+    }
+  );
+
+  const second = await runSingleFlightInlineAction(
+    gate,
+    () => {
+      secondStarts += 1;
+      return Promise.resolve("reset");
+    },
+    {
+      pending: "Resetting Instagram...",
+      success: "Instagram disconnected",
+      failure: "Instagram reset failed",
+      setState: (state) => states.push(state)
+    }
+  );
+
+  assert.equal(firstStarts, 1);
+  assert.equal(secondStarts, 0);
+  assert.equal(second, null);
+  assert.equal(gate.current, true);
+
+  firstResolve("connected");
+  const outcome = await first;
+
+  assert.equal(outcome?.ok, true);
+  assert.equal(gate.current, false);
   assert.deepEqual(states, [
     { phase: "running", label: "Connecting Instagram..." },
     { phase: "success", label: "Instagram connected" }

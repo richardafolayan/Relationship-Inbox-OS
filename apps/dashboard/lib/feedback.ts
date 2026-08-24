@@ -44,6 +44,15 @@ export type InlineActionOutcome<T> =
   | { ok: true; value: T }
   | { ok: false; error: unknown };
 
+export interface InlineActionOptions<T> {
+  pending: string;
+  success: string | ((value: T) => string);
+  failure: string | ((error: unknown) => string);
+  setState: (state: InlineActionState) => void;
+  setError?: (message: string | null) => void;
+  onDone?: (value: T) => void | Promise<void>;
+}
+
 const TOAST_EVENT = "inbox-toast";
 
 let counter = 0;
@@ -157,14 +166,7 @@ export function runActionWithFeedback<T>(
 
 export async function runActionWithInlineFeedback<T>(
   promise: Promise<T>,
-  opts: {
-    pending: string;
-    success: string | ((value: T) => string);
-    failure: string | ((error: unknown) => string);
-    setState: (state: InlineActionState) => void;
-    setError?: (message: string | null) => void;
-    onDone?: (value: T) => void | Promise<void>;
-  }
+  opts: InlineActionOptions<T>
 ): Promise<InlineActionOutcome<T>> {
   opts.setError?.(null);
   opts.setState({ phase: "running", label: opts.pending });
@@ -192,5 +194,19 @@ export async function runActionWithInlineFeedback<T>(
     opts.setError?.(detail);
     console.warn("[action]", failure, error);
     return { ok: false, error };
+  }
+}
+
+export async function runSingleFlightInlineAction<T>(
+  gate: { current: boolean },
+  work: () => Promise<T>,
+  opts: InlineActionOptions<T>
+): Promise<InlineActionOutcome<T> | null> {
+  if (gate.current) return null;
+  gate.current = true;
+  try {
+    return await runActionWithInlineFeedback(work(), opts);
+  } finally {
+    gate.current = false;
   }
 }
