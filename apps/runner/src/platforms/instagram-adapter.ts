@@ -443,6 +443,7 @@ export function normalizeInstagramMessageSnapshots(
 
   const seenKeys = new Set<string>();
   const seenStableNativeIds = new Set<string>();
+  const legacyOccurrences = new Map<string, number>();
   const messages: NormalizedMessage[] = [];
 
   for (let index = 0; index < prepared.length; index += 1) {
@@ -454,6 +455,15 @@ export function normalizeInstagramMessageSnapshots(
       }
       seenStableNativeIds.add(nativeId);
     }
+    const legacyOccurrence = legacyOccurrences.get(item.signature) ?? 0;
+    legacyOccurrences.set(item.signature, legacyOccurrence + 1);
+    const legacyCandidateKey = instagramMessageFallbackKey(
+      platformThreadId,
+      item.snapshot.direction as "IN" | "OUT",
+      item.text,
+      item.placeholder?.attachmentType,
+      legacyOccurrence
+    );
     const key =
       item.snapshot.nativeIdStable && nativeId
         ? instagramStableMessageKey(platformThreadId, "native", nativeId)
@@ -474,13 +484,18 @@ export function normalizeInstagramMessageSnapshots(
 
     messages.push({
       platformMessageKey: key,
+      platformMessageKeyMigration: {
+        scheme: "instagram_occurrence_v1",
+        candidateKey: legacyCandidateKey
+      },
       direction: item.snapshot.direction as "IN" | "OUT",
       timestamp: item.sourceTimestamp,
       text: item.text,
       senderName: item.senderName,
       raw: {
         timestampSource: item.sourceTimestamp ? "source" : "first_seen",
-        contentKind: item.placeholder?.attachmentType ?? "text"
+        contentKind: item.placeholder?.attachmentType ?? "text",
+        messageIdentityVersion: "instagram_stable_v2"
       },
       attachments: item.placeholder?.attachmentType
         ? [
@@ -1315,7 +1330,9 @@ export class InstagramAdapter extends BetaAdapter {
           const idNode = query(root, selectors.message_id);
           const nativeId =
             root.getAttribute("data-message-id") ||
+            root.getAttribute("data-id") ||
             idNode?.getAttribute("data-message-id") ||
+            idNode?.getAttribute("data-id") ||
             undefined;
           const textNode = query(root, selectors.message_text);
           const timestampNode = query(root, selectors.message_timestamp ?? "time[datetime]");
@@ -1536,6 +1553,14 @@ export class InstagramAdapter extends BetaAdapter {
         "THREAD_FETCH_FAILED",
         "persist",
         "empty_message_rejected",
+        thread.platformThreadId
+      );
+    }
+    if (normalizedText.includes("\n")) {
+      throw this.safeFailure(
+        "THREAD_FETCH_FAILED",
+        "persist",
+        "multiline_message_not_supported",
         thread.platformThreadId
       );
     }

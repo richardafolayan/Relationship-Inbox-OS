@@ -58,6 +58,13 @@ function createLegacyDraftTable(database) {
 
 function createLegacySendRequestTable(database) {
   database.exec(`
+    CREATE TABLE settings (
+      id TEXT PRIMARY KEY,
+      key TEXT NOT NULL UNIQUE,
+      valueJson TEXT NOT NULL,
+      createdAt DATETIME NOT NULL,
+      updatedAt DATETIME NOT NULL
+    );
     CREATE TABLE send_requests (
       id TEXT PRIMARY KEY,
       clientSendId TEXT NOT NULL,
@@ -437,6 +444,131 @@ test("database-only repairs a legacy database even when the schema stamp is curr
     database = new Database(databasePath);
     assert.deepEqual(database.prepare("SELECT id FROM drafts").all(), [{ id: "new" }]);
     assertUniqueDraftIndex(database);
+    assert.deepEqual(
+      database
+        .prepare('SELECT "id", "valueJson" FROM "settings" WHERE "key" = ?')
+        .get("data_repair_send_request_source_v2"),
+      {
+        id: "data_repair_send_request_source_v2",
+        valueJson: '{"version":2}'
+      }
+    );
+    assert.equal(
+      database
+        .prepare('PRAGMA table_info("send_requests")')
+        .all()
+        .find((column) => column.name === "source")?.dflt_value,
+      null
+    );
+    database.close();
+  } finally {
+    cleanup();
+  }
+});
+
+test("database-only writes the provenance marker before a clean first launch succeeds", () => {
+  const { directory, databasePath, cleanup } = fixture();
+  try {
+    const result = runDatabaseOnly(directory, databasePath);
+    assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+
+    const database = new Database(databasePath, { readonly: true, fileMustExist: true });
+    assert.equal(
+      database
+        .prepare('SELECT "valueJson" FROM "settings" WHERE "key" = ?')
+        .get("data_repair_send_request_source_v2")?.valueJson,
+      '{"version":2}'
+    );
+    assert.equal(
+      database
+        .prepare('PRAGMA table_info("send_requests")')
+        .all()
+        .find((column) => column.name === "source")?.dflt_value,
+      null
+    );
+    database.close();
+  } finally {
+    cleanup();
+  }
+});
+
+test("database-only invalidates provenance from the immediately preceding source schema", () => {
+  const { directory, databasePath, cleanup } = fixture();
+  try {
+    const currentSchema = readFileSync("packages/core/prisma/schema.prisma", "utf8");
+    const predecessorSchema = currentSchema.replace(
+      /^  source\s+String\s*$/m,
+      '  source       String            @default("manual")'
+    );
+    assert.notEqual(predecessorSchema, currentSchema);
+    const predecessorSchemaPath = join(directory, "predecessor.prisma");
+    writeFileSync(predecessorSchemaPath, predecessorSchema);
+    writeFileSync(databasePath, "", { mode: 0o600 });
+    const prismaCli = join(appDir, "node_modules", "prisma", "build", "index.js");
+    const predecessorPush = spawnSync(
+      process.execPath,
+      [prismaCli, "db", "push", "--schema", predecessorSchemaPath, "--skip-generate"],
+      {
+        cwd: appDir,
+        encoding: "utf8",
+        env: { ...process.env, DATABASE_URL: `file:${databasePath}` }
+      }
+    );
+    assert.equal(
+      predecessorPush.status,
+      0,
+      `${predecessorPush.stdout}\n${predecessorPush.stderr}`
+    );
+
+    let database = new Database(databasePath);
+    database.pragma("foreign_keys = OFF");
+    const now = Date.now();
+    database
+      .prepare(`
+        INSERT INTO "send_requests" (
+          "id", "clientSendId", "threadId", "status", "requestText",
+          "source", "createdAt", "updatedAt"
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `)
+      .run(
+        "send-predecessor",
+        "client-predecessor",
+        "thread-predecessor",
+        "PENDING",
+        "hello",
+        "manual",
+        now,
+        now
+      );
+    database.close();
+    writeFileSync(
+      join(directory, "app-prepare-stamps.json"),
+      `${JSON.stringify({ schemaHash: currentSchemaHash() })}\n`
+    );
+
+    const result = runDatabaseOnly(directory, databasePath);
+    assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+
+    database = new Database(databasePath, { readonly: true, fileMustExist: true });
+    assert.equal(
+      database
+        .prepare('SELECT "source" FROM "send_requests" WHERE "id" = ?')
+        .get("send-predecessor")?.source,
+      "legacy_unknown"
+    );
+    assert.equal(
+      database
+        .prepare('SELECT "valueJson" FROM "settings" WHERE "key" = ?')
+        .get("data_repair_send_request_source_v2")?.valueJson,
+      '{"version":2}'
+    );
+    assert.equal(
+      database
+        .prepare('PRAGMA table_info("send_requests")')
+        .all()
+        .find((column) => column.name === "source")?.dflt_value,
+      null
+    );
     database.close();
   } finally {
     cleanup();
@@ -690,11 +822,16 @@ test("schema, launcher order, and save route share one Draft invariant", () => {
     /if \(existsSync\(DATABASE_RECOVERY_REQUIRED_PATH\)\)[\s\S]*sameLegacyRestore[\s\S]*sameCurrentRecovery[\s\S]*fsyncSync\(existingDescriptor\)/
   );
   const backupAt = preparation.indexOf("backupDatabaseBeforeSchemaChange(schemaHash)");
-  const repairAt = preparation.indexOf("repairDatabaseBeforeSchemaChange");
+  const repairAt = preparation.indexOf("repairDatabaseSchemaData");
   const syncAt = preparation.indexOf("syncDatabase");
   const restoreAt = preparation.indexOf("restoreDatabaseAfterFailedSchemaChange");
   assert.ok(backupAt >= 0 && repairAt > backupAt && syncAt > repairAt);
   assert.ok(restoreAt > syncAt);
+  const syncHelper = launcher.slice(
+    launcher.indexOf("function syncDatabase()"),
+    launcher.indexOf("function backupDatabaseBeforeSchemaChange")
+  );
+  assert.match(syncHelper, /return synced && repairDatabaseSchemaData\(\)/);
 
   const updater = readFileSync("scripts/update-student.mjs", "utf8");
   const dependencyStep = updater.slice(

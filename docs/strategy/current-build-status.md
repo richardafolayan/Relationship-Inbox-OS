@@ -85,7 +85,7 @@ before claiming those guarantees still hold.
 - Reviewed local integration branch: `fix/instagram-integration-gate`.
 - Base: `origin/develop` at
   `ddfba09f44470852c349e0a7f82c12230ba7d32d`.
-- The complete bounded-concurrency suite passes: 2,940 tests, zero failures,
+- The complete bounded-concurrency suite passes: 2,957 tests, zero failures,
   zero skips, zero cancellations, and zero todos.
 - Dashboard, runner, and core type checks pass. The production dashboard build,
   Prisma generation, documentation checks, schema-upgrade checks, and diff
@@ -100,10 +100,17 @@ before claiming those guarantees still hold.
   GraphQL objects from becoming threads, preserves request-start ordering across
   out-of-order responses, verifies the exact composer text, binds Send to the
   verified document, and treats every post-click error as delivery uncertain.
+- A second exact-head adversarial pass reopened four upgrade and send-boundary
+  claims. The corrected branch reads both configured DOM message-ID variants,
+  rejects multiline Instagram text before any key event can submit it, and
+  reconciles predecessor message keys only when timestamp or automation-receipt
+  evidence proves the identity. Ambiguous legacy history fails closed.
 - Focus acknowledgements are excluded from Instagram and persist their own
-  provenance instead of appearing manual. Existing send rows with unknown
-  legacy provenance are relabelled transactionally and fail closed at the
-  worker boundary.
+  provenance instead of appearing manual. A durable repair marker now ensures
+  every pre-marker send row is relabelled `legacy_unknown` transactionally,
+  including databases already opened by the preceding integration head. Fresh
+  databases receive the marker before first launch succeeds, and future writes
+  have no schema-level manual-provenance default.
 - Scheduled sends, attachments, polls, focus acknowledgements, and other
   automated Instagram sends are rejected at the durable worker boundary. The
   dashboard no longer offers those unsupported actions.

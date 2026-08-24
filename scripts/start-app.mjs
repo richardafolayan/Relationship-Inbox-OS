@@ -362,12 +362,13 @@ function syncDatabase() {
     packaged: PACKAGED,
     npmCommand: NPM_COMMAND
   });
-  return run(
+  const synced = run(
     "Updating the database...",
     invocation.command,
     invocation.args,
     { env: { ...process.env, DATABASE_URL: process.env.DATABASE_URL } }
   );
+  return synced && repairDatabaseSchemaData();
 }
 
 function backupDatabaseBeforeSchemaChange(schemaHash) {
@@ -408,7 +409,7 @@ function backupDatabaseBeforeSchemaChange(schemaHash) {
   return { ok: true, backupPath: destination, databaseExisted: true };
 }
 
-function repairDatabaseBeforeSchemaChange() {
+function repairDatabaseSchemaData() {
   const source = resolvedDatabaseFile();
   if (!existsSync(source)) return true;
   const result = spawnSync(
@@ -520,7 +521,7 @@ function prepare() {
       try {
         changed = applyRecoverableSchemaChange({
           backup: () => backupDatabaseBeforeSchemaChange(schemaHash),
-          repair: repairDatabaseBeforeSchemaChange,
+          repair: repairDatabaseSchemaData,
           sync: syncDatabase,
           restore: restoreDatabaseAfterFailedSchemaChange
         });

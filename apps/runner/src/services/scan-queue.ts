@@ -24,6 +24,10 @@ import type { LinkedInStreamPreOpenDecision } from "../platforms/linkedin-adapte
 import { resolveAdapterFailureKind, shouldStopScanForFailureKind } from "./failure-routing";
 import { isAiVisibleMessage, prismaMessageToPrompt } from "./ai";
 import { buildMessageUpsertPayload } from "./message-upsert-payload";
+import {
+  applyInstagramMessageKeyUpgradePlan,
+  planInstagramMessageKeyUpgrades
+} from "./instagram-message-key-upgrade";
 import { deleteImessageVoiceSnapshot } from "./imessage-voice-store";
 import { isVoicePlaceholderText, previewFromTranscript } from "./transcript-preview";
 import type { KeyedMutex } from "./keyed-mutex";
@@ -3243,6 +3247,34 @@ export function createScanQueue(deps: ScanQueueDeps) {
       },
       note: candidate.displayName
     });
+
+    if (
+      platform === "INSTAGRAM" &&
+      messages.some((message) => message.platformMessageKeyMigration)
+    ) {
+      const existingInstagramMessages = await prisma.message.findMany({
+        where: { threadId: thread.id },
+        select: {
+          id: true,
+          platformMessageKey: true,
+          direction: true,
+          timestamp: true,
+          text: true,
+          rawJson: true,
+          attachmentsJson: true,
+          sentVia: true,
+          audioTranscription: {
+            select: { id: true, audioFingerprint: true }
+          }
+        }
+      });
+      const keyUpgradePlan = planInstagramMessageKeyUpgrades({
+        threadId: thread.id,
+        currentMessages: messages,
+        existingRows: existingInstagramMessages
+      });
+      await applyInstagramMessageKeyUpgradePlan(prisma, keyUpgradePlan);
+    }
 
     const timestampFallback = candidateListTimestamp ?? new Date();
     const batchedMessageWrites: Array<ReturnType<typeof prisma.message.upsert>> = [];

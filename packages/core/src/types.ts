@@ -73,6 +73,15 @@ export interface AttachmentPlaceholder {
 
 export interface NormalizedMessage {
   platformMessageKey?: string;
+  /**
+   * A non-authoritative key emitted by an adapter when a previous release
+   * used a different identity scheme. Persistence must verify the candidate
+   * against stable evidence before rekeying an existing row.
+   */
+  platformMessageKeyMigration?: {
+    scheme: "instagram_occurrence_v1";
+    candidateKey: string;
+  };
   direction: Direction;
   /**
    * The platform-reported send time as an ISO string. Adapters that

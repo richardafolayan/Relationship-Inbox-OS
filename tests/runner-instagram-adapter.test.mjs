@@ -676,10 +676,79 @@ test("message normalization preserves direction, exact timestamps and first-seen
   assert.equal(messages[0].direction, "IN");
   assert.equal(messages[0].timestamp, "2026-07-30T09:10:11.000Z");
   assert.equal(messages[0].raw.timestampSource, "source");
+  assert.equal(messages[0].raw.messageIdentityVersion, "instagram_stable_v2");
+  assert.deepEqual(messages[0].platformMessageKeyMigration, {
+    scheme: "instagram_occurrence_v1",
+    candidateKey: instagramMessageFallbackKey("thread-1", "IN", "Hello", undefined, 0)
+  });
   assert.equal(messages[1].direction, "OUT");
   assert.equal(messages[1].timestamp, undefined);
   assert.equal(messages[1].raw.timestampSource, "first_seen");
   assert.equal(parseInstagramSourceTimestamp("Yesterday"), undefined);
+});
+
+test("message snapshot extraction accepts the configured data-id identity variant", async () => {
+  const selectors = {
+    message_container: "main",
+    message_item: "[data-message]",
+    message_text: "[data-text]",
+    message_id: "[data-message-id], [data-id]",
+    message_direction_in: "[data-direction='incoming']"
+  };
+  const textNode = {
+    textContent: "Hello from Instagram",
+    matches: () => false,
+    querySelector: () => null
+  };
+  const messageNode = {
+    className: "",
+    textContent: "Hello from Instagram",
+    tagName: "DIV",
+    getAttribute: (name) =>
+      ({
+        "data-id": "ig-message-42",
+        "data-direction": "incoming"
+      })[name] ?? null,
+    matches: (selector) =>
+      selector
+        .split(",")
+        .map((part) => part.trim())
+        .some(
+          (part) =>
+            part === "[data-message]" ||
+            part === "[data-id]" ||
+            part === "[data-direction='incoming']"
+        ),
+    querySelector: (selector) => (selector === "[data-text]" ? textNode : null),
+    getBoundingClientRect: () => ({ left: 0, width: 300 })
+  };
+  const container = {
+    querySelectorAll: (selector) => (selector === "[data-message]" ? [messageNode] : []),
+    getBoundingClientRect: () => ({ left: 0, width: 600 })
+  };
+  const body = {
+    querySelector: (selector) => (selector === "main" ? container : null)
+  };
+  const documentRoot = {
+    evaluate: async (callback, argument) =>
+      typeof callback === "string" ? undefined : callback(body, argument)
+  };
+  const page = { $: async () => documentRoot };
+  const adapter = new InstagramAdapter({
+    screenshotDir: "/tmp",
+    domDumpDir: "/tmp",
+    resolveSelectors: async () => selectors,
+    sessionManager: { getManagedPage: async () => page },
+    personKey: "instagram",
+    connectTimeoutMs: 50
+  });
+
+  const snapshots = await adapter.snapshotMessages(page, selectors);
+
+  assert.equal(snapshots.length, 1);
+  assert.equal(snapshots[0].nativeId, "ig-message-42");
+  assert.equal(snapshots[0].nativeIdStable, true);
+  assert.doesNotThrow(() => normalizeInstagramMessageSnapshots("thread-1", snapshots));
 });
 
 test("unsupported Instagram content becomes safe placeholders", () => {
@@ -708,7 +777,8 @@ test("message keys are stable across rescans and deduplicate native ids", () => 
     { nativeId: "native-1", nativeIdStable: true, direction: "IN", text: "Same text" },
     { nativeId: "native-2", nativeIdStable: true, direction: "IN", text: "Same text" },
     { nativeId: "native-3", nativeIdStable: true, direction: "OUT", text: "Reply" },
-    { nativeId: "native-3", nativeIdStable: true, direction: "OUT", text: "Reply" }
+    { nativeId: "native-3", nativeIdStable: true, direction: "OUT", text: "Reply" },
+    { nativeId: "native-4", nativeIdStable: true, direction: "OUT", text: "Reply" }
   ];
   const first = normalizeInstagramMessageSnapshots("thread-3", snapshots);
   const second = normalizeInstagramMessageSnapshots("thread-3", snapshots);
@@ -717,8 +787,17 @@ test("message keys are stable across rescans and deduplicate native ids", () => 
     first.map((message) => message.platformMessageKey),
     second.map((message) => message.platformMessageKey)
   );
-  assert.equal(first.length, 3);
+  assert.equal(first.length, 4);
   assert.notEqual(first[0].platformMessageKey, first[1].platformMessageKey);
+  assert.deepEqual(
+    first.map((message) => message.platformMessageKeyMigration?.candidateKey),
+    [
+      instagramMessageFallbackKey("thread-3", "IN", "Same text", undefined, 0),
+      instagramMessageFallbackKey("thread-3", "IN", "Same text", undefined, 1),
+      instagramMessageFallbackKey("thread-3", "OUT", "Reply", undefined, 0),
+      instagramMessageFallbackKey("thread-3", "OUT", "Reply", undefined, 1)
+    ]
+  );
 });
 
 test("stable native message ids remain authoritative across sliding history windows", () => {
@@ -986,11 +1065,13 @@ function sendTestHarness({
   switchThreadBeforeClick = false,
   switchThreadDuringClick = false,
   dropTypedUnit = false,
-  failAfterClick = false
+  failAfterClick = false,
+  submitOnTypedNewline = false
 }) {
   let currentUrl = "about:blank";
   let submitted = false;
   let typed = "";
+  const typedUnits = [];
   let messageSnapshots = 0;
   const headerLocator = {
     getAttribute: async () => "Safe thread",
@@ -1078,6 +1159,12 @@ function sendTestHarness({
     },
     keyboard: {
       type: async (unit) => {
+        typedUnits.push(unit);
+        if (submitOnTypedNewline && unit === "\n") {
+          submitted = true;
+          typed = "";
+          return;
+        }
         if (dropTypedUnit && typed.length === 0) return;
         typed += unit;
       }
@@ -1109,7 +1196,7 @@ function sendTestHarness({
     connectTimeoutMs: 50,
     sendVerificationTimeoutMs: 5
   });
-  return { adapter, wasSubmitted: () => submitted };
+  return { adapter, wasSubmitted: () => submitted, typedUnits: () => [...typedUnits] };
 }
 
 test("Instagram adapter reports success only after an exact new outgoing bubble", async () => {
@@ -1143,6 +1230,26 @@ test("Instagram adapter fails when submission produces no outgoing bubble", asyn
       error?.details?.reason === "delivery_uncertain_after_submit"
   );
   assert.equal(harness.wasSubmitted(), true);
+});
+
+test("Instagram rejects multiline text before typing can trigger an Enter-key send", async () => {
+  const harness = sendTestHarness({
+    observeSubmittedBubble: false,
+    submitOnTypedNewline: true
+  });
+
+  await assert.rejects(
+    () =>
+      harness.adapter.sendMessage(
+        { platformThreadId: "safe-thread", displayName: "Safe thread" },
+        "first line\nsecond line"
+      ),
+    (error) =>
+      error?.kind === "THREAD_FETCH_FAILED" &&
+      error?.details?.reason === "multiline_message_not_supported"
+  );
+  assert.deepEqual(harness.typedUnits(), []);
+  assert.equal(harness.wasSubmitted(), false);
 });
 
 test("Instagram adapter verifies an exact new outgoing layout bubble", async () => {
