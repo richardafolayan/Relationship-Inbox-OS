@@ -1546,7 +1546,7 @@ test("Instagram atomic composer actions validate and mutate in one browser task"
   };
 
   const resolvedSend = await adapter.requireComposerSendButton(page, composer, "#send");
-  assert.equal(await resolvedSend.getAttribute("id"), "send");
+  assert.equal(await resolvedSend.button.getAttribute("id"), "send");
   await assert.rejects(
     () => adapter.requireComposerSendButton(page, composer, "#unrelated"),
     (error) => error?.reason === "send_button_not_unique"
@@ -1609,6 +1609,7 @@ test("Instagram atomic composer actions validate and mutate in one browser task"
     await adapter.runAtomicComposerAction({
       composer,
       sendButton: unrelated,
+      sendOwner: resolvedSend.owner,
       selectors,
       thread,
       platformThreadId: "safe-thread",
@@ -1622,6 +1623,7 @@ test("Instagram atomic composer actions validate and mutate in one browser task"
     await adapter.runAtomicComposerAction({
       composer,
       sendButton,
+      sendOwner: resolvedSend.owner,
       selectors,
       thread,
       platformThreadId: "safe-thread",
@@ -1636,6 +1638,7 @@ test("Instagram atomic composer actions validate and mutate in one browser task"
     await adapter.runAtomicComposerAction({
       composer,
       sendButton,
+      sendOwner: resolvedSend.owner,
       selectors,
       thread,
       platformThreadId: "safe-thread",
@@ -1765,7 +1768,8 @@ test("Instagram atomic send rejects a bound Send moved to another composer", asy
     connectTimeoutMs: 50
   });
   const composer = await page.locator("#composer").elementHandle();
-  const sendButton = await adapter.requireComposerSendButton(page, composer, "#send");
+  const sendBinding = await adapter.requireComposerSendButton(page, composer, "#send");
+  const sendButton = sendBinding.button;
   await sendButton.evaluate((button) => {
     document.querySelector("#other")?.append(button);
   });
@@ -1774,6 +1778,81 @@ test("Instagram atomic send rejects a bound Send moved to another composer", asy
     await adapter.runAtomicComposerAction({
       composer,
       sendButton,
+      sendOwner: sendBinding.owner,
+      selectors: { conversation_header: "main header h1" },
+      thread: {
+        platformThreadId: "safe-thread",
+        displayName: "Safe thread",
+        recipientVerificationLabel: "Safe thread"
+      },
+      platformThreadId: "safe-thread",
+      action: "send",
+      expectedText: "Approved text"
+    }),
+    { ok: false, reason: "send_button_not_owned" }
+  );
+  assert.equal(await page.evaluate(() => window.submitted), 0);
+});
+
+test("Instagram atomic send rejects coordinate-preserving reparenting without forms", async (t) => {
+  let browser;
+  try {
+    browser = await chromium.launch({ headless: true });
+  } catch (error) {
+    t.skip(`Playwright Chromium unavailable: ${error instanceof Error ? error.message : String(error)}`);
+    return;
+  }
+
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  t.after(async () => {
+    await context.close();
+    await browser.close();
+  });
+  await page.route("https://www.instagram.com/**", async (route) => {
+    await route.fulfill({
+      contentType: "text/html",
+      body: `<!doctype html>
+        <main>
+          <header><h1>Safe thread</h1></header>
+          <div id="original-owner">
+            <div id="composer" role="textbox" contenteditable="true" style="position:fixed;left:100px;top:100px;width:300px;height:40px">Approved text</div>
+            <button id="send" type="button" aria-label="Send" style="position:fixed;left:420px;top:100px;width:80px;height:40px">Send</button>
+          </div>
+          <div id="other-owner">
+            <div role="textbox" contenteditable="true" style="position:fixed;left:100px;top:300px;width:300px;height:40px"></div>
+          </div>
+        </main>`
+    });
+  });
+  await page.goto("https://www.instagram.com/direct/t/safe-thread/");
+  await page.evaluate(() => {
+    window.submitted = 0;
+    document.querySelector("#send")?.addEventListener("click", () => {
+      window.submitted += 1;
+    });
+  });
+
+  const adapter = new InstagramAdapter({
+    screenshotDir: "/tmp",
+    domDumpDir: "/tmp",
+    resolveSelectors: async () => ({}),
+    sessionManager: {},
+    personKey: "instagram",
+    connectTimeoutMs: 50
+  });
+  const composer = await page.locator("#composer").elementHandle();
+  const sendBinding = await adapter.requireComposerSendButton(page, composer, "#send");
+  const sendButton = sendBinding.button;
+  await sendButton.evaluate((button) => {
+    document.querySelector("#other-owner")?.append(button);
+  });
+
+  assert.deepEqual(
+    await adapter.runAtomicComposerAction({
+      composer,
+      sendButton,
+      sendOwner: sendBinding.owner,
       selectors: { conversation_header: "main header h1" },
       thread: {
         platformThreadId: "safe-thread",
@@ -2009,6 +2088,7 @@ function sendTestHarness({
       return composer;
     }
   };
+  const boundSendOwner = {};
   const boundSendButton = {
     unrelatedNearbySubmit,
     boundingBox: async () =>
@@ -2030,6 +2110,10 @@ function sendTestHarness({
     evaluate: async () => ({
       exactSend: !unrelatedNearbySubmit,
       sameForm: false
+    }),
+    evaluateHandle: async () => ({
+      asElement: () => boundSendOwner,
+      dispose: async () => undefined
     })
   };
   const sendButton = {

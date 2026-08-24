@@ -51,6 +51,11 @@ export interface InstagramMessageSnapshot {
   deleted?: boolean;
 }
 
+interface InstagramComposerSendBinding {
+  button: ElementHandle;
+  owner: ElementHandle;
+}
+
 export class InstagramParsingError extends Error {
   constructor(readonly reason: string) {
     super(`Instagram parsing failed: ${reason}`);
@@ -1782,6 +1787,7 @@ export class InstagramAdapter extends BetaAdapter {
   private async runAtomicComposerAction(input: {
     composer: ElementHandle;
     sendButton?: ElementHandle;
+    sendOwner?: ElementHandle;
     selectors: SelectorRegistry;
     thread: ThreadStub;
     platformThreadId: string;
@@ -1794,6 +1800,7 @@ export class InstagramAdapter extends BetaAdapter {
         composerNode,
         {
           sendButton,
+          sendOwner,
           headerSelector,
           recipientVerificationLabel,
           platformThreadId,
@@ -2026,6 +2033,28 @@ export class InstagramAdapter extends BetaAdapter {
         if (!conversationEvidence?.container.contains(sendElement)) {
           return fail("send_button_not_owned");
         }
+        if (
+          !sendOwner ||
+          !sendOwner.isConnected ||
+          sendOwner.ownerDocument !== document
+        ) {
+          return fail("send_button_not_owned");
+        }
+        const ownerElement = sendOwner as Element;
+        let currentLocalOwner: Element | null = sendElement.parentElement;
+        while (currentLocalOwner && !currentLocalOwner.contains(composerNode as Element)) {
+          currentLocalOwner = currentLocalOwner.parentElement;
+        }
+        if (
+          ownerElement === document.body ||
+          ownerElement === document.documentElement ||
+          ownerElement.matches("main, [role='main']") ||
+          currentLocalOwner !== ownerElement ||
+          !ownerElement.contains(composerNode as Element) ||
+          !ownerElement.contains(sendElement)
+        ) {
+          return fail("send_button_not_owned");
+        }
         const composerForm = composerElement.closest("form");
         const sendForm = sendElement.closest("form");
         if ((composerForm || sendForm) && composerForm !== sendForm) {
@@ -2077,6 +2106,7 @@ export class InstagramAdapter extends BetaAdapter {
       },
       {
         sendButton: input.sendButton,
+        sendOwner: input.sendOwner,
         headerSelector:
           input.selectors.conversation_header ?? "header h1, header h2, header span[title]",
         recipientVerificationLabel: input.thread.recipientVerificationLabel,
@@ -2114,7 +2144,7 @@ export class InstagramAdapter extends BetaAdapter {
     page: Page,
     composer: Locator | ElementHandle,
     selector: string
-  ): Promise<ElementHandle> {
+  ): Promise<InstagramComposerSendBinding> {
     let candidates = await this.enabledCandidates(page.locator(selector));
     if (candidates.length === 0) {
       candidates = await this.enabledCandidates(
@@ -2125,14 +2155,21 @@ export class InstagramAdapter extends BetaAdapter {
       throw new InstagramParsingError("send_button_disabled");
     }
 
-    const composerBox = await composer.boundingBox();
+    const composerHandle =
+      "elementHandle" in composer && typeof composer.elementHandle === "function"
+        ? await composer.elementHandle()
+        : composer;
+    if (!composerHandle) {
+      throw new InstagramParsingError("composer_not_visible");
+    }
+    const composerBox = await composerHandle.boundingBox();
     if (!composerBox) {
       throw new InstagramParsingError("composer_not_visible");
     }
     const composerCenterY = composerBox.y + composerBox.height / 2;
     const composerRight = composerBox.x + composerBox.width;
     const maxHorizontalGap = Math.max(160, composerBox.height * 4);
-    const nearby: ElementHandle[] = [];
+    const nearby: InstagramComposerSendBinding[] = [];
     for (const candidate of candidates) {
       const candidateHandle = await candidate.elementHandle();
       if (!candidateHandle) continue;
@@ -2149,9 +2186,31 @@ export class InstagramAdapter extends BetaAdapter {
           ];
           const exactSend = labels.some((value) => normalize(value) === "send");
           return { exactSend };
-        }, composer as ElementHandle)
+        }, composerHandle)
         .catch(() => null);
       if (!association?.exactSend) {
+        continue;
+      }
+      const ownerHandle = await candidateHandle
+        .evaluateHandle((button, composerNode) => {
+          let owner = (button as Element).parentElement;
+          while (owner && !owner.contains(composerNode as Element)) {
+            owner = owner.parentElement;
+          }
+          if (
+            !owner ||
+            owner === document.body ||
+            owner === document.documentElement ||
+            owner.matches("main, [role='main']")
+          ) {
+            return null;
+          }
+          return owner;
+        }, composerHandle)
+        .catch(() => null);
+      const owner = ownerHandle?.asElement() ?? null;
+      if (!owner) {
+        await ownerHandle?.dispose().catch(() => undefined);
         continue;
       }
       const box = await candidateHandle.boundingBox();
@@ -2162,7 +2221,7 @@ export class InstagramAdapter extends BetaAdapter {
       const horizontallyAssociated =
         centerX >= composerBox.x && centerX <= composerRight + maxHorizontalGap;
       if (sameRow && horizontallyAssociated) {
-        nearby.push(candidateHandle);
+        nearby.push({ button: candidateHandle, owner });
       }
     }
     if (nearby.length !== 1) {
@@ -2335,19 +2394,20 @@ export class InstagramAdapter extends BetaAdapter {
       await this.verifyComposerText(composer, normalizedText);
       await readingPause(500, 1_100);
 
-      const boundSendButton = await this.requireComposerSendButton(
+      const boundSend = await this.requireComposerSendButton(
         page,
         composer,
         selectors.send_button
       );
-      await humanClick(page, boundSendButton, {
+      await humanClick(page, boundSend.button, {
         timeout: 10_000,
         reading: null,
         performClick: async () => {
           submissionMayHaveOccurred = true;
           const result = await this.runAtomicComposerAction({
             composer,
-            sendButton: boundSendButton,
+            sendButton: boundSend.button,
+            sendOwner: boundSend.owner,
             selectors,
             thread,
             platformThreadId: platformThreadId!,

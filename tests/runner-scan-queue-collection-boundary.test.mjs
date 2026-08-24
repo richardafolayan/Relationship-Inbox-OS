@@ -10,6 +10,7 @@ test("scan queue keeps incomplete and capped adapters degraded without advancing
 
   const platformState = new Map();
   const settingWrites = [];
+  const watermarkReads = new Map();
   const applyDefined = (target, values) => {
     for (const [key, value] of Object.entries(values ?? {})) {
       if (value !== undefined) target[key] = value;
@@ -63,7 +64,11 @@ test("scan queue keeps incomplete and capped adapters degraded without advancing
       })
     },
     ensureConnected: async () => undefined,
-    getScanWatermark: async () => `${platform.toLowerCase()}-watermark`,
+    getScanWatermark: async () => {
+      watermarkReads.set(platform, (watermarkReads.get(platform) ?? 0) + 1);
+      return `${platform.toLowerCase()}-watermark`;
+    },
+    collectChangedThreads: async () => ({ stubs: [], fullSweepRequired: true }),
     scanUnreadThreads: async () => [],
     fetchRecentThreads: async () => [],
     fetchThreadMessages: async () => [],
@@ -123,6 +128,7 @@ test("scan queue keeps incomplete and capped adapters degraded without advancing
         : PLATFORM_SCAN_COLLECTION_INCOMPLETE_ERROR
     );
     assert.equal(finalState.lastScanAt, originalLastScanAt);
+    assert.equal(watermarkReads.get(platform), 1);
   }
   assert.deepEqual(settingWrites, []);
 });
