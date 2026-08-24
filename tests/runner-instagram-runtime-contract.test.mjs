@@ -14,6 +14,14 @@ const factorySource = await readFile(
   new URL("../apps/runner/src/services/platform-factory.ts", import.meta.url),
   "utf8"
 );
+const scanQueueSource = await readFile(
+  new URL("../apps/runner/src/services/scan-queue.ts", import.meta.url),
+  "utf8"
+);
+const schemaSource = await readFile(
+  new URL("../packages/core/prisma/schema.prisma", import.meta.url),
+  "utf8"
+);
 const selectors = JSON.parse(
   await readFile(
     new URL("../packages/core/selectors/instagram.json", import.meta.url),
@@ -56,4 +64,23 @@ test("Instagram selectors and adapter never use a first-row or Enter-key send fa
 test("Instagram failures do not invoke content-bearing diagnostics", () => {
   assert.doesNotMatch(adapterSource, /toStageFailure|captureDiagnostics|page\.screenshot|page\.content/);
   assert.match(adapterSource, /details: \{ reason \}/);
+});
+
+test("message identity reconciliation stays behind a platform-neutral scan capability", () => {
+  assert.doesNotMatch(scanQueueSource, /instagram-message-key-upgrade/);
+  assert.doesNotMatch(scanQueueSource, /planInstagramMessageKeyUpgrades/);
+  assert.match(scanQueueSource, /messageIdentityReconcilers/);
+  assert.match(
+    runnerSource,
+    /messageIdentityReconcilers:\s*\{[\s\S]*?INSTAGRAM:\s*createInstagramMessageIdentityReconciler\(prisma\)/
+  );
+});
+
+test("platform recipient verification identity is persisted separately from Person display copy", () => {
+  assert.match(schemaSource, /recipientVerificationLabel\s+String\?/);
+  assert.match(runnerSource, /recipientVerificationLabel: thread\.recipientVerificationLabel \?\? undefined/);
+  assert.match(
+    scanQueueSource,
+    /recipientVerificationLabel: candidate\.recipientVerificationLabel/
+  );
 });

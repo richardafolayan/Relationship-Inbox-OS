@@ -25,9 +25,9 @@ import { resolveAdapterFailureKind, shouldStopScanForFailureKind } from "./failu
 import { isAiVisibleMessage, prismaMessageToPrompt } from "./ai";
 import { buildMessageUpsertPayload } from "./message-upsert-payload";
 import {
-  applyInstagramMessageKeyUpgradePlan,
-  planInstagramMessageKeyUpgrades
-} from "./instagram-message-key-upgrade";
+  reconcilePlatformMessageIdentity,
+  type MessageIdentityReconciler
+} from "./message-identity-reconciliation";
 import { deleteImessageVoiceSnapshot } from "./imessage-voice-store";
 import { isVoicePlaceholderText, previewFromTranscript } from "./transcript-preview";
 import type { KeyedMutex } from "./keyed-mutex";
@@ -65,6 +65,7 @@ interface ScanQueueDeps {
   // scan loop only iterates `enabledPlatforms` (which excludes IMESSAGE
   // by default); per-thread sync paths guard via requireAdapter.
   adapters: Partial<Record<PlatformName, PlatformAdapter>>;
+  messageIdentityReconcilers?: Partial<Record<PlatformName, MessageIdentityReconciler>>;
   eventBus: EventBus;
   settingsStore: SettingsStore;
   aiService: AiService;
@@ -1453,6 +1454,8 @@ export function createScanQueue(deps: ScanQueueDeps) {
         let authInterrupted = false;
         let openedThreadsCount = 0;
         let messagesParsedCount = 0;
+        let messagesPersistedCount = 0;
+        let messageIdentityQuarantines = 0;
         let candidatesCount = 0;
         let threadsScannedCount = 0;
         let unreadCandidatesCount = 0;
@@ -2455,6 +2458,8 @@ export function createScanQueue(deps: ScanQueueDeps) {
               updatedThreads += syncResult.updatedThreads;
               platformUpdatedThreads += syncResult.updatedThreads;
               messagesParsedCount += syncResult.parsedMessages;
+              messagesPersistedCount += syncResult.persistedMessages;
+              messageIdentityQuarantines += syncResult.quarantinedMessages;
               headline("OPEN_THREAD_OK", "thread opened and synced", {
                 index: openedThreadsCount,
                 total: Math.min(candidatesToSync.length, maxOpenCount),
@@ -2464,18 +2469,27 @@ export function createScanQueue(deps: ScanQueueDeps) {
                 name: thread.displayName,
                 messagesParsed: syncResult.parsedMessages
               });
-              headline("PERSIST_OK", "thread persisted", {
-                name: thread.displayName,
-                threadsUpserted: syncResult.updatedThreads,
-                messagesUpserted: syncResult.parsedMessages
-              });
+              headline(
+                syncResult.quarantinedMessages > 0 ? "PERSIST_PARTIAL" : "PERSIST_OK",
+                syncResult.quarantinedMessages > 0
+                  ? "thread persisted with identity quarantine"
+                  : "thread persisted",
+                {
+                  name: thread.displayName,
+                  threadsUpserted: syncResult.updatedThreads,
+                  messagesUpserted: syncResult.persistedMessages,
+                  messagesQuarantined: syncResult.quarantinedMessages
+                }
+              );
               runLogger.logAction({
                 stage: "read_thread",
                 action: "thread_sync_complete",
-                result: "ok",
+                result: syncResult.quarantinedMessages > 0 ? "partial" : "ok",
                 counts: {
                   openedThreadsCount,
                   messagesParsedCount,
+                  messagesPersistedCount,
+                  messageIdentityQuarantines,
                   updatedThreads: platformUpdatedThreads
                 },
                 note: thread.displayName
@@ -2611,37 +2625,52 @@ export function createScanQueue(deps: ScanQueueDeps) {
             return;
           }
 
+          const freshnessComplete = messageIdentityQuarantines === 0;
           await prisma.platform.update({
             where: { name: platform },
             data: {
               status: "CONNECTED",
               lastScanAt: new Date(),
-              lastError: null
+              lastError: freshnessComplete
+                ? null
+                : "Platform freshness is incomplete because historical message identity could not be reconciled safely."
             }
           });
 
-          runStopReason =
-            typeof collectionMetrics?.stopReason === "string" ? (collectionMetrics.stopReason as string) : runStopReason;
+          runStopReason = freshnessComplete
+            ? typeof collectionMetrics?.stopReason === "string"
+              ? (collectionMetrics.stopReason as string)
+              : runStopReason
+            : "message_identity_quarantine";
           runLogger.setStopReason(runStopReason ?? "scan_complete");
-          headline("SCAN_END_OK", "scan completed", {
-            stopReason: runStopReason ?? "scan_complete",
-            updatedThreads: platformUpdatedThreads,
-            LOG_DIR: logDir
-          });
+          headline(
+            freshnessComplete ? "SCAN_END_OK" : "SCAN_END_PARTIAL",
+            freshnessComplete ? "scan completed" : "scan completed with incomplete freshness",
+            {
+              stopReason: runStopReason ?? "scan_complete",
+              updatedThreads: platformUpdatedThreads,
+              messagesQuarantined: messageIdentityQuarantines,
+              LOG_DIR: logDir
+            }
+          );
           if (logDir) {
-            headline("SCAN_END_OK", `LOG_DIR: ${logDir}`);
+            headline(freshnessComplete ? "SCAN_END_OK" : "SCAN_END_PARTIAL", `LOG_DIR: ${logDir}`);
           }
 
           await deps.auditLog({
             platform,
             stage: "Scan",
             action: "SCAN_END",
-            status: "OK",
+            status: freshnessComplete ? "OK" : "FAIL",
             details: {
               jobId: job.jobId,
               requestId: job.jobId,
               stage: "persist",
               platform,
+              freshnessComplete,
+              messagesParsed: messagesParsedCount,
+              messagesPersisted: messagesPersistedCount,
+              messagesQuarantined: messageIdentityQuarantines,
               updatedThreads: platformUpdatedThreads,
               processed: platformUpdatedThreads,
               skipped: Math.max(0, candidatesCount - platformUpdatedThreads),
@@ -2659,8 +2688,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
                   : needsReplyCandidatesCount,
               iterations:
                 typeof collectionMetrics?.iterations === "number" ? (collectionMetrics.iterations as number) : undefined,
-              stopReason:
-                typeof collectionMetrics?.stopReason === "string" ? (collectionMetrics.stopReason as string) : undefined,
+              stopReason: runStopReason,
               threadsScanned: threadsScannedCount,
               unreadCount: unreadCandidatesCount,
               needsReplyCount: needsReplyCandidatesCount,
@@ -2685,7 +2713,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
           });
           retryController.markSuccess(platform);
           runError = undefined;
-          runSuccess = true;
+          runSuccess = freshnessComplete;
 
           // Advance the incremental-scan watermark ONLY now: clean
           // completion, every candidate processed, no per-thread failures.
@@ -2693,7 +2721,12 @@ export function createScanQueue(deps: ScanQueueDeps) {
           // changes that landed mid-scan stay ahead of it and are picked up
           // next tick. A failed/capped/aborted run leaves the old watermark
           // in place and the next tick simply re-derives a (cheap) delta.
-          if (capturedScanWatermark && threadFailures === 0 && !candidateCapBroke) {
+          if (
+            capturedScanWatermark &&
+            threadFailures === 0 &&
+            !candidateCapBroke &&
+            freshnessComplete
+          ) {
             await saveScanWatermark(platform, capturedScanWatermark);
           }
         } catch (error) {
@@ -2835,6 +2868,8 @@ export function createScanQueue(deps: ScanQueueDeps) {
             candidatesToOpenCount: candidatesCount,
             openedThreadsCount,
             messagesParsedCount,
+            messagesPersistedCount,
+            messageIdentityQuarantines,
             threadFailures,
             threadFailureKinds,
             updatedThreads: platformUpdatedThreads,
@@ -2995,7 +3030,12 @@ export function createScanQueue(deps: ScanQueueDeps) {
     // what the backfill is for.
     skipAi = false,
     trigger?: ScanTrigger
-  ): Promise<{ updatedThreads: number; parsedMessages: number }> {
+  ): Promise<{
+    updatedThreads: number;
+    parsedMessages: number;
+    persistedMessages: number;
+    quarantinedMessages: number;
+  }> {
     const candidateListTimestamp = parseCandidateListTimestamp(candidate.lastMessageAt);
     const adapter = deps.adapters[platform];
     if (!adapter) {
@@ -3061,7 +3101,9 @@ export function createScanQueue(deps: ScanQueueDeps) {
       });
       return {
         updatedThreads: 0,
-        parsedMessages: 0
+        parsedMessages: 0,
+        persistedMessages: 0,
+        quarantinedMessages: 0
       };
     }
 
@@ -3215,6 +3257,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
           platformThreadId: candidate.platformThreadId,
           personId: person.id,
           threadUrl: candidate.threadUrl,
+          recipientVerificationLabel: candidate.recipientVerificationLabel,
           unreadCount: candidate.unreadCount ?? 0,
           lastMessagePreview: cleanText(candidate.lastMessagePreview ?? ""),
           lastMessageAt: candidateListTimestamp ?? undefined,
@@ -3248,37 +3291,14 @@ export function createScanQueue(deps: ScanQueueDeps) {
       note: candidate.displayName
     });
 
-    const blockedInstagramMessageKeys = new Set<string>();
-    if (
-      platform === "INSTAGRAM" &&
-      messages.some((message) => message.platformMessageKeyMigration)
-    ) {
-      const existingInstagramMessages = await prisma.message.findMany({
-        where: { threadId: thread.id },
-        select: {
-          id: true,
-          platformMessageKey: true,
-          direction: true,
-          timestamp: true,
-          text: true,
-          rawJson: true,
-          attachmentsJson: true,
-          sentVia: true,
-          audioTranscription: {
-            select: { id: true, audioFingerprint: true }
-          }
-        }
-      });
-      const keyUpgradePlan = planInstagramMessageKeyUpgrades({
-        threadId: thread.id,
-        currentMessages: messages,
-        existingRows: existingInstagramMessages
-      });
-      await applyInstagramMessageKeyUpgradePlan(prisma, keyUpgradePlan);
-      for (const key of keyUpgradePlan.blockedCanonicalKeys) {
-        blockedInstagramMessageKeys.add(key);
-      }
-    }
+    const identityReconciliation = await reconcilePlatformMessageIdentity({
+      reconcilers: deps.messageIdentityReconcilers ?? {},
+      platform,
+      threadId: thread.id,
+      currentMessages: messages
+    });
+    const blockedMessageKeys = new Set(identityReconciliation.blockedMessageKeys);
+    const quarantinedMessageKeys = new Set(identityReconciliation.quarantinedMessageKeys);
 
     const timestampFallback = candidateListTimestamp ?? new Date();
     const batchedMessageWrites: Array<ReturnType<typeof prisma.message.upsert>> = [];
@@ -3298,7 +3318,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
     for (const message of messages) {
       if (
         message.platformMessageKey &&
-        blockedInstagramMessageKeys.has(message.platformMessageKey)
+        blockedMessageKeys.has(message.platformMessageKey)
       ) {
         continue;
       }
@@ -3939,6 +3959,9 @@ export function createScanQueue(deps: ScanQueueDeps) {
         // fix) would get reverted on the next rescan. PR #151's profileUrl-
         // first resolution still applies on first creation.
         threadUrl: candidate.threadUrl ?? thread.threadUrl,
+        ...(candidate.recipientVerificationLabel !== undefined
+          ? { recipientVerificationLabel: candidate.recipientVerificationLabel }
+          : {}),
         unreadCount: candidate.unreadCount ?? thread.unreadCount,
         // Keep the thread's group flags current, but never wipe a known
         // name: a group renamed on another device reports isGroup with no
@@ -4046,7 +4069,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
       platform,
       stage: "Parse",
       action: "THREAD_UPDATED",
-      status: "OK",
+      status: quarantinedMessageKeys.size === 0 ? "OK" : "FAIL",
       details: {
         requestId: jobId,
         jobId,
@@ -4054,15 +4077,18 @@ export function createScanQueue(deps: ScanQueueDeps) {
         threadId: thread.id,
         platformThreadId: candidate.platformThreadId,
         messageCount: latestMessages.length,
+        freshnessComplete: quarantinedMessageKeys.size === 0,
+        quarantinedMessages: quarantinedMessageKeys.size,
         needsReply: resolvedNeedsReply
       }
     });
     runLogger?.logAction({
       stage: "persist",
       action: "thread_updated",
-      result: "ok",
+      result: quarantinedMessageKeys.size === 0 ? "ok" : "partial",
       counts: {
         messageCount: latestMessages.length,
+        quarantinedMessages: quarantinedMessageKeys.size,
         needsReply: resolvedNeedsReply
       },
       note: candidate.displayName
@@ -4070,7 +4096,9 @@ export function createScanQueue(deps: ScanQueueDeps) {
 
     return {
       updatedThreads: 1,
-      parsedMessages: messages.length
+      parsedMessages: messages.length,
+      persistedMessages: messages.length - blockedMessageKeys.size,
+      quarantinedMessages: quarantinedMessageKeys.size
     };
   }
 

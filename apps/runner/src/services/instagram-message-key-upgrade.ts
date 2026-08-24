@@ -2,9 +2,11 @@ import type { NormalizedMessage } from "@inbox-os/core";
 import type { Prisma, PrismaClient } from "@prisma/client";
 import { cleanMessageText } from "../platforms/utils";
 import { withMessageIdentityLocks } from "./message-identity-lock";
+import type { MessageIdentityReconciler } from "./message-identity-reconciliation";
 
 const STABLE_IDENTITY_VERSION = "instagram_stable_v2";
 const RECEIPT_TIMESTAMP_TOLERANCE_MS = 2 * 60 * 1000;
+const FIRST_SEEN_CLOCK_SKEW_MARGIN_MS = 5 * 60 * 1000;
 
 export interface ExistingInstagramMessageRow {
   id: string;
@@ -36,6 +38,7 @@ export interface InstagramMessageKeyRekey {
 export interface InstagramMessageKeyUpgradePlan {
   rekeys: InstagramMessageKeyRekey[];
   blockedCanonicalKeys: string[];
+  quarantinedCanonicalKeys: string[];
 }
 
 export class InstagramMessageKeyUpgradeError extends Error {
@@ -117,6 +120,13 @@ function hasDistinctTimestampEvidence(
 ): boolean {
   if (!message.timestamp) return false;
   if (raw.timestampSource === "source") return true;
+  const currentTimestamp = new Date(message.timestamp).getTime();
+  if (
+    Number.isFinite(currentTimestamp) &&
+    row.timestamp.getTime() + FIRST_SEEN_CLOCK_SKEW_MARGIN_MS < currentTimestamp
+  ) {
+    return true;
+  }
   return message.direction === "OUT" &&
     row.direction === "OUT" &&
     row.sentVia === "automation" &&
@@ -147,7 +157,9 @@ export function planInstagramMessageKeyUpgrades(input: {
 }): InstagramMessageKeyUpgradePlan {
   const rekeys: InstagramMessageKeyRekey[] = [];
   const blockedCanonicalKeys = new Set<string>();
-  const claimedLegacyRows = new Set<string>();
+  const quarantinedCanonicalKeys = new Set<string>();
+  const claimedLegacyRows = new Map<string, string>();
+  const ambiguousLegacyRows = new Set<string>();
 
   for (const message of input.currentMessages) {
     const migration = message.platformMessageKeyMigration;
@@ -164,16 +176,24 @@ export function planInstagramMessageKeyUpgrades(input: {
       raw.messageIdentityVersion !== STABLE_IDENTITY_VERSION &&
       sameSignature(message, row, raw)
     );
-    const malformedCandidate = parsedRows.some(
-      ({ row, raw }) => row.platformMessageKey === migration.candidateKey && raw === null
+    const unresolvedMalformedRows = parsedRows.filter(
+      ({ row, raw }) =>
+        row.platformMessageKey !== canonicalKey &&
+        raw === null &&
+        row.direction === message.direction &&
+        cleanMessageText(row.text) === cleanMessageText(message.text) &&
+        !hasDistinctTimestampEvidence(message, row, {})
     );
-    if (malformedCandidate) {
-      throw new InstagramMessageKeyUpgradeError("malformed_legacy_provenance");
+    if (unresolvedMalformedRows.length > 0) {
+      quarantinedCanonicalKeys.add(canonicalKey);
+      if (!canonical) blockedCanonicalKeys.add(canonicalKey);
+      continue;
     }
 
     if (!message.timestamp) {
-      if (!canonical && legacyRows.length > 0) {
-        blockedCanonicalKeys.add(canonicalKey);
+      if (legacyRows.length > 0) {
+        quarantinedCanonicalKeys.add(canonicalKey);
+        if (!canonical) blockedCanonicalKeys.add(canonicalKey);
       }
       continue;
     }
@@ -183,34 +203,65 @@ export function planInstagramMessageKeyUpgrades(input: {
       verifiedReceiptMatch(message, row, raw!)
     );
     if (verified.length > 1) {
-      throw new InstagramMessageKeyUpgradeError("multiple_verified_legacy_messages");
+      quarantinedCanonicalKeys.add(canonicalKey);
+      if (!canonical) blockedCanonicalKeys.add(canonicalKey);
+      continue;
     }
     if (canonical && verified.length > 0) {
-      throw new InstagramMessageKeyUpgradeError("canonical_and_legacy_message_conflict");
+      quarantinedCanonicalKeys.add(canonicalKey);
+      continue;
     }
     if (canonical) continue;
     if (verified.length === 0) {
       if (legacyRows.some(({ row, raw }) => !hasDistinctTimestampEvidence(message, row, raw!))) {
         blockedCanonicalKeys.add(canonicalKey);
+        quarantinedCanonicalKeys.add(canonicalKey);
       }
       continue;
     }
 
     const legacy = verified[0]!.row;
-    if (claimedLegacyRows.has(legacy.id)) {
-      throw new InstagramMessageKeyUpgradeError("legacy_message_claimed_twice");
+    if (ambiguousLegacyRows.has(legacy.id)) {
+      blockedCanonicalKeys.add(canonicalKey);
+      quarantinedCanonicalKeys.add(canonicalKey);
+      continue;
     }
-    claimedLegacyRows.add(legacy.id);
+    const priorCanonicalKey = claimedLegacyRows.get(legacy.id);
+    if (priorCanonicalKey) {
+      const priorIndex = rekeys.findIndex((rekey) => rekey.messageId === legacy.id);
+      if (priorIndex >= 0) rekeys.splice(priorIndex, 1);
+      claimedLegacyRows.delete(legacy.id);
+      ambiguousLegacyRows.add(legacy.id);
+      for (const key of [priorCanonicalKey, canonicalKey]) {
+        blockedCanonicalKeys.add(key);
+        quarantinedCanonicalKeys.add(key);
+      }
+      continue;
+    }
+    let audioTranscription: InstagramMessageKeyRekey["audioTranscription"];
+    try {
+      audioTranscription = transcriptionRekey(legacy, canonicalKey);
+    } catch (error) {
+      if (!(error instanceof InstagramMessageKeyUpgradeError)) throw error;
+      blockedCanonicalKeys.add(canonicalKey);
+      quarantinedCanonicalKeys.add(canonicalKey);
+      continue;
+    }
+    claimedLegacyRows.set(legacy.id, canonicalKey);
     rekeys.push({
       threadId: input.threadId,
       messageId: legacy.id,
       fromKey: legacy.platformMessageKey,
       toKey: canonicalKey,
-      audioTranscription: transcriptionRekey(legacy, canonicalKey)
+      audioTranscription
     });
   }
 
-  return { rekeys, blockedCanonicalKeys: [...blockedCanonicalKeys] };
+  return {
+    rekeys,
+    blockedCanonicalKeys: [...blockedCanonicalKeys],
+    quarantinedCanonicalKeys: [...quarantinedCanonicalKeys]
+  };
 }
 
 export async function applyInstagramMessageKeyUpgradePlan(
@@ -279,4 +330,56 @@ export async function applyInstagramMessageKeyUpgradePlan(
       }
     });
   });
+}
+
+export function createInstagramMessageIdentityReconciler(
+  database: PrismaClient
+): MessageIdentityReconciler {
+  return async ({ threadId, currentMessages }) => {
+    if (
+      !currentMessages.some(
+        (message) => message.platformMessageKeyMigration?.scheme === "instagram_occurrence_v1"
+      )
+    ) {
+      return { blockedMessageKeys: [], quarantinedMessageKeys: [] };
+    }
+
+    const existingRows = await database.message.findMany({
+      where: { threadId },
+      select: {
+        id: true,
+        platformMessageKey: true,
+        direction: true,
+        timestamp: true,
+        text: true,
+        rawJson: true,
+        attachmentsJson: true,
+        sentVia: true,
+        audioTranscription: {
+          select: { id: true, audioFingerprint: true }
+        }
+      }
+    });
+    const plan = planInstagramMessageKeyUpgrades({
+      threadId,
+      currentMessages,
+      existingRows
+    });
+    try {
+      await applyInstagramMessageKeyUpgradePlan(database, plan);
+    } catch (error) {
+      if (!(error instanceof InstagramMessageKeyUpgradeError)) throw error;
+      const unresolvedKeys = plan.rekeys.map((rekey) => rekey.toKey);
+      return {
+        blockedMessageKeys: [...new Set([...plan.blockedCanonicalKeys, ...unresolvedKeys])],
+        quarantinedMessageKeys: [
+          ...new Set([...plan.quarantinedCanonicalKeys, ...unresolvedKeys])
+        ]
+      };
+    }
+    return {
+      blockedMessageKeys: plan.blockedCanonicalKeys,
+      quarantinedMessageKeys: plan.quarantinedCanonicalKeys
+    };
+  };
 }

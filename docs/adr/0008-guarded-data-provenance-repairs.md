@@ -29,18 +29,30 @@ message when an exact source timestamp or a timestamp-disambiguated automation
 receipt proves that it is the same physical message. The receipt must have
 exact outgoing-layout provenance, and matching considers every same-signature
 receipt rather than trusting its window-relative occurrence. Multiple matches,
-a canonical and verified legacy twin, malformed provenance, or a changed target
-fails closed.
+a canonical and verified legacy twin, or potentially matching malformed
+provenance quarantines that mapping without stopping unrelated writes. A legacy
+first-seen observation that predates a current exact source timestamp beyond a
+clock-skew margin proves that the messages are distinct. A changed source or
+target during transactional apply rolls the transaction back and quarantines
+the affected planned mappings at the scan boundary.
 
 When identity cannot be proved, the scan preserves the legacy row and skips only
-the unresolved canonical write. Other messages in the thread continue to
-persist. A later scan may resolve the mapping if stronger evidence appears.
+an unresolved canonical write that does not already exist. Other messages in
+the thread continue to persist. The scan reports parsed, persisted, and
+quarantined counts separately, marks freshness incomplete, and does not advance
+its incremental watermark. A later scan may resolve the mapping if stronger
+evidence appears.
 
 A verified Instagram rekey preserves the Message ID and changes the message key
 and any embedded audio fingerprint in one database transaction. Message rekeys
 and transcription creation share a per-message in-process lock. Transcription
 persistence reads the current message key inside that lock, so work started
 before a rekey cannot later store the predecessor fingerprint.
+
+The shared scan queue does not import this Instagram repair. A generic
+reconciler registry is wired at the runner composition root, and only the
+Instagram reconciler interprets its migration scheme or queries predecessor
+rows.
 
 The launcher database backup remains the recovery boundary for the one-time
 send-source repair. SQLite transaction rollback covers a failed repair. A failed
@@ -54,7 +66,8 @@ mapping performs no message mutation.
 - Stable Instagram identities can replace verified legacy keys without changing
   reply references or orphaning transcription state.
 - Unprovable Instagram history can remain on its predecessor key until evidence
-  or a future manual repair exists, but it cannot stop unrelated thread updates.
+  or a future manual repair exists, but it cannot stop unrelated thread updates
+  or produce a false full-freshness claim.
 - The message identity lock coordinates one runner process. The runner remains a
   singleton for a pilot data directory.
 
@@ -63,6 +76,7 @@ mapping performs no message mutation.
 - [`scripts/lib/repair-schema-data.mjs`](../../scripts/lib/repair-schema-data.mjs)
 - [`scripts/start-app.mjs`](../../scripts/start-app.mjs)
 - [`apps/runner/src/services/instagram-message-key-upgrade.ts`](../../apps/runner/src/services/instagram-message-key-upgrade.ts)
+- [`apps/runner/src/services/message-identity-reconciliation.ts`](../../apps/runner/src/services/message-identity-reconciliation.ts)
 - [`apps/runner/src/services/message-identity-lock.ts`](../../apps/runner/src/services/message-identity-lock.ts)
 - [`apps/runner/src/services/transcription/transcription-service.ts`](../../apps/runner/src/services/transcription/transcription-service.ts)
 - [`tests/runner-send-source-upgrade.test.mjs`](../../tests/runner-send-source-upgrade.test.mjs)

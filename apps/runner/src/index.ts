@@ -92,6 +92,7 @@ import {
   snapshotImessageVoice
 } from "./services/imessage-voice-store";
 import { createScanQueue, type ScanTrigger } from "./services/scan-queue";
+import { createInstagramMessageIdentityReconciler } from "./services/instagram-message-key-upgrade";
 import { runReassessForThread } from "./services/reassess-thread";
 import { resolveSseResumeCursor } from "./services/sse-resume-cursor";
 import { resummarizeThread } from "./services/resummarize-thread";
@@ -1038,6 +1039,9 @@ const transcriptionSetup = createTranscriptionSetupManager({
 
 const scanQueue = createScanQueue({
   adapters,
+  messageIdentityReconcilers: {
+    INSTAGRAM: createInstagramMessageIdentityReconciler(prisma)
+  },
   eventBus,
   settingsStore,
   aiService,
@@ -1727,6 +1731,7 @@ async function getThreadStub(threadId: string): Promise<{
   platformThreadId: string;
   threadUrl?: string;
   displayName: string;
+  recipientVerificationLabel?: string;
   personId: string;
 }> {
   const thread = await prisma.thread.findUnique({
@@ -1747,6 +1752,7 @@ async function getThreadStub(threadId: string): Promise<{
     platformThreadId: thread.platformThreadId,
     threadUrl: thread.threadUrl ?? undefined,
     displayName: thread.person.displayName,
+    recipientVerificationLabel: thread.recipientVerificationLabel ?? undefined,
     personId: thread.personId
   };
 }
@@ -4034,6 +4040,7 @@ app.post("/control/thread/:threadId/send-poll", asyncRoute(async (req, res) => {
   const threadStub: ThreadStub = {
     platformThreadId: target.platformThreadId,
     displayName: target.displayName,
+    recipientVerificationLabel: target.recipientVerificationLabel,
     threadUrl: target.threadUrl,
     lastMessagePreview: ""
   };
@@ -4308,6 +4315,7 @@ app.post("/control/thread/:threadId/open", asyncRoute(async (req, res) => {
       await adapter.openThread({
         platformThreadId: target.platformThreadId,
         displayName: target.displayName,
+        recipientVerificationLabel: target.recipientVerificationLabel,
         lastMessagePreview: "",
         threadUrl: target.threadUrl
       });
@@ -4418,6 +4426,7 @@ app.post("/control/thread/:threadId/message/:messageId/react", asyncRoute(async 
   const threadStub: ThreadStub = {
     platformThreadId: target.platformThreadId,
     displayName: target.displayName,
+    recipientVerificationLabel: target.recipientVerificationLabel,
     threadUrl: target.threadUrl,
     lastMessagePreview: ""
   };
@@ -4476,6 +4485,7 @@ app.post("/control/thread/:threadId/message/:messageId/edit", asyncRoute(async (
   const threadStub: ThreadStub = {
     platformThreadId: target.platformThreadId,
     displayName: target.displayName,
+    recipientVerificationLabel: target.recipientVerificationLabel,
     threadUrl: target.threadUrl,
     lastMessagePreview: ""
   };
@@ -4533,6 +4543,7 @@ app.post("/control/thread/:threadId/message/:messageId/poll-vote", asyncRoute(as
   const threadStub: ThreadStub = {
     platformThreadId: target.platformThreadId,
     displayName: target.displayName,
+    recipientVerificationLabel: target.recipientVerificationLabel,
     threadUrl: target.threadUrl,
     lastMessagePreview: ""
   };
@@ -4596,6 +4607,7 @@ app.get("/control/thread/:threadId/message/:messageId/poll-votes", asyncRoute(as
   const threadStub: ThreadStub = {
     platformThreadId: target.platformThreadId,
     displayName: target.displayName,
+    recipientVerificationLabel: target.recipientVerificationLabel,
     threadUrl: target.threadUrl,
     lastMessagePreview: ""
   };
@@ -4640,9 +4652,21 @@ app.post("/control/thread/:threadId/rescan", asyncRoute(async (req, res) => {
     target.platform === "IMESSAGE"
       ? await prisma.thread.findMany({
           where: { platform: target.platform, personId: target.personId },
-          select: { id: true, platformThreadId: true, threadUrl: true, person: { select: { displayName: true } } }
+          select: {
+            id: true,
+            platformThreadId: true,
+            threadUrl: true,
+            recipientVerificationLabel: true,
+            person: { select: { displayName: true } }
+          }
         })
-      : [{ id: target.threadId, platformThreadId: target.platformThreadId, threadUrl: target.threadUrl, person: { displayName: target.displayName } }];
+      : [{
+          id: target.threadId,
+          platformThreadId: target.platformThreadId,
+          threadUrl: target.threadUrl,
+          recipientVerificationLabel: target.recipientVerificationLabel,
+          person: { displayName: target.displayName }
+        }];
 
   // Per-thread rescan: open ONLY this thread and re-parse its messages,
   // instead of triggering a full-inbox scan via enqueueScan(). The full-
@@ -4683,6 +4707,7 @@ app.post("/control/thread/:threadId/rescan", asyncRoute(async (req, res) => {
         const candidate: ThreadStub = {
           platformThreadId: t.platformThreadId,
           displayName: t.person.displayName,
+          recipientVerificationLabel: t.recipientVerificationLabel ?? undefined,
           threadUrl: t.threadUrl ?? undefined,
           lastMessagePreview: ""
         };

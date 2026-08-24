@@ -44,6 +44,7 @@ function matchesWhere(row, where) {
 function makeHarness(initialRows, opts = {}) {
   const rows = initialRows.map((r) => ({ ...r }));
   const sends = []; // every physical adapter.sendMessage call
+  const sentStubs = [];
   const messages = []; // every Message upsert (one per actual persisted send)
 
   const prisma = {
@@ -87,6 +88,7 @@ function makeHarness(initialRows, opts = {}) {
           platform: opts.platform ?? "LINKEDIN",
           platformThreadId: "pt1",
           threadUrl: null,
+          recipientVerificationLabel: opts.recipientVerificationLabel ?? null,
           lastMessageAt: null,
           lastInboundAt: null,
           person: { displayName: "Test Person" }
@@ -105,7 +107,8 @@ function makeHarness(initialRows, opts = {}) {
   };
 
   const adapter = {
-    async sendMessage(_stub, text) {
+    async sendMessage(stub, text) {
+      sentStubs.push(stub);
       sends.push(text);
       if (opts.adapterFailure) {
         throw opts.adapterFailure;
@@ -142,7 +145,7 @@ function makeHarness(initialRows, opts = {}) {
     prisma
   });
 
-  return { svc, rows, sends, messages };
+  return { svc, rows, sends, sentStubs, messages };
 }
 
 const pendingRow = (over = {}) => ({
@@ -171,6 +174,18 @@ test("happy path: a PENDING row sends exactly once and lands SENT", async () => 
   await svc.processSendRequest("sr1");
   assert.equal(sends.length, 1, "exactly one physical send");
   assert.equal(rows[0].status, "SENT");
+});
+
+test("send dispatch preserves the last platform-authoritative recipient label", async () => {
+  const { svc, sentStubs } = makeHarness([pendingRow()], {
+    platform: "INSTAGRAM",
+    recipientVerificationLabel: "Current Instagram name"
+  });
+
+  await svc.processSendRequest("sr1");
+
+  assert.equal(sentStubs[0].displayName, "Test Person");
+  assert.equal(sentStubs[0].recipientVerificationLabel, "Current Instagram name");
 });
 
 test("worker refuses a stale scheduled Instagram row before any physical send", async () => {

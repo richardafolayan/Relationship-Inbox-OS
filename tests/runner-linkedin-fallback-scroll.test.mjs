@@ -49,7 +49,7 @@ async function createFixture() {
     personKey: "default",
     scanMaxThreads: 80,
     scanStableIterations: 3,
-    scanScrollWaitMs: 80,
+    scanScrollWaitMs: 500,
     messageBackfillAttempts: 1
   });
 

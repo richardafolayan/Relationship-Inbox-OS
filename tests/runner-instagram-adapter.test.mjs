@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import {
   canonicalInstagramThreadUrl,
   classifyInstagramAuthRequirement,
@@ -335,6 +336,10 @@ test("thread identity is stable across row order and duplicate rows", () => {
   );
   assert.equal(first.length, 2);
   assert.equal(first.find((thread) => thread.platformThreadId === "two")?.unreadCount, 1);
+  assert.equal(
+    first.find((thread) => thread.platformThreadId === "two")?.recipientVerificationLabel,
+    "Person Two"
+  );
 });
 
 test("GraphQL thread payloads use only typed thread IDs and ignore unsupported fallbacks", () => {
@@ -603,7 +608,8 @@ test("opening Instagram uses the exact thread URL and rejects identity mismatche
     () =>
       makeAdapter(wrongRecipientPage).openThread({
         platformThreadId: "safe-thread",
-        displayName: "Safe thread"
+        displayName: "Safe thread",
+        recipientVerificationLabel: "Safe thread"
       }),
     (error) =>
       error?.kind === "THREAD_NOT_FOUND" &&
@@ -618,12 +624,23 @@ test("opening Instagram uses the exact thread URL and rejects identity mismatche
     () =>
       makeAdapter(unverifiedRecipientPage).openThread({
         platformThreadId: "safe-thread",
-        displayName: "Ann"
+        displayName: "Ann",
+        recipientVerificationLabel: "Ann"
       }),
     (error) =>
       error?.kind === "THREAD_NOT_FOUND" &&
       error?.details?.reason === "opened_recipient_mismatch"
   );
+
+  const renamedRecipientPage = makePage({
+    openedUrl: "https://www.instagram.com/direct/t/safe-thread/",
+    header: "Joanne"
+  });
+  await makeAdapter(renamedRecipientPage).openThread({
+    platformThreadId: "safe-thread",
+    displayName: "Ann",
+    recipientVerificationLabel: "Joanne"
+  });
 
   const exactIdWithoutHeader = makePage({
     openedUrl: "https://www.instagram.com/direct/t/safe-thread/",
@@ -749,6 +766,113 @@ test("message snapshot extraction accepts the configured data-id identity varian
   assert.equal(snapshots[0].nativeId, "ig-message-42");
   assert.equal(snapshots[0].nativeIdStable, true);
   assert.doesNotThrow(() => normalizeInstagramMessageSnapshots("thread-1", snapshots));
+});
+
+test("shipped Instagram selectors exclude sidebar rows and preserve message boundaries", async () => {
+  const selectors = JSON.parse(
+    readFileSync(new URL("../packages/core/selectors/instagram.json", import.meta.url), "utf8")
+  );
+  const selectorParts = (selector) => selector.split(",").map((part) => part.trim());
+  const node = ({
+    tagName = "DIV",
+    text = "",
+    attributes = {},
+    matched = [],
+    descendants = {},
+    closest = null,
+    left = 0,
+    width = 280
+  } = {}) => ({
+    tagName,
+    className: "",
+    textContent: text,
+    getAttribute: (name) => attributes[name] ?? null,
+    matches: (selector) => selectorParts(selector).some((part) => matched.includes(part)),
+    querySelector: (selector) =>
+      Object.entries(descendants).find(([candidate]) => selectorParts(selector).includes(candidate))?.[1] ?? null,
+    querySelectorAll: (selector) =>
+      Object.entries(descendants)
+        .filter(([candidate]) => selectorParts(selector).includes(candidate))
+        .map(([, descendant]) => descendant),
+    closest: () => closest,
+    getBoundingClientRect: () => ({ left, width })
+  });
+
+  const sidebarAvatar = node({ tagName: "IMG", attributes: { alt: "Joanne" } });
+  const sidebar = node({
+    text: "Joanne Latest preview",
+    matched: ["div[role='row']"],
+    descendants: {
+      "a[href^='/direct/t/']": node({ tagName: "A" }),
+      "div[dir='auto']": node({ text: "Joanne Latest preview" }),
+      "img[alt]:not([alt=''])": sidebarAvatar
+    },
+    left: 0
+  });
+  const inbound = node({
+    text: "Hello",
+    attributes: { "data-message-id": "message-in", "data-direction": "incoming" },
+    matched: ["div[role='row']", "[data-message-id]", "[data-direction='incoming']"],
+    descendants: {
+      "div[dir='auto']": node({ text: "Hello" }),
+      "img[alt]:not([alt=''])": node({
+        tagName: "IMG",
+        attributes: { alt: "Joanne" },
+        closest: node({ tagName: "A", attributes: { href: "/joanne/" } })
+      })
+    },
+    left: 260
+  });
+  const outbound = node({
+    text: "Hi",
+    attributes: { "data-direction": "outgoing" },
+    matched: ["div[role='listitem']", "[data-direction='outgoing']"],
+    descendants: {
+      "div[dir='auto']": node({ text: "Hi" }),
+      "time[datetime]": node({ attributes: { datetime: "2026-08-24T10:00:00.000Z" } })
+    },
+    left: 700
+  });
+  const photo = node({
+    tagName: "IMG",
+    attributes: { alt: "Photo" },
+    closest: node({ tagName: "A", attributes: { href: "/p/post-1/" } })
+  });
+  const media = node({
+    attributes: { "data-id": "message-photo", "data-direction": "incoming" },
+    matched: ["div[role='row']", "[data-id]", "[data-direction='incoming']"],
+    descendants: { "img[alt]:not([alt=''])": photo },
+    left: 260
+  });
+  const rows = [sidebar, inbound, outbound, media];
+  const container = node({ left: 200, width: 800 });
+  container.querySelectorAll = (selector) => selector === selectors.message_item ? rows : [];
+  const body = node();
+  body.querySelector = (selector) => selector === selectors.message_container ? container : null;
+  const documentRoot = {
+    evaluate: async (callback, argument) =>
+      typeof callback === "string" ? undefined : callback(body, argument)
+  };
+  const page = { $: async () => documentRoot };
+  const adapter = new InstagramAdapter({
+    screenshotDir: "/tmp",
+    domDumpDir: "/tmp",
+    resolveSelectors: async () => selectors,
+    sessionManager: { getManagedPage: async () => page },
+    personKey: "instagram",
+    connectTimeoutMs: 50
+  });
+
+  const snapshots = await adapter.snapshotMessages(page, selectors);
+
+  assert.deepEqual(
+    snapshots.map(({ nativeId, direction, text, mediaKind }) => ({ nativeId, direction, text, mediaKind })),
+    [
+      { nativeId: "message-in", direction: "IN", text: "Hello", mediaKind: undefined },
+      { nativeId: undefined, direction: "OUT", text: "Hi", mediaKind: undefined },
+      { nativeId: "message-photo", direction: "IN", text: "", mediaKind: "photo" }
+    ]
+  );
 });
 
 test("unsupported Instagram content becomes safe placeholders", () => {
@@ -1050,7 +1174,11 @@ test("Instagram refuses to send through a disabled composer", async () => {
   await assert.rejects(
     () =>
       adapter.sendMessage(
-        { platformThreadId: "safe-thread", displayName: "Safe thread" },
+        {
+          platformThreadId: "safe-thread",
+          displayName: "Safe thread",
+          recipientVerificationLabel: "Safe thread"
+        },
         "Approved text"
       ),
     (error) =>
@@ -1202,7 +1330,11 @@ function sendTestHarness({
 test("Instagram adapter reports success only after an exact new outgoing bubble", async () => {
   const harness = sendTestHarness({ observeSubmittedBubble: true });
   const receipt = await harness.adapter.sendMessage(
-    { platformThreadId: "safe-thread", displayName: "Safe thread" },
+    {
+      platformThreadId: "safe-thread",
+      displayName: "Safe thread",
+      recipientVerificationLabel: "Safe thread"
+    },
     "x"
   );
 
@@ -1216,13 +1348,31 @@ test("Instagram adapter reports success only after an exact new outgoing bubble"
   );
 });
 
+test("Instagram refuses a physical send without a platform-authoritative recipient label", async () => {
+  const harness = sendTestHarness({ observeSubmittedBubble: true });
+
+  await assert.rejects(
+    () =>
+      harness.adapter.sendMessage(
+        { platformThreadId: "safe-thread", displayName: "User-edited name" },
+        "x"
+      ),
+    (error) => error?.details?.reason === "recipient_unverified_before_send"
+  );
+  assert.equal(harness.wasSubmitted(), false);
+});
+
 test("Instagram adapter fails when submission produces no outgoing bubble", async () => {
   const harness = sendTestHarness({ observeSubmittedBubble: false });
 
   await assert.rejects(
     () =>
       harness.adapter.sendMessage(
-        { platformThreadId: "safe-thread", displayName: "Safe thread" },
+        {
+          platformThreadId: "safe-thread",
+          displayName: "Safe thread",
+          recipientVerificationLabel: "Safe thread"
+        },
         "x"
       ),
     (error) =>
@@ -1241,7 +1391,11 @@ test("Instagram rejects multiline text before typing can trigger an Enter-key se
   await assert.rejects(
     () =>
       harness.adapter.sendMessage(
-        { platformThreadId: "safe-thread", displayName: "Safe thread" },
+        {
+          platformThreadId: "safe-thread",
+          displayName: "Safe thread",
+          recipientVerificationLabel: "Safe thread"
+        },
         "first line\nsecond line"
       ),
     (error) =>
@@ -1258,7 +1412,11 @@ test("Instagram adapter verifies an exact new outgoing layout bubble", async () 
     observeExactLayoutBubble: true
   });
   const receipt = await harness.adapter.sendMessage(
-    { platformThreadId: "safe-thread", displayName: "Safe thread" },
+    {
+      platformThreadId: "safe-thread",
+      displayName: "Safe thread",
+      recipientVerificationLabel: "Safe thread"
+    },
     "x"
   );
 
@@ -1280,7 +1438,11 @@ test("Instagram revalidates the exact thread after typing and before clicking Se
   await assert.rejects(
     () =>
       harness.adapter.sendMessage(
-        { platformThreadId: "safe-thread", displayName: "Safe thread" },
+        {
+          platformThreadId: "safe-thread",
+          displayName: "Safe thread",
+          recipientVerificationLabel: "Safe thread"
+        },
         "x"
       ),
     (error) => error?.details?.reason === "thread_changed_before_send"
@@ -1297,7 +1459,11 @@ test("Instagram refuses to click Send when the composer lost approved text", asy
   await assert.rejects(
     () =>
       harness.adapter.sendMessage(
-        { platformThreadId: "safe-thread", displayName: "Safe thread" },
+        {
+          platformThreadId: "safe-thread",
+          displayName: "Safe thread",
+          recipientVerificationLabel: "Safe thread"
+        },
         "approved"
       ),
     (error) => error?.details?.reason === "composer_text_mismatch_before_send"
@@ -1314,7 +1480,11 @@ test("Instagram binds Send to the verified document instead of re-resolving afte
   await assert.rejects(
     () =>
       harness.adapter.sendMessage(
-        { platformThreadId: "safe-thread", displayName: "Safe thread" },
+        {
+          platformThreadId: "safe-thread",
+          displayName: "Safe thread",
+          recipientVerificationLabel: "Safe thread"
+        },
         "approved"
       ),
     (error) => error?.details?.reason === "delivery_uncertain_after_submit"
@@ -1331,7 +1501,11 @@ test("every Instagram failure after the Send click is delivery uncertain", async
   await assert.rejects(
     () =>
       harness.adapter.sendMessage(
-        { platformThreadId: "safe-thread", displayName: "Safe thread" },
+        {
+          platformThreadId: "safe-thread",
+          displayName: "Safe thread",
+          recipientVerificationLabel: "Safe thread"
+        },
         "approved"
       ),
     (error) => error?.details?.reason === "delivery_uncertain_after_submit"

@@ -334,6 +334,7 @@ export function createSendService(deps: SendServiceDeps) {
     const threadStub: ThreadStub = {
       platformThreadId: thread.platformThreadId,
       displayName: thread.person.displayName,
+      recipientVerificationLabel: thread.recipientVerificationLabel ?? undefined,
       lastMessagePreview: "",
       threadUrl: thread.threadUrl ?? undefined,
       lastMessageAt: thread.lastMessageAt?.toISOString()

@@ -211,6 +211,9 @@ model Thread {
   platform          PlatformName
   platformThreadId  String
   threadUrl         String?
+  // Last label read from the platform for recipient verification. This is
+  // deliberately separate from Person.displayName, which is user-editable.
+  recipientVerificationLabel String?
   personId          String
   unreadCount       Int          @default(0)
   needsReply        Boolean      @default(false)

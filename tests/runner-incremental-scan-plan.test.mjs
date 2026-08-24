@@ -116,8 +116,8 @@ test("scan loop wiring: gate consulted in the collect phase, watermark persisted
     "scan loop resolves the incremental plan"
   );
   assert.ok(
-    /capturedScanWatermark && threadFailures === 0 && !candidateCapBroke/.test(source),
-    "watermark advances only when every candidate was processed without failures"
+    /capturedScanWatermark\s*&&\s*threadFailures === 0\s*&&\s*!candidateCapBroke\s*&&\s*freshnessComplete/.test(source),
+    "watermark advances only when every candidate was processed without failures or quarantines"
   );
   assert.ok(
     /saveScanWatermark\(platform, capturedScanWatermark\)/.test(source),

@@ -26,6 +26,12 @@ export type VerificationMethod =
 export interface ThreadStub {
   platformThreadId: string;
   displayName: string;
+  /**
+   * Last platform-reported conversation label used to verify that an exact
+   * thread navigation still targets the intended recipient. Kept separate
+   * from displayName because the operator may edit the user-facing name.
+   */
+  recipientVerificationLabel?: string;
   avatarUrl?: string;
   /**
    * Participant's profile URL (e.g. `https://www.linkedin.com/in/<slug>/`)
@@ -79,7 +85,7 @@ export interface NormalizedMessage {
    * against stable evidence before rekeying an existing row.
    */
   platformMessageKeyMigration?: {
-    scheme: "instagram_occurrence_v1";
+    scheme: string;
     candidateKey: string;
   };
   direction: Direction;

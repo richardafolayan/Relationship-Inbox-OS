@@ -85,7 +85,7 @@ before claiming those guarantees still hold.
 - Reviewed local integration branch: `fix/instagram-integration-gate`.
 - Base: `origin/develop` at
   `ddfba09f44470852c349e0a7f82c12230ba7d32d`.
-- The complete bounded-concurrency suite passes: 2,962 tests, zero failures,
+- The complete bounded-concurrency suite passes: 2,971 tests, zero failures,
   zero skips, zero cancellations, and zero todos.
 - Dashboard, runner, and core type checks pass. The production dashboard build,
   Prisma generation, documentation checks, schema-upgrade checks, and diff
@@ -114,11 +114,25 @@ before claiming those guarantees still hold.
 - A third exact-head adversarial pass found sliding-window receipt drift,
   thread-wide blocking around unresolved predecessor identity, a transcription
   creation race, and the missing migration decision record. Receipt matching
-  now considers every exact-layout automation receipt by timestamp and fails
-  closed when more than one is plausible. An unresolved predecessor mapping
-  blocks only that canonical message write, while independently safe messages
-  continue. Rekeys and transcription creation share a per-message lock, and
-  ADR 0008 records the repair, rollback, quarantine, and atomicity rules.
+  now considers every exact-layout automation receipt by timestamp and
+  quarantines only a mapping when more than one is plausible. A one-sided
+  first-seen bound preserves provably newer messages, and malformed provenance
+  is matched independently of a drifting occurrence key. Unresolved mappings
+  block only unsafe canonical writes while independently safe messages continue.
+  Scans expose parsed, persisted, and quarantined counts, retain their watermark,
+  and report freshness as incomplete. Rekeys and transcription creation share a
+  per-message lock, and ADR 0008 records the repair, rollback, quarantine, and
+  atomicity rules.
+- Platform-specific identity repair is injected through a generic runner
+  reconciliation boundary rather than branching inside the shared scan path.
+  Instagram recipient revalidation uses the adapter-captured platform label,
+  stored separately from the mutable person display name. Physical sends fail
+  closed when that authoritative label is unavailable.
+- The production Instagram selector registry is exercised against a realistic
+  DOM fixture. Sidebar links and linked profile images are excluded from message
+  ingestion while genuine message media remains attached to the correct bubble.
+  A legacy SQLite database was upgraded with the new nullable recipient label
+  column and its existing person and thread rows remained intact.
 - Scheduled sends, attachments, polls, focus acknowledgements, and other
   automated Instagram sends are rejected at the durable worker boundary. The
   dashboard no longer offers those unsupported actions.

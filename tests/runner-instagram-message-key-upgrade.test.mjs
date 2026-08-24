@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   applyInstagramMessageKeyUpgradePlan,
+  createInstagramMessageIdentityReconciler,
   InstagramMessageKeyUpgradeError,
   planInstagramMessageKeyUpgrades
 } from "../apps/runner/dist/services/instagram-message-key-upgrade.js";
@@ -130,7 +131,11 @@ test("a shifted occurrence candidate with a different source timestamp remains d
     currentMessages: [currentMessage({ timestamp: "2026-08-21T10:00:00.000Z" })],
     existingRows: [existingRow()]
   });
-  assert.deepEqual(plan, { rekeys: [], blockedCanonicalKeys: [] });
+  assert.deepEqual(plan, {
+    rekeys: [],
+    blockedCanonicalKeys: [],
+    quarantinedCanonicalKeys: []
+  });
 });
 
 test("exact timestamp evidence migrates a shifted legacy occurrence key", () => {
@@ -163,6 +168,7 @@ test("an identity-less current snapshot quarantines only its unresolved mapping"
 
   assert.deepEqual(plan.rekeys, []);
   assert.deepEqual(plan.blockedCanonicalKeys, ["instagram:stable"]);
+  assert.deepEqual(plan.quarantinedCanonicalKeys, ["instagram:stable"]);
 });
 
 test("first-seen predecessor history stays quarantined when a native id later gains a timestamp", () => {
@@ -178,20 +184,54 @@ test("first-seen predecessor history stays quarantined when a native id later ga
 
   assert.deepEqual(plan.rekeys, []);
   assert.deepEqual(plan.blockedCanonicalKeys, ["instagram:stable"]);
+  assert.deepEqual(plan.quarantinedCanonicalKeys, ["instagram:stable"]);
 });
 
-test("malformed candidate provenance fails closed before any persistence", () => {
-  assert.throws(
-    () =>
-      planInstagramMessageKeyUpgrades({
-        threadId: "thread-1",
-        currentMessages: [currentMessage()],
-        existingRows: [existingRow({ rawJson: "not-json" })]
-      }),
-    (error) =>
-      error instanceof InstagramMessageKeyUpgradeError &&
-      error.reason === "malformed_legacy_provenance"
-  );
+test("a first-seen predecessor observed long before a new source message is distinct", () => {
+  const plan = planInstagramMessageKeyUpgrades({
+    threadId: "thread-1",
+    currentMessages: [currentMessage({ timestamp: "2026-08-24T10:00:00.000Z" })],
+    existingRows: [
+      existingRow({
+        timestamp: new Date("2026-01-01T10:00:00.000Z"),
+        rawJson: JSON.stringify({ timestampSource: "first_seen", contentKind: "text" })
+      })
+    ]
+  });
+
+  assert.deepEqual(plan, {
+    rekeys: [],
+    blockedCanonicalKeys: [],
+    quarantinedCanonicalKeys: []
+  });
+});
+
+test("shifted malformed predecessor provenance quarantines only its possible mapping", () => {
+  const plan = planInstagramMessageKeyUpgrades({
+    threadId: "thread-1",
+    currentMessages: [
+      currentMessage(),
+      currentMessage({
+        platformMessageKey: "instagram:independent",
+        platformMessageKeyMigration: {
+          scheme: "instagram_occurrence_v1",
+          candidateKey: "instagram:independent-legacy"
+        },
+        timestamp: "2026-08-20T10:05:00.000Z",
+        text: "Independent"
+      })
+    ],
+    existingRows: [
+      existingRow({
+        platformMessageKey: "instagram:legacy-7",
+        rawJson: "not-json"
+      })
+    ]
+  });
+
+  assert.deepEqual(plan.rekeys, []);
+  assert.deepEqual(plan.blockedCanonicalKeys, ["instagram:stable"]);
+  assert.deepEqual(plan.quarantinedCanonicalKeys, ["instagram:stable"]);
 });
 
 test("an existing canonical row is left unchanged", () => {
@@ -210,32 +250,34 @@ test("an existing canonical row is left unchanged", () => {
       })
     ]
   });
-  assert.deepEqual(plan, { rekeys: [], blockedCanonicalKeys: [] });
+  assert.deepEqual(plan, {
+    rekeys: [],
+    blockedCanonicalKeys: [],
+    quarantinedCanonicalKeys: []
+  });
 });
 
-test("a canonical row plus a verified legacy twin fails closed", () => {
-  assert.throws(
-    () =>
-      planInstagramMessageKeyUpgrades({
-        threadId: "thread-1",
-        currentMessages: [currentMessage()],
-        existingRows: [
-          existingRow(),
-          existingRow({
-            id: "canonical",
-            platformMessageKey: "instagram:stable",
-            rawJson: JSON.stringify({
-              timestampSource: "source",
-              contentKind: "text",
-              messageIdentityVersion: "instagram_stable_v2"
-            })
-          })
-        ]
-      }),
-    (error) =>
-      error instanceof InstagramMessageKeyUpgradeError &&
-      error.reason === "canonical_and_legacy_message_conflict"
-  );
+test("a canonical row plus a verified legacy twin quarantines reconciliation only", () => {
+  const plan = planInstagramMessageKeyUpgrades({
+    threadId: "thread-1",
+    currentMessages: [currentMessage()],
+    existingRows: [
+      existingRow(),
+      existingRow({
+        id: "canonical",
+        platformMessageKey: "instagram:stable",
+        rawJson: JSON.stringify({
+          timestampSource: "source",
+          contentKind: "text",
+          messageIdentityVersion: "instagram_stable_v2"
+        })
+      })
+    ]
+  });
+
+  assert.deepEqual(plan.rekeys, []);
+  assert.deepEqual(plan.blockedCanonicalKeys, []);
+  assert.deepEqual(plan.quarantinedCanonicalKeys, ["instagram:stable"]);
 });
 
 test("a later exact-layout receipt scan reconciles outside the outbound time window", () => {
@@ -262,42 +304,49 @@ test("a later exact-layout receipt scan reconciles outside the outbound time win
   assert.equal(plan.rekeys[0]?.toKey, "instagram:stable");
 });
 
-test("nearby repeated receipts fail closed when a sliding window shifts the candidate", () => {
-  assert.throws(
-    () =>
-      planInstagramMessageKeyUpgrades({
-        threadId: "thread-1",
-        currentMessages: [
-          currentMessage({
-            direction: "OUT",
-            timestamp: "2026-08-20T10:01:00.000Z",
-            text: "Same reply"
-          })
-        ],
-        existingRows: [
-          existingRow({
-            id: "receipt-a",
-            direction: "OUT",
-            timestamp: new Date("2026-08-20T10:00:00.000Z"),
-            text: "Same reply",
-            rawJson: JSON.stringify({ verification: "exact_outgoing_layout_bubble" }),
-            sentVia: "automation"
-          }),
-          existingRow({
-            id: "receipt-b",
-            platformMessageKey: "instagram:legacy-1",
-            direction: "OUT",
-            timestamp: new Date("2026-08-20T10:01:00.000Z"),
-            text: "Same reply",
-            rawJson: JSON.stringify({ verification: "exact_outgoing_layout_bubble" }),
-            sentVia: "automation"
-          })
-        ]
+test("nearby repeated receipts quarantine only the ambiguous sliding-window mapping", () => {
+  const plan = planInstagramMessageKeyUpgrades({
+    threadId: "thread-1",
+    currentMessages: [
+      currentMessage({
+        direction: "OUT",
+        timestamp: "2026-08-20T10:01:00.000Z",
+        text: "Same reply"
       }),
-    (error) =>
-      error instanceof InstagramMessageKeyUpgradeError &&
-      error.reason === "multiple_verified_legacy_messages"
-  );
+      currentMessage({
+        platformMessageKey: "instagram:independent",
+        platformMessageKeyMigration: {
+          scheme: "instagram_occurrence_v1",
+          candidateKey: "instagram:independent-legacy"
+        },
+        timestamp: "2026-08-20T10:05:00.000Z",
+        text: "Independent"
+      })
+    ],
+    existingRows: [
+      existingRow({
+        id: "receipt-a",
+        direction: "OUT",
+        timestamp: new Date("2026-08-20T10:00:00.000Z"),
+        text: "Same reply",
+        rawJson: JSON.stringify({ verification: "exact_outgoing_layout_bubble" }),
+        sentVia: "automation"
+      }),
+      existingRow({
+        id: "receipt-b",
+        platformMessageKey: "instagram:legacy-1",
+        direction: "OUT",
+        timestamp: new Date("2026-08-20T10:01:00.000Z"),
+        text: "Same reply",
+        rawJson: JSON.stringify({ verification: "exact_outgoing_layout_bubble" }),
+        sentVia: "automation"
+      })
+    ]
+  });
+
+  assert.deepEqual(plan.rekeys, []);
+  assert.deepEqual(plan.blockedCanonicalKeys, ["instagram:stable"]);
+  assert.deepEqual(plan.quarantinedCanonicalKeys, ["instagram:stable"]);
 });
 
 test("timestamp evidence finds a later repeated receipt despite a shifted candidate", () => {
@@ -401,6 +450,32 @@ test("an occupied target discovered during apply rolls back without deleting his
   );
   assert.deepEqual(
     database.rows().map((row) => row.platformMessageKey).sort(),
+    ["instagram:legacy-0", "instagram:stable"]
+  );
+});
+
+test("the scan reconciler quarantines an apply race without aborting unrelated persistence", async () => {
+  const legacy = existingRow();
+  const canonical = existingRow({ id: "canonical", platformMessageKey: "instagram:stable" });
+  const storage = inMemoryDatabase([legacy, canonical]);
+  const reconciler = createInstagramMessageIdentityReconciler({
+    ...storage,
+    message: {
+      findMany: async () => [legacy]
+    }
+  });
+
+  const result = await reconciler({
+    threadId: "thread-1",
+    currentMessages: [currentMessage()]
+  });
+
+  assert.deepEqual(result, {
+    blockedMessageKeys: ["instagram:stable"],
+    quarantinedMessageKeys: ["instagram:stable"]
+  });
+  assert.deepEqual(
+    storage.rows().map((row) => row.platformMessageKey).sort(),
     ["instagram:legacy-0", "instagram:stable"]
   );
 });

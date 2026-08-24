@@ -160,10 +160,12 @@ export function normalizeInstagramThreadSnapshots(
     }
 
     const existing = byId.get(platformThreadId);
-    const displayName = snapshot.displayName?.replace(/\s+/g, " ").trim() || "Instagram conversation";
+    const recipientVerificationLabel = snapshot.displayName?.replace(/\s+/g, " ").trim() || undefined;
+    const displayName = recipientVerificationLabel || "Instagram conversation";
     const candidate: ThreadStub = {
       platformThreadId,
       displayName,
+      recipientVerificationLabel,
       unreadCount: snapshot.unread ? 1 : 0,
       lastMessagePreview: snapshot.preview?.replace(/\s+/g, " ").trim().slice(0, 220) ?? "",
       threadUrl: canonicalInstagramThreadUrl(platformThreadId)
@@ -179,6 +181,8 @@ export function normalizeInstagramThreadSnapshots(
       unreadCount: Math.max(existing.unreadCount ?? 0, candidate.unreadCount ?? 0),
       displayName:
         existing.displayName === "Instagram conversation" ? candidate.displayName : existing.displayName,
+      recipientVerificationLabel:
+        candidate.recipientVerificationLabel ?? existing.recipientVerificationLabel,
       lastMessagePreview: existing.lastMessagePreview || candidate.lastMessagePreview
     });
   }
@@ -1234,7 +1238,7 @@ export class InstagramAdapter extends BetaAdapter {
           .textContent()
           .catch(() => "");
     const normalizedHeader = fallbackHeader?.replace(/\s+/g, " ").trim().normalize("NFKC").toLocaleLowerCase();
-    const normalizedRecipient = thread.displayName
+    const normalizedRecipient = thread.recipientVerificationLabel
       ?.replace(/\s+/g, " ")
       .trim()
       .normalize("NFKC")
@@ -1288,6 +1292,26 @@ export class InstagramAdapter extends BetaAdapter {
             return null;
           }
         };
+        const queryAll = (root: Element, selector: string | undefined): Element[] => {
+          if (!selector) return [];
+          try {
+            const descendants = Array.from(root.querySelectorAll(selector));
+            return root.matches(selector) ? [root, ...descendants] : descendants;
+          } catch {
+            return [];
+          }
+        };
+        const isRecipientImage = (candidate: Element): boolean => {
+          const anchor = candidate.closest("a[href]");
+          const href = anchor?.getAttribute("href")?.trim();
+          if (!href) return false;
+          try {
+            const pathname = new URL(href, "https://www.instagram.com").pathname;
+            return pathname.startsWith("/direct/t/") || /^\/[^/]+\/?$/.test(pathname);
+          } catch {
+            return false;
+          }
+        };
         const container =
           root.querySelector(selectors.message_container) ??
           root.querySelector("main, div[role='main']");
@@ -1297,6 +1321,13 @@ export class InstagramAdapter extends BetaAdapter {
         const containerRect = container.getBoundingClientRect();
         return Array.from(container.querySelectorAll(selectors.message_item)).map((node) => {
           const root = node as HTMLElement;
+          const threadLink = query(
+            root,
+            selectors.thread_link ?? "a[href^='/direct/t/']"
+          );
+          if (threadLink) {
+            return null;
+          }
           const semantic = [
             root.getAttribute("data-direction"),
             root.getAttribute("data-testid"),
@@ -1319,7 +1350,7 @@ export class InstagramAdapter extends BetaAdapter {
                 ? "OUT"
                 : "IN"
               : null;
-          const direction =
+          const direction: InstagramDirectionEvidence =
             explicitIn && explicitOut
               ? "AMBIGUOUS"
               : explicitIn
@@ -1337,10 +1368,13 @@ export class InstagramAdapter extends BetaAdapter {
           const textNode = query(root, selectors.message_text);
           const timestampNode = query(root, selectors.message_timestamp ?? "time[datetime]");
           const senderNode = query(root, selectors.message_sender);
-          const mediaNode = query(
+          const mediaNode = queryAll(
             root,
             selectors.message_media ?? "img:not([alt='']), video, audio"
-          ) as HTMLElement | null;
+          ).find((candidate) => {
+            if (candidate.tagName.toLowerCase() !== "img") return true;
+            return !isRecipientImage(candidate);
+          }) as HTMLElement | undefined;
           const mediaSignal = [
             mediaNode?.tagName,
             mediaNode?.getAttribute("aria-label"),
@@ -1349,7 +1383,7 @@ export class InstagramAdapter extends BetaAdapter {
             .filter(Boolean)
             .join(" ")
             .toLowerCase();
-          const mediaKind = !mediaNode
+          const mediaKind: InstagramMessageSnapshot["mediaKind"] = !mediaNode
             ? undefined
             : /voice|audio/.test(mediaSignal)
               ? "voice_message"
@@ -1373,7 +1407,7 @@ export class InstagramAdapter extends BetaAdapter {
               matches(root, selectors.message_deleted) ||
               /message (?:was )?(?:deleted|unavailable)/i.test(clean(root.textContent))
           };
-        });
+        }).filter((snapshot): snapshot is NonNullable<typeof snapshot> => snapshot !== null);
       },
       { selectors }
     );
