@@ -3248,6 +3248,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
       note: candidate.displayName
     });
 
+    const blockedInstagramMessageKeys = new Set<string>();
     if (
       platform === "INSTAGRAM" &&
       messages.some((message) => message.platformMessageKeyMigration)
@@ -3274,6 +3275,9 @@ export function createScanQueue(deps: ScanQueueDeps) {
         existingRows: existingInstagramMessages
       });
       await applyInstagramMessageKeyUpgradePlan(prisma, keyUpgradePlan);
+      for (const key of keyUpgradePlan.blockedCanonicalKeys) {
+        blockedInstagramMessageKeys.add(key);
+      }
     }
 
     const timestampFallback = candidateListTimestamp ?? new Date();
@@ -3292,6 +3296,12 @@ export function createScanQueue(deps: ScanQueueDeps) {
     const audioBearingMessageKeys: string[] = [];
 
     for (const message of messages) {
+      if (
+        message.platformMessageKey &&
+        blockedInstagramMessageKeys.has(message.platformMessageKey)
+      ) {
+        continue;
+      }
       const safeTimestamp = normalizeMessageTimestamp(message.timestamp, timestampFallback);
       const messageText = cleanMessageText(message.text);
       const key =

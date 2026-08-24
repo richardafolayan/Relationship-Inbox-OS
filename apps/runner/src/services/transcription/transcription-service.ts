@@ -1,9 +1,10 @@
 import { existsSync, statSync } from "node:fs";
 import { extname } from "node:path";
-import type { PrismaClient } from "@prisma/client";
+import type { Prisma, PrismaClient } from "@prisma/client";
 import { resolveAppName, type AttachmentPlaceholder } from "@inbox-os/core";
 import { convertCafToM4a, convertVideoToAudioM4a } from "../imessage-attachment-server";
 import { buildAudioFingerprint } from "./fingerprint";
+import { withMessageIdentityLock } from "../message-identity-lock";
 import type {
   TranscriptionOutcome,
   TranscriptionProvider,
@@ -285,6 +286,37 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
     return guarded;
   }
 
+  async function createTranscriptionForCurrentMessageKey(input: {
+    messageId: string;
+    attachmentGuid: string | null | undefined;
+    attachmentIndex: number;
+    data: Omit<
+      Prisma.MessageAudioTranscriptionUncheckedCreateInput,
+      "messageId" | "audioFingerprint"
+    >;
+  }) {
+    return withMessageIdentityLock(input.messageId, async () => {
+      const currentMessage = await deps.prisma.message.findUnique({
+        where: { id: input.messageId },
+        select: { platformMessageKey: true }
+      });
+      if (!currentMessage) {
+        throw new Error("message_missing_before_transcription_persistence");
+      }
+      return deps.prisma.messageAudioTranscription.create({
+        data: {
+          ...input.data,
+          messageId: input.messageId,
+          audioFingerprint: buildAudioFingerprint({
+            platformMessageKey: currentMessage.platformMessageKey,
+            attachmentGuid: input.attachmentGuid,
+            attachmentIndex: input.attachmentIndex
+          })
+        }
+      });
+    });
+  }
+
   function enqueueMessage(messageId: string): void {
     if (!deps.config.enabled) return;
     // Single-mode (no `providers` wired): use the legacy fire-and-
@@ -485,19 +517,15 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
     let failed = 0;
     let skipped = 0;
     for (const { attachment, index } of attachments) {
-      const fingerprint = buildAudioFingerprint({
-        platformMessageKey: message.platformMessageKey,
-        attachmentGuid: attachment.guid,
-        attachmentIndex: index
-      });
       const attachmentId = attachment.guid ?? `idx-${index}`;
       const prepared = await prepareRequest(attachment, deps.provider!.modelLabel);
       if (prepared.kind === "skipped") {
-        await deps.prisma.messageAudioTranscription.create({
+        await createTranscriptionForCurrentMessageKey({
+          messageId: message.id,
+          attachmentGuid: attachment.guid,
+          attachmentIndex: index,
           data: {
-            messageId: message.id,
             attachmentId,
-            audioFingerprint: fingerprint,
             status: "skipped",
             errorMessage: prepared.reason
           }
@@ -508,11 +536,12 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
       }
       const outcome = await deps.provider!.transcribe(prepared.request);
       if (outcome.kind === "ok") {
-        await deps.prisma.messageAudioTranscription.create({
+        await createTranscriptionForCurrentMessageKey({
+          messageId: message.id,
+          attachmentGuid: attachment.guid,
+          attachmentIndex: index,
           data: {
-            messageId: message.id,
             attachmentId,
-            audioFingerprint: fingerprint,
             status: "transcribed",
             transcript: outcome.result.text,
             provider: deps.provider!.id,
@@ -527,11 +556,12 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
         notifyTranscriptSelected(message.id);
         ok += 1;
       } else if (outcome.kind === "skipped") {
-        await deps.prisma.messageAudioTranscription.create({
+        await createTranscriptionForCurrentMessageKey({
+          messageId: message.id,
+          attachmentGuid: attachment.guid,
+          attachmentIndex: index,
           data: {
-            messageId: message.id,
             attachmentId,
-            audioFingerprint: fingerprint,
             status: "skipped",
             errorMessage: outcome.reason
           }
@@ -539,11 +569,12 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
         skipped += 1;
         maybeRetentionWarn(outcome.reason);
       } else {
-        await deps.prisma.messageAudioTranscription.create({
+        await createTranscriptionForCurrentMessageKey({
+          messageId: message.id,
+          attachmentGuid: attachment.guid,
+          attachmentIndex: index,
           data: {
-            messageId: message.id,
             attachmentId,
-            audioFingerprint: fingerprint,
             status: "failed",
             provider: deps.provider!.id,
             model: deps.provider!.modelLabel,
@@ -673,11 +704,6 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
     const first = audio[0];
     if (!first) return "skipped";
     const { attachment, index } = first;
-    const fingerprint = buildAudioFingerprint({
-      platformMessageKey: message.platformMessageKey,
-      attachmentGuid: attachment.guid,
-      attachmentIndex: index
-    });
     const attachmentId = attachment.guid ?? `idx-${index}`;
 
     // Ensure parent exists. If a pre-tier failure (missing_file etc.)
@@ -688,11 +714,12 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
     const prepared = await prepareRequest(attachment, provider.modelLabel || deps.config.model);
     if (prepared.kind === "skipped") {
       if (!parent) {
-        await deps.prisma.messageAudioTranscription.create({
+        await createTranscriptionForCurrentMessageKey({
+          messageId,
+          attachmentGuid: attachment.guid,
+          attachmentIndex: index,
           data: {
-            messageId,
             attachmentId,
-            audioFingerprint: fingerprint,
             status: "skipped",
             errorMessage: prepared.reason
           }
@@ -702,11 +729,12 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
       return "skipped";
     }
     if (!parent) {
-      parent = await deps.prisma.messageAudioTranscription.create({
+      parent = await createTranscriptionForCurrentMessageKey({
+        messageId,
+        attachmentGuid: attachment.guid,
+        attachmentIndex: index,
         data: {
-          messageId,
           attachmentId,
-          audioFingerprint: fingerprint,
           status: "pending",
           language: deps.config.language
         }

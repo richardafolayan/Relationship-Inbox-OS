@@ -1,6 +1,7 @@
 import type { NormalizedMessage } from "@inbox-os/core";
 import type { Prisma, PrismaClient } from "@prisma/client";
 import { cleanMessageText } from "../platforms/utils";
+import { withMessageIdentityLocks } from "./message-identity-lock";
 
 const STABLE_IDENTITY_VERSION = "instagram_stable_v2";
 const RECEIPT_TIMESTAMP_TOLERANCE_MS = 2 * 60 * 1000;
@@ -30,6 +31,11 @@ export interface InstagramMessageKeyRekey {
     fromFingerprint: string;
     toFingerprint: string;
   } | null;
+}
+
+export interface InstagramMessageKeyUpgradePlan {
+  rekeys: InstagramMessageKeyRekey[];
+  blockedCanonicalKeys: string[];
 }
 
 export class InstagramMessageKeyUpgradeError extends Error {
@@ -89,19 +95,32 @@ function exactSourceTimestampMatch(
 function verifiedReceiptMatch(
   message: NormalizedMessage,
   row: ExistingInstagramMessageRow,
-  candidateKey: string
+  raw: Record<string, unknown>
 ): boolean {
   if (
     !message.timestamp ||
     message.direction !== "OUT" ||
     row.direction !== "OUT" ||
     row.sentVia !== "automation" ||
-    row.platformMessageKey !== candidateKey
+    raw.verification !== "exact_outgoing_layout_bubble"
   ) {
     return false;
   }
   return Math.abs(row.timestamp.getTime() - new Date(message.timestamp).getTime()) <=
     RECEIPT_TIMESTAMP_TOLERANCE_MS;
+}
+
+function hasDistinctTimestampEvidence(
+  message: NormalizedMessage,
+  row: ExistingInstagramMessageRow,
+  raw: Record<string, unknown>
+): boolean {
+  if (!message.timestamp) return false;
+  if (raw.timestampSource === "source") return true;
+  return message.direction === "OUT" &&
+    row.direction === "OUT" &&
+    row.sentVia === "automation" &&
+    raw.verification === "exact_outgoing_layout_bubble";
 }
 
 function transcriptionRekey(
@@ -125,8 +144,9 @@ export function planInstagramMessageKeyUpgrades(input: {
   threadId: string;
   currentMessages: NormalizedMessage[];
   existingRows: ExistingInstagramMessageRow[];
-}): InstagramMessageKeyRekey[] {
+}): InstagramMessageKeyUpgradePlan {
   const rekeys: InstagramMessageKeyRekey[] = [];
+  const blockedCanonicalKeys = new Set<string>();
   const claimedLegacyRows = new Set<string>();
 
   for (const message of input.currentMessages) {
@@ -152,15 +172,15 @@ export function planInstagramMessageKeyUpgrades(input: {
     }
 
     if (!message.timestamp) {
-      if (legacyRows.length > 0) {
-        throw new InstagramMessageKeyUpgradeError("legacy_message_identity_ambiguous");
+      if (!canonical && legacyRows.length > 0) {
+        blockedCanonicalKeys.add(canonicalKey);
       }
       continue;
     }
 
     const verified = legacyRows.filter(({ row, raw }) =>
       exactSourceTimestampMatch(message, row, raw!) ||
-      verifiedReceiptMatch(message, row, migration.candidateKey)
+      verifiedReceiptMatch(message, row, raw!)
     );
     if (verified.length > 1) {
       throw new InstagramMessageKeyUpgradeError("multiple_verified_legacy_messages");
@@ -168,7 +188,13 @@ export function planInstagramMessageKeyUpgrades(input: {
     if (canonical && verified.length > 0) {
       throw new InstagramMessageKeyUpgradeError("canonical_and_legacy_message_conflict");
     }
-    if (canonical || verified.length === 0) continue;
+    if (canonical) continue;
+    if (verified.length === 0) {
+      if (legacyRows.some(({ row, raw }) => !hasDistinctTimestampEvidence(message, row, raw!))) {
+        blockedCanonicalKeys.add(canonicalKey);
+      }
+      continue;
+    }
 
     const legacy = verified[0]!.row;
     if (claimedLegacyRows.has(legacy.id)) {
@@ -184,64 +210,73 @@ export function planInstagramMessageKeyUpgrades(input: {
     });
   }
 
-  return rekeys;
+  return { rekeys, blockedCanonicalKeys: [...blockedCanonicalKeys] };
 }
 
 export async function applyInstagramMessageKeyUpgradePlan(
   database: Pick<PrismaClient, "$transaction">,
-  plan: InstagramMessageKeyRekey[]
+  plan: InstagramMessageKeyUpgradePlan
 ): Promise<void> {
-  if (plan.length === 0) return;
-  await database.$transaction(async (transaction: Prisma.TransactionClient) => {
-    for (const rekey of plan) {
-      const [source, target] = await Promise.all([
-        transaction.message.findUnique({
-          where: {
-            threadId_platformMessageKey: {
-              threadId: rekey.threadId,
-              platformMessageKey: rekey.fromKey
+  if (plan.rekeys.length === 0) return;
+  await withMessageIdentityLocks(plan.rekeys.map((rekey) => rekey.messageId), async () => {
+    await database.$transaction(async (transaction: Prisma.TransactionClient) => {
+      for (const rekey of plan.rekeys) {
+        const [source, target] = await Promise.all([
+          transaction.message.findUnique({
+            where: {
+              threadId_platformMessageKey: {
+                threadId: rekey.threadId,
+                platformMessageKey: rekey.fromKey
+              }
+            },
+            select: {
+              id: true,
+              platformMessageKey: true,
+              audioTranscription: { select: { id: true, audioFingerprint: true } }
             }
-          },
-          select: {
-            id: true,
-            platformMessageKey: true,
-            audioTranscription: { select: { id: true, audioFingerprint: true } }
-          }
-        }),
-        transaction.message.findUnique({
-          where: {
-            threadId_platformMessageKey: {
-              threadId: rekey.threadId,
-              platformMessageKey: rekey.toKey
+          }),
+          transaction.message.findUnique({
+            where: {
+              threadId_platformMessageKey: {
+                threadId: rekey.threadId,
+                platformMessageKey: rekey.toKey
+              }
+            },
+            select: {
+              id: true,
+              platformMessageKey: true,
+              audioTranscription: { select: { id: true, audioFingerprint: true } }
             }
-          },
-          select: {
-            id: true,
-            platformMessageKey: true,
-            audioTranscription: { select: { id: true, audioFingerprint: true } }
-          }
-        })
-      ]);
-      if (!source || source.id !== rekey.messageId || target) {
-        throw new InstagramMessageKeyUpgradeError("message_key_upgrade_race");
-      }
-      if (rekey.audioTranscription) {
+          })
+        ]);
+        if (!source || source.id !== rekey.messageId || target) {
+          throw new InstagramMessageKeyUpgradeError("message_key_upgrade_race");
+        }
+        const currentTranscription = source.audioTranscription;
         if (
-          source.audioTranscription?.id !== rekey.audioTranscription.id ||
-          source.audioTranscription.audioFingerprint !==
-            rekey.audioTranscription.fromFingerprint
+          rekey.audioTranscription &&
+          (currentTranscription?.id !== rekey.audioTranscription.id ||
+            currentTranscription.audioFingerprint !==
+              rekey.audioTranscription.fromFingerprint)
         ) {
           throw new InstagramMessageKeyUpgradeError("audio_fingerprint_upgrade_race");
         }
-        await transaction.messageAudioTranscription.update({
-          where: { id: rekey.audioTranscription.id },
-          data: { audioFingerprint: rekey.audioTranscription.toFingerprint }
+        if (currentTranscription) {
+          const prefix = `${rekey.fromKey}|`;
+          if (!currentTranscription.audioFingerprint.startsWith(prefix)) {
+            throw new InstagramMessageKeyUpgradeError("unexpected_audio_fingerprint");
+          }
+          const toFingerprint = `${rekey.toKey}|${currentTranscription.audioFingerprint.slice(prefix.length)}`;
+          await transaction.messageAudioTranscription.update({
+            where: { id: currentTranscription.id },
+            data: { audioFingerprint: toFingerprint }
+          });
+        }
+        await transaction.message.update({
+          where: { id: rekey.messageId },
+          data: { platformMessageKey: rekey.toKey }
         });
       }
-      await transaction.message.update({
-        where: { id: rekey.messageId },
-        data: { platformMessageKey: rekey.toKey }
-      });
-    }
+    });
   });
 }

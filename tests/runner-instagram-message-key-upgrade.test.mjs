@@ -108,7 +108,7 @@ test("a verified inbound predecessor row is rekeyed without changing its identit
     currentMessages: [currentMessage()],
     existingRows: [legacy]
   });
-  assert.deepEqual(plan.map(({ messageId, fromKey, toKey }) => ({ messageId, fromKey, toKey })), [
+  assert.deepEqual(plan.rekeys.map(({ messageId, fromKey, toKey }) => ({ messageId, fromKey, toKey })), [
     {
       messageId: "message-legacy",
       fromKey: "instagram:legacy-0",
@@ -130,7 +130,7 @@ test("a shifted occurrence candidate with a different source timestamp remains d
     currentMessages: [currentMessage({ timestamp: "2026-08-21T10:00:00.000Z" })],
     existingRows: [existingRow()]
   });
-  assert.deepEqual(plan, []);
+  assert.deepEqual(plan, { rekeys: [], blockedCanonicalKeys: [] });
 });
 
 test("exact timestamp evidence migrates a shifted legacy occurrence key", () => {
@@ -139,22 +139,45 @@ test("exact timestamp evidence migrates a shifted legacy occurrence key", () => 
     currentMessages: [currentMessage()],
     existingRows: [existingRow({ platformMessageKey: "instagram:legacy-7" })]
   });
-  assert.equal(plan[0]?.fromKey, "instagram:legacy-7");
-  assert.equal(plan[0]?.toKey, "instagram:stable");
+  assert.equal(plan.rekeys[0]?.fromKey, "instagram:legacy-7");
+  assert.equal(plan.rekeys[0]?.toKey, "instagram:stable");
 });
 
-test("an identity-less current snapshot fails closed around legacy history", () => {
-  assert.throws(
-    () =>
-      planInstagramMessageKeyUpgrades({
-        threadId: "thread-1",
-        currentMessages: [currentMessage({ timestamp: undefined })],
-        existingRows: [existingRow()]
-      }),
-    (error) =>
-      error instanceof InstagramMessageKeyUpgradeError &&
-      error.reason === "legacy_message_identity_ambiguous"
-  );
+test("an identity-less current snapshot quarantines only its unresolved mapping", () => {
+  const plan = planInstagramMessageKeyUpgrades({
+    threadId: "thread-1",
+    currentMessages: [
+      currentMessage({ timestamp: undefined }),
+      currentMessage({
+        platformMessageKey: "instagram:independent",
+        platformMessageKeyMigration: {
+          scheme: "instagram_occurrence_v1",
+          candidateKey: "instagram:independent-legacy"
+        },
+        timestamp: "2026-08-20T10:05:00.000Z",
+        text: "Independent"
+      })
+    ],
+    existingRows: [existingRow()]
+  });
+
+  assert.deepEqual(plan.rekeys, []);
+  assert.deepEqual(plan.blockedCanonicalKeys, ["instagram:stable"]);
+});
+
+test("first-seen predecessor history stays quarantined when a native id later gains a timestamp", () => {
+  const plan = planInstagramMessageKeyUpgrades({
+    threadId: "thread-1",
+    currentMessages: [currentMessage()],
+    existingRows: [
+      existingRow({
+        rawJson: JSON.stringify({ timestampSource: "first_seen", contentKind: "text" })
+      })
+    ]
+  });
+
+  assert.deepEqual(plan.rekeys, []);
+  assert.deepEqual(plan.blockedCanonicalKeys, ["instagram:stable"]);
 });
 
 test("malformed candidate provenance fails closed before any persistence", () => {
@@ -187,7 +210,7 @@ test("an existing canonical row is left unchanged", () => {
       })
     ]
   });
-  assert.deepEqual(plan, []);
+  assert.deepEqual(plan, { rekeys: [], blockedCanonicalKeys: [] });
 });
 
 test("a canonical row plus a verified legacy twin fails closed", () => {
@@ -235,8 +258,82 @@ test("a later exact-layout receipt scan reconciles outside the outbound time win
       })
     ]
   });
-  assert.equal(plan[0]?.messageId, "message-legacy");
-  assert.equal(plan[0]?.toKey, "instagram:stable");
+  assert.equal(plan.rekeys[0]?.messageId, "message-legacy");
+  assert.equal(plan.rekeys[0]?.toKey, "instagram:stable");
+});
+
+test("nearby repeated receipts fail closed when a sliding window shifts the candidate", () => {
+  assert.throws(
+    () =>
+      planInstagramMessageKeyUpgrades({
+        threadId: "thread-1",
+        currentMessages: [
+          currentMessage({
+            direction: "OUT",
+            timestamp: "2026-08-20T10:01:00.000Z",
+            text: "Same reply"
+          })
+        ],
+        existingRows: [
+          existingRow({
+            id: "receipt-a",
+            direction: "OUT",
+            timestamp: new Date("2026-08-20T10:00:00.000Z"),
+            text: "Same reply",
+            rawJson: JSON.stringify({ verification: "exact_outgoing_layout_bubble" }),
+            sentVia: "automation"
+          }),
+          existingRow({
+            id: "receipt-b",
+            platformMessageKey: "instagram:legacy-1",
+            direction: "OUT",
+            timestamp: new Date("2026-08-20T10:01:00.000Z"),
+            text: "Same reply",
+            rawJson: JSON.stringify({ verification: "exact_outgoing_layout_bubble" }),
+            sentVia: "automation"
+          })
+        ]
+      }),
+    (error) =>
+      error instanceof InstagramMessageKeyUpgradeError &&
+      error.reason === "multiple_verified_legacy_messages"
+  );
+});
+
+test("timestamp evidence finds a later repeated receipt despite a shifted candidate", () => {
+  const plan = planInstagramMessageKeyUpgrades({
+    threadId: "thread-1",
+    currentMessages: [
+      currentMessage({
+        direction: "OUT",
+        timestamp: "2026-08-20T10:10:00.000Z",
+        text: "Same reply"
+      })
+    ],
+    existingRows: [
+      existingRow({
+        id: "receipt-a",
+        direction: "OUT",
+        timestamp: new Date("2026-08-20T10:00:00.000Z"),
+        text: "Same reply",
+        rawJson: JSON.stringify({ verification: "exact_outgoing_layout_bubble" }),
+        sentVia: "automation"
+      }),
+      existingRow({
+        id: "receipt-b",
+        platformMessageKey: "instagram:legacy-1",
+        direction: "OUT",
+        timestamp: new Date("2026-08-20T10:10:00.000Z"),
+        text: "Same reply",
+        rawJson: JSON.stringify({ verification: "exact_outgoing_layout_bubble" }),
+        sentVia: "automation"
+      })
+    ]
+  });
+
+  assert.equal(plan.rekeys[0]?.messageId, "receipt-b");
+  assert.equal(plan.rekeys[0]?.fromKey, "instagram:legacy-1");
+  assert.equal(plan.rekeys[0]?.toKey, "instagram:stable");
 });
 
 test("audio fingerprints are migrated atomically with their owning message key", async () => {
@@ -258,6 +355,31 @@ test("audio fingerprints are migrated atomically with their owning message key",
   assert.equal(
     database.rows()[0].audioTranscription.audioFingerprint,
     "instagram:stable|voice-1"
+  );
+});
+
+test("a transcription created after planning is included in the atomic rekey", async () => {
+  const legacy = existingRow();
+  const plan = planInstagramMessageKeyUpgrades({
+    threadId: "thread-1",
+    currentMessages: [currentMessage()],
+    existingRows: [legacy]
+  });
+  const database = inMemoryDatabase([
+    existingRow({
+      audioTranscription: {
+        id: "transcription-late",
+        audioFingerprint: "instagram:legacy-0|voice-late"
+      }
+    })
+  ]);
+
+  await applyInstagramMessageKeyUpgradePlan(database, plan);
+
+  assert.equal(database.rows()[0].platformMessageKey, "instagram:stable");
+  assert.equal(
+    database.rows()[0].audioTranscription.audioFingerprint,
+    "instagram:stable|voice-late"
   );
 });
 
