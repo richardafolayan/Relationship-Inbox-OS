@@ -57,6 +57,21 @@ function withBrowserRuntime(page) {
   return runtimePage;
 }
 
+async function bindAtomicComposerOwnership(
+  adapter,
+  composer,
+  headerSelector = "main header h1"
+) {
+  const binding = await adapter.requireComposerOwnershipBinding(
+    composer,
+    headerSelector
+  );
+  return {
+    composerConversationContainer: binding.conversationContainer,
+    composerDocumentPath: binding.documentPath
+  };
+}
+
 test("Instagram authentication detection covers current and legacy login forms", () => {
   assert.equal(
     instagramAuthRequiredFromSignals({
@@ -478,6 +493,87 @@ test("fetchRecentThreads prioritizes unread rows before applying its limit", asy
   assert.deepEqual(
     threads.map((thread) => [thread.platformThreadId, thread.unreadCount]),
     [["u1", 1], ["u2", 1], ["u3", 1]]
+  );
+});
+
+test("fetchRecentThreads waits for an in-flight network-only unread thread before limiting", async (t) => {
+  let browser;
+  try {
+    browser = await chromium.launch({ headless: true });
+  } catch (error) {
+    t.skip(
+      `Playwright Chromium unavailable: ${error instanceof Error ? error.message : String(error)}`
+    );
+    return;
+  }
+
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  t.after(async () => {
+    await context.close();
+    await browser.close();
+  });
+  await page.route("https://www.instagram.com/**", async (route) => {
+    const url = new URL(route.request().url());
+    if (/\/api\/graphql$/.test(url.pathname)) {
+      await new Promise((resolve) => setTimeout(resolve, 1_200));
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          data: {
+            inbox: {
+              threads: [
+                {
+                  id: "network-unread",
+                  thread_title: "Network unread",
+                  has_unread: true
+                }
+              ]
+            }
+          }
+        })
+      });
+      return;
+    }
+    const row = (id) => `
+      <a data-thread href="/direct/t/${id}/">
+        <span title="${id.toUpperCase()}">${id.toUpperCase()}</span>
+      </a>`;
+    await route.fulfill({
+      contentType: "text/html",
+      body: `<!doctype html><main>
+        ${row("r1")}${row("r2")}${row("r3")}
+        <script>fetch('/api/graphql', { method: 'POST' })</script>
+      </main>`
+    });
+  });
+
+  const adapter = new InstagramAdapter({
+    screenshotDir: "/tmp",
+    domDumpDir: "/tmp",
+    resolveSelectors: async () => ({
+      inbox_url: "https://www.instagram.com/direct/inbox/",
+      thread_list: "main",
+      thread_item: "[data-thread]",
+      thread_link: "a[href*='/direct/t/']",
+      thread_identity: "span[title]",
+      unread_badge: "[data-unread]",
+      message_container: "main",
+      message_item: "[data-message]",
+      message_text: "[data-text]",
+      composer_input: "[contenteditable='true']",
+      send_button: "[aria-label='Send']"
+    }),
+    sessionManager: { getManagedPage: async () => page },
+    personKey: "instagram",
+    connectTimeoutMs: 50
+  });
+
+  const threads = await adapter.fetchRecentThreads(3);
+  assert.deepEqual(
+    threads.map((thread) => [thread.platformThreadId, thread.unreadCount]),
+    [["network-unread", 1], ["r1", 0], ["r2", 0]]
   );
 });
 
@@ -1641,6 +1737,7 @@ test("Instagram atomic composer actions validate and mutate in one browser task"
     displayName: "Safe thread",
     recipientVerificationLabel: "Safe thread"
   };
+  const composerOwnership = await bindAtomicComposerOwnership(adapter, composer);
 
   const resolvedSend = await adapter.requireComposerSendButton(page, composer, "#send");
   assert.equal(await resolvedSend.button.getAttribute("id"), "send");
@@ -1652,6 +1749,7 @@ test("Instagram atomic composer actions validate and mutate in one browser task"
   assert.deepEqual(
     await adapter.runAtomicComposerAction({
       composer,
+      ...composerOwnership,
       selectors,
       thread,
       platformThreadId: "safe-thread",
@@ -1663,6 +1761,7 @@ test("Instagram atomic composer actions validate and mutate in one browser task"
   assert.deepEqual(
     await adapter.runAtomicComposerAction({
       composer,
+      ...composerOwnership,
       selectors,
       thread,
       platformThreadId: "safe-thread",
@@ -1675,6 +1774,7 @@ test("Instagram atomic composer actions validate and mutate in one browser task"
   assert.deepEqual(
     await adapter.runAtomicComposerAction({
       composer,
+      ...composerOwnership,
       selectors,
       thread,
       platformThreadId: "safe-thread",
@@ -1690,6 +1790,7 @@ test("Instagram atomic composer actions validate and mutate in one browser task"
   assert.deepEqual(
     await adapter.runAtomicComposerAction({
       composer,
+      ...composerOwnership,
       selectors,
       thread,
       platformThreadId: "safe-thread",
@@ -1705,6 +1806,7 @@ test("Instagram atomic composer actions validate and mutate in one browser task"
   assert.deepEqual(
     await adapter.runAtomicComposerAction({
       composer,
+      ...composerOwnership,
       sendButton: unrelated,
       sendOwner: resolvedSend.owner,
       sendConversationContainer: resolvedSend.conversationContainer,
@@ -1723,6 +1825,7 @@ test("Instagram atomic composer actions validate and mutate in one browser task"
   assert.deepEqual(
     await adapter.runAtomicComposerAction({
       composer,
+      ...composerOwnership,
       sendButton,
       sendOwner: resolvedSend.owner,
       sendConversationContainer: resolvedSend.conversationContainer,
@@ -1742,6 +1845,7 @@ test("Instagram atomic composer actions validate and mutate in one browser task"
   assert.deepEqual(
     await adapter.runAtomicComposerAction({
       composer,
+      ...composerOwnership,
       sendButton,
       sendOwner: resolvedSend.owner,
       sendConversationContainer: resolvedSend.conversationContainer,
@@ -1808,10 +1912,12 @@ test("Instagram atomic typing revalidates recipient ownership after focus handle
     connectTimeoutMs: 50
   });
   const composer = await page.locator("#composer").elementHandle();
+  const composerOwnership = await bindAtomicComposerOwnership(adapter, composer);
 
   assert.deepEqual(
     await adapter.runAtomicComposerAction({
       composer,
+      ...composerOwnership,
       selectors: { conversation_header: "main header h1" },
       thread: {
         platformThreadId: "safe-thread",
@@ -1877,6 +1983,7 @@ test("Instagram atomic send rejects a bound Send moved to another composer", asy
     connectTimeoutMs: 50
   });
   const composer = await page.locator("#composer").elementHandle();
+  const composerOwnership = await bindAtomicComposerOwnership(adapter, composer);
   const sendBinding = await adapter.requireComposerSendButton(page, composer, "#send");
   const sendButton = sendBinding.button;
   await sendButton.evaluate((button) => {
@@ -1886,6 +1993,7 @@ test("Instagram atomic send rejects a bound Send moved to another composer", asy
   assert.deepEqual(
     await adapter.runAtomicComposerAction({
       composer,
+      ...composerOwnership,
       sendButton,
       sendOwner: sendBinding.owner,
       sendConversationContainer: sendBinding.conversationContainer,
@@ -1955,6 +2063,7 @@ test("Instagram atomic send rejects coordinate-preserving reparenting without fo
     connectTimeoutMs: 50
   });
   const composer = await page.locator("#composer").elementHandle();
+  const composerOwnership = await bindAtomicComposerOwnership(adapter, composer);
   const sendBinding = await adapter.requireComposerSendButton(page, composer, "#send");
   const sendButton = sendBinding.button;
   await sendButton.evaluate((button) => {
@@ -1964,6 +2073,7 @@ test("Instagram atomic send rejects coordinate-preserving reparenting without fo
   assert.deepEqual(
     await adapter.runAtomicComposerAction({
       composer,
+      ...composerOwnership,
       sendButton,
       sendOwner: sendBinding.owner,
       sendConversationContainer: sendBinding.conversationContainer,
@@ -2037,6 +2147,7 @@ test("Instagram atomic send rejects reparenting within the same shared owner", a
     connectTimeoutMs: 50
   });
   const composer = await page.locator("#composer").elementHandle();
+  const composerOwnership = await bindAtomicComposerOwnership(adapter, composer);
   const sendBinding = await adapter.requireComposerSendButton(page, composer, "#send");
   const sendButton = sendBinding.button;
   assert.equal(await sendBinding.owner.getAttribute("id"), "shared-owner");
@@ -2047,6 +2158,7 @@ test("Instagram atomic send rejects reparenting within the same shared owner", a
   assert.deepEqual(
     await adapter.runAtomicComposerAction({
       composer,
+      ...composerOwnership,
       sendButton,
       sendOwner: sendBinding.owner,
       sendConversationContainer: sendBinding.conversationContainer,
@@ -2122,6 +2234,7 @@ test("Instagram atomic send rejects a bound wrapper moved within the same branch
     connectTimeoutMs: 50
   });
   const composer = await page.locator("#composer").elementHandle();
+  const composerOwnership = await bindAtomicComposerOwnership(adapter, composer);
   const sendBinding = await adapter.requireComposerSendButton(page, composer, "#send");
   assert.equal(await sendBinding.owner.getAttribute("id"), "shared-owner");
   assert.equal(await sendBinding.sendPath[0].getAttribute("id"), "send-parent");
@@ -2132,6 +2245,7 @@ test("Instagram atomic send rejects a bound wrapper moved within the same branch
   assert.deepEqual(
     await adapter.runAtomicComposerAction({
       composer,
+      ...composerOwnership,
       sendButton: sendBinding.button,
       sendOwner: sendBinding.owner,
       sendConversationContainer: sendBinding.conversationContainer,
@@ -2215,6 +2329,7 @@ test("Instagram atomic send rejects its complete owner moved within the conversa
     connectTimeoutMs: 50
   });
   const composer = await page.locator("#composer").elementHandle();
+  const composerOwnership = await bindAtomicComposerOwnership(adapter, composer);
   const sendBinding = await adapter.requireComposerSendButton(page, composer, "#send");
   assert.equal(await sendBinding.owner.getAttribute("id"), "shared-owner");
   await page.locator("#shared-owner").evaluate((owner) => {
@@ -2224,6 +2339,7 @@ test("Instagram atomic send rejects its complete owner moved within the conversa
   assert.deepEqual(
     await adapter.runAtomicComposerAction({
       composer,
+      ...composerOwnership,
       sendButton: sendBinding.button,
       sendOwner: sendBinding.owner,
       sendConversationContainer: sendBinding.conversationContainer,
@@ -2240,7 +2356,7 @@ test("Instagram atomic send rejects its complete owner moved within the conversa
       action: "send",
       expectedText: "Approved text"
     }),
-    { ok: false, reason: "send_button_not_owned" }
+    { ok: false, reason: "composer_owner_changed_before_send" }
   );
   assert.deepEqual(
     await page.evaluate(() => ({
@@ -2248,6 +2364,123 @@ test("Instagram atomic send rejects its complete owner moved within the conversa
       wrongSubtreeClicks: window.wrongSubtreeClicks
     })),
     { submitted: 0, wrongSubtreeClicks: 0 }
+  );
+});
+
+test("Instagram sendMessage rejects composer ownership moved during its first pointer approach", async (t) => {
+  let browser;
+  try {
+    browser = await chromium.launch({ headless: true });
+  } catch (error) {
+    t.skip(
+      `Playwright Chromium unavailable: ${error instanceof Error ? error.message : String(error)}`
+    );
+    return;
+  }
+
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  t.after(async () => {
+    await context.close();
+    await browser.close();
+  });
+  await page.route("https://www.instagram.com/**", async (route) => {
+    await route.fulfill({
+      contentType: "text/html",
+      body: `<!doctype html>
+        <main>
+          <header><h1>Safe thread</h1></header>
+          <div id="original-slot">
+            <div id="composer-owner">
+              <div id="composer" role="textbox" contenteditable="true" style="position:fixed;left:100px;top:160px;width:300px;height:40px"></div>
+              <button id="send" type="button" aria-label="Send" style="position:fixed;left:420px;top:160px;width:80px;height:40px">Send</button>
+            </div>
+          </div>
+          <div id="other-slot"></div>
+        </main>`
+    });
+  });
+  await page.goto("https://www.instagram.com/direct/t/safe-thread/");
+  await page.evaluate(() => {
+    window.moved = 0;
+    window.submitted = 0;
+    window.wrongClicks = 0;
+    window.addEventListener(
+      "mousemove",
+      () => {
+        const owner = document.querySelector("#composer-owner");
+        const otherSlot = document.querySelector("#other-slot");
+        if (owner && otherSlot && window.moved === 0) {
+          window.moved = 1;
+          otherSlot.append(owner);
+        }
+      },
+      { once: true }
+    );
+    document.querySelector("#other-slot")?.addEventListener("click", (event) => {
+      if (event.target?.closest?.("#send")) {
+        window.wrongClicks += 1;
+      }
+    });
+    document.querySelector("#send")?.addEventListener("click", () => {
+      window.submitted += 1;
+    });
+  });
+
+  const selectors = {
+    inbox_url: "https://www.instagram.com/direct/inbox/",
+    thread_list: "main",
+    thread_item: "[data-thread]",
+    conversation_header: "header h1",
+    message_container: "main",
+    message_item: "[data-message]",
+    message_text: "[data-text]",
+    composer_input: "#composer",
+    send_button: "#send"
+  };
+  const adapter = new InstagramAdapter({
+    screenshotDir: "/tmp",
+    domDumpDir: "/tmp",
+    resolveSelectors: async () => selectors,
+    sessionManager: { getManagedPage: async () => page },
+    personKey: "instagram",
+    connectTimeoutMs: 50,
+    sendVerificationTimeoutMs: 50
+  });
+  adapter.openExactThread = async () => "safe-thread";
+  adapter.countExactOutgoingBubbles = async () => 0;
+  adapter.snapshotMessages = async () =>
+    (await page.evaluate(() => window.submitted > 0))
+      ? [
+          {
+            nativeId: "new-out",
+            nativeIdStable: true,
+            direction: "OUT",
+            text: "x"
+          }
+        ]
+      : [];
+
+  await assert.rejects(
+    () =>
+      adapter.sendMessage(
+        {
+          platformThreadId: "safe-thread",
+          displayName: "Safe thread",
+          recipientVerificationLabel: "Safe thread"
+        },
+        "x"
+      ),
+    (error) => error?.details?.reason === "composer_owner_changed_before_send"
+  );
+  assert.deepEqual(
+    await page.evaluate(() => ({
+      moved: window.moved,
+      wrongClicks: window.wrongClicks,
+      submitted: window.submitted,
+      ownerParent: document.querySelector("#composer-owner")?.parentElement?.id
+    })),
+    { moved: 1, wrongClicks: 0, submitted: 0, ownerParent: "other-slot" }
   );
 });
 
@@ -2300,8 +2533,10 @@ test("Instagram atomic composer actions bind recipient evidence to the active co
   });
   const composer = await page.locator("#composer").elementHandle();
   const sendButton = await page.locator("#send").elementHandle();
+  const composerOwnership = await bindAtomicComposerOwnership(adapter, composer);
   const input = {
     composer,
+    ...composerOwnership,
     selectors: { conversation_header: "main header h1" },
     thread: {
       platformThreadId: "safe-thread",
@@ -2464,6 +2699,24 @@ function sendTestHarness({
       }
       throw new Error(`Unexpected atomic action ${action}`);
     },
+    evaluateHandle: async () => ({
+      getProperties: async () =>
+        new Map([
+          ["conversationContainer", boundInitialConversationContainer],
+          [
+            "documentPath",
+            pathProperty([
+              boundInitialComposerParent,
+              boundInitialOwner,
+              boundInitialSlot,
+              boundInitialConversationContainer,
+              boundInitialBody,
+              boundInitialHtml
+            ])
+          ]
+        ]),
+      dispose: async () => undefined
+    }),
     elementHandle: async () => {
       if (switchThreadDuringComposerHandle) {
         currentUrl = "https://www.instagram.com/direct/t/wrong-thread/";
@@ -2489,6 +2742,14 @@ function sendTestHarness({
   const boundComposerBranch = boundElement("composer-branch");
   const boundSendBranch = boundElement("send-branch");
   const boundSendParent = boundElement("send-parent");
+  const boundInitialComposerParent = boundElement("initial-composer-parent");
+  const boundInitialOwner = boundElement("initial-owner");
+  const boundInitialSlot = boundElement("initial-slot");
+  const boundInitialConversationContainer = boundElement(
+    "initial-conversation-container"
+  );
+  const boundInitialBody = boundElement("initial-body");
+  const boundInitialHtml = boundElement("initial-html");
   const pathProperty = (elements) => ({
     getProperties: async () =>
       new Map(elements.map((element, index) => [String(index), element])),
@@ -2675,6 +2936,12 @@ test("Instagram adapter reports success only after an exact new outgoing bubble"
       "composer-branch",
       "conversation-container",
       "html",
+      "initial-body",
+      "initial-composer-parent",
+      "initial-conversation-container",
+      "initial-html",
+      "initial-owner",
+      "initial-slot",
       "original-slot",
       "owner",
       "send-branch",
@@ -2814,6 +3081,12 @@ test("Instagram revalidates the exact thread after typing and before clicking Se
       "composer-branch",
       "conversation-container",
       "html",
+      "initial-body",
+      "initial-composer-parent",
+      "initial-conversation-container",
+      "initial-html",
+      "initial-owner",
+      "initial-slot",
       "original-slot",
       "owner",
       "send-branch",
@@ -3007,6 +3280,12 @@ test("Instagram never treats a lone distant submit as the composer Send button",
       "composer-branch",
       "conversation-container",
       "html",
+      "initial-body",
+      "initial-composer-parent",
+      "initial-conversation-container",
+      "initial-html",
+      "initial-owner",
+      "initial-slot",
       "original-slot",
       "owner",
       "send-branch",
@@ -3055,7 +3334,18 @@ test("Instagram rejects a nearby unrelated submit beside the composer", async ()
     (error) => error?.details?.reason === "send_button_not_unique"
   );
   assert.equal(harness.wasSubmitted(), false);
-  assert.deepEqual(harness.bindingDisposals(), ["button"]);
+  assert.deepEqual(
+    harness.bindingDisposals().sort(),
+    [
+      "button",
+      "initial-body",
+      "initial-composer-parent",
+      "initial-conversation-container",
+      "initial-html",
+      "initial-owner",
+      "initial-slot"
+    ].sort()
+  );
 });
 
 test("Instagram measures and clicks the same bound Send handle", async () => {
@@ -3242,6 +3532,53 @@ test("Instagram GraphQL capture preserves request order when responses complete 
     capture.current(2).map((snapshot) => snapshot.stableId),
     ["recent-a", "recent-b"]
   );
+});
+
+test("Instagram GraphQL capture promotes an overlapping current-page thread when its response finishes last", () => {
+  const capture = new InstagramNetworkThreadCapture();
+  const generation = capture.begin();
+  const currentInboxOrder = capture.reserveRequestOrder(generation);
+  const olderPageOrder = capture.reserveRequestOrder(generation);
+
+  capture.accept(
+    generation,
+    [{ stableId: "shared", displayName: "Older result", unread: false }],
+    olderPageOrder ?? undefined
+  );
+  capture.accept(
+    generation,
+    [
+      { stableId: "shared", displayName: "Current result", unread: true },
+      { stableId: "current-only" }
+    ],
+    currentInboxOrder ?? undefined
+  );
+
+  assert.deepEqual(capture.current(1), [
+    { stableId: "shared", displayName: "Current result", unread: true }
+  ]);
+});
+
+test("Instagram GraphQL capture cannot let a later older-page response erase current unread evidence", () => {
+  const capture = new InstagramNetworkThreadCapture();
+  const generation = capture.begin();
+  const currentInboxOrder = capture.reserveRequestOrder(generation);
+  const olderPageOrder = capture.reserveRequestOrder(generation);
+
+  capture.accept(
+    generation,
+    [{ stableId: "shared", displayName: "Current result", unread: true }],
+    currentInboxOrder ?? undefined
+  );
+  capture.accept(
+    generation,
+    [{ stableId: "shared", displayName: "Older result", unread: false }],
+    olderPageOrder ?? undefined
+  );
+
+  assert.deepEqual(capture.current(1), [
+    { stableId: "shared", displayName: "Current result", unread: true }
+  ]);
 });
 
 test("Instagram GraphQL capture exposes pending and failed network evidence per generation", () => {

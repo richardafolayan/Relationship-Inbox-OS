@@ -25,17 +25,20 @@ conversation label when a platform needs recipient verification. It is stored
 separately from the user-facing `Person.displayName`, so an operator rename does
 not become platform identity evidence.
 
-Browser sends bind the exact composer element before recipient verification.
-After humanized delays, the final route, recipient, composer, and control
-ownership checks run in the same synchronous browser task as each composer
-mutation and the Send click. It binds a send-control handle before measuring
-locality and binds the lowest non-page-level owner shared with the composer.
-It also binds the verified conversation container, both complete ordered paths
-to the shared owner, and the owner's complete path to the document root. The
-final task requires the same container and owner, with every bound parent edge
-connected and unchanged, then measures and clicks the same control handle.
-All temporary control and ownership handles are released after the click
-attempt or a rejected binding. Recipient ownership is
+Browser sends bind the exact composer element, its verified conversation
+container, and its complete path to the document root before recipient
+verification, pointer movement, or input. After humanized delays, the final
+route, recipient, composer, and control ownership checks run in the same
+synchronous browser task as each composer mutation and the Send click. Every
+task requires the original composer path and conversation container to remain
+connected and unchanged. The send boundary binds a control handle before
+measuring locality and binds the lowest non-page-level owner shared with the
+composer. It also binds both complete ordered paths to the shared owner and the
+owner's complete path to the document root. The final task requires the same
+original conversation container and local owner, with every bound parent edge
+connected and unchanged, then measures and clicks the same control handle. All
+temporary control and ownership handles are released after the click attempt,
+a rejected binding, or an earlier composer failure. Recipient ownership is
 rechecked after focus handlers run and before any text mutation or input event.
 The active conversation container and local composer form or row must still own
 the visible recipient evidence, composer, and Send control. The control must
@@ -57,7 +60,12 @@ the document so sibling live panes veto an empty claim. GraphQL application
 errors count as failed collection evidence. The adapter captures all currently
 rendered DOM and network candidates, deduplicates identities while preserving
 unread evidence from either source, places every unread thread first, and only
-then applies the final distinct-thread limit.
+then applies the final distinct-thread limit. Network requests reserve their
+ordering when they start. Overlapping thread snapshots retain fields and
+position from the earliest request while unread evidence is monotonic across
+responses. After DOM or network readiness, the adapter gives current-generation
+pending GraphQL requests the remainder of one bounded readiness window to
+settle before the final merge.
 
 Unsupported operations fail clearly and callers check optional capabilities
 before offering them.
