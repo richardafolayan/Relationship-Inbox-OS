@@ -1610,6 +1610,9 @@ test("Instagram atomic composer actions validate and mutate in one browser task"
       composer,
       sendButton: unrelated,
       sendOwner: resolvedSend.owner,
+      sendComposerBranch: resolvedSend.composerBranch,
+      sendBranch: resolvedSend.sendBranch,
+      sendParent: resolvedSend.sendParent,
       selectors,
       thread,
       platformThreadId: "safe-thread",
@@ -1624,6 +1627,9 @@ test("Instagram atomic composer actions validate and mutate in one browser task"
       composer,
       sendButton,
       sendOwner: resolvedSend.owner,
+      sendComposerBranch: resolvedSend.composerBranch,
+      sendBranch: resolvedSend.sendBranch,
+      sendParent: resolvedSend.sendParent,
       selectors,
       thread,
       platformThreadId: "safe-thread",
@@ -1639,6 +1645,9 @@ test("Instagram atomic composer actions validate and mutate in one browser task"
       composer,
       sendButton,
       sendOwner: resolvedSend.owner,
+      sendComposerBranch: resolvedSend.composerBranch,
+      sendBranch: resolvedSend.sendBranch,
+      sendParent: resolvedSend.sendParent,
       selectors,
       thread,
       platformThreadId: "safe-thread",
@@ -1779,6 +1788,9 @@ test("Instagram atomic send rejects a bound Send moved to another composer", asy
       composer,
       sendButton,
       sendOwner: sendBinding.owner,
+      sendComposerBranch: sendBinding.composerBranch,
+      sendBranch: sendBinding.sendBranch,
+      sendParent: sendBinding.sendParent,
       selectors: { conversation_header: "main header h1" },
       thread: {
         platformThreadId: "safe-thread",
@@ -1853,6 +1865,91 @@ test("Instagram atomic send rejects coordinate-preserving reparenting without fo
       composer,
       sendButton,
       sendOwner: sendBinding.owner,
+      sendComposerBranch: sendBinding.composerBranch,
+      sendBranch: sendBinding.sendBranch,
+      sendParent: sendBinding.sendParent,
+      selectors: { conversation_header: "main header h1" },
+      thread: {
+        platformThreadId: "safe-thread",
+        displayName: "Safe thread",
+        recipientVerificationLabel: "Safe thread"
+      },
+      platformThreadId: "safe-thread",
+      action: "send",
+      expectedText: "Approved text"
+    }),
+    { ok: false, reason: "send_button_not_owned" }
+  );
+  assert.equal(await page.evaluate(() => window.submitted), 0);
+});
+
+test("Instagram atomic send rejects reparenting within the same shared owner", async (t) => {
+  let browser;
+  try {
+    browser = await chromium.launch({ headless: true });
+  } catch (error) {
+    t.skip(`Playwright Chromium unavailable: ${error instanceof Error ? error.message : String(error)}`);
+    return;
+  }
+
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  t.after(async () => {
+    await context.close();
+    await browser.close();
+  });
+  await page.route("https://www.instagram.com/**", async (route) => {
+    await route.fulfill({
+      contentType: "text/html",
+      body: `<!doctype html>
+        <main>
+          <header><h1>Safe thread</h1></header>
+          <div id="shared-owner">
+            <div id="composer-slot">
+              <div id="composer" role="textbox" contenteditable="true" style="position:fixed;left:100px;top:100px;width:300px;height:40px">Approved text</div>
+            </div>
+            <div id="send-slot">
+              <button id="send" type="button" aria-label="Send" style="position:fixed;left:420px;top:100px;width:80px;height:40px">Send</button>
+            </div>
+            <div id="other-composer-slot">
+              <div role="textbox" contenteditable="true" style="position:fixed;left:100px;top:300px;width:300px;height:40px"></div>
+            </div>
+          </div>
+        </main>`
+    });
+  });
+  await page.goto("https://www.instagram.com/direct/t/safe-thread/");
+  await page.evaluate(() => {
+    window.submitted = 0;
+    document.querySelector("#send")?.addEventListener("click", () => {
+      window.submitted += 1;
+    });
+  });
+
+  const adapter = new InstagramAdapter({
+    screenshotDir: "/tmp",
+    domDumpDir: "/tmp",
+    resolveSelectors: async () => ({}),
+    sessionManager: {},
+    personKey: "instagram",
+    connectTimeoutMs: 50
+  });
+  const composer = await page.locator("#composer").elementHandle();
+  const sendBinding = await adapter.requireComposerSendButton(page, composer, "#send");
+  const sendButton = sendBinding.button;
+  assert.equal(await sendBinding.owner.getAttribute("id"), "shared-owner");
+  await sendButton.evaluate((button) => {
+    document.querySelector("#other-composer-slot")?.append(button);
+  });
+
+  assert.deepEqual(
+    await adapter.runAtomicComposerAction({
+      composer,
+      sendButton,
+      sendOwner: sendBinding.owner,
+      sendComposerBranch: sendBinding.composerBranch,
+      sendBranch: sendBinding.sendBranch,
+      sendParent: sendBinding.sendParent,
       selectors: { conversation_header: "main header h1" },
       thread: {
         platformThreadId: "safe-thread",
@@ -2088,7 +2185,15 @@ function sendTestHarness({
       return composer;
     }
   };
-  const boundSendOwner = {};
+  const boundElement = () => ({ dispose: async () => undefined });
+  const boundSendOwner = boundElement();
+  const boundComposerBranch = boundElement();
+  const boundSendBranch = boundElement();
+  const boundSendParent = boundElement();
+  const elementProperty = (element) => ({
+    asElement: () => element,
+    dispose: async () => undefined
+  });
   const boundSendButton = {
     unrelatedNearbySubmit,
     boundingBox: async () =>
@@ -2112,7 +2217,13 @@ function sendTestHarness({
       sameForm: false
     }),
     evaluateHandle: async () => ({
-      asElement: () => boundSendOwner,
+      getProperties: async () =>
+        new Map([
+          ["owner", elementProperty(boundSendOwner)],
+          ["composerBranch", elementProperty(boundComposerBranch)],
+          ["sendBranch", elementProperty(boundSendBranch)],
+          ["sendParent", elementProperty(boundSendParent)]
+        ]),
       dispose: async () => undefined
     })
   };

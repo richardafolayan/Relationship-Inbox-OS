@@ -30,8 +30,10 @@ After humanized delays, the final route, recipient, composer, and control
 ownership checks run in the same synchronous browser task as each composer
 mutation and the Send click. It binds a send-control handle before measuring
 locality and binds the lowest non-page-level owner shared with the composer.
-The final task requires that same owner to contain both elements, then measures
-and clicks the same control handle. Recipient ownership is
+It also binds the composer's branch under that owner, the control's branch,
+and the control's immediate parent. The final task requires the same owner,
+branches, and parent to remain connected and unchanged, then measures and
+clicks the same control handle. Recipient ownership is
 rechecked after focus handlers run and before any text mutation or input event.
 The active conversation container and local composer form or row must still own
 the visible recipient evidence, composer, and Send control. The control must

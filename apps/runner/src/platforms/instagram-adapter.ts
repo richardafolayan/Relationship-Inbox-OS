@@ -54,6 +54,9 @@ export interface InstagramMessageSnapshot {
 interface InstagramComposerSendBinding {
   button: ElementHandle;
   owner: ElementHandle;
+  composerBranch: ElementHandle;
+  sendBranch: ElementHandle;
+  sendParent: ElementHandle;
 }
 
 export class InstagramParsingError extends Error {
@@ -1788,6 +1791,9 @@ export class InstagramAdapter extends BetaAdapter {
     composer: ElementHandle;
     sendButton?: ElementHandle;
     sendOwner?: ElementHandle;
+    sendComposerBranch?: ElementHandle;
+    sendBranch?: ElementHandle;
+    sendParent?: ElementHandle;
     selectors: SelectorRegistry;
     thread: ThreadStub;
     platformThreadId: string;
@@ -1801,6 +1807,9 @@ export class InstagramAdapter extends BetaAdapter {
         {
           sendButton,
           sendOwner,
+          sendComposerBranch,
+          sendBranch,
+          sendParent,
           headerSelector,
           recipientVerificationLabel,
           platformThreadId,
@@ -2036,11 +2045,30 @@ export class InstagramAdapter extends BetaAdapter {
         if (
           !sendOwner ||
           !sendOwner.isConnected ||
-          sendOwner.ownerDocument !== document
+          sendOwner.ownerDocument !== document ||
+          !sendComposerBranch ||
+          !sendComposerBranch.isConnected ||
+          sendComposerBranch.ownerDocument !== document ||
+          !sendBranch ||
+          !sendBranch.isConnected ||
+          sendBranch.ownerDocument !== document ||
+          !sendParent ||
+          !sendParent.isConnected ||
+          sendParent.ownerDocument !== document
         ) {
           return fail("send_button_not_owned");
         }
         const ownerElement = sendOwner as Element;
+        const composerBranchElement = sendComposerBranch as Element;
+        const sendBranchElement = sendBranch as Element;
+        const sendParentElement = sendParent as Element;
+        const branchUnderOwner = (node: Element): Element | null => {
+          let branch = node;
+          while (branch.parentElement && branch.parentElement !== ownerElement) {
+            branch = branch.parentElement;
+          }
+          return branch.parentElement === ownerElement ? branch : null;
+        };
         let currentLocalOwner: Element | null = sendElement.parentElement;
         while (currentLocalOwner && !currentLocalOwner.contains(composerNode as Element)) {
           currentLocalOwner = currentLocalOwner.parentElement;
@@ -2051,7 +2079,13 @@ export class InstagramAdapter extends BetaAdapter {
           ownerElement.matches("main, [role='main']") ||
           currentLocalOwner !== ownerElement ||
           !ownerElement.contains(composerNode as Element) ||
-          !ownerElement.contains(sendElement)
+          !ownerElement.contains(sendElement) ||
+          !ownerElement.contains(composerBranchElement) ||
+          !ownerElement.contains(sendBranchElement) ||
+          !sendParentElement.contains(sendElement) ||
+          sendElement.parentElement !== sendParentElement ||
+          branchUnderOwner(composerNode as Element) !== composerBranchElement ||
+          branchUnderOwner(sendElement) !== sendBranchElement
         ) {
           return fail("send_button_not_owned");
         }
@@ -2107,6 +2141,9 @@ export class InstagramAdapter extends BetaAdapter {
       {
         sendButton: input.sendButton,
         sendOwner: input.sendOwner,
+        sendComposerBranch: input.sendComposerBranch,
+        sendBranch: input.sendBranch,
+        sendParent: input.sendParent,
         headerSelector:
           input.selectors.conversation_header ?? "header h1, header h2, header span[title]",
         recipientVerificationLabel: input.thread.recipientVerificationLabel,
@@ -2191,9 +2228,11 @@ export class InstagramAdapter extends BetaAdapter {
       if (!association?.exactSend) {
         continue;
       }
-      const ownerHandle = await candidateHandle
+      const structureHandle = await candidateHandle
         .evaluateHandle((button, composerNode) => {
-          let owner = (button as Element).parentElement;
+          const buttonElement = button as Element;
+          const composerElement = composerNode as Element;
+          let owner = buttonElement.parentElement;
           while (owner && !owner.contains(composerNode as Element)) {
             owner = owner.parentElement;
           }
@@ -2203,25 +2242,60 @@ export class InstagramAdapter extends BetaAdapter {
             owner === document.documentElement ||
             owner.matches("main, [role='main']")
           ) {
-            return null;
+            return {};
           }
-          return owner;
+          const branchUnderOwner = (node: Element): Element | null => {
+            let branch = node;
+            while (branch.parentElement && branch.parentElement !== owner) {
+              branch = branch.parentElement;
+            }
+            return branch.parentElement === owner ? branch : null;
+          };
+          const composerBranch = branchUnderOwner(composerElement);
+          const sendBranch = branchUnderOwner(buttonElement);
+          const sendParent = buttonElement.parentElement;
+          if (!composerBranch || !sendBranch || !sendParent) {
+            return {};
+          }
+          return { owner, composerBranch, sendBranch, sendParent };
         }, composerHandle)
         .catch(() => null);
-      const owner = ownerHandle?.asElement() ?? null;
-      if (!owner) {
-        await ownerHandle?.dispose().catch(() => undefined);
+      const structure = await structureHandle?.getProperties().catch(() => null);
+      await structureHandle?.dispose().catch(() => undefined);
+      const owner = structure?.get("owner")?.asElement() ?? null;
+      const composerBranch = structure?.get("composerBranch")?.asElement() ?? null;
+      const sendBranch = structure?.get("sendBranch")?.asElement() ?? null;
+      const sendParent = structure?.get("sendParent")?.asElement() ?? null;
+      if (!owner || !composerBranch || !sendBranch || !sendParent) {
+        await Promise.all(
+          [...(structure?.values() ?? [])].map((handle) =>
+            handle.dispose().catch(() => undefined)
+          )
+        );
         continue;
       }
       const box = await candidateHandle.boundingBox();
-      if (!box) continue;
+      if (!box) {
+        await Promise.all(
+          [owner, composerBranch, sendBranch, sendParent].map((handle) =>
+            handle.dispose().catch(() => undefined)
+          )
+        );
+        continue;
+      }
       const centerY = box.y + box.height / 2;
       const centerX = box.x + box.width / 2;
       const sameRow = Math.abs(centerY - composerCenterY) <= Math.max(36, composerBox.height);
       const horizontallyAssociated =
         centerX >= composerBox.x && centerX <= composerRight + maxHorizontalGap;
       if (sameRow && horizontallyAssociated) {
-        nearby.push({ button: candidateHandle, owner });
+        nearby.push({ button: candidateHandle, owner, composerBranch, sendBranch, sendParent });
+      } else {
+        await Promise.all(
+          [owner, composerBranch, sendBranch, sendParent].map((handle) =>
+            handle.dispose().catch(() => undefined)
+          )
+        );
       }
     }
     if (nearby.length !== 1) {
@@ -2408,6 +2482,9 @@ export class InstagramAdapter extends BetaAdapter {
             composer,
             sendButton: boundSend.button,
             sendOwner: boundSend.owner,
+            sendComposerBranch: boundSend.composerBranch,
+            sendBranch: boundSend.sendBranch,
+            sendParent: boundSend.sendParent,
             selectors,
             thread,
             platformThreadId: platformThreadId!,
