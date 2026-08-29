@@ -1,6 +1,6 @@
 # Current Build Status
 
-_Volatile. Update this whenever branches, commits, or build state change. Last updated: 2026-08-24._
+_Volatile. Update this whenever branches, commits, or build state change. Last updated: 2026-08-29._
 
 This file holds fast-moving build state on purpose. Branch tips and commit
 hashes go stale quickly, so verify live refs before starting work rather than
@@ -58,6 +58,32 @@ wrong. Fetch first, then compare the live refs.
 - Current feature truth belongs in
   [`docs/developer/features.md`](../developer/features.md); this page only tracks
   the moving branch and verification state.
+
+## Current corrective hardening branch
+
+- Active corrective branch: `fix/external-action-safety-final`.
+- Base: merged Instagram integration on `develop` at `905103e8`.
+- Latest corrective commit: `4d18dc7c`.
+- The broad `chore/full-product-hardening` branch remains audit evidence and is
+  not an integration branch.
+- The corrective branch prevents a focus acknowledgement from overtaking newer
+  user intent, holds sends and session resets behind the same platform fences,
+  binds send replays to their complete immutable intent, and preserves sent
+  state before local projection.
+- Message reactions, edits, and poll votes now use durable per-attempt identity.
+  An uncertain action is not dispatched again, completed local projections are
+  repaired after restart, and an older edit repair cannot overwrite a newer
+  completed edit.
+- Legacy database upgrade coverage verifies creation of the durable external
+  action table alongside the existing deterministic Draft repair.
+- The focused safety corpus passes: 178 send, reset, scheduling, and action
+  tests; 21 database recovery and upgrade tests; and three real Chromium
+  LinkedIn fallback tests. Core, runner, and dashboard lint and production
+  builds pass.
+- The exact commit still requires the scheduled adversarial review, complete
+  repository test suite, pull request CI, and merged `develop` verification.
+- Verification did not send, edit, react to, vote on, scan, reconnect, or reset
+  a live platform account.
 
 ## Last recorded live verification
 
