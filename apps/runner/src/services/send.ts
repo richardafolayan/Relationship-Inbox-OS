@@ -315,23 +315,33 @@ export function createSendService(deps: SendServiceDeps) {
   const prisma = deps.prisma ?? defaultPrisma;
   const userTriggeredIntentCounts = new Map<string, number>();
 
-  async function withUserTriggeredIntent<T>(
-    threadId: string,
-    work: () => Promise<T>
-  ): Promise<T> {
+  function registerUserTriggeredIntent(threadId: string): () => void {
     userTriggeredIntentCounts.set(
       threadId,
       (userTriggeredIntentCounts.get(threadId) ?? 0) + 1
     );
-    try {
-      return await work();
-    } finally {
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
       const remaining = (userTriggeredIntentCounts.get(threadId) ?? 1) - 1;
       if (remaining > 0) {
         userTriggeredIntentCounts.set(threadId, remaining);
       } else {
         userTriggeredIntentCounts.delete(threadId);
       }
+    };
+  }
+
+  async function withUserTriggeredIntent<T>(
+    threadId: string,
+    work: () => Promise<T>
+  ): Promise<T> {
+    const release = registerUserTriggeredIntent(threadId);
+    try {
+      return await work();
+    } finally {
+      release();
     }
   }
 
@@ -855,9 +865,10 @@ export function createSendService(deps: SendServiceDeps) {
                 "Automatic focus acknowledgement is no longer eligible for this conversation"
               );
             }
+            const finalSupersedingUserRequest = await findSupersedingUserRequest();
             if (
-              (userTriggeredIntentCounts.get(thread.id) ?? 0) > 0 ||
-              await findSupersedingUserRequest()
+              finalSupersedingUserRequest ||
+              (userTriggeredIntentCounts.get(thread.id) ?? 0) > 0
             ) {
               throw new SendPolicyError(
                 "focus_auto_ack_superseded",
@@ -1352,7 +1363,8 @@ export function createSendService(deps: SendServiceDeps) {
     processSendRequest,
     reconcileInterruptedSends,
     reconcileSentProjections,
-    withUserTriggeredIntent
+    withUserTriggeredIntent,
+    registerUserTriggeredIntent
   };
 }
 

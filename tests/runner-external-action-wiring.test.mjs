@@ -62,6 +62,18 @@ test("reaction, edit, and poll vote routes use durable external-action identity"
   }
 });
 
+test("manual send intent is registered before route preprocessing awaits", () => {
+  const send = route(
+    "/control/thread/:threadId/send",
+    "/control/thread/:threadId/send-poll"
+  );
+  const registration = send.indexOf("registerUserTriggeredIntent(threadId)");
+  assert.notEqual(registration, -1);
+  assert.ok(registration < send.indexOf("checkPresenterGuard"));
+  assert.ok(registration < send.indexOf("sha256File"));
+  assert.ok(registration < send.indexOf("getThreadStub"));
+});
+
 test("durable external actions reconcile local projections during runner startup", () => {
   assert.match(source, /durableExternalActionService\.reconcileSentProjections\(\)/);
 });

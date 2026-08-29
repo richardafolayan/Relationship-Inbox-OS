@@ -1124,6 +1124,29 @@ test("a current auth failure allows ordinary connect to create a fresh client", 
   assert.equal(createCalls, 2);
 });
 
+test("an initialize rejection allows ordinary connect to create a fresh client", async () => {
+  const firstClient = createFakeClient({
+    initialize: async () => {
+      throw new Error("browser failed to initialize");
+    }
+  });
+  const secondClient = createFakeClient();
+  let createCalls = 0;
+  const adapter = new WhatsAppAdapter({
+    ...baseDeps(),
+    createClient: () => {
+      createCalls += 1;
+      return createCalls === 1 ? firstClient : secondClient;
+    }
+  });
+
+  await assert.rejects(adapter.ensureConnected(), /browser failed to initialize/);
+  const second = adapter.ensureConnected();
+  setImmediate(() => secondClient.emit("ready"));
+  await second;
+  assert.equal(createCalls, 2);
+});
+
 test("a stale client cannot mark a replacement WhatsApp session connected", async () => {
   const firstClient = createFakeClient();
   const secondClient = createFakeClient();

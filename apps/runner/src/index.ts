@@ -4015,7 +4015,9 @@ app.post("/control/platform/test-selectors", asyncRoute(async (req, res) => {
 // surface, never inline here.
 app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req, res) => {
   const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
-  if (await checkPresenterGuard(res, settingsStore, { threadId, action: "send", kind: "thread-mutation" })) return;
+  const releaseUserIntent = sendService.registerUserTriggeredIntent(threadId);
+  try {
+    if (await checkPresenterGuard(res, settingsStore, { threadId, action: "send", kind: "thread-mutation" })) return;
   // For multipart bodies, multer puts file metadata on req.files and
   // string fields on req.body. Reuse the same JSON schema for the field
   // values so the validation flow is identical between JSON and multipart.
@@ -4069,17 +4071,14 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
   // over from there.
   if (payload.scheduledFor) {
     try {
-      const scheduleResult = await sendService.withUserTriggeredIntent(
+      const scheduleResult = await sendService.enqueueScheduledSend({
         threadId,
-        () => sendService.enqueueScheduledSend({
-          threadId,
-          text: payload.text,
-          clientSendId: payload.clientSendId,
-          scheduledFor: new Date(payload.scheduledFor!),
-          attachments: stagedAttachments,
-          replyToMessageId: payload.replyToMessageId
-        })
-      );
+        text: payload.text,
+        clientSendId: payload.clientSendId,
+        scheduledFor: new Date(payload.scheduledFor),
+        attachments: stagedAttachments,
+        replyToMessageId: payload.replyToMessageId
+      });
       res.json({
         clientSendId: scheduleResult.clientSendId,
         status: scheduleResult.status,
@@ -4119,17 +4118,14 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
       payload.clientSendId,
       payload.clientRequestedAt ?? new Date().toISOString()
     );
-    const queueResult = await sendService.withUserTriggeredIntent(
+    const queueResult = await sendQueue.enqueueAndKick({
       threadId,
-      () => sendQueue.enqueueAndKick({
-        threadId,
-        text: payload.text,
-        clientSendId: payload.clientSendId,
-        attachments: stagedAttachments,
-        source: payload.source ?? "manual",
-        replyToMessageId: payload.replyToMessageId
-      })
-    );
+      text: payload.text,
+      clientSendId: payload.clientSendId,
+      attachments: stagedAttachments,
+      source: payload.source ?? "manual",
+      replyToMessageId: payload.replyToMessageId
+    });
     res.json(queueResult);
   } catch (error) {
     await auditService.log({
@@ -4144,6 +4140,9 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
       }
     });
     throw error;
+  }
+  } finally {
+    releaseUserIntent();
   }
 }));
 

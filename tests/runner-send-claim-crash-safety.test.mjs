@@ -70,6 +70,7 @@ function makeHarness(initialRows, opts = {}) {
   const events = [];
   let threadExists = true;
   let claimAttempts = 0;
+  let supersedingQueryCount = 0;
 
   const prisma = {
     sendRequest: {
@@ -80,6 +81,10 @@ function makeHarness(initialRows, opts = {}) {
         return r ? { ...r } : null;
       },
       async findFirst({ where }) {
+        if (where.source?.in) {
+          supersedingQueryCount += 1;
+          await opts.onSupersedingQuery?.(supersedingQueryCount);
+        }
         const match = rows.find((r) => matchesWhere(r, where));
         return match ? { ...match } : null;
       },
@@ -435,6 +440,31 @@ test("an in-flight user send intent supersedes auto-ack before its row is persis
   assert.equal(sends.length, 0);
   assert.equal(rows[0].status, "FAILED");
   assert.equal(JSON.parse(rows[0].errorJson).reasonCode, "focus_auto_ack_superseded");
+});
+
+test("manual intent arriving during the final database guard still supersedes auto-ack", async () => {
+  let releaseFinalQuery;
+  let finalQueryStarted;
+  const finalQuery = new Promise((resolve) => { releaseFinalQuery = resolve; });
+  const reachedFinalQuery = new Promise((resolve) => { finalQueryStarted = resolve; });
+  const h = makeHarness([focusAutoAckRow()], {
+    async onSupersedingQuery(count) {
+      if (count !== 2) return;
+      finalQueryStarted();
+      await finalQuery;
+    }
+  });
+
+  const processing = h.svc.processSendRequest("sr1");
+  await reachedFinalQuery;
+  const releaseIntent = h.svc.registerUserTriggeredIntent("t1");
+  releaseFinalQuery();
+  await processing;
+  releaseIntent();
+
+  assert.equal(h.sends.length, 0);
+  assert.equal(h.rows[0].status, "FAILED");
+  assert.equal(JSON.parse(h.rows[0].errorJson).reasonCode, "focus_auto_ack_superseded");
 });
 
 test("worker treats an equal-timestamp manual request as superseding auto-ack", async () => {

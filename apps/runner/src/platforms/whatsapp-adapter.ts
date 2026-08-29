@@ -220,6 +220,12 @@ export class WhatsAppAdapter implements PlatformAdapter {
             resolve();
             return;
           }
+          this.sessionEpoch += 1;
+          this.client = null;
+          this.ready = false;
+          this.readyPromise = null;
+          this.deps.onStateChange?.("disconnected");
+          void client.destroy().catch(() => undefined);
           reject(error);
         });
     });
