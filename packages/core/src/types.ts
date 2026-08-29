@@ -113,6 +113,7 @@ export interface OutboundAttachment {
   displayName: string;
   mimeType?: string;
   kind?: "voice_note" | "photo" | "video" | "audio" | "pdf" | "sticker" | "gif" | "unknown";
+  contentDigest?: string;
 }
 
 export interface OutboundPoll {

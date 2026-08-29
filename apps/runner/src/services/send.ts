@@ -314,8 +314,15 @@ export function createSendService(deps: SendServiceDeps) {
   // scheduled-send race guards without a real database.
   const prisma = deps.prisma ?? defaultPrisma;
   const userTriggeredIntentCounts = new Map<string, number>();
+  const userTriggeredIntentEpochs = new Map<string, number>();
+  let focusPolicyMutationIntentCount = 0;
+  let focusPolicyMutationIntentEpoch = 0;
 
   function registerUserTriggeredIntent(threadId: string): () => void {
+    userTriggeredIntentEpochs.set(
+      threadId,
+      (userTriggeredIntentEpochs.get(threadId) ?? 0) + 1
+    );
     userTriggeredIntentCounts.set(
       threadId,
       (userTriggeredIntentCounts.get(threadId) ?? 0) + 1
@@ -330,6 +337,20 @@ export function createSendService(deps: SendServiceDeps) {
       } else {
         userTriggeredIntentCounts.delete(threadId);
       }
+    };
+  }
+
+  function registerFocusPolicyMutationIntent(): () => void {
+    focusPolicyMutationIntentEpoch += 1;
+    focusPolicyMutationIntentCount += 1;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      focusPolicyMutationIntentCount = Math.max(
+        0,
+        focusPolicyMutationIntentCount - 1
+      );
     };
   }
 
@@ -769,7 +790,13 @@ export function createSendService(deps: SendServiceDeps) {
       const inSandbox = settings.presenterDemoMode === "sandbox";
       let receipt: SendReceipt;
       const stagedAttachments = sendRequest.attachmentsJson
-        ? (JSON.parse(sendRequest.attachmentsJson) as Array<{ absolutePath: string; displayName: string; mimeType?: string; kind?: string }>)
+        ? (JSON.parse(sendRequest.attachmentsJson) as Array<{
+            absolutePath: string;
+            displayName: string;
+            mimeType?: string;
+            kind?: string;
+            contentDigest?: string;
+          }>)
         : [];
       const source = parsePersistedSendSource(sendRequest.source);
       if (!source) {
@@ -799,101 +826,92 @@ export function createSendService(deps: SendServiceDeps) {
         // Serialize the page-driving send against scans on the shared managed
         // page. The demo branch above drives no page, so it stays unlocked.
         receipt = await deps.withPlatformLock(thread.platform as PlatformName, async () => {
-          if (source === "focus_auto_ack") {
-            const findSupersedingUserRequest = () => prisma.sendRequest.findFirst({
-              where: {
-                threadId: thread.id,
-                source: { in: ["manual", "focus_ack", "manual_poll"] },
-                status: { in: ["PENDING", "SENT", "FAILED", "SCHEDULED"] },
-                createdAt: { gte: sendRequest.createdAt },
-                NOT: { id: sendRequest.id }
-              },
-              select: { id: true }
-            });
-            const supersedingUserRequest = await findSupersedingUserRequest();
-            if (supersedingUserRequest) {
-              throw new SendPolicyError(
-                "focus_auto_ack_superseded",
-                "Automatic focus acknowledgement was superseded by a user-triggered reply"
-              );
-            }
-            const authoritativeThread = await prisma.thread.findUnique({
-              where: { id: thread.id },
-              select: {
-                id: true,
-                platform: true,
-                category: true,
-                isGroup: true,
-                lastInboundAt: true,
-                lastOutboundAt: true,
-                person: {
+          const assertFocusAutoAckDispatchEligible = source === "focus_auto_ack"
+            ? async () => {
+              const threadIntentEpoch = userTriggeredIntentEpochs.get(thread.id) ?? 0;
+              const focusIntentEpoch = focusPolicyMutationIntentEpoch;
+              const [supersedingUserRequest, authoritativeThread, profile] = await Promise.all([
+                prisma.sendRequest.findFirst({
+                  where: {
+                    threadId: thread.id,
+                    source: { in: ["manual", "focus_ack", "manual_poll"] },
+                    status: { in: ["PENDING", "SENT", "FAILED", "SCHEDULED"] },
+                    createdAt: { gte: sendRequest.createdAt },
+                    NOT: { id: sendRequest.id }
+                  },
+                  select: { id: true }
+                }),
+                prisma.thread.findUnique({
+                  where: { id: thread.id },
                   select: {
                     id: true,
-                    displayName: true,
-                    birthday: true,
-                    favouritedAt: true
+                    platform: true,
+                    category: true,
+                    isGroup: true,
+                    lastInboundAt: true,
+                    lastOutboundAt: true,
+                    person: {
+                      select: {
+                        id: true,
+                        displayName: true,
+                        birthday: true,
+                        favouritedAt: true
+                      }
+                    }
                   }
-                }
+                }),
+                deps.settingsStore.getOperatorProfile()
+              ]);
+              const autoAckThread: FocusAutoAckThread | null = authoritativeThread
+                ? {
+                    threadId: authoritativeThread.id,
+                    platform: authoritativeThread.platform as PlatformName,
+                    isGroup: authoritativeThread.isGroup,
+                    category:
+                      authoritativeThread.category === "genuine" ||
+                      authoritativeThread.category === "outreach"
+                        ? authoritativeThread.category
+                        : null,
+                    person: authoritativeThread.person,
+                    latestInboundAt: authoritativeThread.lastInboundAt,
+                    latestOutboundAt: authoritativeThread.lastOutboundAt
+                  }
+                : null;
+              if (
+                !autoAckThread ||
+                !focusAutoAckDispatchEligible(
+                  autoAckThread,
+                  profile,
+                  sendRequest.clientSendId,
+                  new Date(),
+                  sendRequest.requestText
+                )
+              ) {
+                throw new SendPolicyError(
+                  "focus_auto_ack_not_eligible",
+                  "Automatic focus acknowledgement is no longer eligible for this conversation"
+                );
               }
-            });
-            const profile = await deps.settingsStore.getOperatorProfile();
-            const autoAckThread: FocusAutoAckThread | null = authoritativeThread
-              ? {
-                  threadId: authoritativeThread.id,
-                  platform: authoritativeThread.platform as PlatformName,
-                  isGroup: authoritativeThread.isGroup,
-                  category:
-                    authoritativeThread.category === "genuine" ||
-                    authoritativeThread.category === "outreach"
-                      ? authoritativeThread.category
-                      : null,
-                  person: authoritativeThread.person,
-                  latestInboundAt: authoritativeThread.lastInboundAt,
-                  latestOutboundAt: authoritativeThread.lastOutboundAt
-                }
-              : null;
-            if (
-              !autoAckThread ||
-              !focusAutoAckDispatchEligible(
-                autoAckThread,
-                profile,
-                sendRequest.clientSendId,
-                new Date(),
-                sendRequest.requestText
-              )
-            ) {
-              throw new SendPolicyError(
-                "focus_auto_ack_not_eligible",
-                "Automatic focus acknowledgement is no longer eligible for this conversation"
-              );
+              if (
+                supersedingUserRequest ||
+                (userTriggeredIntentCounts.get(thread.id) ?? 0) > 0 ||
+                (userTriggeredIntentEpochs.get(thread.id) ?? 0) !== threadIntentEpoch ||
+                focusPolicyMutationIntentCount > 0 ||
+                focusPolicyMutationIntentEpoch !== focusIntentEpoch
+              ) {
+                throw new SendPolicyError(
+                  "focus_auto_ack_superseded",
+                  "Automatic focus acknowledgement was superseded by a user-triggered reply"
+                );
+              }
             }
-            const finalSupersedingUserRequest = await findSupersedingUserRequest();
-            const finalProfile = await deps.settingsStore.getOperatorProfile();
-            if (
-              !focusAutoAckDispatchEligible(
-                autoAckThread,
-                finalProfile,
-                sendRequest.clientSendId,
-                new Date(),
-                sendRequest.requestText
-              )
-            ) {
-              throw new SendPolicyError(
-                "focus_auto_ack_not_eligible",
-                "Automatic focus acknowledgement is no longer eligible for this conversation"
-              );
-            }
-            if (
-              finalSupersedingUserRequest ||
-              (userTriggeredIntentCounts.get(thread.id) ?? 0) > 0
-            ) {
-              throw new SendPolicyError(
-                "focus_auto_ack_superseded",
-                "Automatic focus acknowledgement was superseded by a user-triggered reply"
-              );
-            }
-          }
-          dispatchStarted = true;
+            : undefined;
+
+          await assertFocusAutoAckDispatchEligible?.();
+          const beforeDispatch = async () => {
+            await assertFocusAutoAckDispatchEligible?.();
+            dispatchStarted = true;
+          };
           const delivered = await adapter.sendMessage(
             threadStub,
             input.text,
@@ -901,8 +919,10 @@ export function createSendService(deps: SendServiceDeps) {
               absolutePath: a.absolutePath,
               displayName: a.displayName,
               mimeType: a.mimeType,
-              kind: (a.kind as "voice_note" | "photo" | "video" | "audio" | "pdf" | "sticker" | "gif" | "unknown" | undefined) ?? undefined
-            }))
+              kind: (a.kind as "voice_note" | "photo" | "video" | "audio" | "pdf" | "sticker" | "gif" | "unknown" | undefined) ?? undefined,
+              contentDigest: a.contentDigest
+            })),
+            beforeDispatch
           );
           await persistDeliveredReceipt(delivered);
           return delivered;
@@ -1381,7 +1401,8 @@ export function createSendService(deps: SendServiceDeps) {
     reconcileInterruptedSends,
     reconcileSentProjections,
     withUserTriggeredIntent,
-    registerUserTriggeredIntent
+    registerUserTriggeredIntent,
+    registerFocusPolicyMutationIntent
   };
 }
 

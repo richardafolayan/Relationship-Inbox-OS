@@ -279,3 +279,52 @@ test("LinkedIn fallback follows real list growth across a filtered-row gap", asy
   const after = await fixture.adapter.captureThreadRowsSnapshot(fixture.page, selectors);
   assert.equal(after.rows.some((row) => row.displayName === "Later Unread"), true);
 });
+
+test("LinkedIn fallback observes delayed virtualized changes even when candidate rows and geometry stay constant", async (t) => {
+  const fixture = await createFixture();
+  if (fixture.skipped) {
+    t.skip(fixture.reason);
+    return;
+  }
+
+  t.after(async () => {
+    await fixture.context.close();
+    await fixture.browser.close();
+  });
+  await fixture.page.setContent(`
+    <ul class="msg-conversations-container__conversations-list" style="height: 80px; overflow-y: auto; margin: 0; padding: 0">
+      <li class="msg-conversation-listitem" data-urn="urn:li:msg_conversation:first" style="height: 50px">
+        <h3>First Unread</h3>
+        <p class="msg-conversation-card__message-snippet">Can you reply?</p>
+        <div class="msg-conversation-card__unread-count"><span class="notification-badge__count">1</span></div>
+      </li>
+      <li class="msg-conversation-listitem" data-urn="urn:li:msg_conversation:virtual-slot" style="height: 50px">
+        <h3>Filtered A</h3>
+        <p class="msg-conversation-card__message-snippet">You: already replied</p>
+      </li>
+    </ul>
+    <script>
+      const list = document.querySelector("ul");
+      list.scrollTop = list.scrollHeight;
+      let scheduled = false;
+      list.addEventListener("scroll", () => {
+        if (scheduled) return;
+        scheduled = true;
+        setTimeout(() => {
+          const slot = list.children[1];
+          slot.innerHTML = '<h3>Filtered B</h3><p class="msg-conversation-card__message-snippet">You: still replied</p>';
+        }, 350);
+      });
+    </script>
+  `);
+
+  const selectors = selectorsForInbox("about:blank");
+  const before = await fixture.adapter.captureThreadRowsSnapshot(fixture.page, selectors);
+  const outcome = await fixture.adapter.deepScrollThreadList(fixture.page, selectors, before);
+  const after = await fixture.adapter.captureThreadRowsSnapshot(fixture.page, selectors);
+
+  assert.equal(outcome.moved, true);
+  assert.equal(outcome.reachedBottom, false);
+  assert.equal(after.visibleSetHash, before.visibleSetHash);
+  assert.notEqual(after.listWindowHash, before.listWindowHash);
+});

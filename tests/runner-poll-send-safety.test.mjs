@@ -4,7 +4,23 @@ import {
   createPollSendService,
   POLL_SEND_SOURCE
 } from "../apps/runner/dist/services/poll-send.js";
+import { createSendQueue } from "../apps/runner/dist/services/send-queue.js";
 import { persistedSendRetryEligibility } from "../apps/runner/dist/services/send-failure.js";
+
+function matchesSendRequest(row, where = {}) {
+  if (where.id !== undefined && row.id !== where.id) return false;
+  if (where.clientSendId !== undefined && row.clientSendId !== where.clientSendId) return false;
+  if (where.status !== undefined && row.status !== where.status) return false;
+  if (where.receiptJson !== undefined && row.receiptJson !== where.receiptJson) return false;
+  if (typeof where.source === "string" && row.source !== where.source) return false;
+  if (where.source?.in && !where.source.in.includes(row.source)) return false;
+  if (where.source?.not !== undefined && row.source === where.source.not) return false;
+  if (
+    where.errorJson?.contains &&
+    !(row.errorJson ?? "").includes(where.errorJson.contains)
+  ) return false;
+  return true;
+}
 
 function harness(overrides = {}) {
   const rows = [];
@@ -19,12 +35,15 @@ function harness(overrides = {}) {
       },
       async findMany({ where }) {
         return rows
-          .filter((row) =>
-            row.status === where.status &&
-            row.source === where.source &&
-            (row.errorJson ?? "").includes(where.errorJson.contains)
-          )
+          .filter((row) => matchesSendRequest(row, where))
           .map((row) => ({ ...row }));
+      },
+      async findFirst({ where }) {
+        const row = rows.find((candidate) => matchesSendRequest(candidate, where));
+        return row ? { ...row } : null;
+      },
+      async count({ where }) {
+        return rows.filter((row) => matchesSendRequest(row, where)).length;
       },
       async create({ data }) {
         if (rows.some((row) => row.clientSendId === data.clientSendId)) {
@@ -35,7 +54,11 @@ function harness(overrides = {}) {
         return { ...row };
       },
       async update({ where, data }) {
-        const row = rows.find((candidate) => candidate.clientSendId === where.clientSendId);
+        const row = rows.find((candidate) =>
+          where.id !== undefined
+            ? candidate.id === where.id
+            : candidate.clientSendId === where.clientSendId
+        );
         if (!row) throw new Error("send request missing");
         Object.assign(row, data);
         return { ...row };
@@ -138,6 +161,7 @@ function harness(overrides = {}) {
 
   return {
     service,
+    prisma,
     input,
     rows,
     messages,
@@ -248,6 +272,72 @@ test("a proven pre-dispatch poll failure releases its claim for the same-id retr
   assert.equal(retried.status, "ok");
   assert.equal(retried.replayed, false);
   assert.equal(h.physicalSends(), 2);
+  assert.equal(h.rows[0].status, "SENT");
+});
+
+test("the generic send queue never claims a safely retryable poll", async () => {
+  const safeFailure = new Error("adapter not connected");
+  const overrides = {
+    adapterError: safeFailure,
+    isPreDispatchFailure: (error) => error === safeFailure
+  };
+  const h = harness(overrides);
+
+  await assert.rejects(() => h.service.send(h.input), /not sent/i);
+  assert.equal(h.rows[0].status, "PENDING");
+  assert.equal(h.rows[0].receiptJson, null);
+  h.rows.push({
+    id: "ordinary-send",
+    clientSendId: "c9a57ad6-df2f-49a5-b7d1-07efe177a837",
+    threadId: "thread-1",
+    status: "PENDING",
+    requestText: "hello",
+    source: "manual",
+    attachmentsJson: null,
+    receiptJson: null,
+    errorJson: null,
+    createdAt: new Date("2026-08-24T12:02:00.000Z")
+  });
+
+  const genericClaims = [];
+  const activeCounts = [];
+  const queue = createSendQueue({
+    prisma: h.prisma,
+    eventBus: {
+      emit: (event) => {
+        if (event.type === "SEND_QUEUE_UPDATED") activeCounts.push(event.activeCount);
+      }
+    },
+    sendService: {
+      async enqueueSend() {
+        throw new Error("not used");
+      },
+      async processSendRequest(id) {
+        genericClaims.push(id);
+        h.rows.find((row) => row.id === id).status = "SENT";
+      },
+      async reconcileInterruptedSends() {
+        return 0;
+      },
+      async reconcileSentProjections() {
+        return 0;
+      }
+    }
+  });
+
+  queue.resume();
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.deepEqual(genericClaims, ["ordinary-send"]);
+  assert.equal(await queue.getActiveCount(), 0);
+  assert.equal(h.rows[0].status, "PENDING");
+  assert.equal(h.rows[0].receiptJson, null);
+  assert.equal(activeCounts.includes(1), false);
+
+  delete overrides.adapterError;
+  const retried = await h.service.send(h.input);
+  assert.equal(retried.status, "ok");
   assert.equal(h.rows[0].status, "SENT");
 });
 

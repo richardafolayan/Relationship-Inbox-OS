@@ -2665,7 +2665,8 @@ export class InstagramAdapter extends BetaAdapter {
   async sendMessage(
     thread: ThreadStub,
     text: string,
-    attachments: OutboundAttachment[] = []
+    attachments: OutboundAttachment[] = [],
+    beforeDispatch?: () => Promise<void>
   ): Promise<SendReceipt> {
     if (attachments.length > 0) {
       throw this.safeFailure(
@@ -2799,6 +2800,7 @@ export class InstagramAdapter extends BetaAdapter {
           timeout: 10_000,
           reading: null,
           performClick: async () => {
+            await beforeDispatch?.();
             submissionMayHaveOccurred = true;
             const result = await this.runAtomicComposerAction({
               composer,

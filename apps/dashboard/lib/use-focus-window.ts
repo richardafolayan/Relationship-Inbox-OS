@@ -9,9 +9,10 @@
 // "focus-window-changed" event so the other mounted surfaces refetch.
 
 import { useCallback, useEffect, useState } from "react";
-import { apiGet, apiPost } from "@/lib/api";
+import { apiGet, apiGetRaw, apiPost } from "@/lib/api";
 import { useCacheSeed } from "@/lib/use-cache-seed";
 import { createExternalActionAttemptStore } from "@/lib/external-action-attempts";
+import type { SendStatusResponse } from "@/lib/send-delivery";
 import type {
   AckTemplates,
   CalendarSyncSettings,
@@ -102,17 +103,63 @@ async function reconcileExpiredWindow(windowId: string): Promise<void> {
  */
 export async function sendAcknowledgement(
   threadId: string,
+  personId: string | undefined,
   text: string,
   focusWindowId: string
 ): Promise<void> {
-  const attemptKey = `focus-ack:${JSON.stringify({ threadId, text, focusWindowId })}`;
-  const clientSendId = focusAcknowledgementAttempts.getOrCreate(attemptKey, newWindowId);
+  const scope = `focus-ack:${focusWindowId}:${personId ?? threadId}`;
+  const intent = {
+    source: "focus_ack" as const,
+    threadId,
+    personId: personId ?? null,
+    text,
+    focusWindowId
+  };
+  const { clientSendId } = focusAcknowledgementAttempts.getOrCreateScopedValue(
+    scope,
+    intent,
+    () => ({ clientSendId: newWindowId() })
+  );
   await apiPost(`/runner/control/thread/${threadId}/send`, {
     text,
     clientSendId,
     source: "focus_ack"
   });
-  focusAcknowledgementAttempts.complete(attemptKey);
+  await waitForFocusAcknowledgementDelivery(clientSendId);
+  await apiPost(`/runner/control/thread/${threadId}/focus-ack/complete`, {
+    clientSendId,
+    focusWindowId
+  });
+  focusAcknowledgementAttempts.completeScopedValue<{ clientSendId: string }>(
+    scope,
+    (value) => value.clientSendId === clientSendId
+  );
+}
+
+export async function waitForFocusAcknowledgementDelivery(
+  clientSendId: string,
+  readStatus: (path: string) => Promise<SendStatusResponse> = apiGetRaw,
+  wait: (delayMs: number) => Promise<void> = (delayMs) =>
+    new Promise((resolve) => setTimeout(resolve, delayMs)),
+  maxAttempts = 120
+): Promise<void> {
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const status = await readStatus(
+      `/runner/data/send-status/${encodeURIComponent(clientSendId)}`
+    );
+    if (status.status === "SENT") return;
+    if (status.status === "FAILED") {
+      if (status.deliveryUncertain || status.errorKind === "DELIVERY_UNCERTAIN") {
+        throw new Error("Delivery could not be confirmed. Check the conversation before trying again.");
+      }
+      throw new Error(status.errorMessage ?? "The focus note was not sent.");
+    }
+    if (status.status === "CANCELLED" || status.status === "NOT_FOUND") {
+      throw new Error("The focus note did not reach the recipient.");
+    }
+    await wait(Math.min(250 + attempt * 50, 1_000));
+  }
+  throw new Error("The focus note is still queued. Its status will be checked before any retry.");
 }
 
 export interface UseFocusWindow {

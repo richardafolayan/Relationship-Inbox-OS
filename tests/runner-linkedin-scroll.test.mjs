@@ -10,7 +10,9 @@ import {
 } from "../apps/runner/dist/platforms/linkedin-adapter.js";
 
 test("LinkedIn normalizes native collection reasons before the shared freshness gate", () => {
-  assert.equal(linkedInCollectionCompleteness("deep_scroll_exhausted"), "complete");
+  assert.equal(linkedInCollectionCompleteness("deep_scroll_exhausted"), "incomplete");
+  assert.equal(linkedInCollectionCompleteness("end_of_list_reached"), "incomplete");
+  assert.equal(linkedInCollectionCompleteness("unchanged_streak"), "complete");
   assert.equal(linkedInCollectionCompleteness("max_threads"), "candidate_cap");
   assert.equal(linkedInCollectionCompleteness("deep_scroll_disabled"), "incomplete");
 });

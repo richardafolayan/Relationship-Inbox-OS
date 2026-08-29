@@ -2093,14 +2093,18 @@ export default function ThreadPage() {
     setWhatsAppPollSending(true);
     setWhatsAppPollSent(false);
     setError(null);
-    const payloadKey = JSON.stringify({
+    const scope = `send-poll:${thread.id}`;
+    const intent = {
       threadId: thread.id,
       question,
       options,
       allowMultipleAnswers: whatsAppPollAllowMultiple
-    });
-    const attemptKey = `send-poll:${payloadKey}`;
-    const clientSendId = externalActionAttempts.getOrCreate(attemptKey, uuid);
+    };
+    const { clientSendId } = externalActionAttempts.getOrCreateScopedValue(
+      scope,
+      intent,
+      () => ({ clientSendId: uuid() })
+    );
     try {
       const output = await apiPost<{
         status: "pending" | "ok";
@@ -2116,10 +2120,12 @@ export default function ThreadPage() {
         setError("This poll send is still in progress. Check the conversation before trying again.");
         return;
       }
-      externalActionAttempts.completeIfReconciled(
-        attemptKey,
-        output.reconciliationPending
-      );
+      if (!output.reconciliationPending) {
+        externalActionAttempts.completeScopedValue<{ clientSendId: string }>(
+          scope,
+          (value) => value.clientSendId === clientSendId
+        );
+      }
       setWhatsAppPollQuestion("");
       setWhatsAppPollOptions(["", ""]);
       setWhatsAppPollAllowMultiple(true);
@@ -2464,16 +2470,21 @@ export default function ThreadPage() {
     window.requestAnimationFrame(() => composerInputRef.current?.focus());
   }, [dictationTranscript]);
 
-  const sendDictationMessage = useCallback(async (text: string) => {
+  const sendDictationMessage = useCallback(async (messageId: string, text: string) => {
     if (!thread) throw new Error("This conversation is no longer available.");
     const trimmed = text.trim();
     if (!trimmed) throw new Error("An empty message cannot be sent.");
-    const attemptKey = `dictation-send:${JSON.stringify({
+    const scope = `dictation-send:${thread.id}:${messageId}`;
+    const intent = {
       threadId: thread.id,
       text: trimmed,
       replyToMessageId: focusedThreadParentId ?? null
-    })}`;
-    const clientSendId = externalActionAttempts.getOrCreate(attemptKey, uuid);
+    };
+    const { clientSendId } = externalActionAttempts.getOrCreateScopedValue(
+      scope,
+      intent,
+      () => ({ clientSendId: uuid() })
+    );
     const sentAt = new Date().toISOString();
     setError(null);
     setPendingSends((current) => [...current, { clientSendId, text: trimmed, sentAt, attachments: [] }]);
@@ -2485,7 +2496,10 @@ export default function ThreadPage() {
         clientRequestedAt: sentAt,
         ...(focusedThreadParentId ? { replyToMessageId: focusedThreadParentId } : {})
       });
-      externalActionAttempts.complete(attemptKey);
+      externalActionAttempts.completeScopedValue<{ clientSendId: string }>(
+        scope,
+        (value) => value.clientSendId === clientSendId
+      );
     } catch (sendError) {
       setPendingSends((current) => current.filter((pending) => pending.clientSendId !== clientSendId));
       throw sendError;
@@ -2513,23 +2527,30 @@ export default function ThreadPage() {
     async (at: Date) => {
       if (!thread || !composer.trim() || scheduling) return;
       const text = composer;
-      const attemptKey = `schedule-send:${JSON.stringify({
+      const scheduledFor = at.toISOString();
+      const scope = `schedule-send:${thread.id}`;
+      const intent = {
         threadId: thread.id,
-        text
-      })}`;
-      const attempt = externalActionAttempts.getOrCreateValue(attemptKey, () => ({
-        clientSendId: uuid(),
-        scheduledFor: at.toISOString()
-      }));
+        text,
+        scheduledFor
+      };
+      const { clientSendId } = externalActionAttempts.getOrCreateScopedValue(
+        scope,
+        intent,
+        () => ({ clientSendId: uuid() })
+      );
       setScheduling(true);
       setError(null);
       try {
         await apiPost(`/runner/control/thread/${thread.id}/send`, {
           text,
-          clientSendId: attempt.clientSendId,
-          scheduledFor: attempt.scheduledFor
+          clientSendId,
+          scheduledFor
         });
-        externalActionAttempts.completeValue(attemptKey);
+        externalActionAttempts.completeScopedValue<{ clientSendId: string }>(
+          scope,
+          (value) => value.clientSendId === clientSendId
+        );
         setComposer("");
         // Reset the source too (see onSend): a scheduled predraft empties the
         // composer, so the predraft badge/frame must not linger over a blank
@@ -2905,8 +2926,12 @@ export default function ThreadPage() {
       [messageId]: [...(prev[messageId] ?? []), optimistic]
     }));
     try {
-      const attemptKey = `reaction:${thread.id}:${messageId}:${emoji}`;
-      const clientActionId = externalActionAttempts.getOrCreate(attemptKey, uuid);
+      const scope = `reaction:${thread.id}:${messageId}`;
+      const { clientActionId } = externalActionAttempts.getOrCreateScopedValue(
+        scope,
+        { threadId: thread.id, messageId, emoji },
+        () => ({ clientActionId: uuid() })
+      );
       const output = await apiPost<{
         status: string;
         emoji: string;
@@ -2915,10 +2940,12 @@ export default function ThreadPage() {
         `/runner/control/thread/${thread.id}/message/${messageId}/react`,
         { clientActionId, emoji }
       );
-      externalActionAttempts.completeIfReconciled(
-        attemptKey,
-        output.reconciliationPending
-      );
+      if (!output.reconciliationPending) {
+        externalActionAttempts.completeScopedValue<{ clientActionId: string }>(
+          scope,
+          (value) => value.clientActionId === clientActionId
+        );
+      }
       setError(null);
       // The runner has persisted the reaction; the refresh below pulls the
       // authoritative copy. Drop our optimistic overlay for this message so
@@ -2955,8 +2982,12 @@ export default function ThreadPage() {
 
   const voteOnPoll = async (messageId: string, selectedOptions: string[]) => {
     if (!thread) return;
-    const attemptKey = `poll-vote:${thread.id}:${messageId}:${JSON.stringify(selectedOptions)}`;
-    const clientActionId = externalActionAttempts.getOrCreate(attemptKey, uuid);
+    const scope = `poll-vote:${thread.id}:${messageId}`;
+    const { clientActionId } = externalActionAttempts.getOrCreateScopedValue(
+      scope,
+      { threadId: thread.id, messageId, selectedOptions: [...selectedOptions].sort() },
+      () => ({ clientActionId: uuid() })
+    );
     const output = await apiPost<{
       status: string;
       selectedOptions: string[];
@@ -2965,10 +2996,12 @@ export default function ThreadPage() {
       `/runner/control/thread/${thread.id}/message/${messageId}/poll-vote`,
       { clientActionId, selectedOptions }
     );
-    externalActionAttempts.completeIfReconciled(
-      attemptKey,
-      output.reconciliationPending
-    );
+    if (!output.reconciliationPending) {
+      externalActionAttempts.completeScopedValue<{ clientActionId: string }>(
+        scope,
+        (value) => value.clientActionId === clientActionId
+      );
+    }
     await refresh();
   };
 
@@ -3019,8 +3052,12 @@ export default function ThreadPage() {
       return next;
     });
     try {
-      const attemptKey = `edit:${thread.id}:${messageId}:${nextText}`;
-      const clientActionId = externalActionAttempts.getOrCreate(attemptKey, uuid);
+      const scope = `edit:${thread.id}:${messageId}`;
+      const { clientActionId } = externalActionAttempts.getOrCreateScopedValue(
+        scope,
+        { threadId: thread.id, messageId, text: nextText },
+        () => ({ clientActionId: uuid() })
+      );
       const output = await apiPost<{
         status: string;
         text: string;
@@ -3029,10 +3066,12 @@ export default function ThreadPage() {
         `/runner/control/thread/${thread.id}/message/${messageId}/edit`,
         { clientActionId, text: nextText }
       );
-      externalActionAttempts.completeIfReconciled(
-        attemptKey,
-        output.reconciliationPending
-      );
+      if (!output.reconciliationPending) {
+        externalActionAttempts.completeScopedValue<{ clientActionId: string }>(
+          scope,
+          (value) => value.clientActionId === clientActionId
+        );
+      }
       const confirmedText = output.text || nextText;
       setOptimisticTextByMessageId((prev) => ({ ...prev, [messageId]: confirmedText }));
       setEditDraft(confirmedText);

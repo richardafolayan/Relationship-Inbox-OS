@@ -3,6 +3,12 @@ import { prisma as defaultPrisma } from "../db";
 import type { EventBus } from "../types/runtime";
 import type { SendService, SendSource } from "./send";
 
+export const QUEUED_MESSAGE_SOURCES: SendSource[] = [
+  "manual",
+  "focus_ack",
+  "focus_auto_ack"
+];
+
 interface SendQueueDeps {
   sendService: SendService;
   eventBus: EventBus;
@@ -38,7 +44,13 @@ export interface SendQueueService {
     text: string;
     clientSendId: string;
     source?: SendSource;
-    attachments?: Array<{ absolutePath: string; displayName: string; mimeType?: string; kind?: string }>;
+    attachments?: Array<{
+      absolutePath: string;
+      displayName: string;
+      mimeType?: string;
+      kind?: string;
+      contentDigest?: string;
+    }>;
     /**
      * App-level threading. Forwarded to sendService.enqueueSend → persisted
      * on the SendRequest, then copied onto the resulting Message row so the
@@ -75,7 +87,11 @@ export function createSendQueue(deps: SendQueueDeps): SendQueueService {
         rerunRequested = false;
         while (true) {
           const next = await prisma.sendRequest.findFirst({
-            where: { status: "PENDING", receiptJson: null },
+            where: {
+              status: "PENDING",
+              receiptJson: null,
+              source: { in: QUEUED_MESSAGE_SOURCES }
+            },
             orderBy: { createdAt: "asc" }
           });
           if (!next) break;
@@ -100,7 +116,9 @@ export function createSendQueue(deps: SendQueueDeps): SendQueueService {
               .catch(() => undefined);
           }
 
-          const remaining = await prisma.sendRequest.count({ where: { status: "PENDING" } });
+          const remaining = await prisma.sendRequest.count({
+            where: { status: "PENDING", source: { in: QUEUED_MESSAGE_SOURCES } }
+          });
           deps.eventBus.emit({
             type: "SEND_QUEUE_UPDATED",
             jobId: "send-queue",
@@ -165,7 +183,13 @@ export function createSendQueue(deps: SendQueueDeps): SendQueueService {
     // voice notes / photos survive the type contract — without this the
     // field is silently dropped by any future refactor that relies on
     // the inferred parameter type.
-    attachments?: Array<{ absolutePath: string; displayName: string; mimeType?: string; kind?: string }>;
+    attachments?: Array<{
+      absolutePath: string;
+      displayName: string;
+      mimeType?: string;
+      kind?: string;
+      contentDigest?: string;
+    }>;
     /**
      * App-level threading. Forwarded to sendService.enqueueSend → persisted
      * on the SendRequest, then copied onto the resulting Message row so the
@@ -182,7 +206,7 @@ export function createSendQueue(deps: SendQueueDeps): SendQueueService {
   }> {
     const result = await deps.sendService.enqueueSend(input);
     const activeRows = await prisma.sendRequest.findMany({
-      where: { status: "PENDING" },
+      where: { status: "PENDING", source: { in: QUEUED_MESSAGE_SOURCES } },
       orderBy: { createdAt: "asc" },
       select: { id: true, clientSendId: true }
     });
@@ -208,7 +232,9 @@ export function createSendQueue(deps: SendQueueDeps): SendQueueService {
   }
 
   async function getActiveCount(): Promise<number> {
-    return prisma.sendRequest.count({ where: { status: "PENDING" } });
+    return prisma.sendRequest.count({
+      where: { status: "PENDING", source: { in: QUEUED_MESSAGE_SOURCES } }
+    });
   }
 
   return { enqueueAndKick, kick, resume, getActiveCount };

@@ -147,10 +147,10 @@ export function FocusThreadStrip({
     try {
       await sendAcknowledgement(
         thread.id,
+        thread.personId,
         note ?? noteForRow(row, focusWindow, templates),
         focusWindow.windowId
       );
-      await markAcked(thread.personId);
       setStatus("sent");
       setEditing(false);
       onSent?.();

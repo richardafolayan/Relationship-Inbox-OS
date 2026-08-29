@@ -25,6 +25,11 @@ interface FocusAutoAckDeps {
   };
   sendQueue: Pick<SendQueueService, "enqueueAndKick">;
   loadThread(threadId: string): Promise<FocusAutoAckThread | null>;
+  loadSendRequest(clientSendId: string): Promise<{
+    threadId: string;
+    source: string;
+    status: string;
+  } | null>;
   now?: () => Date;
   auditLog?: (input: {
     platform?: PlatformName;
@@ -156,11 +161,34 @@ export function createFocusAutoAckService(deps: FocusAutoAckDeps) {
 
   async function handleThread(threadId: string): Promise<FocusAutoAckResult> {
     const profile = await deps.settingsStore.getOperatorProfile();
-    const now = deps.now?.() ?? new Date();
-    if (!isLiveAutoWindow(profile, now)) return { type: "skipped", reason: "disabled" };
-
     const thread = await deps.loadThread(threadId);
     if (!thread) return { type: "skipped", reason: "thread_not_found" };
+    const personId = thread.person.id;
+    if (profile.focusWindow.ackedPersonIds.includes(personId)) {
+      return { type: "skipped", reason: "already_acknowledged" };
+    }
+
+    if (profile.focusWindow.windowId) {
+      const deliveredClientSendId = focusAutoAckClientSendId(
+        profile.focusWindow.windowId,
+        personId
+      );
+      const delivered = await deps.loadSendRequest(deliveredClientSendId);
+      if (
+        delivered?.threadId === threadId &&
+        delivered.source === "focus_auto_ack" &&
+        delivered.status === "SENT"
+      ) {
+        await deps.settingsStore.acknowledgeFocusWindowPerson(
+          profile.focusWindow.windowId,
+          personId
+        );
+        return { type: "skipped", reason: "already_acknowledged" };
+      }
+    }
+
+    const now = deps.now?.() ?? new Date();
+    if (!isLiveAutoWindow(profile, now)) return { type: "skipped", reason: "disabled" };
     if (!focusAutoAckCoverage(thread, profile)) return { type: "skipped", reason: "not_covered" };
     if (!thread.latestInboundAt) return { type: "skipped", reason: "no_inbound" };
 
@@ -174,11 +202,6 @@ export function createFocusAutoAckService(deps: FocusAutoAckDeps) {
     ) {
       return { type: "skipped", reason: "already_replied" };
     }
-    const personId = thread.person.id;
-    if (profile.focusWindow.ackedPersonIds.includes(personId)) {
-      return { type: "skipped", reason: "already_acknowledged" };
-    }
-
     const key = `${profile.focusWindow.windowId}:${personId}`;
     if (inFlight.has(key)) return { type: "skipped", reason: "in_flight" };
     inFlight.add(key);
@@ -219,17 +242,22 @@ export function createFocusAutoAckService(deps: FocusAutoAckDeps) {
         latest.focusWindow.windowId,
         personId
       );
-      await deps.sendQueue.enqueueAndKick({
+      const enqueueResult = await deps.sendQueue.enqueueAndKick({
         threadId,
         text,
         clientSendId,
         source: "focus_auto_ack"
       });
 
-      await deps.settingsStore.acknowledgeFocusWindowPerson(
-        latest.focusWindow.windowId,
-        personId
-      );
+      if (enqueueResult.status === "FAILED") {
+        throw new Error(enqueueResult.errorMessage ?? "Automatic focus acknowledgement failed");
+      }
+      if (enqueueResult.status === "SENT") {
+        await deps.settingsStore.acknowledgeFocusWindowPerson(
+          latest.focusWindow.windowId,
+          personId
+        );
+      }
       await deps.auditLog?.({
         platform: authoritativeThread.platform,
         stage: "focus-auto-ack",
@@ -265,7 +293,11 @@ export function bindFocusAutoAckEvents(
   service: Pick<ReturnType<typeof createFocusAutoAckService>, "handleThread">
 ): () => void {
   return eventBus.subscribe((event) => {
-    if (event.type !== "MESSAGES_PERSISTED" && event.type !== "THREAD_UPDATED") return;
+    if (
+      event.type !== "MESSAGES_PERSISTED" &&
+      event.type !== "THREAD_UPDATED" &&
+      event.type !== "MESSAGE_SENT"
+    ) return;
     void service.handleThread(event.threadId).catch((error) => {
       console.warn(
         `[focus-auto-ack] failed for threadId=${event.threadId}: ${

@@ -464,6 +464,39 @@ test("sendMessage delegates to client.sendMessage when the guard allows", async 
   assert.equal(receipt.sentAt, "2023-11-14T22:15:00.000Z");
 });
 
+test("sendMessage does not mutate WhatsApp when the final dispatch boundary rejects", async () => {
+  let physicalSends = 0;
+  let boundaryChecks = 0;
+  const client = createFakeClient({
+    sendMessage: async () => {
+      physicalSends += 1;
+      return { timestamp: 1700000100, id: { _serialized: "should-not-send" }, ack: 1 };
+    }
+  });
+  const adapter = new WhatsAppAdapter({
+    ...baseDeps(),
+    createClient: () => client
+  });
+  const ready = adapter.ensureConnected();
+  setImmediate(() => client.emit("ready"));
+  await ready;
+
+  await assert.rejects(
+    adapter.sendMessage(
+      { platformThreadId: "447111222333@c.us", displayName: "Alice", lastMessagePreview: "" },
+      "hello",
+      undefined,
+      async () => {
+        boundaryChecks += 1;
+        throw new Error("dispatch superseded");
+      }
+    ),
+    /dispatch superseded/
+  );
+  assert.equal(boundaryChecks, 1);
+  assert.equal(physicalSends, 0);
+});
+
 test("sendMessage treats a missing WhatsApp result as delivery uncertain", async () => {
   const client = createFakeClient({ sendMessage: async () => undefined });
   const adapter = new WhatsAppAdapter({
@@ -588,6 +621,49 @@ test("all WhatsApp attachments are readable before the first one is sent", async
     assert.equal(physicalSends, 0);
   } finally {
     await rm(readable, { force: true });
+  }
+});
+
+test("a multi-attachment WhatsApp action crosses the dispatch boundary once", async () => {
+  const first = join(tmpdir(), `whatsapp-boundary-first-${Date.now()}.txt`);
+  const second = join(tmpdir(), `whatsapp-boundary-second-${Date.now()}.txt`);
+  await Promise.all([writeFile(first, "first"), writeFile(second, "second")]);
+  let physicalSends = 0;
+  let boundaryChecks = 0;
+  const client = createFakeClient({
+    sendMessage: async () => {
+      physicalSends += 1;
+      return {
+        timestamp: 1700000100 + physicalSends,
+        id: { _serialized: `media-${physicalSends}` },
+        ack: 1
+      };
+    }
+  });
+  const adapter = new WhatsAppAdapter({
+    ...baseDeps(),
+    createClient: () => client
+  });
+  const ready = adapter.ensureConnected();
+  setImmediate(() => client.emit("ready"));
+  await ready;
+
+  try {
+    await adapter.sendMessage(
+      { platformThreadId: "447111222333@c.us", displayName: "Alice", lastMessagePreview: "" },
+      "caption",
+      [
+        { absolutePath: first, displayName: "first.txt", kind: "unknown" },
+        { absolutePath: second, displayName: "second.txt", kind: "unknown" }
+      ],
+      async () => {
+        boundaryChecks += 1;
+      }
+    );
+    assert.equal(boundaryChecks, 1);
+    assert.equal(physicalSends, 2);
+  } finally {
+    await Promise.all([rm(first, { force: true }), rm(second, { force: true })]);
   }
 });
 
@@ -1151,12 +1227,10 @@ test("closeSession allows a fresh ensureConnected to proceed after a stuck mid-c
   });
   // Start a connect but never resolve it (stuck mid-flight).
   const stuck = adapter.ensureConnected();
+  const stuckRejected = assert.rejects(stuck, /session closed before connection completed/);
   // Tear down without resolution.
   await adapter.closeSession();
-  // The stuck promise needs to be settled so we don't leak it; firstClient
-  // never emitted ready, but closeSession's reject won't fire either since
-  // we cleared readyPromise. Detach it.
-  stuck.catch(() => undefined);
+  await stuckRejected;
   // Fresh connect should construct a NEW client and reach ready cleanly.
   const fresh = adapter.ensureConnected();
   setImmediate(() => secondClient.emit("ready"));
@@ -1229,16 +1303,92 @@ test("an initialize rejection finishes old-client cleanup before reconnecting", 
   });
 
   const first = adapter.ensureConnected();
+  const firstRejected = assert.rejects(first, /browser failed to initialize/);
   await new Promise((resolve) => setImmediate(resolve));
   const second = adapter.ensureConnected();
   assert.equal(createCalls, 1);
   finishDestroy();
-  await assert.rejects(first, /browser failed to initialize/);
-  await assert.rejects(second, /browser failed to initialize/);
-  const replacement = adapter.ensureConnected();
+  await firstRejected;
+  await new Promise((resolve) => setImmediate(resolve));
   setImmediate(() => secondClient.emit("ready"));
-  await replacement;
+  await second;
   assert.equal(createCalls, 2);
+});
+
+test("terminal events and close share one teardown before a replacement client", async () => {
+  let finishDestroy;
+  const destroyFinished = new Promise((resolve) => { finishDestroy = resolve; });
+  let destroyCalls = 0;
+  const firstClient = createFakeClient({
+    destroy: async () => {
+      destroyCalls += 1;
+      await destroyFinished;
+    }
+  });
+  const secondClient = createFakeClient();
+  let createCalls = 0;
+  const adapter = new WhatsAppAdapter({
+    ...baseDeps(),
+    createClient: () => {
+      createCalls += 1;
+      return createCalls === 1 ? firstClient : secondClient;
+    }
+  });
+
+  const first = adapter.ensureConnected();
+  const firstRejected = assert.rejects(first, /WhatsApp auth_failure: session expired/);
+  firstClient.emit("auth_failure", "session expired");
+  firstClient.emit("disconnected", "duplicate terminal event");
+  const replacement = adapter.ensureConnected();
+  const closing = adapter.closeSession();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(createCalls, 1);
+  assert.equal(destroyCalls, 1);
+
+  finishDestroy();
+  await firstRejected;
+  await closing;
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(createCalls, 2);
+  secondClient.emit("ready");
+  await replacement;
+  assert.equal(destroyCalls, 1);
+});
+
+test("a post-ready disconnect finishes teardown before constructing a replacement", async () => {
+  let finishDestroy;
+  const destroyFinished = new Promise((resolve) => { finishDestroy = resolve; });
+  let destroyCalls = 0;
+  const firstClient = createFakeClient({
+    destroy: async () => {
+      destroyCalls += 1;
+      await destroyFinished;
+    }
+  });
+  const secondClient = createFakeClient();
+  let createCalls = 0;
+  const adapter = new WhatsAppAdapter({
+    ...baseDeps(),
+    createClient: () => {
+      createCalls += 1;
+      return createCalls === 1 ? firstClient : secondClient;
+    }
+  });
+
+  const connected = adapter.ensureConnected();
+  firstClient.emit("ready");
+  await connected;
+  firstClient.emit("disconnected", "phone offline");
+  const replacement = adapter.ensureConnected();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(createCalls, 1);
+  assert.equal(destroyCalls, 1);
+
+  finishDestroy();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(createCalls, 2);
+  secondClient.emit("ready");
+  await replacement;
 });
 
 test("a stale client cannot mark a replacement WhatsApp session connected", async () => {

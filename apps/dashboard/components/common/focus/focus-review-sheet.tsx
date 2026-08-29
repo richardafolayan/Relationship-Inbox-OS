@@ -57,7 +57,7 @@ export function FocusReviewSheet({
   onClose: () => void;
   focus: UseFocusWindow;
 }) {
-  const { focusWindow, settings, templates, markAcked, markManyAcked, active } = focus;
+  const { focusWindow, settings, templates, markAcked, active } = focus;
   const [candidates, setCandidates] = useState<InboxRow[]>([]);
   const [filtered, setFiltered] = useState<FilteredEntry[]>([]);
   const [state, setState] = useState<Record<string, RowState>>({});
@@ -132,10 +132,10 @@ export function FocusReviewSheet({
       try {
         await sendAcknowledgement(
           row.id,
+          row.personId,
           notes[key] ?? noteForRow(row, focusWindow, templates),
           focusWindow.windowId
         );
-        await markAcked(row.personId);
         setState((prev) => ({ ...prev, [key]: "sent" }));
         setEditing(null);
       } catch {
@@ -144,7 +144,7 @@ export function FocusReviewSheet({
         setBusy(false);
       }
     },
-    [active, state, busy, notes, focusWindow, templates, markAcked]
+    [active, state, busy, notes, focusWindow, templates]
   );
 
   const dismissOne = useCallback(
@@ -169,6 +169,7 @@ export function FocusReviewSheet({
         try {
           await sendAcknowledgement(
             row.id,
+            row.personId,
             notes[key] ?? noteForRow(row, focusWindow, templates),
             focusWindow.windowId
           );
@@ -177,11 +178,10 @@ export function FocusReviewSheet({
           // Skip a failed send; the row stays open for a manual retry.
         }
       }
-      await markManyAcked(open.map((row) => row.personId));
     } finally {
       setBusy(false);
     }
-  }, [active, busy, candidates, state, notes, focusWindow, templates, markManyAcked]);
+  }, [active, busy, candidates, state, notes, focusWindow, templates]);
 
   const title = !active
     ? "This focus window has ended."

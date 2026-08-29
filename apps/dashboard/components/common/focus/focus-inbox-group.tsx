@@ -24,7 +24,7 @@ export function FocusInboxGroup({
   rows: InboxRow[];
   onChanged?: () => void;
 }) {
-  const { focusWindow, settings, templates, active, markAcked } = useFocusWindow();
+  const { focusWindow, settings, templates, active } = useFocusWindow();
   const [sent, setSent] = useState<Set<string>>(new Set());
   const [busyKey, setBusyKey] = useState<string | null>(null);
 
@@ -45,10 +45,10 @@ export function FocusInboxGroup({
       try {
         await sendAcknowledgement(
           row.id,
+          row.personId,
           noteForRow(row, focusWindow, templates),
           focusWindow.windowId
         );
-        await markAcked(row.personId);
         setSent((prev) => new Set(prev).add(key));
         onChanged?.();
       } catch {
@@ -57,7 +57,7 @@ export function FocusInboxGroup({
         setBusyKey(null);
       }
     },
-    [busyKey, active, focusWindow, templates, markAcked, onChanged]
+    [busyKey, active, focusWindow, templates, onChanged]
   );
 
   if (!active || candidates.length === 0) return null;

@@ -70,8 +70,15 @@ function thread(overrides = {}) {
   };
 }
 
-function harness({ profileValue = profile(), threadValue = thread(), loadThread, afterEnqueue } = {}) {
+function harness({
+  profileValue = profile(),
+  threadValue = thread(),
+  loadThread,
+  afterEnqueue,
+  queueStatus = "PENDING"
+} = {}) {
   let current = structuredClone(profileValue);
+  let deliveredSendRequest = null;
   const queued = [];
   const writes = [];
   const service = createFocusAutoAckService({
@@ -98,6 +105,11 @@ function harness({ profileValue = profile(), threadValue = thread(), loadThread,
     async loadThread(threadId) {
       return loadThread ? loadThread(threadId) : threadValue;
     },
+    async loadSendRequest(clientSendId) {
+      return deliveredSendRequest?.clientSendId === clientSendId
+        ? { ...deliveredSendRequest }
+        : null;
+    },
     sendQueue: {
       async enqueueAndKick(input) {
         queued.push(input);
@@ -107,7 +119,7 @@ function harness({ profileValue = profile(), threadValue = thread(), loadThread,
         });
         return {
           clientSendId: input.clientSendId,
-          status: "PENDING",
+          status: queueStatus,
           replayed: false,
           queuePosition: 0,
           activeCount: 1
@@ -115,11 +127,26 @@ function harness({ profileValue = profile(), threadValue = thread(), loadThread,
       }
     }
   });
-  return { service, queued, writes, current: () => current };
+  return {
+    service,
+    queued,
+    writes,
+    current: () => current,
+    markDelivered() {
+      const send = queued.at(-1);
+      if (!send) throw new Error("no queued focus acknowledgement");
+      deliveredSendRequest = {
+        clientSendId: send.clientSendId,
+        threadId: send.threadId,
+        source: send.source,
+        status: "SENT"
+      };
+    }
+  };
 }
 
 test("explicit focus opt-in queues the operator's note once and records the person", async () => {
-  const h = harness();
+  const h = harness({ queueStatus: "SENT" });
   const result = await h.service.handleThread("thread-1");
   assert.equal(result.type, "queued");
   assert.equal(h.queued.length, 1);
@@ -131,8 +158,43 @@ test("explicit focus opt-in queues the operator's note once and records the pers
   assert.equal(h.queued.length, 1);
 });
 
+test("a queued but not yet delivered automatic note is not marked acknowledged", async () => {
+  const h = harness();
+
+  const result = await h.service.handleThread("thread-1");
+
+  assert.equal(result.type, "queued");
+  assert.equal(h.queued.length, 1);
+  assert.deepEqual(h.current().focusWindow.ackedPersonIds, []);
+  assert.deepEqual(h.writes, []);
+});
+
+test("a delivered automatic note is acknowledged when its send event arrives", async () => {
+  const h = harness();
+  const eventBus = createEventBus();
+  const unsubscribe = bindFocusAutoAckEvents(eventBus, h.service);
+  const settle = () => new Promise((resolve) => setImmediate(resolve));
+
+  await h.service.handleThread("thread-1");
+  h.markDelivered();
+  eventBus.emit({
+    type: "MESSAGE_SENT",
+    jobId: "focus-auto-ack-sent",
+    threadId: "thread-1",
+    platform: "IMESSAGE",
+    clientSendId: h.queued[0].clientSendId,
+    verifiedBy: "best_effort"
+  });
+  await settle();
+
+  assert.deepEqual(h.current().focusWindow.ackedPersonIds, ["person-1"]);
+  assert.equal(h.queued.length, 1);
+  unsubscribe();
+});
+
 test("recording the queued person cannot reactivate a focus window ended concurrently", async () => {
   const h = harness({
+    queueStatus: "SENT",
     afterEnqueue: async ({ read, write }) => {
       const ended = read();
       write({ ...ended, focusWindow: { ...ended.focusWindow, active: false } });

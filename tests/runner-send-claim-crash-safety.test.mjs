@@ -178,8 +178,10 @@ function makeHarness(initialRows, opts = {}) {
   };
 
   const adapter = {
-    async sendMessage(stub, text) {
+    async sendMessage(stub, text, _attachments, beforeDispatch) {
       sentStubs.push(stub);
+      await opts.beforeAdapterDispatch?.();
+      await beforeDispatch?.();
       sends.push(text);
       await opts.onSend?.();
       if (opts.adapterFailure) {
@@ -465,6 +467,99 @@ test("manual intent arriving during the final database guard still supersedes au
   assert.equal(h.sends.length, 0);
   assert.equal(h.rows[0].status, "FAILED");
   assert.equal(JSON.parse(h.rows[0].errorJson).reasonCode, "focus_auto_ack_superseded");
+});
+
+test("a completed manual request during boundary revalidation still supersedes auto-ack", async () => {
+  let releaseFinalQuery;
+  let finalQueryStarted;
+  const finalQuery = new Promise((resolve) => { releaseFinalQuery = resolve; });
+  const reachedFinalQuery = new Promise((resolve) => { finalQueryStarted = resolve; });
+  const h = makeHarness([focusAutoAckRow()], {
+    async onSupersedingQuery(count) {
+      if (count !== 2) return;
+      finalQueryStarted();
+      await finalQuery;
+    }
+  });
+
+  const processing = h.svc.processSendRequest("sr1");
+  await reachedFinalQuery;
+  const releaseIntent = h.svc.registerUserTriggeredIntent("t1");
+  releaseIntent();
+  releaseFinalQuery();
+  await processing;
+
+  assert.equal(h.sends.length, 0);
+  assert.equal(h.rows[0].status, "FAILED");
+  assert.equal(JSON.parse(h.rows[0].errorJson).reasonCode, "focus_auto_ack_superseded");
+});
+
+test("a focus-policy write at the physical-send boundary supersedes auto-ack", async () => {
+  let releaseFinalQuery;
+  let finalQueryStarted;
+  const finalQuery = new Promise((resolve) => { releaseFinalQuery = resolve; });
+  const reachedFinalQuery = new Promise((resolve) => { finalQueryStarted = resolve; });
+  const h = makeHarness([focusAutoAckRow()], {
+    async onSupersedingQuery(count) {
+      if (count !== 2) return;
+      finalQueryStarted();
+      await finalQuery;
+    }
+  });
+
+  const processing = h.svc.processSendRequest("sr1");
+  await reachedFinalQuery;
+  const releasePolicyMutation = h.svc.registerFocusPolicyMutationIntent();
+  releaseFinalQuery();
+  await processing;
+  releasePolicyMutation();
+
+  assert.equal(h.sends.length, 0);
+  assert.equal(h.rows[0].status, "FAILED");
+  assert.equal(JSON.parse(h.rows[0].errorJson).reasonCode, "focus_auto_ack_superseded");
+});
+
+test("a completed focus-policy write during boundary revalidation still supersedes auto-ack", async () => {
+  let releaseFinalQuery;
+  let finalQueryStarted;
+  const finalQuery = new Promise((resolve) => { releaseFinalQuery = resolve; });
+  const reachedFinalQuery = new Promise((resolve) => { finalQueryStarted = resolve; });
+  const h = makeHarness([focusAutoAckRow()], {
+    async onSupersedingQuery(count) {
+      if (count !== 2) return;
+      finalQueryStarted();
+      await finalQuery;
+    }
+  });
+
+  const processing = h.svc.processSendRequest("sr1");
+  await reachedFinalQuery;
+  const releasePolicyMutation = h.svc.registerFocusPolicyMutationIntent();
+  releasePolicyMutation();
+  releaseFinalQuery();
+  await processing;
+
+  assert.equal(h.sends.length, 0);
+  assert.equal(h.rows[0].status, "FAILED");
+  assert.equal(JSON.parse(h.rows[0].errorJson).reasonCode, "focus_auto_ack_superseded");
+});
+
+test("focus-policy intent leases are counted and each release is idempotent", async () => {
+  const h = makeHarness([focusAutoAckRow({ id: "auto-ack" })]);
+  const releaseFirst = h.svc.registerFocusPolicyMutationIntent();
+  const releaseSecond = h.svc.registerFocusPolicyMutationIntent();
+
+  releaseFirst();
+  releaseFirst();
+  await h.svc.processSendRequest("auto-ack");
+  assert.equal(h.sends.length, 0);
+  assert.equal(h.rows[0].status, "FAILED");
+
+  releaseSecond();
+  Object.assign(h.rows[0], { status: "PENDING", receiptJson: null, errorJson: null });
+  await h.svc.processSendRequest("auto-ack");
+  assert.deepEqual(h.sends, ["I am focusing until 2:00pm."]);
+  assert.equal(h.rows[0].status, "SENT");
 });
 
 test("ending the focus window during the final database guard prevents auto-ack", async () => {

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import type {
   AttachmentPlaceholder,
   NormalizedMessage,
+  OutboundAttachment,
   PlatformAdapter,
   SelectorRegistry,
   SendReceipt,
@@ -1961,8 +1962,6 @@ export function linkedInCollectionCompleteness(
   }
   if (
     stopReason === "zero_threads_found" ||
-    stopReason === "end_of_list_reached" ||
-    stopReason === "deep_scroll_exhausted" ||
     stopReason === "unchanged_streak"
   ) {
     return "complete";
@@ -3997,6 +3996,7 @@ export class LinkedInAdapter implements PlatformAdapter {
     threadItemCount: number;
     spinnerCount: number;
     visibleSetHash: string;
+    listWindowHash: string;
     bottomKey: string | null;
   }> {
     const threadListLocator = page.locator(selectors.thread_list).first();
@@ -4004,6 +4004,7 @@ export class LinkedInAdapter implements PlatformAdapter {
     const rowRoots = page.locator(".msg-conversation-listitem");
     const selectorItemCount = await rowRoots.count().catch(() => 0);
     const rows: LinkedInThreadSnapshot[] = [];
+    const listWindowKeys: string[] = [];
 
     const readText = async (locator: Locator): Promise<string | null> => {
       const first = locator.first();
@@ -4056,14 +4057,28 @@ export class LinkedInAdapter implements PlatformAdapter {
           (await readText(scope.locator("span.msg-conversation-card__pill"))) ??
           ""
       );
-      if (isSponsoredPillText(pillText)) {
-        continue;
-      }
       const lastMessageAt = cleanText(
         (await readText(scope.locator("time.msg-conversation-listitem__time-stamp"))) ??
           (await readText(scope.locator("time"))) ??
           ""
       );
+
+      const urnToken =
+        (await readAttr(scope, "data-conversation-urn")) ??
+        (await readAttr(scope, "data-urn")) ??
+        (await readAttr(scope, "data-event-urn")) ??
+        (await readAttr(scope, "data-conversation-id")) ??
+        (await readAttr(scope, "data-id")) ??
+        (await readAttr(scope, "id")) ??
+        "";
+      listWindowKeys.push(
+        [urnToken, href, displayName, preview, lastMessageAt, pillText]
+          .map((part) => cleanText(part))
+          .join("\u001f") || `mounted-row:${index}`
+      );
+      if (isSponsoredPillText(pillText)) {
+        continue;
+      }
 
       const unreadContainer = scope.locator(".msg-conversation-card__unread-count").first();
       const unreadContainerExists = (await unreadContainer.count().catch(() => 0)) > 0;
@@ -4082,14 +4097,6 @@ export class LinkedInAdapter implements PlatformAdapter {
           ? 1
           : 0;
 
-      const urnToken =
-        (await readAttr(scope, "data-conversation-urn")) ??
-        (await readAttr(scope, "data-urn")) ??
-        (await readAttr(scope, "data-event-urn")) ??
-        (await readAttr(scope, "data-conversation-id")) ??
-        (await readAttr(scope, "data-id")) ??
-        (await readAttr(scope, "id")) ??
-        "";
       const canonicalId = normalizeCanonicalLinkedInThreadId({
         threadUrl: href || undefined,
         activeKey: urnToken || undefined
@@ -4131,6 +4138,7 @@ export class LinkedInAdapter implements PlatformAdapter {
       threadItemCount: selectorItemCount,
       spinnerCount: await page.locator(linkedInLoadingSpinnerSelector).count().catch(() => 0),
       visibleSetHash,
+      listWindowHash: listWindowKeys.join("|"),
       bottomKey
     };
   }
@@ -4145,6 +4153,7 @@ export class LinkedInAdapter implements PlatformAdapter {
     threadItemCount: number;
     spinnerCount: number;
     visibleSetHash: string;
+    listWindowHash: string;
     bottomKey: string | null;
   }> {
     return this.collectThreadCandidates(page, selectors);
@@ -4153,7 +4162,7 @@ export class LinkedInAdapter implements PlatformAdapter {
   async deepScrollThreadList(
     page: Page,
     selectors: SelectorRegistry,
-    state: { bottomKey: string | null; visibleSetHash: string }
+    state: { bottomKey: string | null; visibleSetHash: string; listWindowHash?: string }
   ): Promise<{
     didScroll: boolean;
     reachedBottom: boolean;
@@ -4249,6 +4258,50 @@ export class LinkedInAdapter implements PlatformAdapter {
             after.clientHeight !== before.clientHeight)
       );
 
+    const waitForListProgress = async (
+      note: string,
+      before: ScrollGeometry
+    ): Promise<{
+      snapshot: Awaited<ReturnType<LinkedInAdapter["collectThreadCandidates"]>>;
+      geometry: ScrollGeometry | null;
+      moved: boolean;
+    }> => {
+      const intervalMs = Math.max(50, Math.min(200, this.deps.scanScrollWaitMs));
+      const totalWaitMs = Math.max(600, Math.min(2_000, this.deps.scanScrollWaitMs * 4));
+      const deadline = Date.now() + totalWaitMs;
+      let snapshot = await this.collectThreadCandidates(page, selectors);
+      let geometry = await readResolvedContainer();
+      const listWindowMoved = () =>
+        state.listWindowHash !== undefined && snapshot.listWindowHash !== state.listWindowHash;
+      let moved = Boolean(
+        (snapshot.bottomKey && snapshot.bottomKey !== state.bottomKey) ||
+        snapshot.visibleSetHash !== state.visibleSetHash ||
+        listWindowMoved() ||
+        geometryChanged(before, geometry)
+      );
+      while (!moved && Date.now() < deadline) {
+        await this.runTracedPageAction({
+          page,
+          stage: "collect_threads",
+          action: "wait_for_timeout",
+          note,
+          details: { delayMs: intervalMs },
+          run: async () => {
+            await page.waitForTimeout(intervalMs);
+          }
+        });
+        snapshot = await this.collectThreadCandidates(page, selectors);
+        geometry = await readResolvedContainer();
+        moved = Boolean(
+          (snapshot.bottomKey && snapshot.bottomKey !== state.bottomKey) ||
+          snapshot.visibleSetHash !== state.visibleSetHash ||
+          listWindowMoved() ||
+          geometryChanged(before, geometry)
+        );
+      }
+      return { snapshot, geometry, moved };
+    };
+
     let beforeGeometry = await scrollResolvedContainer("primary_scroll");
     if (!beforeGeometry) {
       return {
@@ -4258,26 +4311,8 @@ export class LinkedInAdapter implements PlatformAdapter {
         stopReason: "no_scroll_container"
       };
     }
-    await this.runTracedPageAction({
-      page,
-      stage: "collect_threads",
-      action: "wait_for_timeout",
-      note: "after_primary_scroll",
-      details: {
-        delayMs: Math.max(80, this.deps.scanScrollWaitMs)
-      },
-      run: async () => {
-        await page.waitForTimeout(Math.max(80, this.deps.scanScrollWaitMs));
-      }
-    });
-
-    let after = await this.collectThreadCandidates(page, selectors);
-    let afterGeometry = await readResolvedContainer();
-    let moved = Boolean(
-      (after.bottomKey && after.bottomKey !== state.bottomKey) ||
-      after.visibleSetHash !== state.visibleSetHash ||
-      geometryChanged(beforeGeometry, afterGeometry)
-    );
+    let progress = await waitForListProgress("after_primary_scroll", beforeGeometry);
+    let moved = progress.moved;
     if (!moved) {
       beforeGeometry = await scrollResolvedContainer("secondary_scroll");
       if (!beforeGeometry) {
@@ -4288,30 +4323,16 @@ export class LinkedInAdapter implements PlatformAdapter {
           stopReason: "no_scroll_container"
         };
       }
-      await this.runTracedPageAction({
-        page,
-        stage: "collect_threads",
-        action: "wait_for_timeout",
-        note: "after_secondary_scroll",
-        details: {
-          delayMs: Math.max(80, this.deps.scanScrollWaitMs)
-        },
-        run: async () => {
-          await page.waitForTimeout(Math.max(80, this.deps.scanScrollWaitMs));
-        }
-      });
-      after = await this.collectThreadCandidates(page, selectors);
-      afterGeometry = await readResolvedContainer();
-      moved = Boolean(
-        (after.bottomKey && after.bottomKey !== state.bottomKey) ||
-        after.visibleSetHash !== state.visibleSetHash ||
-        geometryChanged(beforeGeometry, afterGeometry)
-      );
+      progress = await waitForListProgress("after_secondary_scroll", beforeGeometry);
+      moved = progress.moved;
     }
 
     return {
       didScroll: true,
-      reachedBottom: !moved && Boolean(afterGeometry?.atBottom),
+      // Geometry at the current bottom is not authoritative for LinkedIn's
+      // lazy virtualized list. Without a native end marker, a quiet window is
+      // an incomplete no-progress result, not proof that all rows were seen.
+      reachedBottom: false,
       moved
     };
   }
@@ -4386,6 +4407,7 @@ export class LinkedInAdapter implements PlatformAdapter {
     let bottomRepeatStreak = 0;
     let scrollNoMoveStreak = 0;
     let previousBottomKey: string | null = null;
+    let previousListWindowHash: string | null = null;
     let stopReason: LinkedInCollectionStopReason = "max_iterations";
 
     this.logTraceEvent({
@@ -4542,16 +4564,19 @@ export class LinkedInAdapter implements PlatformAdapter {
       }
       const nextCount = merged.size;
       const grew = nextCount > previousCount;
+      const listWindowChanged =
+        previousListWindowHash !== null && snapshot.listWindowHash !== previousListWindowHash;
       const bottomRepeated = Boolean(snapshot.bottomKey && snapshot.bottomKey === previousBottomKey);
 
-      if (grew) {
+      if (grew || listWindowChanged) {
         noProgressStreak = 0;
       } else {
         noProgressStreak += 1;
       }
-      bottomRepeatStreak = bottomRepeated ? bottomRepeatStreak + 1 : 0;
+      bottomRepeatStreak = bottomRepeated && !listWindowChanged ? bottomRepeatStreak + 1 : 0;
 
       previousBottomKey = snapshot.bottomKey;
+      previousListWindowHash = snapshot.listWindowHash;
 
       if (nextCount >= cappedMaxThreads) {
         stopReason = "max_threads";
@@ -4616,7 +4641,8 @@ export class LinkedInAdapter implements PlatformAdapter {
 
       const scrollOutcome = await this.deepScrollThreadList(page, selectors, {
         bottomKey: snapshot.bottomKey,
-        visibleSetHash: snapshot.visibleSetHash
+        visibleSetHash: snapshot.visibleSetHash,
+        listWindowHash: snapshot.listWindowHash
       });
       scrollIterations += 1;
       this.logTraceEvent({
@@ -10207,7 +10233,12 @@ export class LinkedInAdapter implements PlatformAdapter {
     };
   }
 
-  async sendMessage(thread: ThreadStub, text: string): Promise<SendReceipt> {
+  async sendMessage(
+    thread: ThreadStub,
+    text: string,
+    _attachments?: OutboundAttachment[],
+    beforeDispatch?: () => Promise<void>
+  ): Promise<SendReceipt> {
     // Stdout-visible breadcrumbs for the send flow. The send-queue worker
     // doesn't have a runLogger attached so logTraceDecision is a no-op for
     // this path; without these console.warns a hung send shows up as silence
@@ -10279,7 +10310,25 @@ export class LinkedInAdapter implements PlatformAdapter {
         await readingPause(700, 1800);
         console.warn(`${tag} click send_button (selector=${selectors.send_button})`);
         const sendBtn = page.locator(selectors.send_button).first();
-        await humanClick(page, sendBtn, { timeout: 10_000, reading: null });
+        let dispatchAuthorized = false;
+        try {
+          await humanClick(page, sendBtn, {
+            timeout: 10_000,
+            reading: null,
+            beforeClick: async () => {
+              await beforeDispatch?.();
+              dispatchAuthorized = true;
+            }
+          });
+        } catch (error) {
+          if (!dispatchAuthorized) {
+            await composer.fill("").catch(async () => {
+              await page.keyboard.press("Meta+A").catch(() => undefined);
+              await page.keyboard.press("Backspace").catch(() => undefined);
+            });
+          }
+          throw error;
+        }
         const acknowledgedAt = new Date().toISOString();
         console.warn(`${tag} send_button clicked, entering verify loop`);
 

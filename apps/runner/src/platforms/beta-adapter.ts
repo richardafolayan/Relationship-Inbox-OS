@@ -1,6 +1,7 @@
 import type { Page } from "patchright";
 import type {
   NormalizedMessage,
+  OutboundAttachment,
   PlatformAdapter,
   PlatformName,
   SelectorRegistry,
@@ -517,7 +518,12 @@ export class BetaAdapter implements PlatformAdapter {
     }
   }
 
-  async sendMessage(thread: ThreadStub, text: string): Promise<SendReceipt> {
+  async sendMessage(
+    thread: ThreadStub,
+    text: string,
+    _attachments?: OutboundAttachment[],
+    beforeDispatch?: () => Promise<void>
+  ): Promise<SendReceipt> {
     const selectors = await this.deps.resolveSelectors();
     const page = await this.getPage();
 
@@ -544,9 +550,22 @@ export class BetaAdapter implements PlatformAdapter {
 
       await readingPause(700, 1800);
       const sendBtn = page.locator(selectors.send_button).first();
-      await humanClick(page, sendBtn, { timeout: 10000, reading: null }).catch(async () => {
-        await page.keyboard.press("Enter");
-      });
+      let dispatchAuthorized = false;
+      try {
+        await humanClick(page, sendBtn, {
+          timeout: 10000,
+          reading: null,
+          beforeClick: async () => {
+            await beforeDispatch?.();
+            dispatchAuthorized = true;
+          }
+        });
+      } catch (error) {
+        if (!dispatchAuthorized) {
+          await composer.fill("").catch(() => undefined);
+        }
+        throw error;
+      }
 
       return {
         sentAt: new Date().toISOString(),

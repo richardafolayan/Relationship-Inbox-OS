@@ -32,7 +32,7 @@ interface DictationMessageReviewProps {
   onKeepTranscript: (transcript: string) => void;
   onDone: () => void;
   onMessageSent: () => void;
-  onSendMessage: (text: string) => Promise<void>;
+  onSendMessage: (messageId: string, text: string) => Promise<void>;
 }
 
 type View = "choice" | "formatting" | "review" | "error" | "sending";
@@ -148,7 +148,7 @@ export function DictationMessageReview({
       try {
         const message = ready[index]!;
         const text = message.text.trim();
-        await onSendMessage(text);
+        await onSendMessage(message.id, text);
         sentTexts.push(text);
         setSentMessageIds((current) => new Set(current).add(message.id));
       } catch (sendError) {
@@ -177,7 +177,7 @@ export function DictationMessageReview({
     setSendingMessageIds((current) => new Set(current).add(message.id));
     setError(null);
     try {
-      await onSendMessage(text);
+      await onSendMessage(message.id, text);
       setSentMessageIds((current) => new Set(current).add(message.id));
       onMessageSent();
       void apiPost(`/runner/control/thread/${threadId}/dictation-message-example`, {

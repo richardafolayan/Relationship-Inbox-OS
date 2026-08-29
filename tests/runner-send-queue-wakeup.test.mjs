@@ -38,11 +38,13 @@ test("enqueue during the final empty read cannot lose the queue wakeup", async (
     }
   };
   const processed = [];
+  const enqueued = [];
   const queue = createSendQueue({
     prisma,
     eventBus: { emit: () => {} },
     sendService: {
       async enqueueSend(input) {
+        enqueued.push(input);
         rows.push({ id: "row-1", clientSendId: input.clientSendId, status: "PENDING" });
         return { clientSendId: input.clientSendId, status: "PENDING", replayed: false };
       },
@@ -64,7 +66,14 @@ test("enqueue during the final empty read cannot lose the queue wakeup", async (
   const enqueue = queue.enqueueAndKick({
     threadId: "thread-1",
     text: "hello",
-    clientSendId: "client-1"
+    clientSendId: "client-1",
+    attachments: [{
+      absolutePath: "/tmp/photo.jpg",
+      displayName: "photo.jpg",
+      mimeType: "image/jpeg",
+      kind: "photo",
+      contentDigest: "sha256:photo"
+    }]
   });
   await new Promise((resolve) => setImmediate(resolve));
   releaseEmptyRead();
@@ -74,5 +83,6 @@ test("enqueue during the final empty read cannot lose the queue wakeup", async (
     await new Promise((resolve) => setImmediate(resolve));
   }
   assert.deepEqual(processed, ["row-1"]);
+  assert.equal(enqueued[0].attachments[0].contentDigest, "sha256:photo");
   assert.equal(rows[0].status, "SENT");
 });

@@ -66,11 +66,47 @@ test("every user-triggered outbound message request registers intent before body
   const registration = source.indexOf("app.use(registerUserTriggeredSendIntent)");
   assert.notEqual(registration, -1);
   assert.ok(registration < source.indexOf("const jsonSmall"));
-  assert.match(source, /\(send\|send-poll\|retry-send\)/);
+  assert.match(source, /createUserTriggeredIntentMiddleware\([\s\S]*?resolveUserTriggeredIntentThreadId/);
+
+  for (const [path, nextPath] of [
+    ["/control/thread/:threadId/send", "/control/thread/:threadId/send-poll"],
+    ["/control/thread/:threadId/send-poll", "/control/thread/:threadId/update-send"],
+    ["/control/thread/:threadId/retry-send", "/control/thread/:threadId/open"]
+  ]) {
+    const block = route(path, nextPath);
+    assert.match(block, /beginUserTriggeredIntentOperation\(res\)/);
+    assert.match(block, /finally\s*\{\s*completeUserTriggeredIntent\(\)/);
+  }
+
+  const profileRegistration = source.indexOf("app.use(registerFocusPolicyMutationIntent)");
+  assert.notEqual(profileRegistration, -1);
+  assert.ok(profileRegistration < source.indexOf("const jsonSmall"));
+  const profileRoute = route(
+    "/control/operator-profile",
+    "/control/calendar/preview"
+  );
+  assert.match(profileRoute, /beginUserTriggeredIntentOperation\(res\)/);
+  assert.match(profileRoute, /finally\s*\{\s*completeFocusPolicyMutation\(\)/);
 });
 
 test("durable external actions reconcile local projections during runner startup", () => {
   assert.match(source, /durableExternalActionService\.reconcileSentProjections\(\)/);
+});
+
+test("manual focus acknowledgement completion trusts only a delivered matching send", () => {
+  const block = route(
+    "/control/thread/:threadId/focus-ack/complete",
+    "/control/thread/:threadId/open"
+  );
+  assert.match(block, /request\.threadId !== threadId \|\| request\.source !== "focus_ack"/);
+  assert.match(block, /request\.status !== "SENT"/);
+  assert.match(block, /profile\.focusWindow\.windowId !== payload\.focusWindowId/);
+  assert.match(block, /request\.createdAt\.getTime\(\) < windowStartedAt/);
+  assert.match(
+    block,
+    /settingsStore\.acknowledgeFocusWindowPerson\(\s*payload\.focusWindowId,\s*request\.thread\.personId/
+  );
+  assert.doesNotMatch(block, /setOperatorProfile|updateOperatorProfile/);
 });
 
 test("send workers and every session reset share the same external-action lock vocabulary", () => {

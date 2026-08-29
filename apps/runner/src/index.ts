@@ -111,8 +111,14 @@ import {
   type MessageSyncMetric
 } from "./services/message-sync-latency";
 import { createSendService, parsePersistedSendSource } from "./services/send";
-import { createUserTriggeredIntentMiddleware } from "./services/user-triggered-intent-middleware";
-import { createSendQueue } from "./services/send-queue";
+import {
+  abandonUnstartedUserTriggeredIntent,
+  beginUserTriggeredIntentOperation,
+  createUserTriggeredIntentMiddleware,
+  resolveFocusPolicyMutationIntentKey,
+  resolveUserTriggeredIntentThreadId
+} from "./services/user-triggered-intent-middleware";
+import { createSendQueue, QUEUED_MESSAGE_SOURCES } from "./services/send-queue";
 import { createPlatformSessionResetCoordinator } from "./services/platform-session-reset-coordinator";
 import { bindFocusAutoAckEvents, createFocusAutoAckService } from "./services/focus-auto-ack";
 import { createAdminResetCoordinator } from "./services/admin-reset-coordinator";
@@ -228,17 +234,17 @@ import type { OverdueDigestRowInput } from "@inbox-os/core";
 
 const app = express();
 let registerUserTriggeredIntentForRequest = (_threadId: string): (() => void) => () => {};
+let registerFocusPolicyMutationForRequest = (): (() => void) => () => {};
 const registerUserTriggeredSendIntent = createUserTriggeredIntentMiddleware(
   (threadId) => registerUserTriggeredIntentForRequest(threadId),
-  (req) => {
-    if (req.method !== "POST") return undefined;
-    const match = req.path.match(
-      /^\/control\/thread\/([^/]+)\/(send|send-poll|retry-send)$/
-    );
-    return match ? decodeURIComponent(match[1]!) : undefined;
-  }
+  resolveUserTriggeredIntentThreadId
+);
+const registerFocusPolicyMutationIntent = createUserTriggeredIntentMiddleware(
+  () => registerFocusPolicyMutationForRequest(),
+  resolveFocusPolicyMutationIntentKey
 );
 app.use(registerUserTriggeredSendIntent);
+app.use(registerFocusPolicyMutationIntent);
 const runnerProcessInfo = {
   executableName: basename(process.execPath),
   executablePath: process.execPath,
@@ -1286,6 +1292,8 @@ const sendService = createSendService({
 });
 registerUserTriggeredIntentForRequest = (threadId) =>
   sendService.registerUserTriggeredIntent(threadId);
+registerFocusPolicyMutationForRequest = () =>
+  sendService.registerFocusPolicyMutationIntent();
 const pollSendService = createPollSendService({
   prisma,
   settingsStore,
@@ -1352,6 +1360,11 @@ const focusAutoAck = createFocusAutoAckService({
   settingsStore,
   sendQueue,
   auditLog: (input) => auditService.log(input),
+  loadSendRequest: (clientSendId) =>
+    prisma.sendRequest.findUnique({
+      where: { clientSendId },
+      select: { threadId: true, source: true, status: true }
+    }),
   loadThread: async (threadId) => {
     const [thread, latestInbound, latestOutbound] = await Promise.all([
       prisma.thread.findUnique({
@@ -4052,6 +4065,8 @@ app.post("/control/platform/test-selectors", asyncRoute(async (req, res) => {
 // outreach loops, batch send-all — should land in a separate gated
 // surface, never inline here.
 app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req, res) => {
+  const completeUserTriggeredIntent = beginUserTriggeredIntentOperation(res);
+  try {
   const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
   if (await checkPresenterGuard(res, settingsStore, { threadId, action: "send", kind: "thread-mutation" })) return;
   // For multipart bodies, multer puts file metadata on req.files and
@@ -4183,9 +4198,14 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
     });
     throw error;
   }
+  } finally {
+    completeUserTriggeredIntent();
+  }
 }));
 
 app.post("/control/thread/:threadId/send-poll", asyncRoute(async (req, res) => {
+  const completeUserTriggeredIntent = beginUserTriggeredIntentOperation(res);
+  try {
   const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
   if (await checkPresenterGuard(res, settingsStore, { threadId, action: "send a poll", kind: "thread-mutation" })) return;
   const payload = z
@@ -4262,6 +4282,9 @@ app.post("/control/thread/:threadId/send-poll", asyncRoute(async (req, res) => {
   if (outcome.status === "missing") {
     res.status(404).json({ error: "thread not found" });
   }
+  } finally {
+    completeUserTriggeredIntent();
+  }
 }));
 
 app.post("/control/thread/:threadId/update-send", asyncRoute(async (req, res) => {
@@ -4335,6 +4358,8 @@ app.post("/control/thread/:threadId/cancel-send", asyncRoute(async (req, res) =>
 }));
 
 app.post("/control/thread/:threadId/retry-send", asyncRoute(async (req, res) => {
+  const completeUserTriggeredIntent = beginUserTriggeredIntentOperation(res);
+  try {
   const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
   if (await checkPresenterGuard(res, settingsStore, { threadId, action: "retry a send", kind: "thread-mutation" })) return;
   const payload = z.object({ clientSendId: z.string().uuid() }).parse(req.body);
@@ -4401,6 +4426,57 @@ app.post("/control/thread/:threadId/retry-send", asyncRoute(async (req, res) => 
     });
     throw error;
   }
+  } finally {
+    completeUserTriggeredIntent();
+  }
+}));
+
+app.post("/control/thread/:threadId/focus-ack/complete", asyncRoute(async (req, res) => {
+  const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
+  if (await checkPresenterGuard(res, settingsStore, {
+    threadId,
+    action: "complete a focus acknowledgement",
+    kind: "thread-mutation"
+  })) return;
+  const payload = z.object({
+    clientSendId: z.string().uuid(),
+    focusWindowId: z.string().min(1).max(80)
+  }).parse(req.body);
+  const request = await prisma.sendRequest.findUnique({
+    where: { clientSendId: payload.clientSendId },
+    include: { thread: { select: { personId: true } } }
+  });
+  if (!request) {
+    res.status(404).json({ error: "send_request_not_found" });
+    return;
+  }
+  if (request.threadId !== threadId || request.source !== "focus_ack") {
+    res.status(409).json({ error: "focus_ack_intent_mismatch" });
+    return;
+  }
+  if (request.status !== "SENT") {
+    res.status(409).json({ error: `focus_ack_not_delivered:${request.status}` });
+    return;
+  }
+  const profile = await settingsStore.getOperatorProfile();
+  const windowStartedAt = Date.parse(profile.focusWindow.startedAt);
+  if (
+    profile.focusWindow.windowId !== payload.focusWindowId ||
+    !Number.isFinite(windowStartedAt) ||
+    request.createdAt.getTime() < windowStartedAt
+  ) {
+    res.status(409).json({ error: "focus_window_changed" });
+    return;
+  }
+  const acknowledged = await settingsStore.acknowledgeFocusWindowPerson(
+    payload.focusWindowId,
+    request.thread.personId
+  );
+  if (!acknowledged) {
+    res.status(409).json({ error: "focus_window_changed" });
+    return;
+  }
+  res.json({ status: "acknowledged", clientSendId: payload.clientSendId });
 }));
 
 app.post("/control/thread/:threadId/open", asyncRoute(async (req, res) => {
@@ -6698,7 +6774,11 @@ app.get("/data/archived", asyncRoute(async (_req, res) => {
 app.get("/data/send-queue", asyncRoute(async (_req, res) => {
   const [activeRows, scheduledRows, recentDoneRows] = await Promise.all([
     prisma.sendRequest.findMany({
-      where: { status: "PENDING", thread: { platform: { in: runnerConfig.availablePlatforms } } },
+      where: {
+        status: "PENDING",
+        source: { in: QUEUED_MESSAGE_SOURCES },
+        thread: { platform: { in: runnerConfig.availablePlatforms } }
+      },
       include: {
         thread: {
           include: { person: true }
@@ -7564,6 +7644,8 @@ app.get("/data/link-preview", asyncRoute(async (req, res) => {
 }));
 
 app.post("/control/operator-profile", asyncRoute(async (req, res) => {
+  const completeFocusPolicyMutation = beginUserTriggeredIntentOperation(res);
+  try {
   if (await checkPresenterGuard(res, settingsStore, { action: "save your profile", kind: "operator-write" })) return;
   const payload = z
     .object({
@@ -7633,6 +7715,9 @@ app.post("/control/operator-profile", asyncRoute(async (req, res) => {
     void calendarFocusService.refresh().catch(() => undefined);
   }
   res.json(updated);
+  } finally {
+    completeFocusPolicyMutation();
+  }
 }));
 
 // Calendar auto-focus (#786): the Settings "check calendar" button. Fetches
@@ -8704,7 +8789,13 @@ app.post("/control/system/restart", asyncRoute(async (_req, res) => {
   }, 250);
 }));
 
+app.use((_req, res, next) => {
+  abandonUnstartedUserTriggeredIntent(res);
+  next();
+});
+
 app.use((error: unknown, req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  abandonUnstartedUserTriggeredIntent(res);
   const path = normalizeControlPath(req.path);
   const trace = getControlTrace(res);
   const statusCode = error instanceof z.ZodError ? 400 : 500;

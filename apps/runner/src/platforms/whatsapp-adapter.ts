@@ -124,6 +124,8 @@ export class WhatsAppAdapter implements PlatformAdapter {
   private client: Client | null = null;
   private ready = false;
   private readyPromise: Promise<void> | null = null;
+  private teardownPromise: Promise<void> | null = null;
+  private terminateCurrentSession: ((error: Error) => Promise<void>) | null = null;
   private sessionEpoch = 0;
   private indexedExistingChats = false;
 
@@ -136,6 +138,10 @@ export class WhatsAppAdapter implements PlatformAdapter {
    * can be re-entered without spinning up a second Puppeteer.
    */
   async ensureConnected(): Promise<void> {
+    if (this.teardownPromise) {
+      await this.teardownPromise;
+      return this.ensureConnected();
+    }
     if (this.ready) return;
     if (this.readyPromise) return this.readyPromise;
 
@@ -151,104 +157,115 @@ export class WhatsAppAdapter implements PlatformAdapter {
     this.client = client;
     this.deps.onStateChange?.("connecting");
 
-    this.readyPromise = new Promise<void>((resolve, reject) => {
-      const onReady = () => {
-        if (!isCurrentSession()) {
-          resolve();
-          return;
-        }
-        if (this.ready) return;
-        this.ready = true;
-        this.deps.onStateChange?.("connected");
+    let settled = false;
+    let terminalClaimed = false;
+    let resolveConnection!: () => void;
+    let rejectConnection!: (error: Error) => void;
+    const connectionPromise = new Promise<void>((resolve, reject) => {
+      resolveConnection = () => {
+        if (settled) return;
+        settled = true;
         resolve();
       };
-      const onAuthFailure = (msg: string) => {
-        if (!isCurrentSession()) {
-          resolve();
-          return;
-        }
-        this.sessionEpoch += 1;
-        this.client = null;
-        this.ready = false;
-        this.readyPromise = null;
-        this.deps.onStateChange?.("disconnected");
-        reject(new Error(`WhatsApp auth_failure: ${msg}`));
+      rejectConnection = (error) => {
+        if (settled) return;
+        settled = true;
+        reject(error);
       };
-      const onDisconnected = (reason: string) => {
-        if (!isCurrentSession()) {
-          resolve();
-          return;
-        }
-        this.sessionEpoch += 1;
-        this.client = null;
-        this.ready = false;
-        this.readyPromise = null;
-        this.deps.onStateChange?.("disconnected");
-        reject(new Error(`WhatsApp disconnected before ready: ${reason}`));
-      };
-
-      client.on("qr", (qr: string) => {
-        if (!isCurrentSession()) return;
-        this.deps.onStateChange?.("qr_ready");
-        this.deps.onQr?.(qr);
-      });
-      client.on("ready", onReady);
-      client.on("auth_failure", onAuthFailure);
-      client.on("disconnected", onDisconnected);
-
-      // Near-real-time inbound. wweb.js emits "message" for messages from
-      // others (not fromMe). We don't read the payload here — the hook just
-      // nudges the runner to enqueue a debounced WhatsApp scan, which does
-      // the real collect/persist/AI work through the same path as a
-      // scheduled scan. Guarded so a listener error can never bubble into
-      // the library's event loop.
-      if (this.deps.onIncomingMessage) {
-        const notify = this.deps.onIncomingMessage;
-        client.on("message", (message: WaMessage) => {
-          if (!isCurrentSession()) return;
-          try {
-            notify({
-              platformThreadId: message.from,
-              sourceChangedAt: new Date().toISOString()
-            });
-          } catch {
-            // Fire-and-forget: never let a scan-enqueue hiccup crash the
-            // wweb.js message pipeline.
-          }
-        });
-      }
-
-      client
-        .initialize()
-        .then(async () => {
-          if (!isCurrentSession()) {
-            resolve();
-            return;
-          }
-          if (this.ready) return;
-          // A restored session can finish syncing before whatsapp-web.js
-          // attaches its one-shot hasSynced listener, so recover from the
-          // missed ready event using the authoritative socket state.
-          if ((await client.getState()) === "CONNECTED") {
-            onReady();
-          }
-        })
-        .catch(async (error) => {
-          if (!isCurrentSession()) {
-            resolve();
-            return;
-          }
-          this.sessionEpoch += 1;
-          this.client = null;
-          this.ready = false;
-          this.deps.onStateChange?.("disconnected");
-          await client.destroy().catch(() => undefined);
-          this.readyPromise = null;
-          reject(error);
-        });
     });
+    this.readyPromise = connectionPromise;
 
-    return this.readyPromise;
+    const terminate = (error: Error): Promise<void> => {
+      if (terminalClaimed) return this.teardownPromise ?? Promise.resolve();
+      if (!isCurrentSession()) return this.teardownPromise ?? Promise.resolve();
+      terminalClaimed = true;
+      const teardown = this.beginClientTeardown(client, sessionEpoch);
+      void teardown.finally(() => rejectConnection(error));
+      return teardown;
+    };
+    this.terminateCurrentSession = terminate;
+
+    const onReady = () => {
+      if (!isCurrentSession() || terminalClaimed) return;
+      if (this.ready) return;
+      this.ready = true;
+      this.deps.onStateChange?.("connected");
+      resolveConnection();
+    };
+    const onAuthFailure = (msg: string) => {
+      void terminate(new Error(`WhatsApp auth_failure: ${msg}`));
+    };
+    const onDisconnected = (reason: string) => {
+      void terminate(new Error(`WhatsApp disconnected before ready: ${reason}`));
+    };
+
+    client.on("qr", (qr: string) => {
+      if (!isCurrentSession() || terminalClaimed) return;
+      this.deps.onStateChange?.("qr_ready");
+      this.deps.onQr?.(qr);
+    });
+    client.on("ready", onReady);
+    client.on("auth_failure", onAuthFailure);
+    client.on("disconnected", onDisconnected);
+
+    if (this.deps.onIncomingMessage) {
+      const notify = this.deps.onIncomingMessage;
+      client.on("message", (message: WaMessage) => {
+        if (!isCurrentSession() || terminalClaimed) return;
+        try {
+          notify({
+            platformThreadId: message.from,
+            sourceChangedAt: new Date().toISOString()
+          });
+        } catch {
+          // Fire-and-forget: never let a scan-enqueue hiccup crash the
+          // wweb.js message pipeline.
+        }
+      });
+    }
+
+    void client
+      .initialize()
+      .then(async () => {
+        if (!isCurrentSession() || terminalClaimed || this.ready) return;
+        if ((await client.getState()) === "CONNECTED") {
+          onReady();
+        }
+      })
+      .catch((error) => terminate(error instanceof Error ? error : new Error(String(error))));
+
+    return connectionPromise;
+  }
+
+  private beginClientTeardown(client: Client, sessionEpoch: number): Promise<void> {
+    if (this.teardownPromise) return this.teardownPromise;
+    if (this.client !== client || this.sessionEpoch !== sessionEpoch) {
+      return Promise.resolve();
+    }
+
+    this.sessionEpoch += 1;
+    this.client = null;
+    this.ready = false;
+    this.readyPromise = null;
+    this.deps.onStateChange?.("disconnected");
+
+    const teardown = (async () => {
+      try {
+        await client.destroy();
+      } catch (error) {
+        console.warn(
+          `[whatsapp] client.destroy() failed (continuing teardown): ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
+      }
+    })();
+    this.teardownPromise = teardown;
+    void teardown.finally(() => {
+      if (this.teardownPromise === teardown) this.teardownPromise = null;
+      if (this.terminateCurrentSession) this.terminateCurrentSession = null;
+    });
+    return teardown;
   }
 
   async scanUnreadThreads(): Promise<ThreadStub[]> {
@@ -293,7 +310,8 @@ export class WhatsAppAdapter implements PlatformAdapter {
   async sendMessage(
     thread: ThreadStub,
     text: string,
-    attachments?: OutboundAttachment[]
+    attachments?: OutboundAttachment[],
+    beforeDispatch?: () => Promise<void>
   ): Promise<SendReceipt> {
     const client = this.requireClient();
     await this.awaitSendClearance(thread.platformThreadId);
@@ -302,6 +320,7 @@ export class WhatsAppAdapter implements PlatformAdapter {
     // returns the sent Message object, whose timestamp we mirror.
     const media = (attachments ?? []).filter((a) => a.absolutePath && a.absolutePath.length > 0);
     if (media.length === 0) {
+      await beforeDispatch?.();
       const sendStartedAt = Date.now();
       const sent = await this.resolveSendResult(
         await (client as unknown as {
@@ -359,6 +378,7 @@ export class WhatsAppAdapter implements PlatformAdapter {
     let firstMessageKey: string | undefined;
     let everyMessageAcknowledged = true;
     let acknowledgedAt: string | undefined;
+    await beforeDispatch?.();
     for (let i = 0; i < preparedMedia.length; i++) {
       const { attachment: a, payload } = preparedMedia[i]!;
       // wweb.js's options bag accepts `caption` (for image/video) and
@@ -768,22 +788,24 @@ export class WhatsAppAdapter implements PlatformAdapter {
     // because this.client wasn't set yet, so subsequent /connect calls
     // saw a "connecting" state and short-circuited via the alreadyInFlight
     // guard. Operator was effectively locked out until a runner restart.
+    if (this.teardownPromise) {
+      await this.teardownPromise;
+      return;
+    }
+    if (this.terminateCurrentSession) {
+      await this.terminateCurrentSession(
+        new Error("WhatsApp session closed before connection completed")
+      );
+      return;
+    }
     const client = this.client;
+    if (client) {
+      await this.beginClientTeardown(client, this.sessionEpoch);
+      return;
+    }
     this.sessionEpoch += 1;
-    this.client = null;
     this.ready = false;
     this.readyPromise = null;
-    if (client) {
-      try {
-        await client.destroy();
-      } catch (error) {
-        console.warn(
-          `[whatsapp] client.destroy() failed (continuing teardown): ${
-            error instanceof Error ? error.message : String(error)
-          }`
-        );
-      }
-    }
     this.deps.onStateChange?.("disconnected");
   }
 
