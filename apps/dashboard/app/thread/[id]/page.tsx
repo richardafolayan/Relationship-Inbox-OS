@@ -621,6 +621,10 @@ export default function ThreadPage() {
   const [whatsAppPollAllowMultiple, setWhatsAppPollAllowMultiple] = useState(true);
   const [whatsAppPollSending, setWhatsAppPollSending] = useState(false);
   const [whatsAppPollSent, setWhatsAppPollSent] = useState(false);
+  const whatsAppPollAttemptRef = useRef<{
+    payloadKey: string;
+    clientSendId: string;
+  } | null>(null);
   // False from the start when the cache seeded `thread` above - the
   // conversation is already on screen, the mount fetch is a revalidation.
   const [loading, setLoading] = useState(
@@ -2091,13 +2095,24 @@ export default function ThreadPage() {
     setWhatsAppPollSending(true);
     setWhatsAppPollSent(false);
     setError(null);
+    const payloadKey = JSON.stringify({
+      question,
+      options,
+      allowMultipleAnswers: whatsAppPollAllowMultiple
+    });
+    const attempt =
+      whatsAppPollAttemptRef.current?.payloadKey === payloadKey
+        ? whatsAppPollAttemptRef.current
+        : { payloadKey, clientSendId: uuid() };
+    whatsAppPollAttemptRef.current = attempt;
     try {
       await apiPost(`/runner/control/thread/${thread.id}/send-poll`, {
         question,
         options,
         allowMultipleAnswers: whatsAppPollAllowMultiple,
-        clientSendId: uuid()
+        clientSendId: attempt.clientSendId
       });
+      whatsAppPollAttemptRef.current = null;
       setWhatsAppPollQuestion("");
       setWhatsAppPollOptions(["", ""]);
       setWhatsAppPollAllowMultiple(true);

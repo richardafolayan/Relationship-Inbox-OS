@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { v5 as uuidv5 } from "uuid";
 import {
   createSendService,
   SEND_CLAIM_MARKER,
@@ -8,6 +9,7 @@ import {
 import { AdapterFailure } from "../apps/runner/dist/platforms/utils.js";
 import { createKeyedMutex } from "../apps/runner/dist/services/keyed-mutex.js";
 import { createAdminResetCoordinator } from "../apps/runner/dist/services/admin-reset-coordinator.js";
+import { persistedSendRetryEligibility } from "../apps/runner/dist/services/send-failure.js";
 
 // ---------------------------------------------------------------------------
 // BUG PH5 — processSendRequest must atomically CLAIM the PENDING row before the
@@ -80,6 +82,9 @@ function makeHarness(initialRows, opts = {}) {
           where.id != null ? x.id === where.id : x.clientSendId === where.clientSendId
         );
         if (!r) throw new Error("update: row not found");
+        if (opts.failFailedTerminalWrite && data.status === "FAILED") {
+          throw new Error("failed terminal write unavailable");
+        }
         Object.assign(r, data);
         if (data.status === "SENT") events.push("send-terminal-persisted");
         return { ...r };
@@ -100,8 +105,15 @@ function makeHarness(initialRows, opts = {}) {
           threadUrl: null,
           recipientVerificationLabel: opts.recipientVerificationLabel ?? null,
           lastMessageAt: null,
-          lastInboundAt: null,
-          person: { displayName: "Test Person" }
+          lastInboundAt:
+            opts.latestInboundAt ?? new Date("2026-08-24T12:00:00.000Z"),
+          lastOutboundAt: opts.latestOutboundAt ?? null,
+          person: {
+            id: opts.personId ?? "p1",
+            displayName: "Test Person",
+            birthday: null,
+            favouritedAt: new Date("2026-01-01T00:00:00.000Z")
+          }
         };
       },
       async update() {
@@ -110,6 +122,7 @@ function makeHarness(initialRows, opts = {}) {
     },
     message: {
       async upsert({ create }) {
+        if (opts.messagePersistError) throw new Error(opts.messagePersistError);
         messages.push(create);
         return {};
       }
@@ -142,16 +155,50 @@ function makeHarness(initialRows, opts = {}) {
 
   const svc = createSendService({
     adapters: { LINKEDIN: adapter, INSTAGRAM: adapter },
-    eventBus: { emit: () => {}, nextEventId: () => 1, subscribe: () => () => {} },
+    eventBus: {
+      emit: (event) => {
+        if (opts.failFailureEvent && event.type === "MESSAGE_SEND_FAILED") {
+          throw new Error("failure event unavailable");
+        }
+      },
+      nextEventId: () => 1,
+      subscribe: () => () => {}
+    },
     settingsStore: {
       getSettings: async () => ({
         presenterDemoMode: "off",
         amberHours: 24,
         redHours: 72
       }),
+      getOperatorProfile:
+        opts.getOperatorProfile ??
+        (async () => ({
+          focusWindow: {
+            active: true,
+            autoSendAcknowledgements: true,
+            windowId: opts.windowId ?? "focus-1",
+            startedAt: "2026-08-24T11:00:00.000Z",
+            endsAt: "2099-08-24T13:00:00.000Z",
+            ackedPersonIds: [opts.personId ?? "p1"],
+            audience: "favourites",
+            note: "I am focusing until [until].",
+            professionalNote: "I am focusing until [until].",
+            reason: "deep work"
+          },
+          ackTemplates: {
+            close: "I am focusing until [until].",
+            professional: "I am focusing until [until]."
+          },
+          focusSettings: { reasonLabel: false }
+        })),
       getDemoSeedManifest: async () => null
     },
-    auditLog: async () => "audit-id",
+    auditLog: async (input) => {
+      if (opts.failVerifyAudit && input.stage === "Verify") {
+        throw new Error("verify audit unavailable");
+      }
+      return "audit-id";
+    },
     withExternalActionLock:
       opts.withExternalActionLock ?? ((_platform, work) => work()),
     withPlatformLock: opts.withPlatformLock ?? ((_platform, work) => work()),
@@ -188,6 +235,14 @@ const pendingRow = (over = {}) => ({
   source: "manual",
   ...over
 });
+
+function focusAutoAckRow(over = {}) {
+  return pendingRow({
+    clientSendId: uuidv5("focus-1:p1", uuidv5.URL),
+    source: "focus_auto_ack",
+    ...over
+  });
+}
 
 test("claim marker helper distinguishes a claim from a real receipt", () => {
   assert.equal(isClaimMarker(SEND_CLAIM_MARKER), true);
@@ -260,6 +315,65 @@ test("worker revalidates focus auto-ack eligibility inside the platform lease", 
   assert.equal(JSON.parse(rows[0].errorJson).reasonCode, "focus_auto_ack_not_eligible");
 });
 
+test("worker refuses a queued focus auto-ack after a newer manual reply", async () => {
+  const opts = {
+    latestOutboundAt: null,
+    withPlatformLock: async (_platform, work) => {
+      opts.latestOutboundAt = new Date("2026-08-24T12:01:00.000Z");
+      return work();
+    }
+  };
+  const { svc, rows, sends } = makeHarness([focusAutoAckRow()], opts);
+
+  await svc.processSendRequest("sr1");
+
+  assert.equal(sends.length, 0);
+  assert.equal(rows[0].status, "FAILED");
+  assert.equal(JSON.parse(rows[0].errorJson).reasonCode, "focus_auto_ack_not_eligible");
+});
+
+test("worker refuses a queued focus auto-ack after its focus window ends", async () => {
+  const { svc, rows, sends } = makeHarness([focusAutoAckRow()], {
+    getOperatorProfile: async () => ({
+      focusWindow: {
+        active: false,
+        autoSendAcknowledgements: true,
+        windowId: "focus-1",
+        startedAt: "2026-08-24T11:00:00.000Z",
+        endsAt: "2026-08-24T13:00:00.000Z",
+        ackedPersonIds: ["p1"],
+        audience: "favourites",
+        note: "I am focusing until [until].",
+        professionalNote: "I am focusing until [until].",
+        reason: "deep work"
+      },
+      ackTemplates: {
+        close: "I am focusing until [until].",
+        professional: "I am focusing until [until]."
+      },
+      focusSettings: { reasonLabel: false }
+    })
+  });
+
+  await svc.processSendRequest("sr1");
+
+  assert.equal(sends.length, 0);
+  assert.equal(rows[0].status, "FAILED");
+  assert.equal(JSON.parse(rows[0].errorJson).reasonCode, "focus_auto_ack_not_eligible");
+});
+
+test("worker binds queued focus auto-ack provenance to the exact active window", async () => {
+  const { svc, rows, sends } = makeHarness([focusAutoAckRow()], {
+    windowId: "focus-2"
+  });
+
+  await svc.processSendRequest("sr1");
+
+  assert.equal(sends.length, 0);
+  assert.equal(rows[0].status, "FAILED");
+  assert.equal(JSON.parse(rows[0].errorJson).reasonCode, "focus_auto_ack_not_eligible");
+});
+
 test("Instagram send failures never persist private platform URLs", async () => {
   const privateUrl = "https://www.instagram.com/direct/t/private-thread-id/";
   const { svc, rows } = makeHarness(
@@ -296,6 +410,81 @@ test("Instagram send failures discard diagnostic artifacts and unsafe reason val
   assert.equal(rows[0].status, "FAILED");
   assert.equal(rows[0].errorJson.includes(privateSentinel), false);
   assert.equal(JSON.parse(rows[0].errorJson).reasonCode, undefined);
+});
+
+test("a successful physical send stays SENT when its verification audit fails", async () => {
+  const { svc, rows, sends } = makeHarness([pendingRow()], {
+    failVerifyAudit: true
+  });
+
+  await svc.processSendRequest("sr1");
+
+  assert.equal(sends.length, 1);
+  assert.equal(rows[0].status, "SENT");
+  assert.deepEqual(
+    persistedSendRetryEligibility(rows[0].status, rows[0].errorJson),
+    { allowed: false, reason: "not_failed" }
+  );
+});
+
+test("a successful physical send stays SENT when local message projection fails", async () => {
+  const { svc, rows, sends } = makeHarness([pendingRow()], {
+    messagePersistError: "local database projection failed"
+  });
+
+  await svc.processSendRequest("sr1");
+
+  assert.equal(sends.length, 1);
+  assert.equal(rows[0].status, "SENT");
+  assert.deepEqual(
+    persistedSendRetryEligibility(rows[0].status, rows[0].errorJson),
+    { allowed: false, reason: "not_failed" }
+  );
+});
+
+test("an adapter failure after dispatch begins is delivery-uncertain and cannot retry", async () => {
+  const { svc, rows, sends } = makeHarness([pendingRow()], {
+    adapterError: "navigation timeout after the first attachment was acknowledged"
+  });
+
+  await svc.processSendRequest("sr1");
+
+  assert.equal(sends.length, 1);
+  assert.equal(rows[0].status, "FAILED");
+  assert.equal(JSON.parse(rows[0].errorJson).errorKind, "DELIVERY_UNCERTAIN");
+  assert.deepEqual(
+    persistedSendRetryEligibility(rows[0].status, rows[0].errorJson),
+    { allowed: false, reason: "delivery_uncertain" }
+  );
+});
+
+test("a failed delivery-uncertain write leaves the durable claim in doubt", async () => {
+  const { svc, rows, sends } = makeHarness([pendingRow()], {
+    adapterError: "navigation timeout after submit",
+    failFailedTerminalWrite: true
+  });
+
+  await svc.processSendRequest("sr1");
+
+  assert.equal(sends.length, 1);
+  assert.equal(rows[0].status, "PENDING");
+  assert.equal(isClaimMarker(rows[0].receiptJson), true);
+});
+
+test("a failed observer cannot erase delivery-uncertain retry protection", async () => {
+  const { svc, rows } = makeHarness([pendingRow()], {
+    adapterError: "navigation timeout after submit",
+    failFailureEvent: true
+  });
+
+  await svc.processSendRequest("sr1");
+
+  assert.equal(rows[0].status, "FAILED");
+  assert.equal(JSON.parse(rows[0].errorJson).errorKind, "DELIVERY_UNCERTAIN");
+  assert.deepEqual(
+    persistedSendRetryEligibility(rows[0].status, rows[0].errorJson),
+    { allowed: false, reason: "delivery_uncertain" }
+  );
 });
 
 test("re-dispatch of an already-SENT row does NOT re-send (resume after a completed send)", async () => {

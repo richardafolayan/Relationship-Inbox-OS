@@ -114,6 +114,39 @@ function isLiveAutoWindow(profile: OperatorProfile, now: Date): boolean {
   return Number.isFinite(startedAt) && (!Number.isFinite(endsAt) || endsAt > now.getTime());
 }
 
+export function focusAutoAckClientSendId(
+  windowId: string,
+  personId: string
+): string {
+  return uuidv5(`${windowId}:${personId}`, uuidv5.URL);
+}
+
+export function focusAutoAckDispatchEligible(
+  thread: FocusAutoAckThread,
+  profile: OperatorProfile,
+  clientSendId: string,
+  now: Date
+): boolean {
+  if (!isLiveAutoWindow(profile, now) || !focusAutoAckCoverage(thread, profile)) {
+    return false;
+  }
+  if (!thread.latestInboundAt) return false;
+  const startedAt = Date.parse(profile.focusWindow.startedAt);
+  if (!Number.isFinite(startedAt) || thread.latestInboundAt.getTime() < startedAt) {
+    return false;
+  }
+  if (
+    thread.latestOutboundAt &&
+    thread.latestOutboundAt.getTime() >= thread.latestInboundAt.getTime()
+  ) {
+    return false;
+  }
+  return (
+    clientSendId ===
+    focusAutoAckClientSendId(profile.focusWindow.windowId, thread.person.id)
+  );
+}
+
 export function createFocusAutoAckService(deps: FocusAutoAckDeps) {
   const inFlight = new Set<string>();
 
@@ -178,7 +211,10 @@ export function createFocusAutoAckService(deps: FocusAutoAckDeps) {
 
       const text = focusAutoAckText(authoritativeThread, latest);
       if (!text) return { type: "skipped", reason: "empty_note" };
-      const clientSendId = uuidv5(key, uuidv5.URL);
+      const clientSendId = focusAutoAckClientSendId(
+        latest.focusWindow.windowId,
+        personId
+      );
       await deps.sendQueue.enqueueAndKick({
         threadId,
         text,

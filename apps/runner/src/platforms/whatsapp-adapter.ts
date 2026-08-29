@@ -95,6 +95,7 @@ export class WhatsAppAdapter implements PlatformAdapter {
   private client: Client | null = null;
   private ready = false;
   private readyPromise: Promise<void> | null = null;
+  private sessionEpoch = 0;
   private indexedExistingChats = false;
 
   constructor(private readonly deps: WhatsAppAdapterDeps) {}
@@ -115,27 +116,43 @@ export class WhatsAppAdapter implements PlatformAdapter {
     const factory =
       this.deps.createClient ?? ((authDir: string) => createWhatsAppClient({ authDir }));
     const client = factory(this.deps.authDir);
+    const sessionEpoch = ++this.sessionEpoch;
+    const isCurrentSession = () =>
+      sessionEpoch === this.sessionEpoch && this.client === client;
     this.client = client;
     this.deps.onStateChange?.("connecting");
 
     this.readyPromise = new Promise<void>((resolve, reject) => {
       const onReady = () => {
+        if (!isCurrentSession()) {
+          resolve();
+          return;
+        }
         if (this.ready) return;
         this.ready = true;
         this.deps.onStateChange?.("connected");
         resolve();
       };
       const onAuthFailure = (msg: string) => {
+        if (!isCurrentSession()) {
+          resolve();
+          return;
+        }
         this.deps.onStateChange?.("disconnected");
         reject(new Error(`WhatsApp auth_failure: ${msg}`));
       };
       const onDisconnected = (reason: string) => {
+        if (!isCurrentSession()) {
+          resolve();
+          return;
+        }
         this.ready = false;
         this.deps.onStateChange?.("disconnected");
         if (!this.ready) reject(new Error(`WhatsApp disconnected before ready: ${reason}`));
       };
 
       client.on("qr", (qr: string) => {
+        if (!isCurrentSession()) return;
         this.deps.onStateChange?.("qr_ready");
         this.deps.onQr?.(qr);
       });
@@ -152,6 +169,7 @@ export class WhatsAppAdapter implements PlatformAdapter {
       if (this.deps.onIncomingMessage) {
         const notify = this.deps.onIncomingMessage;
         client.on("message", (message: WaMessage) => {
+          if (!isCurrentSession()) return;
           try {
             notify({
               platformThreadId: message.from,
@@ -167,6 +185,10 @@ export class WhatsAppAdapter implements PlatformAdapter {
       client
         .initialize()
         .then(async () => {
+          if (!isCurrentSession()) {
+            resolve();
+            return;
+          }
           if (this.ready) return;
           // A restored session can finish syncing before whatsapp-web.js
           // attaches its one-shot hasSynced listener, so recover from the
@@ -175,7 +197,13 @@ export class WhatsAppAdapter implements PlatformAdapter {
             onReady();
           }
         })
-        .catch(reject);
+        .catch((error) => {
+          if (!isCurrentSession()) {
+            resolve();
+            return;
+          }
+          reject(error);
+        });
     });
 
     return this.readyPromise;
@@ -263,30 +291,34 @@ export class WhatsAppAdapter implements PlatformAdapter {
     // send-guard min-interval indirectly via the rolling-24h cap; we
     // don't re-check the per-recipient interval between the media sends
     // because they're all part of one operator action.
+    const wa = (await import("whatsapp-web.js")) as unknown as {
+      MessageMedia?: { fromFilePath: (path: string) => unknown };
+      default?: { MessageMedia?: { fromFilePath: (path: string) => unknown } };
+    };
+    const MessageMedia = wa.MessageMedia ?? wa.default?.MessageMedia;
+    if (!MessageMedia) throw new Error("MessageMedia export unavailable");
+    const preparedMedia = media.map((attachment) => {
+      try {
+        return {
+          attachment,
+          payload: MessageMedia.fromFilePath(attachment.absolutePath)
+        };
+      } catch (error) {
+        throw new Error(
+          `WhatsApp attachment unreadable (${attachment.displayName}): ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
+      }
+    });
+
     const sentAttachments: AttachmentPlaceholder[] = [];
     let firstSentTs: number | undefined;
     let firstMessageKey: string | undefined;
     let everyMessageAcknowledged = true;
     let acknowledgedAt: string | undefined;
-    for (let i = 0; i < media.length; i++) {
-      const a = media[i]!;
-      let payload: unknown;
-      try {
-        // MessageMedia.fromFilePath is a static factory on the wweb.js
-        // export. The dynamic require here avoids importing fs at the
-        // top of the file (the helper itself does fs.readFileSync).
-        const wa = (await import("whatsapp-web.js")) as unknown as {
-          MessageMedia?: { fromFilePath: (path: string) => unknown };
-          default?: { MessageMedia?: { fromFilePath: (path: string) => unknown } };
-        };
-        const MM = wa.MessageMedia ?? wa.default?.MessageMedia;
-        if (!MM) throw new Error("MessageMedia export unavailable");
-        payload = MM.fromFilePath(a.absolutePath);
-      } catch (err) {
-        throw new Error(
-          `WhatsApp attachment unreadable (${a.displayName}): ${err instanceof Error ? err.message : String(err)}`
-        );
-      }
+    for (let i = 0; i < preparedMedia.length; i++) {
+      const { attachment: a, payload } = preparedMedia[i]!;
       // wweb.js's options bag accepts `caption` (for image/video) and
       // `sendMediaAsDocument` / `sendAudioAsVoice` flags. Voice notes
       // become PTT (push-to-talk) so the recipient sees the waveform UI.
@@ -659,6 +691,7 @@ export class WhatsAppAdapter implements PlatformAdapter {
     // saw a "connecting" state and short-circuited via the alreadyInFlight
     // guard. Operator was effectively locked out until a runner restart.
     const client = this.client;
+    this.sessionEpoch += 1;
     this.client = null;
     this.ready = false;
     this.readyPromise = null;

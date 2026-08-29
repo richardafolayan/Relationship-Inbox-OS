@@ -49,8 +49,43 @@ test("message and thread rows are reloaded only after entering the fence", () =>
   }
 });
 
-test("send workers and admin reset share the same external-action lock vocabulary", () => {
+test("send workers and every session reset share the same external-action lock vocabulary", () => {
   assert.match(source, /createSendService\([\s\S]*?withExternalActionLock/);
   assert.match(source, /createAdminResetCoordinator\([\s\S]*?withExternalActionLock/);
+  assert.match(
+    source,
+    /createPlatformSessionResetCoordinator\([\s\S]*?withExternalActionLock[\s\S]*?withPlatformLock:\s*withPlatformControlLock/
+  );
   assert.match(source, /sendLockKeyFor\(platform\)/);
+
+  const reset = route("/control/platform/reset-session", "/control/system/restart");
+  assert.match(reset, /platformSessionResetCoordinator\.reset\(payload\.platform\)/);
+  assert.doesNotMatch(reset, /resetPersonSession|operationMutex\.runExclusive/);
+});
+
+test("WhatsApp connect, QR refresh and reset use the shared action then platform fence", () => {
+  assert.match(
+    source,
+    /function withWhatsAppSessionLocks[\s\S]*?withExternalActionLock\("WHATSAPP"[\s\S]*?withPlatformControlLock\("WHATSAPP"/
+  );
+  for (const [path, nextPath] of [
+    ["/control/whatsapp/connect", "/control/whatsapp/refresh-qr"],
+    ["/control/whatsapp/refresh-qr", "/data/whatsapp/status"],
+    ["/control/whatsapp/reset", "/data/link-preview"]
+  ]) {
+    const block = route(path, nextPath);
+    assert.match(block, /withWhatsAppSessionLocks/);
+  }
+});
+
+test("presenter demo cleanup is centralized behind every affected external fence", () => {
+  assert.equal((source.match(/cleanupDemoData\(/g) ?? []).length, 1);
+  assert.match(
+    source,
+    /createDemoCleanupCoordinator\([\s\S]*?withGlobalResetLock[\s\S]*?withExternalActionLock/
+  );
+  assert.match(
+    source,
+    /async function cleanupDemoManifest[\s\S]*?demoCleanupCoordinator\.run[\s\S]*?cleanupDemoData[\s\S]*?afterCleanup\(\)/
+  );
 });

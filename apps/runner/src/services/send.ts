@@ -7,6 +7,10 @@ import type { EventBus, SettingsStore } from "../types/runtime";
 import { AdapterFailure } from "../platforms/utils";
 import { buildDemoSendReceipt } from "./demo-send";
 import { classifySendFailureKind, consumerSendFailure } from "./send-failure";
+import {
+  focusAutoAckDispatchEligible,
+  type FocusAutoAckThread
+} from "./focus-auto-ack";
 
 interface SendServiceDeps {
   // Partial: not every PlatformName has an adapter on main today. The
@@ -376,6 +380,29 @@ export function createSendService(deps: SendServiceDeps) {
 
     const jobId = uuid();
     const input = { threadId: thread.id, text: sendRequest.requestText, clientSendId: sendRequest.clientSendId };
+    let dispatchStarted = false;
+    let deliveredReceipt: SendReceipt | null = null;
+    let sentStatePersisted = false;
+
+    function notifyPlatformResult(
+      outcome: "success" | "failure",
+      finishedAt: string
+    ): void {
+      try {
+        deps.onPlatformResult?.({
+          clientSendId: input.clientSendId,
+          platform: expectedPlatform,
+          outcome,
+          finishedAt
+        });
+      } catch (error) {
+        console.warn(
+          `[send] platform-result observer failed for ${input.clientSendId}: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
+      }
+    }
 
     try {
       await deps.auditLog({
@@ -429,13 +456,47 @@ export function createSendService(deps: SendServiceDeps) {
           if (source === "focus_auto_ack") {
             const authoritativeThread = await prisma.thread.findUnique({
               where: { id: thread.id },
-              select: { platform: true, category: true, isGroup: true }
+              select: {
+                id: true,
+                platform: true,
+                category: true,
+                isGroup: true,
+                lastInboundAt: true,
+                lastOutboundAt: true,
+                person: {
+                  select: {
+                    id: true,
+                    displayName: true,
+                    birthday: true,
+                    favouritedAt: true
+                  }
+                }
+              }
             });
+            const profile = await deps.settingsStore.getOperatorProfile();
+            const autoAckThread: FocusAutoAckThread | null = authoritativeThread
+              ? {
+                  threadId: authoritativeThread.id,
+                  platform: authoritativeThread.platform as PlatformName,
+                  isGroup: authoritativeThread.isGroup,
+                  category:
+                    authoritativeThread.category === "genuine" ||
+                    authoritativeThread.category === "outreach"
+                      ? authoritativeThread.category
+                      : null,
+                  person: authoritativeThread.person,
+                  latestInboundAt: authoritativeThread.lastInboundAt,
+                  latestOutboundAt: authoritativeThread.lastOutboundAt
+                }
+              : null;
             if (
-              !authoritativeThread ||
-              authoritativeThread.platform === "INSTAGRAM" ||
-              authoritativeThread.category !== "genuine" ||
-              authoritativeThread.isGroup
+              !autoAckThread ||
+              !focusAutoAckDispatchEligible(
+                autoAckThread,
+                profile,
+                sendRequest.clientSendId,
+                new Date()
+              )
             ) {
               throw new SendPolicyError(
                 "focus_auto_ack_not_eligible",
@@ -443,6 +504,7 @@ export function createSendService(deps: SendServiceDeps) {
               );
             }
           }
+          dispatchStarted = true;
           return adapter.sendMessage(
             threadStub,
             input.text,
@@ -455,6 +517,16 @@ export function createSendService(deps: SendServiceDeps) {
           );
         });
       }
+
+      deliveredReceipt = receipt;
+      await prisma.sendRequest.update({
+        where: { clientSendId: input.clientSendId },
+        data: {
+          status: "SENT",
+          receiptJson: JSON.stringify(receipt)
+        }
+      });
+      sentStatePersisted = true;
 
       // Persist platform-side attachments on the OUT row when the adapter
       // captured them post-send (iMessage adapter looks them up from
@@ -541,14 +613,6 @@ export function createSendService(deps: SendServiceDeps) {
         }
       });
 
-      await prisma.sendRequest.update({
-        where: { clientSendId: input.clientSendId },
-        data: {
-          status: "SENT",
-          receiptJson: JSON.stringify(receipt)
-        }
-      });
-
       await deps.auditLog({
         platform: thread.platform as PlatformName,
         stage: "Verify",
@@ -562,33 +626,82 @@ export function createSendService(deps: SendServiceDeps) {
       });
 
       const platformResultAt = receipt.platformResultAt ?? new Date().toISOString();
-      deps.onPlatformResult?.({
-        clientSendId: input.clientSendId,
-        platform: thread.platform as PlatformName,
-        outcome: "success",
-        finishedAt: platformResultAt
-      });
-      deps.eventBus.emit({
-        type: "MESSAGE_SENT",
-        jobId,
-        threadId: thread.id,
-        platform: thread.platform as PlatformName,
-        clientSendId: input.clientSendId,
-        verifiedBy: receipt.verifiedBy,
-        acknowledgedAt: receipt.acknowledgedAt,
-        platformResultAt
-      });
+      notifyPlatformResult("success", platformResultAt);
+      try {
+        deps.eventBus.emit({
+          type: "MESSAGE_SENT",
+          jobId,
+          threadId: thread.id,
+          platform: thread.platform as PlatformName,
+          clientSendId: input.clientSendId,
+          verifiedBy: receipt.verifiedBy,
+          acknowledgedAt: receipt.acknowledgedAt,
+          platformResultAt
+        });
+      } catch (error) {
+        console.warn(
+          `[send] success event failed for ${input.clientSendId}: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
+      }
     } catch (error) {
       const adapterError = error instanceof AdapterFailure ? error : undefined;
       const errorMessage = describeSendError(error);
 
+      if (sentStatePersisted && deliveredReceipt) {
+        await deps
+          .auditLog({
+            platform: thread.platform as PlatformName,
+            stage: "Verify",
+            action: "MESSAGE_SENT_LOCAL_RECONCILIATION_FAILED",
+            status: "FAIL",
+            details: {
+              threadId: thread.id,
+              clientSendId: input.clientSendId,
+              message: errorMessage
+            }
+          })
+          .catch((auditError) => {
+            console.warn(
+              `[send] reconciliation audit failed for ${input.clientSendId}: ${
+                auditError instanceof Error ? auditError.message : String(auditError)
+              }`
+            );
+          });
+        const platformResultAt =
+          deliveredReceipt.platformResultAt ?? new Date().toISOString();
+        notifyPlatformResult("success", platformResultAt);
+        try {
+          deps.eventBus.emit({
+            type: "MESSAGE_SENT",
+            jobId,
+            threadId: thread.id,
+            platform: thread.platform as PlatformName,
+            clientSendId: input.clientSendId,
+            verifiedBy: deliveredReceipt.verifiedBy,
+            acknowledgedAt: deliveredReceipt.acknowledgedAt,
+            platformResultAt
+          });
+        } catch (eventError) {
+          console.warn(
+            `[send] reconciliation event failed for ${input.clientSendId}: ${
+              eventError instanceof Error ? eventError.message : String(eventError)
+            }`
+          );
+        }
+        return;
+      }
+
       // Map the (often opaque) error to a coarse kind the dashboard can
       // turn into a one-tap recovery action ("Open browser to sign in",
       // "Run selector tests", "Reset session", "Retry now").
-      const errorKind = classifySendFailureKind({
-        message: errorMessage,
-        adapterKind: adapterError?.kind
-      });
+      const errorKind = dispatchStarted
+        ? "DELIVERY_UNCERTAIN"
+        : classifySendFailureKind({
+            message: errorMessage,
+            adapterKind: adapterError?.kind
+          });
       const consumerFailure = consumerSendFailure(errorKind);
       const persistedErrorMessage =
         thread.platform === "INSTAGRAM" ? consumerFailure.message : errorMessage;
@@ -605,55 +718,78 @@ export function createSendService(deps: SendServiceDeps) {
               : undefined)
           : undefined;
 
-      const logId = await deps.auditLog({
-        platform: thread.platform as PlatformName,
-        stage: "Send",
-        action: "MESSAGE_SEND_FAILED",
-        status: "FAIL",
-        details: {
-          threadId: thread.id,
-          message: errorMessage,
-          errorKind
-        },
-        screenshotFile: adapterError?.screenshotFile,
-        domDumpFile: adapterError?.domDumpFile
-      });
+      let logId: string | undefined;
+      try {
+        logId = await deps.auditLog({
+          platform: thread.platform as PlatformName,
+          stage: "Send",
+          action: "MESSAGE_SEND_FAILED",
+          status: "FAIL",
+          details: {
+            threadId: thread.id,
+            message: errorMessage,
+            errorKind
+          },
+          screenshotFile: adapterError?.screenshotFile,
+          domDumpFile: adapterError?.domDumpFile
+        });
+      } catch (auditError) {
+        console.warn(
+          `[send] failure audit failed for ${input.clientSendId}: ${
+            auditError instanceof Error ? auditError.message : String(auditError)
+          }`
+        );
+      }
 
-      await prisma.sendRequest.update({
-        where: { clientSendId: input.clientSendId },
-        data: {
-          status: "FAILED",
-          errorJson: JSON.stringify({
-            message: persistedErrorMessage,
-            errorKind,
-            reasonCode,
-            screenshotFile:
-              thread.platform === "INSTAGRAM" ? undefined : adapterError?.screenshotFile,
-            domDumpFile:
-              thread.platform === "INSTAGRAM" ? undefined : adapterError?.domDumpFile,
-            logId
-          })
-        }
-      });
+      await prisma.sendRequest
+        .update({
+          where: { clientSendId: input.clientSendId },
+          data: {
+            status: "FAILED",
+            receiptJson: deliveredReceipt
+              ? JSON.stringify(deliveredReceipt)
+              : sendRequest.receiptJson,
+            errorJson: JSON.stringify({
+              message: persistedErrorMessage,
+              errorKind,
+              reasonCode,
+              screenshotFile:
+                thread.platform === "INSTAGRAM" ? undefined : adapterError?.screenshotFile,
+              domDumpFile:
+                thread.platform === "INSTAGRAM" ? undefined : adapterError?.domDumpFile,
+              logId
+            })
+          }
+        })
+        .catch((writeError) => {
+          console.warn(
+            `[send] terminal failure write failed for ${input.clientSendId}; durable claim retained: ${
+              writeError instanceof Error ? writeError.message : String(writeError)
+            }`
+          );
+        });
 
       const platformResultAt = new Date().toISOString();
-      deps.onPlatformResult?.({
-        clientSendId: input.clientSendId,
-        platform: thread.platform as PlatformName,
-        outcome: "failure",
-        finishedAt: platformResultAt
-      });
-      deps.eventBus.emit({
-        type: "MESSAGE_SEND_FAILED",
-        jobId,
-        threadId: thread.id,
-        platform: thread.platform as PlatformName,
-        logId,
-        clientSendId: input.clientSendId,
-        errorMessage: consumerFailure.message,
-        errorKind,
-        platformResultAt
-      });
+      notifyPlatformResult("failure", platformResultAt);
+      try {
+        deps.eventBus.emit({
+          type: "MESSAGE_SEND_FAILED",
+          jobId,
+          threadId: thread.id,
+          platform: thread.platform as PlatformName,
+          logId: logId ?? "audit-unavailable",
+          clientSendId: input.clientSendId,
+          errorMessage: consumerFailure.message,
+          errorKind,
+          platformResultAt
+        });
+      } catch (eventError) {
+        console.warn(
+          `[send] failure event failed for ${input.clientSendId}: ${
+            eventError instanceof Error ? eventError.message : String(eventError)
+          }`
+        );
+      }
 
       // Don't rethrow — the worker already logged FAILED state. Rethrowing
       // would crash the worker loop; we want it to pick up the next pending

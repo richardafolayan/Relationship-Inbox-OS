@@ -548,6 +548,43 @@ test("media sends wait for WhatsApp and keep a missing result delivery uncertain
   }
 });
 
+test("all WhatsApp attachments are readable before the first one is sent", async () => {
+  const readable = join(tmpdir(), `whatsapp-readable-${Date.now()}.txt`);
+  const missing = join(tmpdir(), `whatsapp-missing-${Date.now()}.txt`);
+  await writeFile(readable, "attachment");
+  let physicalSends = 0;
+  const client = createFakeClient({
+    sendMessage: async () => {
+      physicalSends += 1;
+      return { timestamp: 1700000100, id: { _serialized: "media-1" }, ack: 1 };
+    }
+  });
+  const adapter = new WhatsAppAdapter({
+    ...baseDeps(),
+    createClient: () => client
+  });
+  const ready = adapter.ensureConnected();
+  setImmediate(() => client.emit("ready"));
+  await ready;
+
+  try {
+    await assert.rejects(
+      adapter.sendMessage(
+        { platformThreadId: "447111222333@c.us", displayName: "Alice", lastMessagePreview: "" },
+        "caption",
+        [
+          { absolutePath: readable, displayName: "first.txt", mimeType: "text/plain", kind: "unknown" },
+          { absolutePath: missing, displayName: "missing.txt", mimeType: "text/plain", kind: "unknown" }
+        ]
+      ),
+      /attachment unreadable.*missing\.txt/i
+    );
+    assert.equal(physicalSends, 0);
+  } finally {
+    await rm(readable, { force: true });
+  }
+});
+
 test("sendPoll sends a native WhatsApp poll and returns structured metadata", async () => {
   let sentJid = null;
   let sentPoll = null;
@@ -990,6 +1027,34 @@ test("closeSession allows a fresh ensureConnected to proceed after a stuck mid-c
   setImmediate(() => secondClient.emit("ready"));
   await fresh;
   assert.equal(createCalls, 2);
+});
+
+test("a stale client cannot mark a replacement WhatsApp session connected", async () => {
+  const firstClient = createFakeClient();
+  const secondClient = createFakeClient();
+  const states = [];
+  let createCalls = 0;
+  const adapter = new WhatsAppAdapter({
+    ...baseDeps(),
+    createClient: () => {
+      createCalls += 1;
+      return createCalls === 1 ? firstClient : secondClient;
+    },
+    onStateChange: (state) => states.push(state)
+  });
+
+  const stale = adapter.ensureConnected();
+  stale.catch(() => undefined);
+  await adapter.closeSession();
+  const fresh = adapter.ensureConnected();
+
+  firstClient.emit("ready");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.notEqual(states.at(-1), "connected");
+
+  secondClient.emit("ready");
+  await fresh;
+  assert.equal(states.at(-1), "connected");
 });
 
 test("scanUnreadThreads throws a clear error when called before ensureConnected", async () => {

@@ -108,16 +108,18 @@ import {
 } from "./services/message-sync-latency";
 import { createSendService, parsePersistedSendSource } from "./services/send";
 import { createSendQueue } from "./services/send-queue";
-import { planPlatformSessionReset } from "./services/platform-session-reset";
+import { createPlatformSessionResetCoordinator } from "./services/platform-session-reset-coordinator";
 import { bindFocusAutoAckEvents, createFocusAutoAckService } from "./services/focus-auto-ack";
 import { createAdminResetCoordinator } from "./services/admin-reset-coordinator";
 import { createThreadExternalActionFence } from "./services/external-action-fence";
 import {
-  classifySendFailureKind,
-  consumerSendFailure,
   parsePersistedSendFailure,
   persistedSendRetryEligibility
 } from "./services/send-failure";
+import {
+  createPollSendService,
+  PollSendError
+} from "./services/poll-send";
 import { createReassessOnSendHandler } from "./services/reassess-on-send";
 import { createScheduledSendPromoter } from "./services/scheduled-send-promoter";
 import {
@@ -175,6 +177,8 @@ import {
   validateAdminResetGuards
 } from "./services/admin-reset";
 import { cleanupDemoData, seedDemoData } from "./services/demo";
+import { createDemoCleanupCoordinator } from "./services/demo-cleanup-coordinator";
+import type { DemoSeedManifest } from "./types/runtime";
 import { checkPresenterGuard } from "./middleware/presenter-guard";
 import { createKeyedMutex } from "./services/keyed-mutex";
 import { createRunLogger } from "./services/run-logger";
@@ -327,13 +331,6 @@ function kindFromMime(mime: string | undefined, filename: string | undefined): "
   if (m === "application/pdf" || n.endsWith(".pdf")) return "pdf";
   if (m.startsWith("audio/")) return /webm|opus|m4a|aac|caf/.test(m) || /audio.message/.test(n) ? "voice_note" : "audio";
   return "unknown";
-}
-
-function renderWhatsAppPollText(input: { question: string; options: string[]; allowMultipleAnswers?: boolean }): string {
-  const header = input.allowMultipleAnswers ? "📊 Poll (multi-select)" : "📊 Poll";
-  const body = input.question.trim() ? `${header}: ${input.question.trim()}` : header;
-  const options = input.options.map((option) => `• ${option.trim()}`).join("\n");
-  return options ? `${body}\n${options}` : body;
 }
 
 const settingsStore = createSettingsStore();
@@ -1238,6 +1235,12 @@ const sendService = createSendService({
   withPlatformLock: withPlatformControlLock,
   withExternalActionLock
 });
+const pollSendService = createPollSendService({
+  prisma,
+  settingsStore,
+  auditLog: (input) => auditService.log(input),
+  eventBus
+});
 
 // Async send worker. The /control/thread/:id/send endpoint inserts a PENDING
 // SendRequest and kicks the worker; the worker drains the queue serially in
@@ -1481,6 +1484,41 @@ async function withExternalActionLock<T>(
 
 async function withGlobalResetLock<T>(work: () => Promise<T>): Promise<T> {
   return operationMutex.runExclusive(globalResetLockKey(), work);
+}
+
+async function withWhatsAppSessionLocks<T>(
+  work: () => Promise<T>
+): Promise<T> {
+  return withExternalActionLock("WHATSAPP", () =>
+    withPlatformControlLock("WHATSAPP", work)
+  );
+}
+
+const demoCleanupCoordinator = createDemoCleanupCoordinator({
+  resolvePlatforms: async (threadIds) => {
+    if (threadIds.length === 0) return [];
+    const rows = await prisma.thread.findMany({
+      where: { id: { in: [...threadIds] } },
+      select: { platform: true }
+    });
+    return rows.map((row) => row.platform as PlatformName);
+  },
+  withGlobalResetLock,
+  withExternalActionLock
+});
+
+async function cleanupDemoManifest(
+  manifest: DemoSeedManifest,
+  afterCleanup: () => Promise<void> = async () => undefined
+): Promise<void> {
+  await demoCleanupCoordinator.run(manifest.threadIds, async () => {
+    await cleanupDemoData(manifest, {
+      screenshotDir: runnerConfig.screenshotDir,
+      domDumpDir: runnerConfig.domDumpDir
+    });
+    await settingsStore.setDemoSeedManifest(null);
+    await afterCleanup();
+  });
 }
 
 function parsePlatform(value: unknown): PlatformName {
@@ -3023,20 +3061,30 @@ app.post("/control/settings", asyncRoute(async (req, res) => {
       : payload.demoMode;
 
   const updatePayload = { ...payload, demoMode: derivedDemoMode };
+  const isLeavingDemo = previous.demoMode && derivedDemoMode === false;
+  if (isLeavingDemo) {
+    const manifest = await settingsStore.getDemoSeedManifest();
+    let next = previous;
+    if (manifest) {
+      await cleanupDemoManifest(manifest, async () => {
+        next = await settingsStore.updateSettings(updatePayload);
+      });
+    } else {
+      next = await settingsStore.updateSettings(updatePayload);
+    }
+    res.json(next);
+    return;
+  }
+
   const next = await settingsStore.updateSettings(updatePayload);
 
   const isEnteringDemo = !previous.demoMode && next.demoMode;
-  const isLeavingDemo = previous.demoMode && !next.demoMode;
   const seedMode = next.presenterDemoMode === "sandbox" ? "full-presenter-demo" : "generic";
 
   if (isEnteringDemo) {
     const previousManifest = await settingsStore.getDemoSeedManifest();
     if (previousManifest) {
-      await cleanupDemoData(previousManifest, {
-        screenshotDir: runnerConfig.screenshotDir,
-        domDumpDir: runnerConfig.domDumpDir
-      });
-      await settingsStore.setDemoSeedManifest(null);
+      await cleanupDemoManifest(previousManifest);
     }
 
     const manifest = await seedDemoData({
@@ -3045,17 +3093,6 @@ app.post("/control/settings", asyncRoute(async (req, res) => {
       mode: seedMode
     });
     await settingsStore.setDemoSeedManifest(manifest);
-  }
-
-  if (isLeavingDemo) {
-    const manifest = await settingsStore.getDemoSeedManifest();
-    if (manifest) {
-      await cleanupDemoData(manifest, {
-        screenshotDir: runnerConfig.screenshotDir,
-        domDumpDir: runnerConfig.domDumpDir
-      });
-      await settingsStore.setDemoSeedManifest(null);
-    }
   }
 
   res.json(next);
@@ -3187,17 +3224,20 @@ app.post("/control/overdue-digest/unsnooze-person", asyncRoute(async (req, res) 
 app.post("/control/presenter-demo/reset", asyncRoute(async (_req, res) => {
   const manifest = await settingsStore.getDemoSeedManifest();
   if (manifest) {
-    await cleanupDemoData(manifest, {
-      screenshotDir: runnerConfig.screenshotDir,
-      domDumpDir: runnerConfig.domDumpDir
+    await cleanupDemoManifest(manifest, async () => {
+      await settingsStore.updateSettings({
+        demoMode: false,
+        presenterDemoMode: "off",
+        presenterReadOnly: false
+      });
     });
-    await settingsStore.setDemoSeedManifest(null);
+  } else {
+    await settingsStore.updateSettings({
+      demoMode: false,
+      presenterDemoMode: "off",
+      presenterReadOnly: false
+    });
   }
-  await settingsStore.updateSettings({
-    demoMode: false,
-    presenterDemoMode: "off",
-    presenterReadOnly: false
-  });
   res.json({ ok: true });
 }));
 
@@ -4037,7 +4077,7 @@ app.post("/control/thread/:threadId/send-poll", asyncRoute(async (req, res) => {
         .max(12)
         .transform((options) => Array.from(new Set(options))),
       allowMultipleAnswers: z.boolean().optional().default(false),
-      clientSendId: z.string().uuid().optional()
+      clientSendId: z.string().uuid()
     })
     .parse(req.body ?? {});
   if (payload.options.length < 2) {
@@ -4045,8 +4085,7 @@ app.post("/control/thread/:threadId/send-poll", asyncRoute(async (req, res) => {
     return;
   }
 
-  const clientSendId = payload.clientSendId ?? uuid();
-  const text = renderWhatsAppPollText(payload);
+  const clientSendId = payload.clientSendId;
 
   const outcome = await threadExternalActionFence.run(threadId, async (target) => {
     const adapter = requireAdapter(target.platform);
@@ -4071,111 +4110,29 @@ app.post("/control/thread/:threadId/send-poll", asyncRoute(async (req, res) => {
     };
 
     try {
-      const receipt = await adapter.sendPoll!(threadStub, {
+      const result = await pollSendService.send({
+        clientSendId,
+        thread: {
+          id: threadRow.id,
+          platform: target.platform,
+          lastInboundAt: threadRow.lastInboundAt
+        },
         question: payload.question,
         options: payload.options,
-        allowMultipleAnswers: payload.allowMultipleAnswers
+        allowMultipleAnswers: payload.allowMultipleAnswers,
+        dispatch: () =>
+          adapter.sendPoll!(threadStub, {
+            question: payload.question,
+            options: payload.options,
+            allowMultipleAnswers: payload.allowMultipleAnswers
+          })
       });
-      const sentAt = new Date(receipt.sentAt);
-      const settings = await settingsStore.getSettings();
-      const platformMessageKey =
-        receipt.platformMessageKey ??
-        stableHash(`${threadId}|${receipt.sentAt}|OUT|${text}|poll`);
-      const attachmentsJson =
-        receipt.attachments && receipt.attachments.length > 0
-          ? JSON.stringify(receipt.attachments)
-          : null;
-      const rawJson = receipt.raw ? JSON.stringify(receipt.raw) : null;
-
-      const message = await prisma.message.upsert({
-        where: {
-          threadId_platformMessageKey: {
-            threadId,
-            platformMessageKey
-          }
-        },
-        update: {
-          text,
-          direction: "OUT",
-          timestamp: sentAt,
-          sentVia: "automation",
-          attachmentsJson,
-          rawJson
-        },
-        create: {
-          threadId,
-          platformMessageKey,
-          direction: "OUT",
-          timestamp: sentAt,
-          text,
-          sentVia: "automation",
-          attachmentsJson,
-          rawJson
-        }
-      });
-
-      const risk = calculateRisk({
-        lastInboundAt: threadRow.lastInboundAt,
-        lastOutboundAt: sentAt,
-        amberHours: settings.amberHours,
-        redHours: settings.redHours
-      });
-      await prisma.thread.update({
-        where: { id: threadId },
-        data: {
-          needsReply: risk.needsReply,
-          riskLevel: risk.level,
-          riskReason: risk.riskReason,
-          slaDueAt: risk.slaDueAt,
-          snoozedUntil: null,
-          lastOutboundAt: sentAt,
-          lastMessageAt: sentAt,
-          unreadCount: 0,
-          lastMessageDirection: "OUT",
-          lastMessageText: text
-        }
-      });
-
-      await auditService.log({
-        platform: target.platform,
-        stage: "Send",
-        action: "POLL_SEND",
-        status: "OK",
-        details: {
-          threadId,
-          clientSendId,
-          optionCount: payload.options.length,
-          allowMultipleAnswers: payload.allowMultipleAnswers
-        }
-      });
-      eventBus.emit({
-        type: "MESSAGE_SENT",
-        jobId: "poll-send",
-        threadId,
-        platform: target.platform,
-        clientSendId
-      });
-      res.json({
-        status: "ok",
-        clientSendId,
-        messageId: message.id,
-        platformMessageKey,
-        sentAt: sentAt.toISOString()
-      });
+      res.status(result.status === "pending" ? 202 : 200).json(result);
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      const errorKind = classifySendFailureKind({ message: errorMessage });
-      const consumerFailure = consumerSendFailure(errorKind);
-      await auditService.log({
-        platform: target.platform,
-        stage: "Send",
-        action: "POLL_SEND_FAIL",
-        status: "FAIL",
-        details: { threadId, clientSendId, errorKind, ...summarizeError(error) }
-      });
-      res.status(errorKind === "DELIVERY_UNCERTAIN" ? 409 : 502).json({
-        error: consumerFailure.message,
-        failure: consumerFailure
+      if (!(error instanceof PollSendError)) throw error;
+      res.status(error.statusCode).json({
+        error: error.message,
+        failure: error.failure
       });
     }
   });
@@ -7304,6 +7261,7 @@ app.get("/data/operator-profile", asyncRoute(async (_req, res) => {
 // adapter's onQr callback and is polled from `/status` as a data-URL PNG the
 // operator scans in WhatsApp > Linked Devices. `/status` never blocks.
 app.post("/control/whatsapp/connect", asyncRoute(async (_req, res) => {
+  if (await checkPresenterGuard(res, settingsStore, { action: "connect WhatsApp", kind: "external-action" })) return;
   if (!runnerConfig.whatsapp.enabled) {
     res.status(409).json({ ok: false, reason: "disabled", message: "Set WHATSAPP_ENABLED=true and restart to use WhatsApp." });
     return;
@@ -7321,19 +7279,24 @@ app.post("/control/whatsapp/connect", asyncRoute(async (_req, res) => {
     res.status(202).json({ ok: true, state: whatsappConnect.state });
     return;
   }
-  // ensureConnected resolves on "ready"; don't await it (first connect waits
-  // on the human scanning the QR). Kick it and return immediately.
-  void adapter.ensureConnected().catch((error) => {
+  whatsappConnect.state = "connecting";
+  whatsappConnect.updatedAt = new Date().toISOString();
+  void (async () => {
+    let ready = Promise.resolve();
+    await withWhatsAppSessionLocks(async () => {
+      ready = adapter.ensureConnected();
+    });
+    await ready;
+  })().catch((error) => {
     console.warn(`[whatsapp] connect failed: ${error instanceof Error ? error.message : String(error)}`);
     whatsappConnect.state = "disconnected";
     whatsappConnect.updatedAt = new Date().toISOString();
   });
-  whatsappConnect.state = "connecting";
-  whatsappConnect.updatedAt = new Date().toISOString();
   res.status(202).json({ ok: true, state: whatsappConnect.state });
 }));
 
 app.post("/control/whatsapp/refresh-qr", asyncRoute(async (_req, res) => {
+  if (await checkPresenterGuard(res, settingsStore, { action: "refresh the WhatsApp QR code", kind: "external-action" })) return;
   if (!runnerConfig.whatsapp.enabled) {
     res.status(409).json({ ok: false, reason: "disabled", message: "Set WHATSAPP_ENABLED=true and restart to use WhatsApp." });
     return;
@@ -7343,12 +7306,18 @@ app.post("/control/whatsapp/refresh-qr", asyncRoute(async (_req, res) => {
     res.status(500).json({ ok: false, reason: "no_adapter" });
     return;
   }
-  await adapter.closeSession("refresh_qr");
   whatsappConnect.qr = null;
   whatsappConnect.qrDataUrl = null;
   whatsappConnect.state = "connecting";
   whatsappConnect.updatedAt = new Date().toISOString();
-  void adapter.ensureConnected().catch((error) => {
+  void (async () => {
+    let ready = Promise.resolve();
+    await withWhatsAppSessionLocks(async () => {
+      await adapter.closeSession("refresh_qr");
+      ready = adapter.ensureConnected();
+    });
+    await ready;
+  })().catch((error) => {
     console.warn(`[whatsapp] QR refresh failed: ${error instanceof Error ? error.message : String(error)}`);
     whatsappConnect.state = "disconnected";
     whatsappConnect.updatedAt = new Date().toISOString();
@@ -7367,6 +7336,7 @@ app.get("/data/whatsapp/status", asyncRoute(async (_req, res) => {
 }));
 
 app.post("/control/whatsapp/reset", asyncRoute(async (_req, res) => {
+  if (await checkPresenterGuard(res, settingsStore, { action: "reset WhatsApp", kind: "external-action" })) return;
   if (!runnerConfig.whatsapp.enabled) {
     res.status(409).json({
       ok: false,
@@ -7381,7 +7351,7 @@ app.post("/control/whatsapp/reset", asyncRoute(async (_req, res) => {
     return;
   }
 
-  await withPlatformControlLock("WHATSAPP", async () => {
+  await withWhatsAppSessionLocks(async () => {
     await adapter.closeSession("manual_reset");
     await clearPersistedWhatsAppSession(runnerConfig.profileDirs.WHATSAPP);
     whatsappConnect.qr = null;
@@ -7389,13 +7359,12 @@ app.post("/control/whatsapp/reset", asyncRoute(async (_req, res) => {
     whatsappConnect.state = "disconnected";
     whatsappConnect.updatedAt = new Date().toISOString();
     await syncWhatsAppPlatformRow("disconnected");
-  });
-
-  await auditService.log({
-    platform: "WHATSAPP",
-    stage: "Connect",
-    action: "RESET_WHATSAPP_SESSION",
-    status: "OK"
+    await auditService.log({
+      platform: "WHATSAPP",
+      stage: "Connect",
+      action: "RESET_WHATSAPP_SESSION",
+      status: "OK"
+    });
   });
   res.json({ ok: true, state: "disconnected", hasPersistedSession: false });
 }));
@@ -8411,72 +8380,59 @@ app.post("/control/thread/:threadId/unsnooze", asyncRoute(async (req, res) => {
   res.json({ status: "ok", threadId });
 }));
 
+const platformSessionResetCoordinator = createPlatformSessionResetCoordinator({
+  platforms: allPlatforms,
+  requestAbort: (reason) => scanQueue.requestAbort(reason),
+  clearAbort: () => scanQueue.clearAbort(),
+  clearInFlight: () => {
+    connectInFlight.clear();
+    suggestedRepliesInFlight.clear();
+    threadSummaryRefreshInFlight.clear();
+  },
+  withGlobalResetLock,
+  withExternalActionLock,
+  withPlatformLock: withPlatformControlLock,
+  resetSharedSession: async () => {
+    await sessionManager.resetPersonSession({
+      personKey: defaultPersonKey,
+      reason: "manual_reset",
+      clearProfileDir: true
+    });
+  },
+  resetInstagramSession: async () => {
+    const route = resolvePlatformSession("INSTAGRAM");
+    await route.sessionManager.resetPersonSession({
+      personKey: route.personKey,
+      reason: "manual_reset",
+      clearProfileDir: true
+    });
+  },
+  persistStatus: async (platform) => {
+    await prisma.platform.upsert({
+      where: { name: platform },
+      update: {
+        status: "NOT_CONNECTED",
+        connectedAt: null,
+        lastError: null
+      },
+      create: {
+        name: platform,
+        status: "NOT_CONNECTED"
+      }
+    });
+  },
+  auditLog: (input) => auditService.log(input)
+});
+
 app.post("/control/platform/reset-session", asyncRoute(async (req, res) => {
   if (await checkPresenterGuard(res, settingsStore, { action: "reset the platform session", kind: "external-action" })) return;
   const payload = z.object({ platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE", "GOOGLE_MESSAGES"]).optional() }).parse(req.body ?? {});
 
-  await withGlobalResetLock(async () => {
-    scanQueue.requestAbort("session_reset:manual");
-    // Drop AI bookkeeping along with connect promises so a hung pre-reset
-    // call can't keep a thread id slot occupied across the reset.
-    connectInFlight.clear();
-    suggestedRepliesInFlight.clear();
-    threadSummaryRefreshInFlight.clear();
-
-    for (const platform of allPlatforms) {
-      await operationMutex.runExclusive(platformLockKey(platform), async () => undefined);
-    }
-
-    const resetPlan = planPlatformSessionReset(allPlatforms, payload.platform);
-    if (resetPlan.resetSharedSession) {
-      await sessionManager.resetPersonSession({
-        personKey: defaultPersonKey,
-        reason: "manual_reset",
-        clearProfileDir: true
-      });
-    }
-    if (resetPlan.resetInstagramSession) {
-      const route = resolvePlatformSession("INSTAGRAM");
-      await route.sessionManager.resetPersonSession({
-        personKey: route.personKey,
-        reason: "manual_reset",
-        clearProfileDir: true
-      });
-    }
-
-    for (const platform of resetPlan.statusPlatforms) {
-      await prisma.platform.upsert({
-        where: { name: platform },
-        update: {
-          status: "NOT_CONNECTED",
-          connectedAt: null,
-          lastError: null
-        },
-        create: {
-          name: platform,
-          status: "NOT_CONNECTED"
-        }
-      });
-    }
-
-    await auditService.log({
-      platform: payload.platform,
-      stage: "Connect",
-      action: "RESET_SESSION",
-      status: "OK",
-      details: {
-        resetScope: resetPlan.resetScope,
-        resetSharedSession: resetPlan.resetSharedSession,
-        resetInstagramSession: resetPlan.resetInstagramSession,
-        affectedPlatformCount: resetPlan.statusPlatforms.length
-      }
-    });
-
-    res.json({
-      status: "ok",
-      resetScope: resetPlan.resetScope,
-      affectedPlatforms: resetPlan.statusPlatforms
-    });
+  const resetPlan = await platformSessionResetCoordinator.reset(payload.platform);
+  res.json({
+    status: "ok",
+    resetScope: resetPlan.resetScope,
+    affectedPlatforms: resetPlan.statusPlatforms
   });
 }));
 
