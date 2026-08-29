@@ -5,7 +5,7 @@ import type {
 import { calculateRisk, stableHash } from "@inbox-os/core";
 import type { PrismaClient } from "@prisma/client";
 import type { EventBus, SettingsStore } from "../types/runtime";
-import { SEND_CLAIM_MARKER } from "./send";
+import { localReconciliationMarker, SEND_CLAIM_MARKER } from "./send";
 import {
   consumerSendFailure,
   parsePersistedSendFailure,
@@ -214,7 +214,7 @@ export function createPollSendService(deps: PollSendDeps) {
         data: {
           status: "SENT",
           receiptJson: JSON.stringify(receipt),
-          errorJson: null
+          errorJson: localReconciliationMarker()
         }
       });
       sentStatePersisted = true;
@@ -274,6 +274,10 @@ export function createPollSendService(deps: PollSendDeps) {
           lastMessageDirection: "OUT",
           lastMessageText: requestText
         }
+      });
+      await deps.prisma.sendRequest.update({
+        where: { clientSendId: input.clientSendId },
+        data: { errorJson: null }
       });
       await deps
         .auditLog({

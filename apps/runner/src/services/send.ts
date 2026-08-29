@@ -1,6 +1,6 @@
 import type { PlatformAdapter, PlatformName, SendReceipt, ThreadStub } from "@inbox-os/core";
 import { calculateRisk, stableHash } from "@inbox-os/core";
-import { Prisma, type PrismaClient } from "@prisma/client";
+import { Prisma, type PrismaClient, type SendRequest as SendRequestRow } from "@prisma/client";
 import { v4 as uuid } from "uuid";
 import { prisma as defaultPrisma } from "../db";
 import type { EventBus, SettingsStore } from "../types/runtime";
@@ -131,10 +131,31 @@ function isUniqueConstraintError(error: unknown): boolean {
 // row it is never read. The SENT write overwrites this marker with the real
 // receipt JSON.
 export const SEND_CLAIM_MARKER = "__claimed__";
+export const LOCAL_RECONCILIATION_REQUIRED = "local_projection_required";
 
 /** True when a PENDING row carries the in-flight claim marker (vs. a real receipt). */
 export function isClaimMarker(receiptJson: string | null | undefined): boolean {
   return receiptJson === SEND_CLAIM_MARKER;
+}
+
+export function localReconciliationMarker(): string {
+  return JSON.stringify({
+    reconciliationRequired: true,
+    reason: LOCAL_RECONCILIATION_REQUIRED
+  });
+}
+
+function needsLocalReconciliation(errorJson: string | null | undefined): boolean {
+  if (!errorJson) return false;
+  try {
+    const payload = JSON.parse(errorJson) as Record<string, unknown>;
+    return (
+      payload.reconciliationRequired === true &&
+      payload.reason === LOCAL_RECONCILIATION_REQUIRED
+    );
+  } catch {
+    return false;
+  }
 }
 
 export interface EnqueueSendResult {
@@ -153,6 +174,90 @@ export interface ScheduleSendResult {
 }
 
 export type SendSource = "manual" | "focus_ack" | "focus_auto_ack";
+
+type SendAttachment = {
+  absolutePath: string;
+  displayName: string;
+  mimeType?: string;
+  kind?: string;
+};
+
+type PersistedSendIntent = {
+  threadId: string;
+  requestText: string;
+  source: string;
+  attachmentsJson: string | null;
+  replyToMessageId: string | null;
+  scheduledFor: Date | null;
+};
+
+function normalizedAttachmentsJson(attachments?: SendAttachment[]): string | null {
+  if (!attachments || attachments.length === 0) return null;
+  return JSON.stringify(
+    attachments.map((attachment) => ({
+      absolutePath: attachment.absolutePath,
+      displayName: attachment.displayName,
+      mimeType: attachment.mimeType ?? null,
+      kind: attachment.kind ?? null
+    }))
+  );
+}
+
+function normalizePersistedAttachmentsJson(value: string | null): string | null {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!Array.isArray(parsed) || parsed.length === 0) return null;
+    return normalizedAttachmentsJson(
+      parsed.map((attachment) => {
+        if (!attachment || typeof attachment !== "object") {
+          throw new Error("invalid attachment");
+        }
+        const candidate = attachment as Record<string, unknown>;
+        if (
+          typeof candidate.absolutePath !== "string" ||
+          typeof candidate.displayName !== "string"
+        ) {
+          throw new Error("invalid attachment");
+        }
+        return {
+          absolutePath: candidate.absolutePath,
+          displayName: candidate.displayName,
+          mimeType: typeof candidate.mimeType === "string" ? candidate.mimeType : undefined,
+          kind: typeof candidate.kind === "string" ? candidate.kind : undefined
+        };
+      })
+    );
+  } catch {
+    return "__invalid__";
+  }
+}
+
+function assertExistingSendIntent(
+  existing: PersistedSendIntent,
+  expected: {
+    threadId: string;
+    text: string;
+    source: SendSource;
+    attachments?: SendAttachment[];
+    replyToMessageId?: string;
+    scheduledFor?: Date;
+  }
+): void {
+  const existingScheduledFor = existing.scheduledFor?.getTime() ?? null;
+  const expectedScheduledFor = expected.scheduledFor?.getTime() ?? null;
+  if (
+    existing.threadId !== expected.threadId ||
+    existing.requestText !== expected.text ||
+    existing.source !== expected.source ||
+    normalizePersistedAttachmentsJson(existing.attachmentsJson) !==
+      normalizedAttachmentsJson(expected.attachments) ||
+    (existing.replyToMessageId ?? null) !== (expected.replyToMessageId ?? null) ||
+    existingScheduledFor !== expectedScheduledFor
+  ) {
+    throw new Error("clientSendId is already linked to a different send intent");
+  }
+}
 
 class SendPolicyError extends Error {
   constructor(
@@ -192,6 +297,154 @@ export function createSendService(deps: SendServiceDeps) {
   // scheduled-send race guards without a real database.
   const prisma = deps.prisma ?? defaultPrisma;
 
+  async function projectSentRequest(
+    sendRequest: SendRequestRow,
+    receipt: SendReceipt
+  ): Promise<void> {
+    const thread = await prisma.thread.findUnique({
+      where: { id: sendRequest.threadId }
+    });
+    if (!thread) throw new Error("Thread not found while reconciling a sent message");
+
+    const settings = await deps.settingsStore.getSettings();
+    const sentAt = new Date(receipt.sentAt);
+    if (Number.isNaN(sentAt.getTime())) {
+      throw new Error("Send receipt has an invalid sentAt timestamp");
+    }
+    const attachmentsJson =
+      receipt.attachments && receipt.attachments.length > 0
+        ? JSON.stringify(receipt.attachments)
+        : null;
+    const rawJson = receipt.raw ? JSON.stringify(receipt.raw) : null;
+    const platformMessageKey =
+      receipt.platformMessageKey ??
+      stableHash(`${thread.id}|${receipt.sentAt}|OUT|${sendRequest.requestText}`);
+
+    await prisma.message.upsert({
+      where: {
+        threadId_platformMessageKey: {
+          threadId: thread.id,
+          platformMessageKey
+        }
+      },
+      update: {
+        text: sendRequest.requestText,
+        direction: "OUT",
+        timestamp: sentAt,
+        sentVia: "automation",
+        attachmentsJson,
+        rawJson,
+        replyToMessageId: sendRequest.replyToMessageId ?? null
+      },
+      create: {
+        threadId: thread.id,
+        platformMessageKey,
+        direction: "OUT",
+        timestamp: sentAt,
+        text: sendRequest.requestText,
+        sentVia: "automation",
+        attachmentsJson,
+        rawJson,
+        replyToMessageId: sendRequest.replyToMessageId ?? null
+      }
+    });
+
+    const lastOutboundAt =
+      thread.lastOutboundAt && thread.lastOutboundAt > sentAt
+        ? thread.lastOutboundAt
+        : sentAt;
+    const risk = calculateRisk({
+      lastInboundAt: thread.lastInboundAt,
+      lastOutboundAt,
+      amberHours: settings.amberHours,
+      redHours: settings.redHours
+    });
+    const sendIsLatest = !thread.lastMessageAt || sentAt >= thread.lastMessageAt;
+    await prisma.thread.update({
+      where: { id: thread.id },
+      data: {
+        needsReply: risk.needsReply,
+        riskLevel: risk.level,
+        riskReason: risk.riskReason,
+        slaDueAt: risk.slaDueAt,
+        lastOutboundAt,
+        ...(sendIsLatest
+          ? {
+              snoozedUntil: null,
+              lastMessageAt: sentAt,
+              unreadCount: 0,
+              lastMessageDirection: "OUT" as const,
+              lastMessageText: sendRequest.requestText
+            }
+          : {})
+      }
+    });
+  }
+
+  async function reconcileSentProjectionRow(sendRequest: SendRequestRow): Promise<boolean> {
+    if (
+      sendRequest.status !== "SENT" ||
+      !sendRequest.receiptJson ||
+      !needsLocalReconciliation(sendRequest.errorJson)
+    ) {
+      return false;
+    }
+    let receipt: SendReceipt;
+    try {
+      receipt = JSON.parse(sendRequest.receiptJson) as SendReceipt;
+    } catch {
+      return false;
+    }
+    const thread = await prisma.thread.findUnique({
+      where: { id: sendRequest.threadId },
+      select: { platform: true }
+    });
+    if (!thread) return false;
+    await deps.withExternalActionLock(thread.platform as PlatformName, () =>
+      deps.withPlatformLock(thread.platform as PlatformName, async () => {
+        const authoritative = await prisma.sendRequest.findUnique({
+          where: { id: sendRequest.id }
+        });
+        if (
+          !authoritative ||
+          authoritative.status !== "SENT" ||
+          !authoritative.receiptJson ||
+          !needsLocalReconciliation(authoritative.errorJson)
+        ) {
+          return;
+        }
+        await projectSentRequest(authoritative, JSON.parse(authoritative.receiptJson));
+        await prisma.sendRequest.update({
+          where: { id: authoritative.id },
+          data: { errorJson: null }
+        });
+      })
+    );
+    return true;
+  }
+
+  async function reconcileSentProjections(): Promise<number> {
+    const pendingRepairs = await prisma.sendRequest.findMany({
+      where: {
+        status: "SENT",
+        errorJson: { contains: LOCAL_RECONCILIATION_REQUIRED }
+      }
+    });
+    let repaired = 0;
+    for (const sendRequest of pendingRepairs) {
+      try {
+        if (await reconcileSentProjectionRow(sendRequest)) repaired += 1;
+      } catch (error) {
+        console.warn(
+          `[send] local reconciliation remains pending for ${sendRequest.clientSendId}: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
+      }
+    }
+    return repaired;
+  }
+
   /**
    * Insert a SendRequest in PENDING state and return immediately. The actual
    * adapter call happens in the background, driven by the send-queue worker
@@ -206,7 +459,7 @@ export function createSendService(deps: SendServiceDeps) {
     threadId: string;
     text: string;
     clientSendId: string;
-    attachments?: Array<{ absolutePath: string; displayName: string; mimeType?: string; kind?: string }>;
+    attachments?: SendAttachment[];
     source?: SendSource;
     /**
      * App-level threading: when set, the resulting Message row links back
@@ -232,10 +485,12 @@ export function createSendService(deps: SendServiceDeps) {
       where: { clientSendId: input.clientSendId }
     });
     if (existing) {
-      if (existing.threadId !== input.threadId) {
-        throw new Error("clientSendId is already linked to another thread");
-      }
+      assertExistingSendIntent(existing, {
+        ...input,
+        source: input.source ?? "manual"
+      });
       if (existing.status === "SENT" && existing.receiptJson) {
+        await reconcileSentProjectionRow(existing).catch(() => false);
         return {
           clientSendId: input.clientSendId,
           status: "SENT",
@@ -271,9 +526,7 @@ export function createSendService(deps: SendServiceDeps) {
           requestText: input.text,
           status: "PENDING",
           source: input.source ?? "manual",
-          attachmentsJson: input.attachments && input.attachments.length > 0
-            ? JSON.stringify(input.attachments)
-            : null,
+          attachmentsJson: normalizedAttachmentsJson(input.attachments),
           replyToMessageId: input.replyToMessageId ?? null
         }
       });
@@ -281,7 +534,36 @@ export function createSendService(deps: SendServiceDeps) {
       if (!isUniqueConstraintError(error)) {
         throw error;
       }
-      // Concurrent insert beat us; treat as replay of the existing row.
+      const winner = await prisma.sendRequest.findUnique({
+        where: { clientSendId: input.clientSendId }
+      });
+      if (!winner) throw new Error("clientSendId conflict could not be reconciled");
+      assertExistingSendIntent(winner, {
+        ...input,
+        source: input.source ?? "manual"
+      });
+      if (winner.status === "SENT" && winner.receiptJson) {
+        await reconcileSentProjectionRow(winner).catch(() => false);
+        return {
+          clientSendId: input.clientSendId,
+          status: "SENT",
+          replayed: true,
+          result: { ...parseReceipt(winner.receiptJson), replayed: true }
+        };
+      }
+      if (winner.status === "FAILED") {
+        return {
+          clientSendId: input.clientSendId,
+          status: "FAILED",
+          replayed: true,
+          errorMessage: parseFailedSendMessage(winner.errorJson)
+        };
+      }
+      if (winner.status !== "PENDING") {
+        throw new Error(
+          `Send request ${input.clientSendId} already exists in status ${winner.status}`
+        );
+      }
       return { clientSendId: input.clientSendId, status: "PENDING", replayed: true };
     }
 
@@ -330,6 +612,7 @@ export function createSendService(deps: SendServiceDeps) {
       where: { id: sendRequestId }
     });
     if (!sendRequest) return;
+    const claimedSendRequest = sendRequest;
     if (sendRequest.status !== "PENDING") {
       // Already processed — nothing to do. Defensive against double-kicks.
       return;
@@ -404,6 +687,24 @@ export function createSendService(deps: SendServiceDeps) {
       }
     }
 
+    async function persistDeliveredReceipt(receipt: SendReceipt): Promise<void> {
+      deliveredReceipt = receipt;
+      await prisma.sendRequest.update({
+        where: { clientSendId: input.clientSendId },
+        data: {
+          status: "SENT",
+          receiptJson: JSON.stringify(receipt),
+          errorJson: localReconciliationMarker()
+        }
+      });
+      sentStatePersisted = true;
+      await projectSentRequest(claimedSendRequest, receipt);
+      await prisma.sendRequest.update({
+        where: { clientSendId: input.clientSendId },
+        data: { errorJson: null }
+      });
+    }
+
     try {
       await deps.auditLog({
         platform: thread.platform as PlatformName,
@@ -444,6 +745,7 @@ export function createSendService(deps: SendServiceDeps) {
           );
         }
         receipt = buildDemoSendReceipt();
+        await persistDeliveredReceipt(receipt);
       } else {
         if (!adapter) {
           throw new Error(
@@ -454,6 +756,21 @@ export function createSendService(deps: SendServiceDeps) {
         // page. The demo branch above drives no page, so it stays unlocked.
         receipt = await deps.withPlatformLock(thread.platform as PlatformName, async () => {
           if (source === "focus_auto_ack") {
+            const supersedingUserRequest = await prisma.sendRequest.findFirst({
+              where: {
+                threadId: thread.id,
+                source: { in: ["manual", "focus_ack"] },
+                status: { in: ["PENDING", "SENT", "FAILED", "SCHEDULED"] },
+                createdAt: { gt: sendRequest.createdAt }
+              },
+              select: { id: true }
+            });
+            if (supersedingUserRequest) {
+              throw new SendPolicyError(
+                "focus_auto_ack_superseded",
+                "Automatic focus acknowledgement was superseded by a user-triggered reply"
+              );
+            }
             const authoritativeThread = await prisma.thread.findUnique({
               where: { id: thread.id },
               select: {
@@ -505,7 +822,7 @@ export function createSendService(deps: SendServiceDeps) {
             }
           }
           dispatchStarted = true;
-          return adapter.sendMessage(
+          const delivered = await adapter.sendMessage(
             threadStub,
             input.text,
             stagedAttachments.map((a) => ({
@@ -515,103 +832,10 @@ export function createSendService(deps: SendServiceDeps) {
               kind: (a.kind as "voice_note" | "photo" | "video" | "audio" | "pdf" | "sticker" | "gif" | "unknown" | undefined) ?? undefined
             }))
           );
+          await persistDeliveredReceipt(delivered);
+          return delivered;
         });
       }
-
-      deliveredReceipt = receipt;
-      await prisma.sendRequest.update({
-        where: { clientSendId: input.clientSendId },
-        data: {
-          status: "SENT",
-          receiptJson: JSON.stringify(receipt)
-        }
-      });
-      sentStatePersisted = true;
-
-      // Persist platform-side attachments on the OUT row when the adapter
-      // captured them post-send (iMessage adapter looks them up from
-      // chat.db). Without this, voice notes / photos / videos sent from
-      // the composer only show as a text bubble in the dashboard — the
-      // attachment guid the IMessageMedia component needs is missing.
-      const attachmentsJson =
-        receipt.attachments && receipt.attachments.length > 0
-          ? JSON.stringify(receipt.attachments)
-          : null;
-      const rawJson = receipt.raw ? JSON.stringify(receipt.raw) : null;
-      // App-level threading: when the operator hit "Reply" in the
-      // focused-thread view, the SendRequest row carries the parent
-      // Message.id. Copy it onto the resulting outbound row so the
-      // dashboard renders the new bubble inline under its parent on the
-      // next refresh. The send itself goes out as a normal text bubble
-      // — the recipient on Messages.app sees no threading at all.
-      const replyToMessageId = sendRequest.replyToMessageId ?? null;
-      // Prefer the platform-side stable id when the adapter could
-      // recover it (iMessage polls chat.db post-send for the row's
-      // guid). Falling back to a synthetic stableHash for adapters
-      // that can't observe the real id (LinkedIn web UI, group chats
-      // without a delivery-status path). Aligning the key with what a
-      // later scan writes is how we avoid the same outbound message
-      // showing up twice in the timeline.
-      const platformMessageKey =
-        receipt.platformMessageKey ??
-        stableHash(`${thread.id}|${receipt.sentAt}|OUT|${input.text}`);
-      await prisma.message.upsert({
-        where: {
-          threadId_platformMessageKey: {
-            threadId: thread.id,
-            platformMessageKey
-          }
-        },
-        update: {
-          text: input.text,
-          direction: "OUT",
-          timestamp: new Date(receipt.sentAt),
-          sentVia: "automation",
-          attachmentsJson,
-          rawJson,
-          replyToMessageId
-        },
-        create: {
-          threadId: thread.id,
-          platformMessageKey,
-          direction: "OUT",
-          timestamp: new Date(receipt.sentAt),
-          text: input.text,
-          sentVia: "automation",
-          attachmentsJson,
-          rawJson,
-          replyToMessageId
-        }
-      });
-
-      const risk = calculateRisk({
-        lastInboundAt: thread.lastInboundAt,
-        lastOutboundAt: new Date(receipt.sentAt),
-        amberHours: settings.amberHours,
-        redHours: settings.redHours
-      });
-
-      await prisma.thread.update({
-        where: { id: thread.id },
-        data: {
-          needsReply: risk.needsReply,
-          riskLevel: risk.level,
-          riskReason: risk.riskReason,
-          slaDueAt: risk.slaDueAt,
-          // Operator replied — the thread no longer needs to be hidden.
-          // Clearing snoozedUntil keeps the active inbox honest about
-          // whether the conversation is still in deferred state.
-          snoozedUntil: null,
-          lastOutboundAt: new Date(receipt.sentAt),
-          lastMessageAt: new Date(receipt.sentAt),
-          unreadCount: 0,
-          // Phase 2: keep the inbox-row preview in sync with whoever sent the
-          // most recent message. Without these, the row preview stayed pinned
-          // to the last INBOUND even after the operator replied.
-          lastMessageDirection: "OUT",
-          lastMessageText: input.text
-        }
-      });
 
       await deps.auditLog({
         platform: thread.platform as PlatformName,
@@ -623,6 +847,12 @@ export function createSendService(deps: SendServiceDeps) {
           verifiedBy: receipt.verifiedBy
         },
         screenshotFile: receipt.screenshotFile
+      }).catch((error) => {
+        console.warn(
+          `[send] verification audit failed for ${input.clientSendId}: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
       });
 
       const platformResultAt = receipt.platformResultAt ?? new Date().toISOString();
@@ -649,7 +879,8 @@ export function createSendService(deps: SendServiceDeps) {
       const adapterError = error instanceof AdapterFailure ? error : undefined;
       const errorMessage = describeSendError(error);
 
-      if (sentStatePersisted && deliveredReceipt) {
+      if (sentStatePersisted && (deliveredReceipt as SendReceipt | null)) {
+        const reconciledReceipt = deliveredReceipt as unknown as SendReceipt;
         await deps
           .auditLog({
             platform: thread.platform as PlatformName,
@@ -670,7 +901,7 @@ export function createSendService(deps: SendServiceDeps) {
             );
           });
         const platformResultAt =
-          deliveredReceipt.platformResultAt ?? new Date().toISOString();
+          reconciledReceipt.platformResultAt ?? new Date().toISOString();
         notifyPlatformResult("success", platformResultAt);
         try {
           deps.eventBus.emit({
@@ -679,8 +910,8 @@ export function createSendService(deps: SendServiceDeps) {
             threadId: thread.id,
             platform: thread.platform as PlatformName,
             clientSendId: input.clientSendId,
-            verifiedBy: deliveredReceipt.verifiedBy,
-            acknowledgedAt: deliveredReceipt.acknowledgedAt,
+            verifiedBy: reconciledReceipt.verifiedBy,
+            acknowledgedAt: reconciledReceipt.acknowledgedAt,
             platformResultAt
           });
         } catch (eventError) {
@@ -813,7 +1044,7 @@ export function createSendService(deps: SendServiceDeps) {
     text: string;
     clientSendId: string;
     scheduledFor: Date;
-    attachments?: Array<{ absolutePath: string; displayName: string; mimeType?: string; kind?: string }>;
+    attachments?: SendAttachment[];
     replyToMessageId?: string;
   }): Promise<ScheduleSendResult> {
     const thread = await prisma.thread.findUnique({
@@ -839,9 +1070,10 @@ export function createSendService(deps: SendServiceDeps) {
       where: { clientSendId: input.clientSendId }
     });
     if (existing) {
-      if (existing.threadId !== input.threadId) {
-        throw new Error("clientSendId is already linked to another thread");
-      }
+      assertExistingSendIntent(existing, {
+        ...input,
+        source: "manual"
+      });
       if (existing.status === "SCHEDULED" && existing.scheduledFor) {
         return {
           clientSendId: input.clientSendId,
@@ -863,20 +1095,30 @@ export function createSendService(deps: SendServiceDeps) {
           source: "manual",
           scheduledFor: input.scheduledFor,
           replyToMessageId: input.replyToMessageId ?? null,
-          attachmentsJson: input.attachments && input.attachments.length > 0
-            ? JSON.stringify(input.attachments)
-            : null
+          attachmentsJson: normalizedAttachmentsJson(input.attachments)
         }
       });
     } catch (error) {
       if (!isUniqueConstraintError(error)) {
         throw error;
       }
-      // Concurrent insert beat us; treat as replay.
+      const winner = await prisma.sendRequest.findUnique({
+        where: { clientSendId: input.clientSendId }
+      });
+      if (!winner) throw new Error("clientSendId conflict could not be reconciled");
+      assertExistingSendIntent(winner, {
+        ...input,
+        source: "manual"
+      });
+      if (winner.status !== "SCHEDULED" || !winner.scheduledFor) {
+        throw new Error(
+          `Send request ${input.clientSendId} already exists in status ${winner.status}`
+        );
+      }
       return {
         clientSendId: input.clientSendId,
         status: "SCHEDULED",
-        scheduledFor: input.scheduledFor.toISOString(),
+        scheduledFor: winner.scheduledFor.toISOString(),
         replayed: true
       };
     }
@@ -1064,7 +1306,8 @@ export function createSendService(deps: SendServiceDeps) {
     cancelScheduledSend,
     updateScheduledSend,
     processSendRequest,
-    reconcileInterruptedSends
+    reconcileInterruptedSends,
+    reconcileSentProjections
   };
 }
 

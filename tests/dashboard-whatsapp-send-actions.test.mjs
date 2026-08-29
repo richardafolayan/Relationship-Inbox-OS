@@ -34,6 +34,7 @@ test("runner exposes a dedicated WhatsApp poll send route", () => {
 
 test("ambiguous poll retries reuse the same durable client id", () => {
   assert.match(THREAD_PAGE, /whatsAppPollAttemptRef/);
+  assert.match(THREAD_PAGE, /const payloadKey = JSON\.stringify\(\{\s*threadId: thread\.id,/);
   assert.match(
     THREAD_PAGE,
     /whatsAppPollAttemptRef\.current\?\.payloadKey === payloadKey[\s\S]*?clientSendId: uuid\(\)/

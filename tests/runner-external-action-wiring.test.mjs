@@ -49,6 +49,23 @@ test("message and thread rows are reloaded only after entering the fence", () =>
   }
 });
 
+test("reaction, edit, and poll vote routes use durable external-action identity", () => {
+  for (const [path, nextPath] of [
+    ["/control/thread/:threadId/message/:messageId/react", "/control/thread/:threadId/message/:messageId/edit"],
+    ["/control/thread/:threadId/message/:messageId/edit", "/control/thread/:threadId/message/:messageId/poll-vote"],
+    ["/control/thread/:threadId/message/:messageId/poll-vote", "/control/thread/:threadId/message/:messageId/poll-votes"]
+  ]) {
+    const block = route(path, nextPath);
+    assert.match(block, /durableExternalActionService\.execute\(/);
+    assert.match(block, /DurableExternalActionError/);
+    assert.match(block, /clientActionId:\s*z\.string\(\)\.uuid\(\)/);
+  }
+});
+
+test("durable external actions reconcile local projections during runner startup", () => {
+  assert.match(source, /durableExternalActionService\.reconcileSentProjections\(\)/);
+});
+
 test("send workers and every session reset share the same external-action lock vocabulary", () => {
   assert.match(source, /createSendService\([\s\S]*?withExternalActionLock/);
   assert.match(source, /createAdminResetCoordinator\([\s\S]*?withExternalActionLock/);

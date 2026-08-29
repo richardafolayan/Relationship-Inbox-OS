@@ -124,6 +124,9 @@ test("a poll remains SENT when local projection or success audit fails", async (
     assert.equal(result.status, "ok");
     assert.equal(h.physicalSends(), 1);
     assert.equal(h.rows[0].status, "SENT");
+    if (overrides.messagePersistError) {
+      assert.equal(JSON.parse(h.rows[0].errorJson).reconciliationRequired, true);
+    }
     assert.deepEqual(
       persistedSendRetryEligibility(h.rows[0].status, h.rows[0].errorJson),
       { allowed: false, reason: "not_failed" }

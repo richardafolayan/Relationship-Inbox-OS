@@ -4154,7 +4154,12 @@ export class LinkedInAdapter implements PlatformAdapter {
     page: Page,
     selectors: SelectorRegistry,
     state: { bottomKey: string | null; visibleSetHash: string }
-  ): Promise<{ didScroll: boolean; reachedBottom: boolean; moved: boolean }> {
+  ): Promise<{
+    didScroll: boolean;
+    reachedBottom: boolean;
+    moved: boolean;
+    stopReason?: "no_scroll_container";
+  }> {
     const listTarget = page.locator(selectors.thread_list).first();
     const listTargetCount = await listTarget.count().catch(() => 0);
     if (listTargetCount <= 0) {
@@ -4192,9 +4197,14 @@ export class LinkedInAdapter implements PlatformAdapter {
           })
       });
 
-    const scrollContainerFound = await scrollResolvedContainer("primary_scroll").catch(() => false);
+    const scrollContainerFound = await scrollResolvedContainer("primary_scroll");
     if (!scrollContainerFound) {
-      return { didScroll: true, reachedBottom: true, moved: false };
+      return {
+        didScroll: false,
+        reachedBottom: false,
+        moved: false,
+        stopReason: "no_scroll_container"
+      };
     }
     await this.runTracedPageAction({
       page,
@@ -4209,10 +4219,13 @@ export class LinkedInAdapter implements PlatformAdapter {
       }
     });
 
-    let after = await this.collectThreadCandidates(page, selectors).catch(() => null);
-    let moved = Boolean(after && after.bottomKey && after.bottomKey !== state.bottomKey);
+    let after = await this.collectThreadCandidates(page, selectors);
+    let moved = Boolean(
+      (after.bottomKey && after.bottomKey !== state.bottomKey) ||
+      after.visibleSetHash !== state.visibleSetHash
+    );
     if (!moved) {
-      await scrollResolvedContainer("secondary_scroll").catch(() => false);
+      await scrollResolvedContainer("secondary_scroll");
       await this.runTracedPageAction({
         page,
         stage: "collect_threads",
@@ -4225,8 +4238,11 @@ export class LinkedInAdapter implements PlatformAdapter {
           await page.waitForTimeout(Math.max(80, this.deps.scanScrollWaitMs));
         }
       });
-      after = await this.collectThreadCandidates(page, selectors).catch(() => null);
-      moved = Boolean(after && after.bottomKey && after.bottomKey !== state.bottomKey);
+      after = await this.collectThreadCandidates(page, selectors);
+      moved = Boolean(
+        (after.bottomKey && after.bottomKey !== state.bottomKey) ||
+        after.visibleSetHash !== state.visibleSetHash
+      );
     }
 
     return {
@@ -4555,6 +4571,18 @@ export class LinkedInAdapter implements PlatformAdapter {
         scrollNoMoveStreak += 1;
       } else {
         scrollNoMoveStreak = 0;
+      }
+      if (scrollOutcome.stopReason) {
+        stopReason = scrollOutcome.stopReason;
+        this.logTraceDecision({
+          stage: "collect_threads",
+          decision: "Stopped collection because no trustworthy scroll container was available",
+          details: {
+            mergedCount: merged.size,
+            stopReason
+          }
+        });
+        break;
       }
       if (!scrollOutcome.didScroll || scrollOutcome.reachedBottom) {
         stopReason = merged.size > 0 ? "end_of_list_reached" : "zero_threads_found";

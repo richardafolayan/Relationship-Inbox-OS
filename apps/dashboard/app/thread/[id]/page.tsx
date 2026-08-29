@@ -625,6 +625,7 @@ export default function ThreadPage() {
     payloadKey: string;
     clientSendId: string;
   } | null>(null);
+  const externalActionAttemptRef = useRef<Map<string, string>>(new Map());
   // False from the start when the cache seeded `thread` above - the
   // conversation is already on screen, the mount fetch is a revalidation.
   const [loading, setLoading] = useState(
@@ -2096,6 +2097,7 @@ export default function ThreadPage() {
     setWhatsAppPollSent(false);
     setError(null);
     const payloadKey = JSON.stringify({
+      threadId: thread.id,
       question,
       options,
       allowMultipleAnswers: whatsAppPollAllowMultiple
@@ -2884,10 +2886,14 @@ export default function ThreadPage() {
       [messageId]: [...(prev[messageId] ?? []), optimistic]
     }));
     try {
+      const attemptKey = `reaction:${thread.id}:${messageId}:${emoji}`;
+      const clientActionId = externalActionAttemptRef.current.get(attemptKey) ?? uuid();
+      externalActionAttemptRef.current.set(attemptKey, clientActionId);
       await apiPost<{ status: string; emoji: string }>(
         `/runner/control/thread/${thread.id}/message/${messageId}/react`,
-        { emoji }
+        { clientActionId, emoji }
       );
+      externalActionAttemptRef.current.delete(attemptKey);
       setError(null);
       // The runner has persisted the reaction; the refresh below pulls the
       // authoritative copy. Drop our optimistic overlay for this message so
@@ -2924,10 +2930,14 @@ export default function ThreadPage() {
 
   const voteOnPoll = async (messageId: string, selectedOptions: string[]) => {
     if (!thread) return;
+    const attemptKey = `poll-vote:${thread.id}:${messageId}:${JSON.stringify(selectedOptions)}`;
+    const clientActionId = externalActionAttemptRef.current.get(attemptKey) ?? uuid();
+    externalActionAttemptRef.current.set(attemptKey, clientActionId);
     await apiPost<{ status: string; selectedOptions: string[] }>(
       `/runner/control/thread/${thread.id}/message/${messageId}/poll-vote`,
-      { selectedOptions }
+      { clientActionId, selectedOptions }
     );
+    externalActionAttemptRef.current.delete(attemptKey);
     await refresh();
   };
 
@@ -2978,10 +2988,14 @@ export default function ThreadPage() {
       return next;
     });
     try {
+      const attemptKey = `edit:${thread.id}:${messageId}:${nextText}`;
+      const clientActionId = externalActionAttemptRef.current.get(attemptKey) ?? uuid();
+      externalActionAttemptRef.current.set(attemptKey, clientActionId);
       const output = await apiPost<{ status: string; text: string }>(
         `/runner/control/thread/${thread.id}/message/${messageId}/edit`,
-        { text: nextText }
+        { clientActionId, text: nextText }
       );
+      externalActionAttemptRef.current.delete(attemptKey);
       const confirmedText = output.text || nextText;
       setOptimisticTextByMessageId((prev) => ({ ...prev, [messageId]: confirmedText }));
       setEditDraft(confirmedText);

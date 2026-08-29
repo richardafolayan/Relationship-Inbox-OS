@@ -29,7 +29,11 @@ function matchesWhere(row, where) {
     } else if (key === "clientSendId") {
       if (row.clientSendId !== expected) return false;
     } else if (key === "status") {
-      if (row.status !== expected) return false;
+      if (expected && Array.isArray(expected.in)) {
+        if (!expected.in.includes(row.status)) return false;
+      } else if (row.status !== expected) {
+        return false;
+      }
     } else if (key === "receiptJson") {
       // Prisma: `receiptJson: null` matches only null/undefined; an explicit
       // string matches that exact string.
@@ -38,6 +42,18 @@ function matchesWhere(row, where) {
       } else if (row.receiptJson !== expected) {
         return false;
       }
+    } else if (key === "threadId") {
+      if (row.threadId !== expected) return false;
+    } else if (key === "source") {
+      if (expected && Array.isArray(expected.in)) {
+        if (!expected.in.includes(row.source)) return false;
+      } else if (row.source !== expected) {
+        return false;
+      }
+    } else if (key === "createdAt") {
+      if (expected?.gt && !(row.createdAt > expected.gt)) return false;
+    } else if (key === "NOT") {
+      if (matchesWhere(row, expected)) return false;
     } else {
       throw new Error(`unhandled where key in fake prisma: ${key}`);
     }
@@ -65,6 +81,20 @@ function makeHarness(initialRows, opts = {}) {
       async findFirst({ where }) {
         const match = rows.find((r) => matchesWhere(r, where));
         return match ? { ...match } : null;
+      },
+      async findMany({ where }) {
+        return rows
+          .filter((row) => {
+            if (where.status && row.status !== where.status) return false;
+            if (
+              where.errorJson?.contains &&
+              !(row.errorJson ?? "").includes(where.errorJson.contains)
+            ) {
+              return false;
+            }
+            return true;
+          })
+          .map((row) => ({ ...row }));
       },
       async updateMany({ where, data }) {
         if (data.receiptJson === SEND_CLAIM_MARKER) claimAttempts += 1;
@@ -117,6 +147,7 @@ function makeHarness(initialRows, opts = {}) {
         };
       },
       async update() {
+        opts.onThreadUpdate?.();
         return {};
       }
     },
@@ -233,6 +264,7 @@ const pendingRow = (over = {}) => ({
   replyToMessageId: null,
   scheduledFor: null,
   source: "manual",
+  createdAt: new Date("2026-08-24T12:00:00.000Z"),
   ...over
 });
 
@@ -332,6 +364,30 @@ test("worker refuses a queued focus auto-ack after a newer manual reply", async 
   assert.equal(JSON.parse(rows[0].errorJson).reasonCode, "focus_auto_ack_not_eligible");
 });
 
+test("worker refuses a queued focus auto-ack after a newer manual request is queued", async () => {
+  const autoAck = focusAutoAckRow({
+    id: "auto-ack",
+    createdAt: new Date("2026-08-24T12:00:00.000Z")
+  });
+  const manual = pendingRow({
+    id: "manual",
+    clientSendId: "manual-1",
+    source: "manual",
+    createdAt: new Date("2026-08-24T12:01:00.000Z")
+  });
+  const { svc, rows, sends } = makeHarness([autoAck, manual]);
+
+  await svc.processSendRequest("auto-ack");
+
+  assert.equal(sends.length, 0);
+  assert.equal(rows.find((row) => row.id === "auto-ack").status, "FAILED");
+  assert.equal(
+    JSON.parse(rows.find((row) => row.id === "auto-ack").errorJson).reasonCode,
+    "focus_auto_ack_superseded"
+  );
+  assert.equal(rows.find((row) => row.id === "manual").status, "PENDING");
+});
+
 test("worker refuses a queued focus auto-ack after its focus window ends", async () => {
   const { svc, rows, sends } = makeHarness([focusAutoAckRow()], {
     getOperatorProfile: async () => ({
@@ -428,18 +484,44 @@ test("a successful physical send stays SENT when its verification audit fails", 
 });
 
 test("a successful physical send stays SENT when local message projection fails", async () => {
-  const { svc, rows, sends } = makeHarness([pendingRow()], {
-    messagePersistError: "local database projection failed"
-  });
+  const options = { messagePersistError: "local database projection failed" };
+  const { svc, rows, sends, messages } = makeHarness([pendingRow()], options);
 
   await svc.processSendRequest("sr1");
 
   assert.equal(sends.length, 1);
   assert.equal(rows[0].status, "SENT");
+  assert.equal(JSON.parse(rows[0].errorJson).reconciliationRequired, true);
   assert.deepEqual(
     persistedSendRetryEligibility(rows[0].status, rows[0].errorJson),
     { allowed: false, reason: "not_failed" }
   );
+
+  delete options.messagePersistError;
+  assert.equal(await svc.reconcileSentProjections(), 1);
+  assert.equal(rows[0].errorJson, null);
+  assert.equal(messages.length, 1);
+});
+
+test("send keeps the platform lease through durable local projection", async () => {
+  const mutex = createKeyedMutex();
+  const order = [];
+  let scanProjection;
+  const h = makeHarness([pendingRow()], {
+    withPlatformLock: (platform, work) =>
+      mutex.runExclusive(`platform:${platform}`, work),
+    onSend: async () => {
+      scanProjection = mutex.runExclusive("platform:LINKEDIN", async () => {
+        order.push("newer-inbound-scan");
+      });
+    },
+    onThreadUpdate: () => order.push("send-projection")
+  });
+
+  await h.svc.processSendRequest("sr1");
+  await scanProjection;
+
+  assert.deepEqual(order, ["send-projection", "newer-inbound-scan"]);
 });
 
 test("an adapter failure after dispatch begins is delivery-uncertain and cannot retry", async () => {

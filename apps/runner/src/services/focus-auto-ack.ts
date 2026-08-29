@@ -111,7 +111,7 @@ function isLiveAutoWindow(profile: OperatorProfile, now: Date): boolean {
   if (!window.active || !window.autoSendAcknowledgements || !window.windowId) return false;
   const startedAt = Date.parse(window.startedAt);
   const endsAt = Date.parse(window.endsAt);
-  return Number.isFinite(startedAt) && (!Number.isFinite(endsAt) || endsAt > now.getTime());
+  return Number.isFinite(startedAt) && Number.isFinite(endsAt) && endsAt > now.getTime();
 }
 
 export function focusAutoAckClientSendId(

@@ -56,6 +56,7 @@ async function createFixture() {
   return {
     skipped: false,
     adapter,
+    page,
     context,
     browser
   };
@@ -85,4 +86,68 @@ test("LinkedIn direct fallback deep-scrolls beyond first viewport and exhausts w
   assert.equal(names.includes("India Nine"), true);
   assert.equal(result.threadsScanned > 3, true);
   assert.equal(result.stopReason === "fallback_direct_complete", false);
+});
+
+test("LinkedIn fallback refuses to certify freshness without a real scroll container", async (t) => {
+  const fixture = await createFixture();
+  if (fixture.skipped) {
+    t.skip(fixture.reason);
+    return;
+  }
+
+  t.after(async () => {
+    await fixture.context.close();
+    await fixture.browser.close();
+  });
+  await fixture.page.setContent(`
+    <ul class="msg-conversations-container__conversations-list">
+      <li class="msg-conversation-listitem">One visible row</li>
+    </ul>
+  `);
+
+  const outcome = await fixture.adapter.deepScrollThreadList(
+    fixture.page,
+    selectorsForInbox("about:blank"),
+    { bottomKey: "one", visibleSetHash: "one" }
+  );
+
+  assert.deepEqual(outcome, {
+    didScroll: false,
+    reachedBottom: false,
+    moved: false,
+    stopReason: "no_scroll_container"
+  });
+});
+
+test("LinkedIn fallback propagates a scroll execution failure instead of reporting the end", async (t) => {
+  const fixture = await createFixture();
+  if (fixture.skipped) {
+    t.skip(fixture.reason);
+    return;
+  }
+
+  t.after(async () => {
+    await fixture.context.close();
+    await fixture.browser.close();
+  });
+  fixture.adapter.runTracedPageAction = ({ run }) => run();
+  const fakeTarget = {
+    count: async () => 1,
+    evaluate: async () => {
+      throw new Error("execution context was destroyed");
+    }
+  };
+  const fakePage = {
+    locator: () => ({ first: () => fakeTarget })
+  };
+
+  await assert.rejects(
+    () =>
+      fixture.adapter.deepScrollThreadList(
+        fakePage,
+        selectorsForInbox("about:blank"),
+        { bottomKey: "one", visibleSetHash: "one" }
+      ),
+    /execution context was destroyed/i
+  );
 });

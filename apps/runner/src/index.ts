@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, openSync, rmSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import { basename, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import { performance } from "node:perf_hooks";
@@ -113,9 +113,18 @@ import { bindFocusAutoAckEvents, createFocusAutoAckService } from "./services/fo
 import { createAdminResetCoordinator } from "./services/admin-reset-coordinator";
 import { createThreadExternalActionFence } from "./services/external-action-fence";
 import {
+  createDurableExternalActionService,
+  DurableExternalActionError,
+  type DurableExternalActionProjection
+} from "./services/durable-external-action";
+import {
   parsePersistedSendFailure,
   persistedSendRetryEligibility
 } from "./services/send-failure";
+import {
+  deriveRetryClientSendId,
+  parseRetryAttachments
+} from "./services/send-retry";
 import {
   createPollSendService,
   PollSendError
@@ -1241,6 +1250,50 @@ const pollSendService = createPollSendService({
   auditLog: (input) => auditService.log(input),
   eventBus
 });
+async function projectDurableExternalAction(row: DurableExternalActionProjection): Promise<void> {
+  const payload = JSON.parse(row.payloadJson) as Record<string, unknown>;
+  if (row.actionType === "poll_vote") {
+    if (
+      !Array.isArray(payload.selectedOptions) ||
+      payload.selectedOptions.some((option) => typeof option !== "string")
+    ) {
+      throw new Error("poll vote reconciliation payload is invalid");
+    }
+    return;
+  }
+  const message = await prisma.message.findUnique({ where: { id: row.targetMessageId } });
+  if (!message || message.threadId !== row.threadId) {
+    throw new Error("message missing during external-action reconciliation");
+  }
+  if (row.actionType === "message_reaction") {
+    if (typeof payload.emoji !== "string" || !payload.emoji) {
+      throw new Error("reaction reconciliation payload is invalid");
+    }
+    await prisma.message.update({
+      where: { id: message.id },
+      data: { rawJson: appendOutboundReaction(message.rawJson, payload.emoji) }
+    });
+    return;
+  }
+  if (row.actionType === "message_edit") {
+    if (typeof payload.text !== "string" || !payload.text) {
+      throw new Error("edit reconciliation payload is invalid");
+    }
+    await prisma.message.update({
+      where: { id: message.id },
+      data: { text: payload.text }
+    });
+    return;
+  }
+  throw new Error(`unsupported durable external action: ${row.actionType}`);
+}
+
+const durableExternalActionService = createDurableExternalActionService({
+  prisma,
+  project: projectDurableExternalAction,
+  withExternalActionLock,
+  withPlatformLock: withPlatformControlLock
+});
 
 // Async send worker. The /control/thread/:id/send endpoint inserts a PENDING
 // SendRequest and kicks the worker; the worker drains the queue serially in
@@ -1307,6 +1360,13 @@ bindFocusAutoAckEvents(eventBus, focusAutoAck);
 // (e.g. crashed mid-send, or restarted while a send was queued behind a
 // scan). The queue's `running` guard prevents duplicate processing.
 sendQueue.resume();
+void durableExternalActionService.reconcileSentProjections().catch((error) => {
+  console.warn(
+    `[external-action] startup reconciliation failed: ${
+      error instanceof Error ? error.message : String(error)
+    }`
+  );
+});
 
 // Immediate reassess when the operator sends a reply. The scan loop only
 // refreshes a thread's brief when its lastInboundHash changes, so a dashboard
@@ -4250,20 +4310,14 @@ app.post("/control/thread/:threadId/retry-send", asyncRoute(async (req, res) => 
   // re-sends the same message, not a text-only stub. Staged attachment files
   // persist after a FAILED send (the send service doesn't unlink them), so the
   // original absolutePath references are still valid.
-  let retryAttachments:
-    | Array<{ absolutePath: string; displayName: string; mimeType?: string; kind?: string }>
-    | undefined;
-  if (original.attachmentsJson) {
-    try {
-      const parsed = JSON.parse(original.attachmentsJson);
-      if (Array.isArray(parsed) && parsed.length > 0) {
-        retryAttachments = parsed;
-      }
-    } catch {
-      retryAttachments = undefined;
-    }
+  let retryAttachments;
+  try {
+    retryAttachments = parseRetryAttachments(original.attachmentsJson);
+  } catch {
+    res.status(409).json({ error: "invalid_attachment_metadata" });
+    return;
   }
-  const newClientSendId = randomUUID();
+  const newClientSendId = deriveRetryClientSendId(original.clientSendId);
   try {
     const queueResult = await sendQueue.enqueueAndKick({
       threadId,
@@ -4391,7 +4445,10 @@ app.post("/control/thread/:threadId/message/:messageId/react", asyncRoute(async 
     .object({ threadId: z.string().min(1), messageId: z.string().min(1) })
     .parse(req.params);
   if (await checkPresenterGuard(res, settingsStore, { threadId, action: "react to a message", kind: "thread-mutation" })) return;
-  const payload = z.object({ emoji: z.string().trim().min(1).max(16) }).parse(req.body ?? {});
+  const payload = z.object({
+    clientActionId: z.string().uuid(),
+    emoji: z.string().trim().min(1).max(16)
+  }).parse(req.body ?? {});
 
   const outcome = await threadExternalActionFence.run(threadId, async (target) => {
     const message = await prisma.message.findUnique({ where: { id: messageId } });
@@ -4413,27 +4470,37 @@ app.post("/control/thread/:threadId/message/:messageId/react", asyncRoute(async 
     };
 
     try {
-      await adapter.reactToMessage!(threadStub, message.platformMessageKey, payload.emoji);
-      // Persist the operator's reaction onto rawJson so the dashboard badge
-      // renders immediately, without waiting for a re-scan to read it back.
-      const updatedRawJson = appendOutboundReaction(message.rawJson, payload.emoji);
-      await prisma.message.update({ where: { id: message.id }, data: { rawJson: updatedRawJson } });
-      await auditService.log({
-        platform: target.platform,
-        stage: "Send",
-        action: "MESSAGE_REACT",
-        status: "OK",
-        details: { threadId, messageId, emoji: payload.emoji }
+      const result = await durableExternalActionService.execute({
+        clientActionId: payload.clientActionId,
+        threadId,
+        targetMessageId: messageId,
+        actionType: "message_reaction",
+        payload: { emoji: payload.emoji },
+        dispatch: () =>
+          adapter.reactToMessage!(threadStub, message.platformMessageKey, payload.emoji),
+        auditSuccess: () =>
+          auditService.log({
+            platform: target.platform,
+            stage: "Send",
+            action: "MESSAGE_REACT",
+            status: "OK",
+            details: { threadId, messageId, emoji: payload.emoji }
+          }),
+        auditFailure: (error) =>
+          auditService.log({
+            platform: target.platform,
+            stage: "Send",
+            action: "MESSAGE_REACT_FAIL",
+            status: "FAIL",
+            details: { threadId, messageId, emoji: payload.emoji, ...summarizeError(error) }
+          })
       });
-      res.json({ status: "ok", emoji: payload.emoji });
+      res.json({ status: "ok", emoji: payload.emoji, replayed: result.replayed });
     } catch (error) {
-      await auditService.log({
-        platform: target.platform,
-        stage: "Send",
-        action: "MESSAGE_REACT_FAIL",
-        status: "FAIL",
-        details: { threadId, messageId, emoji: payload.emoji, ...summarizeError(error) }
-      });
+      if (error instanceof DurableExternalActionError) {
+        res.status(409).json({ error: error.message, reason: error.reason });
+        return;
+      }
       throw error;
     }
   });
@@ -4447,7 +4514,10 @@ app.post("/control/thread/:threadId/message/:messageId/edit", asyncRoute(async (
     .object({ threadId: z.string().min(1), messageId: z.string().min(1) })
     .parse(req.params);
   if (await checkPresenterGuard(res, settingsStore, { threadId, action: "edit a message", kind: "thread-mutation" })) return;
-  const payload = z.object({ text: z.string().trim().min(1).max(8_000) }).parse(req.body ?? {});
+  const payload = z.object({
+    clientActionId: z.string().uuid(),
+    text: z.string().trim().min(1).max(8_000)
+  }).parse(req.body ?? {});
 
   const outcome = await threadExternalActionFence.run(threadId, async (target) => {
     const message = await prisma.message.findUnique({ where: { id: messageId } });
@@ -4473,24 +4543,37 @@ app.post("/control/thread/:threadId/message/:messageId/edit", asyncRoute(async (
     };
 
     try {
-      await adapter.editMessage!(threadStub, message.platformMessageKey, payload.text);
-      await prisma.message.update({ where: { id: message.id }, data: { text: payload.text } });
-      await auditService.log({
-        platform: target.platform,
-        stage: "Send",
-        action: "MESSAGE_EDIT",
-        status: "OK",
-        details: { threadId, messageId }
+      const result = await durableExternalActionService.execute({
+        clientActionId: payload.clientActionId,
+        threadId,
+        targetMessageId: messageId,
+        actionType: "message_edit",
+        payload: { text: payload.text },
+        dispatch: () =>
+          adapter.editMessage!(threadStub, message.platformMessageKey, payload.text),
+        auditSuccess: () =>
+          auditService.log({
+            platform: target.platform,
+            stage: "Send",
+            action: "MESSAGE_EDIT",
+            status: "OK",
+            details: { threadId, messageId }
+          }),
+        auditFailure: (error) =>
+          auditService.log({
+            platform: target.platform,
+            stage: "Send",
+            action: "MESSAGE_EDIT_FAIL",
+            status: "FAIL",
+            details: { threadId, messageId, ...summarizeError(error) }
+          })
       });
-      res.json({ status: "ok", text: payload.text });
+      res.json({ status: "ok", text: payload.text, replayed: result.replayed });
     } catch (error) {
-      await auditService.log({
-        platform: target.platform,
-        stage: "Send",
-        action: "MESSAGE_EDIT_FAIL",
-        status: "FAIL",
-        details: { threadId, messageId, ...summarizeError(error) }
-      });
+      if (error instanceof DurableExternalActionError) {
+        res.status(409).json({ error: error.message, reason: error.reason });
+        return;
+      }
       throw error;
     }
   });
@@ -4505,6 +4588,7 @@ app.post("/control/thread/:threadId/message/:messageId/poll-vote", asyncRoute(as
     .parse(req.params);
   if (await checkPresenterGuard(res, settingsStore, { threadId, action: "vote on a poll", kind: "thread-mutation" })) return;
   const payload = z.object({
+    clientActionId: z.string().uuid(),
     selectedOptions: z.array(z.string().trim().min(1).max(280)).min(1).max(12)
   }).parse(req.body ?? {});
 
@@ -4532,28 +4616,54 @@ app.post("/control/thread/:threadId/message/:messageId/poll-vote", asyncRoute(as
     };
 
     try {
-      await adapter.voteOnPoll!(threadStub, message.platformMessageKey!, payload.selectedOptions);
-      await auditService.log({
-        platform: target.platform,
-        stage: "Send",
-        action: "POLL_VOTE",
-        status: "OK",
-        details: { threadId, messageId, optionCount: payload.selectedOptions.length }
+      const result = await durableExternalActionService.execute({
+        clientActionId: payload.clientActionId,
+        threadId,
+        targetMessageId: messageId,
+        actionType: "poll_vote",
+        payload: { selectedOptions: payload.selectedOptions },
+        dispatch: () =>
+          adapter.voteOnPoll!(threadStub, message.platformMessageKey!, payload.selectedOptions),
+        auditSuccess: () =>
+          auditService.log({
+            platform: target.platform,
+            stage: "Send",
+            action: "POLL_VOTE",
+            status: "OK",
+            details: { threadId, messageId, optionCount: payload.selectedOptions.length }
+          }),
+        auditFailure: (error) =>
+          auditService.log({
+            platform: target.platform,
+            stage: "Send",
+            action: "POLL_VOTE_FAIL",
+            status: "FAIL",
+            details: {
+              threadId,
+              messageId,
+              optionCount: payload.selectedOptions.length,
+              ...summarizeError(error)
+            }
+          })
       });
-      res.json({ status: "ok", selectedOptions: payload.selectedOptions });
+      res.json({
+        status: "ok",
+        selectedOptions: payload.selectedOptions,
+        replayed: result.replayed
+      });
     } catch (error) {
-      await auditService.log({
-        platform: target.platform,
-        stage: "Send",
-        action: "POLL_VOTE_FAIL",
-        status: "FAIL",
-        details: { threadId, messageId, optionCount: payload.selectedOptions.length, ...summarizeError(error) }
-      });
-      if (isWhatsAppSessionUnavailableError(error)) {
+      if (
+        error instanceof DurableExternalActionError &&
+        isWhatsAppSessionUnavailableError(error.originalError)
+      ) {
         res.status(409).json({
           error: "WhatsApp lost its connection. Reconnect it in Settings, then try again.",
           reason: "whatsapp_session_unavailable"
         });
+        return;
+      }
+      if (error instanceof DurableExternalActionError) {
+        res.status(409).json({ error: error.message, reason: error.reason });
         return;
       }
       throw error;

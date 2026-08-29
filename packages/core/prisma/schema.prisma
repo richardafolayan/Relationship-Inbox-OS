@@ -347,8 +347,9 @@ model Thread {
 
   person       Person         @relation(fields: [personId], references: [id], onDelete: Cascade)
   messages     Message[]
-  drafts       Draft[]
-  sendRequests SendRequest[]
+  drafts                 Draft[]
+  sendRequests           SendRequest[]
+  externalActionRequests ExternalActionRequest[]
 
   @@unique([platform, platformThreadId])
   @@index([platform, riskLevel, needsReply, lastInboundAt])
@@ -615,4 +616,23 @@ model SendRequest {
   @@index([threadId, status])
   @@index([status, scheduledFor])
   @@map("send_requests")
+}
+
+model ExternalActionRequest {
+  id              String   @id @default(cuid())
+  clientActionId  String   @unique
+  threadId        String
+  targetMessageId String
+  actionType      String
+  payloadJson     String
+  status          String   @default("PENDING")
+  receiptJson     String?
+  errorJson       String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  thread Thread @relation(fields: [threadId], references: [id], onDelete: Cascade)
+
+  @@index([threadId, status])
+  @@map("external_action_requests")
 }

@@ -126,6 +126,22 @@ test("automatic sending stays off unless the active window explicitly opts in", 
   assert.equal(h.queued.length, 0);
 });
 
+test("automatic sending fails closed when either focus-window boundary is invalid", async () => {
+  for (const invalidWindow of [
+    { startedAt: "", endsAt: "2026-07-22T13:30:00.000Z" },
+    { startedAt: "not-a-date", endsAt: "2026-07-22T13:30:00.000Z" },
+    { startedAt: "2026-07-22T11:30:00.000Z", endsAt: "" },
+    { startedAt: "2026-07-22T11:30:00.000Z", endsAt: "not-a-date" }
+  ]) {
+    const h = harness({ profileValue: profile(invalidWindow) });
+    assert.deepEqual(await h.service.handleThread("thread-1"), {
+      type: "skipped",
+      reason: "disabled"
+    });
+    assert.equal(h.queued.length, 0);
+  }
+});
+
 test("group chats, outreach, and unknown unstarred handles are never covered", () => {
   const base = profile({ audience: "all_personal" });
   assert.equal(focusAutoAckCoverage(thread({ isGroup: true }), base), false);
