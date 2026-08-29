@@ -4161,38 +4161,41 @@ export class LinkedInAdapter implements PlatformAdapter {
       return { didScroll: false, reachedBottom: true, moved: false };
     }
 
-    const rowRoots = page.locator(".msg-conversation-listitem");
-    const beforeCount = await rowRoots.count().catch(() => 0);
-    if (beforeCount > 0) {
-      await this.runTracedPageAction({
+    const scrollResolvedContainer = async (note: string) =>
+      this.runTracedPageAction({
         page,
         stage: "collect_threads",
-        action: "scroll_into_view",
-        note: "row_tail_scroll",
-        run: async () => {
-          await rowRoots
-            .nth(beforeCount - 1)
-            .scrollIntoViewIfNeeded()
-            .catch(() => undefined);
-        }
-      });
-    } else {
-      await this.runTracedPageAction({
-        page,
-        stage: "collect_threads",
-        action: "scroll_into_view",
+        action: "scroll_container",
         selector: selectors.thread_list,
-        note: "container_scroll",
-        run: async () => {
-          await listTarget.scrollIntoViewIfNeeded().catch(() => undefined);
-        }
+        note,
+        run: async () =>
+          listTarget.evaluate((listNode) => {
+            let target: HTMLElement | null = listNode as HTMLElement;
+            while (target) {
+              const style = window.getComputedStyle(target);
+              const overflowY = (style.overflowY ?? "").toLowerCase();
+              if (
+                (overflowY === "auto" || overflowY === "scroll") &&
+                target.scrollHeight > target.clientHeight
+              ) {
+                break;
+              }
+              target = target.parentElement;
+            }
+            if (!target) {
+              return false;
+            }
+            const maxScrollTop = Math.max(0, target.scrollHeight - target.clientHeight);
+            target.scrollTop = maxScrollTop;
+            target.dispatchEvent(new Event("scroll"));
+            return true;
+          })
       });
-    }
 
-    await this.tracedScrollContainer(page, selectors.thread_list, 840, {
-      stage: "collect_threads",
-      note: "primary_scroll"
-    });
+    const scrollContainerFound = await scrollResolvedContainer("primary_scroll").catch(() => false);
+    if (!scrollContainerFound) {
+      return { didScroll: true, reachedBottom: true, moved: false };
+    }
     await this.runTracedPageAction({
       page,
       stage: "collect_threads",
@@ -4209,10 +4212,7 @@ export class LinkedInAdapter implements PlatformAdapter {
     let after = await this.collectThreadCandidates(page, selectors).catch(() => null);
     let moved = Boolean(after && after.bottomKey && after.bottomKey !== state.bottomKey);
     if (!moved) {
-      await this.tracedScrollContainer(page, selectors.thread_list, 840, {
-        stage: "collect_threads",
-        note: "secondary_scroll"
-      });
+      await scrollResolvedContainer("secondary_scroll").catch(() => false);
       await this.runTracedPageAction({
         page,
         stage: "collect_threads",
