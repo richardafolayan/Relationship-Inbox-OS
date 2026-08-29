@@ -4161,9 +4161,14 @@ export class LinkedInAdapter implements PlatformAdapter {
     stopReason?: "no_scroll_container";
   }> {
     const listTarget = page.locator(selectors.thread_list).first();
-    const listTargetCount = await listTarget.count().catch(() => 0);
+    const listTargetCount = await listTarget.count();
     if (listTargetCount <= 0) {
-      return { didScroll: false, reachedBottom: true, moved: false };
+      return {
+        didScroll: false,
+        reachedBottom: false,
+        moved: false,
+        stopReason: "no_scroll_container"
+      };
     }
 
     const scrollResolvedContainer = async (note: string) =>

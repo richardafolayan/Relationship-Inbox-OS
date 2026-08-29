@@ -145,7 +145,7 @@ export function localReconciliationMarker(): string {
   });
 }
 
-function needsLocalReconciliation(errorJson: string | null | undefined): boolean {
+export function needsLocalReconciliation(errorJson: string | null | undefined): boolean {
   if (!errorJson) return false;
   try {
     const payload = JSON.parse(errorJson) as Record<string, unknown>;
@@ -180,6 +180,7 @@ type SendAttachment = {
   displayName: string;
   mimeType?: string;
   kind?: string;
+  contentDigest?: string;
 };
 
 type PersistedSendIntent = {
@@ -198,7 +199,21 @@ function normalizedAttachmentsJson(attachments?: SendAttachment[]): string | nul
       absolutePath: attachment.absolutePath,
       displayName: attachment.displayName,
       mimeType: attachment.mimeType ?? null,
-      kind: attachment.kind ?? null
+      kind: attachment.kind ?? null,
+      contentDigest: attachment.contentDigest ?? null
+    }))
+  );
+}
+
+function attachmentIntentJson(attachments?: SendAttachment[]): string | null {
+  if (!attachments || attachments.length === 0) return null;
+  return JSON.stringify(
+    attachments.map((attachment) => ({
+      displayName: attachment.displayName,
+      mimeType: attachment.mimeType ?? null,
+      kind: attachment.kind ?? null,
+      contentDigest: attachment.contentDigest ?? null,
+      legacyAbsolutePath: attachment.contentDigest ? null : attachment.absolutePath
     }))
   );
 }
@@ -208,7 +223,7 @@ function normalizePersistedAttachmentsJson(value: string | null): string | null 
   try {
     const parsed = JSON.parse(value) as unknown;
     if (!Array.isArray(parsed) || parsed.length === 0) return null;
-    return normalizedAttachmentsJson(
+    return attachmentIntentJson(
       parsed.map((attachment) => {
         if (!attachment || typeof attachment !== "object") {
           throw new Error("invalid attachment");
@@ -224,7 +239,9 @@ function normalizePersistedAttachmentsJson(value: string | null): string | null 
           absolutePath: candidate.absolutePath,
           displayName: candidate.displayName,
           mimeType: typeof candidate.mimeType === "string" ? candidate.mimeType : undefined,
-          kind: typeof candidate.kind === "string" ? candidate.kind : undefined
+          kind: typeof candidate.kind === "string" ? candidate.kind : undefined,
+          contentDigest:
+            typeof candidate.contentDigest === "string" ? candidate.contentDigest : undefined
         };
       })
     );
@@ -251,7 +268,7 @@ function assertExistingSendIntent(
     existing.requestText !== expected.text ||
     existing.source !== expected.source ||
     normalizePersistedAttachmentsJson(existing.attachmentsJson) !==
-      normalizedAttachmentsJson(expected.attachments) ||
+      attachmentIntentJson(expected.attachments) ||
     (existing.replyToMessageId ?? null) !== (expected.replyToMessageId ?? null) ||
     existingScheduledFor !== expectedScheduledFor
   ) {
@@ -296,6 +313,27 @@ export function createSendService(deps: SendServiceDeps) {
   // Default to the runner's singleton; tests inject a fake to exercise the
   // scheduled-send race guards without a real database.
   const prisma = deps.prisma ?? defaultPrisma;
+  const userTriggeredIntentCounts = new Map<string, number>();
+
+  async function withUserTriggeredIntent<T>(
+    threadId: string,
+    work: () => Promise<T>
+  ): Promise<T> {
+    userTriggeredIntentCounts.set(
+      threadId,
+      (userTriggeredIntentCounts.get(threadId) ?? 0) + 1
+    );
+    try {
+      return await work();
+    } finally {
+      const remaining = (userTriggeredIntentCounts.get(threadId) ?? 1) - 1;
+      if (remaining > 0) {
+        userTriggeredIntentCounts.set(threadId, remaining);
+      } else {
+        userTriggeredIntentCounts.delete(threadId);
+      }
+    }
+  }
 
   async function projectSentRequest(
     sendRequest: SendRequestRow,
@@ -328,13 +366,7 @@ export function createSendService(deps: SendServiceDeps) {
         }
       },
       update: {
-        text: sendRequest.requestText,
-        direction: "OUT",
-        timestamp: sentAt,
-        sentVia: "automation",
-        attachmentsJson,
-        rawJson,
-        replyToMessageId: sendRequest.replyToMessageId ?? null
+        direction: "OUT"
       },
       create: {
         threadId: thread.id,
@@ -756,15 +788,17 @@ export function createSendService(deps: SendServiceDeps) {
         // page. The demo branch above drives no page, so it stays unlocked.
         receipt = await deps.withPlatformLock(thread.platform as PlatformName, async () => {
           if (source === "focus_auto_ack") {
-            const supersedingUserRequest = await prisma.sendRequest.findFirst({
+            const findSupersedingUserRequest = () => prisma.sendRequest.findFirst({
               where: {
                 threadId: thread.id,
                 source: { in: ["manual", "focus_ack"] },
                 status: { in: ["PENDING", "SENT", "FAILED", "SCHEDULED"] },
-                createdAt: { gt: sendRequest.createdAt }
+                createdAt: { gte: sendRequest.createdAt },
+                NOT: { id: sendRequest.id }
               },
               select: { id: true }
             });
+            const supersedingUserRequest = await findSupersedingUserRequest();
             if (supersedingUserRequest) {
               throw new SendPolicyError(
                 "focus_auto_ack_superseded",
@@ -812,12 +846,22 @@ export function createSendService(deps: SendServiceDeps) {
                 autoAckThread,
                 profile,
                 sendRequest.clientSendId,
-                new Date()
+                new Date(),
+                sendRequest.requestText
               )
             ) {
               throw new SendPolicyError(
                 "focus_auto_ack_not_eligible",
                 "Automatic focus acknowledgement is no longer eligible for this conversation"
+              );
+            }
+            if (
+              (userTriggeredIntentCounts.get(thread.id) ?? 0) > 0 ||
+              await findSupersedingUserRequest()
+            ) {
+              throw new SendPolicyError(
+                "focus_auto_ack_superseded",
+                "Automatic focus acknowledgement was superseded by a user-triggered reply"
               );
             }
           }
@@ -1307,7 +1351,8 @@ export function createSendService(deps: SendServiceDeps) {
     updateScheduledSend,
     processSendRequest,
     reconcileInterruptedSends,
-    reconcileSentProjections
+    reconcileSentProjections,
+    withUserTriggeredIntent
   };
 }
 

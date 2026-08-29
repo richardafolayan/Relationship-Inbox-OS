@@ -2,6 +2,7 @@ import type { AppSettings, PlatformName, SelectorOverrideStore, SelectorRegistry
 import { defaultSettings } from "@inbox-os/core";
 import { safeJsonParse } from "../utils/json";
 import { prisma } from "../db";
+import { createKeyedMutex } from "./keyed-mutex";
 import type {
   AckTemplates,
   AiHelpLevel,
@@ -139,6 +140,21 @@ function asFocusWindow(value: unknown): FocusWindowState {
   };
 }
 
+export function mergeFocusWindowUpdate(
+  current: FocusWindowState,
+  requestedValue: unknown
+): FocusWindowState {
+  const requested = asFocusWindow(requestedValue);
+  if (requested.windowId !== current.windowId) return requested;
+  return {
+    ...requested,
+    ackedPersonIds: Array.from(new Set([
+      ...current.ackedPersonIds,
+      ...requested.ackedPersonIds
+    ]))
+  };
+}
+
 function asCalendarSync(value: unknown): CalendarSyncSettings {
   const raw = value && typeof value === "object" ? (value as Record<string, unknown>) : {};
   const urls = [asString(raw.url), ...asStringArray(raw.additionalUrls)]
@@ -190,6 +206,7 @@ function cloneSelectorOverrides(overrides: SelectorOverrideStore): SelectorOverr
 }
 
 export function createSettingsStore(): SettingsStore {
+  const writeMutex = createKeyedMutex();
   let settingsCache: AppSettings | null = null;
   let settingsLoadPromise: Promise<AppSettings> | null = null;
   let selectorOverridesCache: SelectorOverrideStore | null = null;
@@ -365,46 +382,76 @@ export function createSettingsStore(): SettingsStore {
   }
 
   async function updateOperatorProfile(partial: Partial<OperatorProfile>): Promise<OperatorProfile> {
-    const current = await getOperatorProfile();
-    const next: OperatorProfile = {
-      displayName: typeof partial.displayName === "string" ? partial.displayName : current.displayName,
-      about: typeof partial.about === "string" ? partial.about : current.about,
-      interests: typeof partial.interests === "string" ? partial.interests : current.interests,
-      commonPhrases:
-        typeof partial.commonPhrases === "string" ? partial.commonPhrases : current.commonPhrases,
-      avoidedPhrases:
-        typeof partial.avoidedPhrases === "string" ? partial.avoidedPhrases : current.avoidedPhrases,
-      preferredStyle:
-        partial.preferredStyle !== undefined
-          ? asReplyStyle(partial.preferredStyle)
-          : current.preferredStyle,
-      aiHelpLevel:
-        partial.aiHelpLevel !== undefined ? asAiHelpLevel(partial.aiHelpLevel) : current.aiHelpLevel,
-      setupCompletedAt:
-        typeof partial.setupCompletedAt === "string"
-          ? partial.setupCompletedAt
-          : current.setupCompletedAt,
-      focusWindow:
-        partial.focusWindow !== undefined ? asFocusWindow(partial.focusWindow) : current.focusWindow,
-      ackTemplates:
-        partial.ackTemplates !== undefined
-          ? asAckTemplates(partial.ackTemplates)
-          : current.ackTemplates,
-      focusSettings:
-        partial.focusSettings !== undefined
-          ? asFocusSettings(partial.focusSettings)
-          : current.focusSettings,
-      calendarSync:
-        partial.calendarSync !== undefined
-          ? asCalendarSync(partial.calendarSync)
-          : current.calendarSync
-    };
-    await prisma.setting.upsert({
-      where: { key: OPERATOR_PROFILE_KEY },
-      update: { valueJson: JSON.stringify(next) },
-      create: { key: OPERATOR_PROFILE_KEY, valueJson: JSON.stringify(next) }
+    return writeMutex.runExclusive(OPERATOR_PROFILE_KEY, async () => {
+      const current = await getOperatorProfile();
+      const next: OperatorProfile = {
+        displayName: typeof partial.displayName === "string" ? partial.displayName : current.displayName,
+        about: typeof partial.about === "string" ? partial.about : current.about,
+        interests: typeof partial.interests === "string" ? partial.interests : current.interests,
+        commonPhrases:
+          typeof partial.commonPhrases === "string" ? partial.commonPhrases : current.commonPhrases,
+        avoidedPhrases:
+          typeof partial.avoidedPhrases === "string" ? partial.avoidedPhrases : current.avoidedPhrases,
+        preferredStyle:
+          partial.preferredStyle !== undefined
+            ? asReplyStyle(partial.preferredStyle)
+            : current.preferredStyle,
+        aiHelpLevel:
+          partial.aiHelpLevel !== undefined ? asAiHelpLevel(partial.aiHelpLevel) : current.aiHelpLevel,
+        setupCompletedAt:
+          typeof partial.setupCompletedAt === "string"
+            ? partial.setupCompletedAt
+            : current.setupCompletedAt,
+        focusWindow:
+          partial.focusWindow !== undefined
+            ? mergeFocusWindowUpdate(current.focusWindow, partial.focusWindow)
+            : current.focusWindow,
+        ackTemplates:
+          partial.ackTemplates !== undefined
+            ? asAckTemplates(partial.ackTemplates)
+            : current.ackTemplates,
+        focusSettings:
+          partial.focusSettings !== undefined
+            ? asFocusSettings(partial.focusSettings)
+            : current.focusSettings,
+        calendarSync:
+          partial.calendarSync !== undefined
+            ? asCalendarSync(partial.calendarSync)
+            : current.calendarSync
+      };
+      await prisma.setting.upsert({
+        where: { key: OPERATOR_PROFILE_KEY },
+        update: { valueJson: JSON.stringify(next) },
+        create: { key: OPERATOR_PROFILE_KEY, valueJson: JSON.stringify(next) }
+      });
+      return next;
     });
-    return next;
+  }
+
+  async function acknowledgeFocusWindowPerson(
+    windowId: string,
+    personId: string
+  ): Promise<boolean> {
+    return writeMutex.runExclusive(OPERATOR_PROFILE_KEY, async () => {
+      const current = await getOperatorProfile();
+      if (current.focusWindow.windowId !== windowId) {
+        return false;
+      }
+      if (current.focusWindow.ackedPersonIds.includes(personId)) return true;
+      const next: OperatorProfile = {
+        ...current,
+        focusWindow: {
+          ...current.focusWindow,
+          ackedPersonIds: [...current.focusWindow.ackedPersonIds, personId]
+        }
+      };
+      await prisma.setting.upsert({
+        where: { key: OPERATOR_PROFILE_KEY },
+        update: { valueJson: JSON.stringify(next) },
+        create: { key: OPERATOR_PROFILE_KEY, valueJson: JSON.stringify(next) }
+      });
+      return true;
+    });
   }
 
   return {
@@ -416,6 +463,7 @@ export function createSettingsStore(): SettingsStore {
     getDemoSeedManifest,
     setDemoSeedManifest,
     getOperatorProfile,
-    updateOperatorProfile
+    updateOperatorProfile,
+    acknowledgeFocusWindowPerson
   };
 }

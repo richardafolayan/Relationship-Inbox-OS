@@ -122,6 +122,11 @@ test("post-dispatch projection failure is durable, replay repairs locally withou
   const action = input({ dispatch: async () => { dispatches += 1; } });
 
   await h.service.execute(action);
+  assert.deepEqual(await h.service.execute(action), {
+    status: "ok",
+    replayed: true,
+    reconciliationPending: true
+  });
   assert.equal(JSON.parse(h.rows[0].errorJson).reconciliationRequired, true);
   projectionFails = false;
   assert.deepEqual(await h.service.execute(action), { status: "ok", replayed: true });
@@ -194,6 +199,28 @@ test("an ambiguous dispatch failure is never retried", async () => {
     return true;
   });
   await assert.rejects(() => h.service.execute(action), /may already have reached/i);
+  assert.equal(dispatches, 1);
+});
+
+test("a proven pre-dispatch failure releases the durable claim for a safe retry", async () => {
+  const h = harness();
+  let connected = false;
+  let dispatches = 0;
+  const sessionUnavailable = new Error("session unavailable before dispatch");
+  const action = input({
+    isPreDispatchFailure: (error) => error === sessionUnavailable,
+    dispatch: async () => {
+      if (!connected) throw sessionUnavailable;
+      dispatches += 1;
+    }
+  });
+
+  await assert.rejects(() => h.service.execute(action), (error) => error === sessionUnavailable);
+  assert.equal(h.rows[0].status, "PENDING");
+  assert.equal(h.rows[0].receiptJson, null);
+
+  connected = true;
+  assert.deepEqual(await h.service.execute(action), { status: "ok", replayed: false });
   assert.equal(dispatches, 1);
 });
 

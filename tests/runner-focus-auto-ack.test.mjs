@@ -7,6 +7,7 @@ import {
   focusAutoAckText
 } from "../apps/runner/src/services/focus-auto-ack.ts";
 import { createEventBus } from "../apps/runner/src/services/event-bus.ts";
+import { mergeFocusWindowUpdate } from "../apps/runner/src/services/settings.ts";
 
 const now = new Date("2026-07-22T12:00:00.000Z");
 
@@ -69,7 +70,7 @@ function thread(overrides = {}) {
   };
 }
 
-function harness({ profileValue = profile(), threadValue = thread(), loadThread } = {}) {
+function harness({ profileValue = profile(), threadValue = thread(), loadThread, afterEnqueue } = {}) {
   let current = structuredClone(profileValue);
   const queued = [];
   const writes = [];
@@ -79,10 +80,19 @@ function harness({ profileValue = profile(), threadValue = thread(), loadThread 
       async getOperatorProfile() {
         return structuredClone(current);
       },
-      async updateOperatorProfile(partial) {
-        current = { ...current, ...structuredClone(partial) };
-        writes.push(structuredClone(partial));
-        return structuredClone(current);
+      async acknowledgeFocusWindowPerson(windowId, personId) {
+        if (current.focusWindow.windowId !== windowId) {
+          return false;
+        }
+        current = {
+          ...current,
+          focusWindow: {
+            ...current.focusWindow,
+            ackedPersonIds: Array.from(new Set([...current.focusWindow.ackedPersonIds, personId]))
+          }
+        };
+        writes.push({ focusWindow: structuredClone(current.focusWindow) });
+        return true;
       }
     },
     async loadThread(threadId) {
@@ -91,6 +101,10 @@ function harness({ profileValue = profile(), threadValue = thread(), loadThread 
     sendQueue: {
       async enqueueAndKick(input) {
         queued.push(input);
+        await afterEnqueue?.({
+          read: () => structuredClone(current),
+          write: (next) => { current = structuredClone(next); }
+        });
         return {
           clientSendId: input.clientSendId,
           status: "PENDING",
@@ -115,6 +129,33 @@ test("explicit focus opt-in queues the operator's note once and records the pers
   const repeated = await h.service.handleThread("thread-1");
   assert.deepEqual(repeated, { type: "skipped", reason: "already_acknowledged" });
   assert.equal(h.queued.length, 1);
+});
+
+test("recording the queued person cannot reactivate a focus window ended concurrently", async () => {
+  const h = harness({
+    afterEnqueue: async ({ read, write }) => {
+      const ended = read();
+      write({ ...ended, focusWindow: { ...ended.focusWindow, active: false } });
+    }
+  });
+
+  assert.equal((await h.service.handleThread("thread-1")).type, "queued");
+  assert.equal(h.current().focusWindow.active, false);
+  assert.deepEqual(h.current().focusWindow.ackedPersonIds, ["person-1"]);
+});
+
+test("ending the same focus window preserves acknowledgements recorded concurrently", () => {
+  const current = profile({ ackedPersonIds: ["person-1"] }).focusWindow;
+  const endedFromStaleClient = {
+    ...profile().focusWindow,
+    active: false,
+    ackedPersonIds: []
+  };
+
+  assert.deepEqual(
+    mergeFocusWindowUpdate(current, endedFromStaleClient),
+    { ...endedFromStaleClient, ackedPersonIds: ["person-1"] }
+  );
 });
 
 test("automatic sending stays off unless the active window explicitly opts in", async () => {

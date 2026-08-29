@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, openSync, rmSync } from "node:fs";
+import { createReadStream, existsSync, mkdirSync, openSync, rmSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { basename, join, resolve } from "node:path";
@@ -68,7 +68,10 @@ import {
   hasPersistedWhatsAppSession
 } from "./platforms/whatsapp/session";
 import { findWhatsAppMediaByGuid, streamWhatsAppMedia } from "./platforms/whatsapp/media";
-import { isWhatsAppSessionUnavailableError } from "./platforms/whatsapp-adapter";
+import {
+  isWhatsAppPollVotePreDispatchError,
+  isWhatsAppSessionUnavailableError
+} from "./platforms/whatsapp-adapter";
 import {
   connectedPlatformCount,
   effectivePlatformStatus
@@ -290,6 +293,16 @@ function maybeMultipart(req: express.Request, res: express.Response, next: expre
   } else {
     next();
   }
+}
+
+async function sha256File(path: string): Promise<string> {
+  return new Promise((resolveHash, rejectHash) => {
+    const hash = createHash("sha256");
+    const stream = createReadStream(path);
+    stream.on("data", (chunk) => hash.update(chunk));
+    stream.on("error", rejectHash);
+    stream.on("end", () => resolveHash(hash.digest("hex")));
+  });
 }
 
 // #462 (pilot R-0061): voice-to-text dictation. The composer records a short
@@ -4025,12 +4038,15 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
     })
     .parse(req.body);
   const uploadedFiles = (req.files as Express.Multer.File[] | undefined) ?? [];
-  const stagedAttachments = uploadedFiles.map((f) => ({
-    absolutePath: f.path,
-    displayName: f.originalname,
-    mimeType: f.mimetype,
-    kind: kindFromMime(f.mimetype, f.originalname)
-  }));
+  const stagedAttachments = await Promise.all(
+    uploadedFiles.map(async (f) => ({
+      absolutePath: f.path,
+      displayName: f.originalname,
+      mimeType: f.mimetype,
+      kind: kindFromMime(f.mimetype, f.originalname),
+      contentDigest: await sha256File(f.path)
+    }))
+  );
   if (stagedAttachments.length === 0 && payload.text.trim().length === 0) {
     res.status(400).json({ error: "send must have text, attachments, or both" });
     return;
@@ -4053,14 +4069,17 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
   // over from there.
   if (payload.scheduledFor) {
     try {
-      const scheduleResult = await sendService.enqueueScheduledSend({
+      const scheduleResult = await sendService.withUserTriggeredIntent(
         threadId,
-        text: payload.text,
-        clientSendId: payload.clientSendId,
-        scheduledFor: new Date(payload.scheduledFor),
-        attachments: stagedAttachments,
-        replyToMessageId: payload.replyToMessageId
-      });
+        () => sendService.enqueueScheduledSend({
+          threadId,
+          text: payload.text,
+          clientSendId: payload.clientSendId,
+          scheduledFor: new Date(payload.scheduledFor!),
+          attachments: stagedAttachments,
+          replyToMessageId: payload.replyToMessageId
+        })
+      );
       res.json({
         clientSendId: scheduleResult.clientSendId,
         status: scheduleResult.status,
@@ -4100,14 +4119,17 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
       payload.clientSendId,
       payload.clientRequestedAt ?? new Date().toISOString()
     );
-    const queueResult = await sendQueue.enqueueAndKick({
+    const queueResult = await sendService.withUserTriggeredIntent(
       threadId,
-      text: payload.text,
-      clientSendId: payload.clientSendId,
-      attachments: stagedAttachments,
-      source: payload.source ?? "manual",
-      replyToMessageId: payload.replyToMessageId
-    });
+      () => sendQueue.enqueueAndKick({
+        threadId,
+        text: payload.text,
+        clientSendId: payload.clientSendId,
+        attachments: stagedAttachments,
+        source: payload.source ?? "manual",
+        replyToMessageId: payload.replyToMessageId
+      })
+    );
     res.json(queueResult);
   } catch (error) {
     await auditService.log({
@@ -4175,7 +4197,9 @@ app.post("/control/thread/:threadId/send-poll", asyncRoute(async (req, res) => {
         thread: {
           id: threadRow.id,
           platform: target.platform,
-          lastInboundAt: threadRow.lastInboundAt
+          lastInboundAt: threadRow.lastInboundAt,
+          lastOutboundAt: threadRow.lastOutboundAt,
+          lastMessageAt: threadRow.lastMessageAt
         },
         question: payload.question,
         options: payload.options,
@@ -4495,7 +4519,12 @@ app.post("/control/thread/:threadId/message/:messageId/react", asyncRoute(async 
             details: { threadId, messageId, emoji: payload.emoji, ...summarizeError(error) }
           })
       });
-      res.json({ status: "ok", emoji: payload.emoji, replayed: result.replayed });
+      res.json({
+        status: "ok",
+        emoji: payload.emoji,
+        replayed: result.replayed,
+        reconciliationPending: result.reconciliationPending ?? false
+      });
     } catch (error) {
       if (error instanceof DurableExternalActionError) {
         res.status(409).json({ error: error.message, reason: error.reason });
@@ -4568,7 +4597,12 @@ app.post("/control/thread/:threadId/message/:messageId/edit", asyncRoute(async (
             details: { threadId, messageId, ...summarizeError(error) }
           })
       });
-      res.json({ status: "ok", text: payload.text, replayed: result.replayed });
+      res.json({
+        status: "ok",
+        text: payload.text,
+        replayed: result.replayed,
+        reconciliationPending: result.reconciliationPending ?? false
+      });
     } catch (error) {
       if (error instanceof DurableExternalActionError) {
         res.status(409).json({ error: error.message, reason: error.reason });
@@ -4622,6 +4656,7 @@ app.post("/control/thread/:threadId/message/:messageId/poll-vote", asyncRoute(as
         targetMessageId: messageId,
         actionType: "poll_vote",
         payload: { selectedOptions: payload.selectedOptions },
+        isPreDispatchFailure: isWhatsAppPollVotePreDispatchError,
         dispatch: () =>
           adapter.voteOnPoll!(threadStub, message.platformMessageKey!, payload.selectedOptions),
         auditSuccess: () =>
@@ -4649,13 +4684,11 @@ app.post("/control/thread/:threadId/message/:messageId/poll-vote", asyncRoute(as
       res.json({
         status: "ok",
         selectedOptions: payload.selectedOptions,
-        replayed: result.replayed
+        replayed: result.replayed,
+        reconciliationPending: result.reconciliationPending ?? false
       });
     } catch (error) {
-      if (
-        error instanceof DurableExternalActionError &&
-        isWhatsAppSessionUnavailableError(error.originalError)
-      ) {
+      if (isWhatsAppPollVotePreDispatchError(error)) {
         res.status(409).json({
           error: "WhatsApp lost its connection. Reconnect it in Settings, then try again.",
           reason: "whatsapp_session_unavailable"

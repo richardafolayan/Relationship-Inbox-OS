@@ -84,9 +84,14 @@ export function createDurableExternalActionService(deps: DurableExternalActionDe
     actionType: ActionType;
     payload: unknown;
     dispatch(): Promise<void>;
+    isPreDispatchFailure?(error: unknown): boolean;
     auditSuccess(): Promise<unknown>;
     auditFailure(error: unknown): Promise<unknown>;
-  }): Promise<{ status: "ok"; replayed: boolean }> {
+  }): Promise<{
+    status: "ok";
+    replayed: boolean;
+    reconciliationPending?: true;
+  }> {
     const payloadJson = canonicalPayload(input.payload);
     const clientActionId = input.clientActionId;
 
@@ -140,14 +145,18 @@ export function createDurableExternalActionService(deps: DurableExternalActionDe
     assertIntent(row);
 
     if (row.status === "SENT") {
+      let reconciliationPending: true | undefined;
       if (row.errorJson?.includes(LOCAL_RECONCILIATION_REQUIRED)) {
         try {
           await repairProjection(row);
         } catch {
           // SENT remains authoritative and the durable repair marker remains.
+          reconciliationPending = true;
         }
       }
-      return { status: "ok", replayed: true };
+      return reconciliationPending
+        ? { status: "ok", replayed: true, reconciliationPending }
+        : { status: "ok", replayed: true };
     }
     if (row.status === "FAILED" || row.receiptJson === ACTION_CLAIM_MARKER) {
       throw new DurableExternalActionError(
@@ -170,6 +179,18 @@ export function createDurableExternalActionService(deps: DurableExternalActionDe
     try {
       await input.dispatch();
     } catch (error) {
+      if (input.isPreDispatchFailure?.(error)) {
+        await deps.prisma.externalActionRequest.update({
+          where: { id: row.id },
+          data: {
+            status: "PENDING",
+            receiptJson: null,
+            errorJson: null
+          }
+        });
+        await input.auditFailure(error).catch(() => undefined);
+        throw error;
+      }
       await deps.prisma.externalActionRequest
         .update({
           where: { id: row.id },
@@ -195,6 +216,7 @@ export function createDurableExternalActionService(deps: DurableExternalActionDe
         errorJson: JSON.stringify({ reconciliationRequired: true, reason: LOCAL_RECONCILIATION_REQUIRED })
       }
     });
+    let reconciliationPending: true | undefined;
     try {
       await deps.project(row);
       await deps.prisma.externalActionRequest.update({
@@ -203,9 +225,12 @@ export function createDurableExternalActionService(deps: DurableExternalActionDe
       });
     } catch {
       // The SENT row and repair marker prevent repeat dispatch and preserve repair work.
+      reconciliationPending = true;
     }
     await input.auditSuccess().catch(() => undefined);
-    return { status: "ok", replayed: false };
+    return reconciliationPending
+      ? { status: "ok", replayed: false, reconciliationPending }
+      : { status: "ok", replayed: false };
   }
 
   async function reconcileSentProjections(): Promise<number> {

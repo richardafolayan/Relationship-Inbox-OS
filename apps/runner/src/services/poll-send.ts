@@ -5,7 +5,11 @@ import type {
 import { calculateRisk, stableHash } from "@inbox-os/core";
 import type { PrismaClient } from "@prisma/client";
 import type { EventBus, SettingsStore } from "../types/runtime";
-import { localReconciliationMarker, SEND_CLAIM_MARKER } from "./send";
+import {
+  localReconciliationMarker,
+  needsLocalReconciliation,
+  SEND_CLAIM_MARKER
+} from "./send";
 import {
   consumerSendFailure,
   parsePersistedSendFailure,
@@ -33,6 +37,8 @@ interface PollSendInput {
     id: string;
     platform: PlatformName;
     lastInboundAt: Date | null;
+    lastOutboundAt?: Date | null;
+    lastMessageAt?: Date | null;
   };
   question: string;
   options: string[];
@@ -53,6 +59,7 @@ export type PollSendResult =
       messageId?: string;
       platformMessageKey: string;
       sentAt: string;
+      reconciliationPending?: true;
     };
 
 export class PollSendError extends Error {
@@ -109,6 +116,79 @@ export function createPollSendService(deps: PollSendDeps) {
     const requestText = renderWhatsAppPollText(input);
     const settings = await deps.settingsStore.getSettings();
 
+    async function projectSentPoll(receipt: SendReceipt): Promise<{
+      messageId?: string;
+      platformMessageKey: string;
+      sentAt: string;
+    }> {
+      const sentAt = new Date(receipt.sentAt);
+      if (Number.isNaN(sentAt.getTime())) {
+        throw new PollSendError("Stored poll receipt has an invalid sent time", 409);
+      }
+      const platformMessageKey =
+        receipt.platformMessageKey ??
+        stableHash(`${input.thread.id}|${receipt.sentAt}|OUT|${requestText}|poll`);
+      const attachmentsJson =
+        receipt.attachments && receipt.attachments.length > 0
+          ? JSON.stringify(receipt.attachments)
+          : null;
+      const rawJson = receipt.raw ? JSON.stringify(receipt.raw) : null;
+      const message = await deps.prisma.message.upsert({
+        where: {
+          threadId_platformMessageKey: {
+            threadId: input.thread.id,
+            platformMessageKey
+          }
+        },
+        update: { direction: "OUT" },
+        create: {
+          threadId: input.thread.id,
+          platformMessageKey,
+          direction: "OUT",
+          timestamp: sentAt,
+          text: requestText,
+          sentVia: "automation",
+          attachmentsJson,
+          rawJson
+        }
+      });
+      const lastOutboundAt =
+        input.thread.lastOutboundAt && input.thread.lastOutboundAt > sentAt
+          ? input.thread.lastOutboundAt
+          : sentAt;
+      const risk = calculateRisk({
+        lastInboundAt: input.thread.lastInboundAt,
+        lastOutboundAt,
+        amberHours: settings.amberHours,
+        redHours: settings.redHours
+      });
+      const sendIsLatest = !input.thread.lastMessageAt || sentAt >= input.thread.lastMessageAt;
+      await deps.prisma.thread.update({
+        where: { id: input.thread.id },
+        data: {
+          needsReply: risk.needsReply,
+          riskLevel: risk.level,
+          riskReason: risk.riskReason,
+          slaDueAt: risk.slaDueAt,
+          lastOutboundAt,
+          ...(sendIsLatest
+            ? {
+                snoozedUntil: null,
+                lastMessageAt: sentAt,
+                unreadCount: 0,
+                lastMessageDirection: "OUT" as const,
+                lastMessageText: requestText
+              }
+            : {})
+        }
+      });
+      await deps.prisma.sendRequest.update({
+        where: { clientSendId: input.clientSendId },
+        data: { errorJson: null }
+      });
+      return { messageId: message.id, platformMessageKey, sentAt: receipt.sentAt };
+    }
+
     async function replayExisting(): Promise<PollSendResult> {
       const existing = await deps.prisma.sendRequest.findUnique({
         where: { clientSendId: input.clientSendId }
@@ -138,14 +218,25 @@ export function createPollSendService(deps: PollSendDeps) {
         if (!receipt) {
           throw new PollSendError("Stored poll receipt is invalid", 409);
         }
-        return {
-          status: "ok",
-          clientSendId: input.clientSendId,
-          replayed: true,
+        let reconciliationPending: true | undefined;
+        const fallbackProjection = {
           platformMessageKey:
             receipt.platformMessageKey ??
             stableHash(`${input.thread.id}|${receipt.sentAt}|OUT|${requestText}|poll`),
           sentAt: receipt.sentAt
+        };
+        const projection = needsLocalReconciliation(existing.errorJson)
+          ? await projectSentPoll(receipt).catch(() => {
+              reconciliationPending = true;
+              return fallbackProjection;
+            })
+          : fallbackProjection;
+        return {
+          status: "ok",
+          clientSendId: input.clientSendId,
+          replayed: true,
+          ...projection,
+          ...(reconciliationPending ? { reconciliationPending } : {})
         };
       }
       if (existing.status === "FAILED") {
@@ -219,66 +310,7 @@ export function createPollSendService(deps: PollSendDeps) {
       });
       sentStatePersisted = true;
 
-      const sentAt = new Date(receipt.sentAt);
-      const platformMessageKey =
-        receipt.platformMessageKey ??
-        stableHash(`${input.thread.id}|${receipt.sentAt}|OUT|${requestText}|poll`);
-      const attachmentsJson =
-        receipt.attachments && receipt.attachments.length > 0
-          ? JSON.stringify(receipt.attachments)
-          : null;
-      const rawJson = receipt.raw ? JSON.stringify(receipt.raw) : null;
-      const message = await deps.prisma.message.upsert({
-        where: {
-          threadId_platformMessageKey: {
-            threadId: input.thread.id,
-            platformMessageKey
-          }
-        },
-        update: {
-          text: requestText,
-          direction: "OUT",
-          timestamp: sentAt,
-          sentVia: "automation",
-          attachmentsJson,
-          rawJson
-        },
-        create: {
-          threadId: input.thread.id,
-          platformMessageKey,
-          direction: "OUT",
-          timestamp: sentAt,
-          text: requestText,
-          sentVia: "automation",
-          attachmentsJson,
-          rawJson
-        }
-      });
-      const risk = calculateRisk({
-        lastInboundAt: input.thread.lastInboundAt,
-        lastOutboundAt: sentAt,
-        amberHours: settings.amberHours,
-        redHours: settings.redHours
-      });
-      await deps.prisma.thread.update({
-        where: { id: input.thread.id },
-        data: {
-          needsReply: risk.needsReply,
-          riskLevel: risk.level,
-          riskReason: risk.riskReason,
-          slaDueAt: risk.slaDueAt,
-          snoozedUntil: null,
-          lastOutboundAt: sentAt,
-          lastMessageAt: sentAt,
-          unreadCount: 0,
-          lastMessageDirection: "OUT",
-          lastMessageText: requestText
-        }
-      });
-      await deps.prisma.sendRequest.update({
-        where: { clientSendId: input.clientSendId },
-        data: { errorJson: null }
-      });
+      const projection = await projectSentPoll(receipt);
       await deps
         .auditLog({
           platform: input.thread.platform,
@@ -304,9 +336,7 @@ export function createPollSendService(deps: PollSendDeps) {
         status: "ok",
         clientSendId: input.clientSendId,
         replayed: false,
-        messageId: message.id,
-        platformMessageKey,
-        sentAt: receipt.sentAt
+        ...projection
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -332,7 +362,8 @@ export function createPollSendService(deps: PollSendDeps) {
           platformMessageKey:
             receipt.platformMessageKey ??
             stableHash(`${input.thread.id}|${receipt.sentAt}|OUT|${requestText}|poll`),
-          sentAt: receipt.sentAt
+          sentAt: receipt.sentAt,
+          reconciliationPending: true
         };
       }
 

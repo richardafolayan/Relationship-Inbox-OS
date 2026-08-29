@@ -81,6 +81,17 @@ export class WhatsAppSessionUnavailableError extends Error {
   }
 }
 
+export class WhatsAppPollVotePreDispatchError extends WhatsAppSessionUnavailableError {
+  constructor() {
+    super();
+    this.name = "WhatsAppPollVotePreDispatchError";
+  }
+}
+
+export function isWhatsAppPollVotePreDispatchError(error: unknown): boolean {
+  return error instanceof WhatsAppPollVotePreDispatchError;
+}
+
 export function isWhatsAppSessionUnavailableError(error: unknown): boolean {
   if (error instanceof WhatsAppSessionUnavailableError) return true;
   const message = error instanceof Error ? error.message : String(error);
@@ -138,6 +149,10 @@ export class WhatsAppAdapter implements PlatformAdapter {
           resolve();
           return;
         }
+        this.sessionEpoch += 1;
+        this.client = null;
+        this.ready = false;
+        this.readyPromise = null;
         this.deps.onStateChange?.("disconnected");
         reject(new Error(`WhatsApp auth_failure: ${msg}`));
       };
@@ -146,9 +161,12 @@ export class WhatsAppAdapter implements PlatformAdapter {
           resolve();
           return;
         }
+        this.sessionEpoch += 1;
+        this.client = null;
         this.ready = false;
+        this.readyPromise = null;
         this.deps.onStateChange?.("disconnected");
-        if (!this.ready) reject(new Error(`WhatsApp disconnected before ready: ${reason}`));
+        reject(new Error(`WhatsApp disconnected before ready: ${reason}`));
       };
 
       client.on("qr", (qr: string) => {
@@ -601,6 +619,7 @@ export class WhatsAppAdapter implements PlatformAdapter {
     platformMessageKey: string,
     selectedOptions: string[]
   ): Promise<void> {
+    let dispatchStarted = false;
     try {
       const client = this.requireClient();
       const message = await (client as unknown as {
@@ -609,8 +628,13 @@ export class WhatsAppAdapter implements PlatformAdapter {
       if (!message || message.type !== "poll_creation" || typeof message.vote !== "function") {
         throw new Error("WhatsApp poll vote failed: poll message not found");
       }
+      dispatchStarted = true;
       await message.vote(selectedOptions);
     } catch (error) {
+      if (!dispatchStarted && isWhatsAppSessionUnavailableError(error)) {
+        await this.closeSession("poll_vote_pre_dispatch_session_unavailable");
+        throw new WhatsAppPollVotePreDispatchError();
+      }
       await this.rethrowPollSessionFailure(error);
     }
   }

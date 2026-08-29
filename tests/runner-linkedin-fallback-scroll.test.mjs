@@ -119,6 +119,33 @@ test("LinkedIn fallback refuses to certify freshness without a real scroll conta
   });
 });
 
+test("LinkedIn fallback treats a missing list after snapshot as incomplete", async (t) => {
+  const fixture = await createFixture();
+  if (fixture.skipped) {
+    t.skip(fixture.reason);
+    return;
+  }
+
+  t.after(async () => {
+    await fixture.context.close();
+    await fixture.browser.close();
+  });
+  await fixture.page.setContent("<main>LinkedIn rerendered the list away</main>");
+
+  const outcome = await fixture.adapter.deepScrollThreadList(
+    fixture.page,
+    selectorsForInbox("about:blank"),
+    { bottomKey: "one", visibleSetHash: "one" }
+  );
+
+  assert.deepEqual(outcome, {
+    didScroll: false,
+    reachedBottom: false,
+    moved: false,
+    stopReason: "no_scroll_container"
+  });
+});
+
 test("LinkedIn fallback propagates a scroll execution failure instead of reporting the end", async (t) => {
   const fixture = await createFixture();
   if (fixture.skipped) {
@@ -149,5 +176,37 @@ test("LinkedIn fallback propagates a scroll execution failure instead of reporti
         { bottomKey: "one", visibleSetHash: "one" }
       ),
     /execution context was destroyed/i
+  );
+});
+
+test("LinkedIn fallback propagates a list locator failure instead of certifying completeness", async (t) => {
+  const fixture = await createFixture();
+  if (fixture.skipped) {
+    t.skip(fixture.reason);
+    return;
+  }
+
+  t.after(async () => {
+    await fixture.context.close();
+    await fixture.browser.close();
+  });
+  const fakePage = {
+    locator: () => ({
+      first: () => ({
+        count: async () => {
+          throw new Error("execution context was destroyed while locating the thread list");
+        }
+      })
+    })
+  };
+
+  await assert.rejects(
+    () =>
+      fixture.adapter.deepScrollThreadList(
+        fakePage,
+        selectorsForInbox("about:blank"),
+        { bottomKey: "one", visibleSetHash: "one" }
+      ),
+    /execution context was destroyed while locating the thread list/i
   );
 });

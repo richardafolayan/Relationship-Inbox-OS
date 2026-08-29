@@ -81,6 +81,54 @@ test("immediate clientSendId replay is bound to the complete immutable intent", 
   }
 });
 
+test("identical attachment content replays across different staging paths", async () => {
+  const h = harness();
+  const first = immediateInput({
+    attachments: [{
+      absolutePath: "/tmp/upload-a/photo.jpg",
+      displayName: "photo.jpg",
+      mimeType: "image/jpeg",
+      kind: "photo",
+      contentDigest: "sha256-same-content"
+    }]
+  });
+  const replay = immediateInput({
+    attachments: [{
+      absolutePath: "/tmp/upload-b/photo.jpg",
+      displayName: "photo.jpg",
+      mimeType: "image/jpeg",
+      kind: "photo",
+      contentDigest: "sha256-same-content"
+    }]
+  });
+
+  assert.equal((await h.service.enqueueSend(first)).replayed, false);
+  assert.equal((await h.service.enqueueSend(replay)).replayed, true);
+  assert.equal(h.rows.length, 1);
+});
+
+test("attachment replay rejects different content at the same display name", async () => {
+  const h = harness();
+  await h.service.enqueueSend(immediateInput({
+    attachments: [{
+      absolutePath: "/tmp/upload-a/photo.jpg",
+      displayName: "photo.jpg",
+      contentDigest: "sha256-first"
+    }]
+  }));
+
+  await assert.rejects(
+    () => h.service.enqueueSend(immediateInput({
+      attachments: [{
+        absolutePath: "/tmp/upload-b/photo.jpg",
+        displayName: "photo.jpg",
+        contentDigest: "sha256-second"
+      }]
+    })),
+    /different send intent/i
+  );
+});
+
 test("a concurrent immediate-send uniqueness loser rereads and rejects the winner's different intent", async () => {
   const h = harness({
     createRaceWinner: (loser) => ({

@@ -33,12 +33,9 @@ test("runner exposes a dedicated WhatsApp poll send route", () => {
 });
 
 test("ambiguous poll retries reuse the same durable client id", () => {
-  assert.match(THREAD_PAGE, /whatsAppPollAttemptRef/);
   assert.match(THREAD_PAGE, /const payloadKey = JSON\.stringify\(\{\s*threadId: thread\.id,/);
-  assert.match(
-    THREAD_PAGE,
-    /whatsAppPollAttemptRef\.current\?\.payloadKey === payloadKey[\s\S]*?clientSendId: uuid\(\)/
-  );
-  assert.match(THREAD_PAGE, /clientSendId:\s*attempt\.clientSendId/);
-  assert.match(THREAD_PAGE, /whatsAppPollAttemptRef\.current = null/);
+  assert.match(THREAD_PAGE, /const attemptKey = `send-poll:\$\{payloadKey\}`/);
+  assert.match(THREAD_PAGE, /externalActionAttempts\.getOrCreate\(attemptKey, uuid\)/);
+  assert.match(THREAD_PAGE, /clientSendId\s*\n\s*}\);/);
+  assert.match(THREAD_PAGE, /externalActionAttempts\.completeIfReconciled\(/);
 });

@@ -52,6 +52,7 @@ function matchesWhere(row, where) {
       }
     } else if (key === "createdAt") {
       if (expected?.gt && !(row.createdAt > expected.gt)) return false;
+      if (expected?.gte && !(row.createdAt >= expected.gte)) return false;
     } else if (key === "NOT") {
       if (matchesWhere(row, expected)) return false;
     } else {
@@ -147,13 +148,24 @@ function makeHarness(initialRows, opts = {}) {
         };
       },
       async update() {
+        if (opts.threadPersistError) throw new Error(opts.threadPersistError);
         opts.onThreadUpdate?.();
         return {};
       }
     },
     message: {
-      async upsert({ create }) {
+      async upsert({ where, update, create }) {
         if (opts.messagePersistError) throw new Error(opts.messagePersistError);
+        const key = where.threadId_platformMessageKey;
+        const existing = messages.find(
+          (message) =>
+            message.threadId === key.threadId &&
+            message.platformMessageKey === key.platformMessageKey
+        );
+        if (existing) {
+          Object.assign(existing, update);
+          return { ...existing };
+        }
         messages.push(create);
         return {};
       }
@@ -203,25 +215,28 @@ function makeHarness(initialRows, opts = {}) {
       }),
       getOperatorProfile:
         opts.getOperatorProfile ??
-        (async () => ({
-          focusWindow: {
-            active: true,
-            autoSendAcknowledgements: true,
-            windowId: opts.windowId ?? "focus-1",
-            startedAt: "2026-08-24T11:00:00.000Z",
-            endsAt: "2099-08-24T13:00:00.000Z",
-            ackedPersonIds: [opts.personId ?? "p1"],
-            audience: "favourites",
-            note: "I am focusing until [until].",
-            professionalNote: "I am focusing until [until].",
-            reason: "deep work"
-          },
-          ackTemplates: {
-            close: "I am focusing until [until].",
-            professional: "I am focusing until [until]."
-          },
-          focusSettings: { reasonLabel: false }
-        })),
+        (async () => {
+          opts.beforeOperatorProfileReturn?.(rows);
+          return {
+            focusWindow: {
+              active: true,
+              autoSendAcknowledgements: true,
+              windowId: opts.windowId ?? "focus-1",
+              startedAt: "2026-08-24T11:00:00.000Z",
+              endsAt: "2099-08-24T13:00:00.000Z",
+              ackedPersonIds: [opts.personId ?? "p1"],
+              audience: "favourites",
+              note: "I am focusing until [until].",
+              professionalNote: "I am focusing until [until].",
+              reason: "deep work"
+            },
+            ackTemplates: {
+              close: "I am focusing until [until].",
+              professional: "I am focusing until [until]."
+            },
+            focusSettings: { reasonLabel: false }
+          };
+        }),
       getDemoSeedManifest: async () => null
     },
     auditLog: async (input) => {
@@ -272,6 +287,7 @@ function focusAutoAckRow(over = {}) {
   return pendingRow({
     clientSendId: uuidv5("focus-1:p1", uuidv5.URL),
     source: "focus_auto_ack",
+    requestText: "I am focusing until 2:00pm.",
     ...over
   });
 }
@@ -388,6 +404,90 @@ test("worker refuses a queued focus auto-ack after a newer manual request is que
   assert.equal(rows.find((row) => row.id === "manual").status, "PENDING");
 });
 
+test("worker checks again when a manual reply arrives during auto-ack revalidation", async () => {
+  const manual = pendingRow({
+    id: "manual",
+    clientSendId: "manual-1",
+    source: "manual",
+    createdAt: new Date("2026-08-24T12:01:00.000Z")
+  });
+  const { svc, rows, sends } = makeHarness([focusAutoAckRow()], {
+    beforeOperatorProfileReturn(currentRows) {
+      currentRows.push(manual);
+    }
+  });
+
+  await svc.processSendRequest("sr1");
+
+  assert.equal(sends.length, 0);
+  assert.equal(rows.find((row) => row.id === "sr1").status, "FAILED");
+  assert.equal(
+    JSON.parse(rows.find((row) => row.id === "sr1").errorJson).reasonCode,
+    "focus_auto_ack_superseded"
+  );
+});
+
+test("an in-flight user send intent supersedes auto-ack before its row is persisted", async () => {
+  const { svc, rows, sends } = makeHarness([focusAutoAckRow()]);
+
+  await svc.withUserTriggeredIntent("t1", () => svc.processSendRequest("sr1"));
+
+  assert.equal(sends.length, 0);
+  assert.equal(rows[0].status, "FAILED");
+  assert.equal(JSON.parse(rows[0].errorJson).reasonCode, "focus_auto_ack_superseded");
+});
+
+test("worker treats an equal-timestamp manual request as superseding auto-ack", async () => {
+  const createdAt = new Date("2026-08-24T12:00:00.000Z");
+  const autoAck = focusAutoAckRow({ id: "auto-ack", createdAt });
+  const manual = pendingRow({
+    id: "manual",
+    clientSendId: "manual-1",
+    source: "manual",
+    createdAt
+  });
+  const { svc, rows, sends } = makeHarness([autoAck, manual]);
+
+  await svc.processSendRequest("auto-ack");
+
+  assert.equal(sends.length, 0);
+  assert.equal(rows.find((row) => row.id === "auto-ack").status, "FAILED");
+  assert.equal(
+    JSON.parse(rows.find((row) => row.id === "auto-ack").errorJson).reasonCode,
+    "focus_auto_ack_superseded"
+  );
+});
+
+test("worker refuses queued auto-ack text after the active note changes", async () => {
+  const { svc, rows, sends } = makeHarness([focusAutoAckRow()], {
+    getOperatorProfile: async () => ({
+      focusWindow: {
+        active: true,
+        autoSendAcknowledgements: true,
+        windowId: "focus-1",
+        startedAt: "2026-08-24T11:00:00.000Z",
+        endsAt: "2099-08-24T13:00:00.000Z",
+        ackedPersonIds: ["p1"],
+        audience: "favourites",
+        note: "My focus note changed. I will reply after [until].",
+        professionalNote: "My focus note changed. I will reply after [until].",
+        reason: "deep work"
+      },
+      ackTemplates: {
+        close: "My focus note changed. I will reply after [until].",
+        professional: "My focus note changed. I will reply after [until]."
+      },
+      focusSettings: { reasonLabel: false }
+    })
+  });
+
+  await svc.processSendRequest("sr1");
+
+  assert.equal(sends.length, 0);
+  assert.equal(rows[0].status, "FAILED");
+  assert.equal(JSON.parse(rows[0].errorJson).reasonCode, "focus_auto_ack_not_eligible");
+});
+
 test("worker refuses a queued focus auto-ack after its focus window ends", async () => {
   const { svc, rows, sends } = makeHarness([focusAutoAckRow()], {
     getOperatorProfile: async () => ({
@@ -501,6 +601,27 @@ test("a successful physical send stays SENT when local message projection fails"
   assert.equal(await svc.reconcileSentProjections(), 1);
   assert.equal(rows[0].errorJson, null);
   assert.equal(messages.length, 1);
+});
+
+test("startup send repair preserves a newer edit and reaction projection", async () => {
+  const options = { threadPersistError: "thread projection failed" };
+  const { svc, rows, sends, messages } = makeHarness([pendingRow()], options);
+
+  await svc.processSendRequest("sr1");
+  assert.equal(sends.length, 1);
+  assert.equal(rows[0].status, "SENT");
+  assert.equal(messages.length, 1);
+
+  messages[0].text = "Edited after send";
+  messages[0].rawJson = JSON.stringify({ reactions: [{ emoji: "heart" }] });
+  delete options.threadPersistError;
+
+  assert.equal(await svc.reconcileSentProjections(), 1);
+  assert.equal(messages[0].text, "Edited after send");
+  assert.deepEqual(JSON.parse(messages[0].rawJson), {
+    reactions: [{ emoji: "heart" }]
+  });
+  assert.equal(rows[0].errorJson, null);
 });
 
 test("send keeps the platform lease through durable local projection", async () => {

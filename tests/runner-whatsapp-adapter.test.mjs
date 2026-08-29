@@ -4,7 +4,12 @@ import { EventEmitter } from "node:events";
 import { rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { WhatsAppAdapter, extractPollPayload, renderMessageText } from "../apps/runner/dist/platforms/whatsapp-adapter.js";
+import {
+  WhatsAppAdapter,
+  extractPollPayload,
+  isWhatsAppPollVotePreDispatchError,
+  renderMessageText
+} from "../apps/runner/dist/platforms/whatsapp-adapter.js";
 
 /**
  * Minimal whatsapp-web.js Client stub. Wweb.js Client extends EventEmitter
@@ -920,6 +925,51 @@ test("voteOnPoll delegates to the wweb.js poll message vote API", async () => {
   assert.deepEqual(votedOptions, ["Tuesday"]);
 });
 
+test("voteOnPoll identifies a disconnected session as proven pre-dispatch", async () => {
+  const adapter = new WhatsAppAdapter({
+    ...baseDeps(),
+    createClient: () => createFakeClient()
+  });
+
+  await assert.rejects(
+    () =>
+      adapter.voteOnPoll(
+        { platformThreadId: "x@c.us", displayName: "x", lastMessagePreview: "" },
+        "m-poll",
+        ["Tuesday"]
+      ),
+    (error) => isWhatsAppPollVotePreDispatchError(error)
+  );
+});
+
+test("voteOnPoll keeps a session failure from the physical vote delivery-uncertain", async () => {
+  const client = createFakeClient({
+    getMessageById: async () => ({
+      type: "poll_creation",
+      vote: async () => {
+        throw new Error("execution context was destroyed after vote dispatch");
+      }
+    })
+  });
+  const adapter = new WhatsAppAdapter({
+    ...baseDeps(),
+    createClient: () => client
+  });
+  const ready = adapter.ensureConnected();
+  setImmediate(() => client.emit("ready"));
+  await ready;
+
+  await assert.rejects(
+    () =>
+      adapter.voteOnPoll(
+        { platformThreadId: "x@c.us", displayName: "x", lastMessagePreview: "" },
+        "m-poll",
+        ["Tuesday"]
+      ),
+    (error) => !isWhatsAppPollVotePreDispatchError(error)
+  );
+});
+
 test("fetchThreadMessages substitutes [media] placeholder for messages with hasMedia and no body", async () => {
   const fakeChat = {
     fetchMessages: async () => [
@@ -1026,6 +1076,51 @@ test("closeSession allows a fresh ensureConnected to proceed after a stuck mid-c
   const fresh = adapter.ensureConnected();
   setImmediate(() => secondClient.emit("ready"));
   await fresh;
+  assert.equal(createCalls, 2);
+});
+
+test("a current disconnected event allows ordinary connect to create a fresh client", async () => {
+  const firstClient = createFakeClient();
+  const secondClient = createFakeClient();
+  let createCalls = 0;
+  const adapter = new WhatsAppAdapter({
+    ...baseDeps(),
+    createClient: () => {
+      createCalls += 1;
+      return createCalls === 1 ? firstClient : secondClient;
+    }
+  });
+
+  const first = adapter.ensureConnected();
+  setImmediate(() => firstClient.emit("ready"));
+  await first;
+  firstClient.emit("disconnected", "phone offline");
+
+  const second = adapter.ensureConnected();
+  setImmediate(() => secondClient.emit("ready"));
+  await second;
+  assert.equal(createCalls, 2);
+});
+
+test("a current auth failure allows ordinary connect to create a fresh client", async () => {
+  const firstClient = createFakeClient();
+  const secondClient = createFakeClient();
+  let createCalls = 0;
+  const adapter = new WhatsAppAdapter({
+    ...baseDeps(),
+    createClient: () => {
+      createCalls += 1;
+      return createCalls === 1 ? firstClient : secondClient;
+    }
+  });
+
+  const first = adapter.ensureConnected();
+  setImmediate(() => firstClient.emit("auth_failure", "session expired"));
+  await assert.rejects(first, /WhatsApp auth_failure: session expired/);
+
+  const second = adapter.ensureConnected();
+  setImmediate(() => secondClient.emit("ready"));
+  await second;
   assert.equal(createCalls, 2);
 });
 

@@ -33,9 +33,19 @@ function harness(overrides = {}) {
       }
     },
     message: {
-      async upsert({ create }) {
+      async upsert({ where, update, create }) {
         if (overrides.messagePersistError) {
           throw new Error(overrides.messagePersistError);
+        }
+        const key = where.threadId_platformMessageKey;
+        const existing = messages.find(
+          (message) =>
+            message.threadId === key.threadId &&
+            message.platformMessageKey === key.platformMessageKey
+        );
+        if (existing) {
+          Object.assign(existing, update);
+          return { ...existing };
         }
         const message = { id: `m-${messages.length + 1}`, ...create };
         messages.push(message);
@@ -132,6 +142,24 @@ test("a poll remains SENT when local projection or success audit fails", async (
       { allowed: false, reason: "not_failed" }
     );
   }
+});
+
+test("replaying a completed poll repairs local projection without redispatch", async () => {
+  const overrides = { messagePersistError: "projection failed" };
+  const h = harness(overrides);
+
+  const first = await h.service.send(h.input);
+  assert.equal(first.status, "ok");
+  assert.equal(h.messages.length, 0);
+  assert.equal(JSON.parse(h.rows[0].errorJson).reconciliationRequired, true);
+
+  delete overrides.messagePersistError;
+  const replay = await h.service.send(h.input);
+  assert.equal(replay.status, "ok");
+  assert.equal(replay.replayed, true);
+  assert.equal(h.physicalSends(), 1);
+  assert.equal(h.messages.length, 1);
+  assert.equal(h.rows[0].errorJson, null);
 });
 
 test("a poll adapter failure after dispatch begins is never retryable", async () => {

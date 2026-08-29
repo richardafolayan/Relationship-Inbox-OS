@@ -55,6 +55,7 @@ import { readThreadSource } from "@/lib/thread-source";
 import { shouldApplyThreadScopedResult, shouldRefetchForThreadEvent } from "@/lib/thread-identity-guard";
 import { computeRepliesGenerating } from "@/lib/suggestions-spinner";
 import { composerSourceAfterClear } from "@/lib/composer-source";
+import { createExternalActionAttemptStore } from "@/lib/external-action-attempts";
 import { ageOnNextBirthday, birthdayCountdownLabel, daysUntilBirthday } from "@inbox-os/core/birthday";
 import { cn } from "@/lib/utils";
 import type {
@@ -621,11 +622,7 @@ export default function ThreadPage() {
   const [whatsAppPollAllowMultiple, setWhatsAppPollAllowMultiple] = useState(true);
   const [whatsAppPollSending, setWhatsAppPollSending] = useState(false);
   const [whatsAppPollSent, setWhatsAppPollSent] = useState(false);
-  const whatsAppPollAttemptRef = useRef<{
-    payloadKey: string;
-    clientSendId: string;
-  } | null>(null);
-  const externalActionAttemptRef = useRef<Map<string, string>>(new Map());
+  const externalActionAttempts = useMemo(() => createExternalActionAttemptStore(), []);
   // False from the start when the cache seeded `thread` above - the
   // conversation is already on screen, the mount fetch is a revalidation.
   const [loading, setLoading] = useState(
@@ -2102,19 +2099,20 @@ export default function ThreadPage() {
       options,
       allowMultipleAnswers: whatsAppPollAllowMultiple
     });
-    const attempt =
-      whatsAppPollAttemptRef.current?.payloadKey === payloadKey
-        ? whatsAppPollAttemptRef.current
-        : { payloadKey, clientSendId: uuid() };
-    whatsAppPollAttemptRef.current = attempt;
+    const attemptKey = `send-poll:${payloadKey}`;
+    const clientSendId = externalActionAttempts.getOrCreate(attemptKey, uuid);
     try {
-      await apiPost(`/runner/control/thread/${thread.id}/send-poll`, {
+      const output = await apiPost<{ reconciliationPending?: boolean }>(
+        `/runner/control/thread/${thread.id}/send-poll`, {
         question,
         options,
         allowMultipleAnswers: whatsAppPollAllowMultiple,
-        clientSendId: attempt.clientSendId
+        clientSendId
       });
-      whatsAppPollAttemptRef.current = null;
+      externalActionAttempts.completeIfReconciled(
+        attemptKey,
+        output.reconciliationPending
+      );
       setWhatsAppPollQuestion("");
       setWhatsAppPollOptions(["", ""]);
       setWhatsAppPollAllowMultiple(true);
@@ -2128,7 +2126,7 @@ export default function ThreadPage() {
     } finally {
       setWhatsAppPollSending(false);
     }
-  }, [refresh, thread, whatsAppPollAllowMultiple, whatsAppPollOptions, whatsAppPollQuestion, whatsAppPollSending]);
+  }, [externalActionAttempts, refresh, thread, whatsAppPollAllowMultiple, whatsAppPollOptions, whatsAppPollQuestion, whatsAppPollSending]);
 
   // Revoke any outstanding image preview object URLs when the thread view
   // unmounts (e.g. navigating away mid-compose) so they don't leak.
@@ -2887,13 +2885,19 @@ export default function ThreadPage() {
     }));
     try {
       const attemptKey = `reaction:${thread.id}:${messageId}:${emoji}`;
-      const clientActionId = externalActionAttemptRef.current.get(attemptKey) ?? uuid();
-      externalActionAttemptRef.current.set(attemptKey, clientActionId);
-      await apiPost<{ status: string; emoji: string }>(
+      const clientActionId = externalActionAttempts.getOrCreate(attemptKey, uuid);
+      const output = await apiPost<{
+        status: string;
+        emoji: string;
+        reconciliationPending?: boolean;
+      }>(
         `/runner/control/thread/${thread.id}/message/${messageId}/react`,
         { clientActionId, emoji }
       );
-      externalActionAttemptRef.current.delete(attemptKey);
+      externalActionAttempts.completeIfReconciled(
+        attemptKey,
+        output.reconciliationPending
+      );
       setError(null);
       // The runner has persisted the reaction; the refresh below pulls the
       // authoritative copy. Drop our optimistic overlay for this message so
@@ -2931,13 +2935,19 @@ export default function ThreadPage() {
   const voteOnPoll = async (messageId: string, selectedOptions: string[]) => {
     if (!thread) return;
     const attemptKey = `poll-vote:${thread.id}:${messageId}:${JSON.stringify(selectedOptions)}`;
-    const clientActionId = externalActionAttemptRef.current.get(attemptKey) ?? uuid();
-    externalActionAttemptRef.current.set(attemptKey, clientActionId);
-    await apiPost<{ status: string; selectedOptions: string[] }>(
+    const clientActionId = externalActionAttempts.getOrCreate(attemptKey, uuid);
+    const output = await apiPost<{
+      status: string;
+      selectedOptions: string[];
+      reconciliationPending?: boolean;
+    }>(
       `/runner/control/thread/${thread.id}/message/${messageId}/poll-vote`,
       { clientActionId, selectedOptions }
     );
-    externalActionAttemptRef.current.delete(attemptKey);
+    externalActionAttempts.completeIfReconciled(
+      attemptKey,
+      output.reconciliationPending
+    );
     await refresh();
   };
 
@@ -2989,13 +2999,19 @@ export default function ThreadPage() {
     });
     try {
       const attemptKey = `edit:${thread.id}:${messageId}:${nextText}`;
-      const clientActionId = externalActionAttemptRef.current.get(attemptKey) ?? uuid();
-      externalActionAttemptRef.current.set(attemptKey, clientActionId);
-      const output = await apiPost<{ status: string; text: string }>(
+      const clientActionId = externalActionAttempts.getOrCreate(attemptKey, uuid);
+      const output = await apiPost<{
+        status: string;
+        text: string;
+        reconciliationPending?: boolean;
+      }>(
         `/runner/control/thread/${thread.id}/message/${messageId}/edit`,
         { clientActionId, text: nextText }
       );
-      externalActionAttemptRef.current.delete(attemptKey);
+      externalActionAttempts.completeIfReconciled(
+        attemptKey,
+        output.reconciliationPending
+      );
       const confirmedText = output.text || nextText;
       setOptimisticTextByMessageId((prev) => ({ ...prev, [messageId]: confirmedText }));
       setEditDraft(confirmedText);

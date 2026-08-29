@@ -21,7 +21,7 @@ export interface FocusAutoAckThread {
 interface FocusAutoAckDeps {
   settingsStore: {
     getOperatorProfile(): Promise<OperatorProfile>;
-    updateOperatorProfile(partial: Partial<OperatorProfile>): Promise<OperatorProfile>;
+    acknowledgeFocusWindowPerson(windowId: string, personId: string): Promise<boolean>;
   };
   sendQueue: Pick<SendQueueService, "enqueueAndKick">;
   loadThread(threadId: string): Promise<FocusAutoAckThread | null>;
@@ -125,7 +125,8 @@ export function focusAutoAckDispatchEligible(
   thread: FocusAutoAckThread,
   profile: OperatorProfile,
   clientSendId: string,
-  now: Date
+  now: Date,
+  queuedText?: string
 ): boolean {
   if (!isLiveAutoWindow(profile, now) || !focusAutoAckCoverage(thread, profile)) {
     return false;
@@ -141,9 +142,12 @@ export function focusAutoAckDispatchEligible(
   ) {
     return false;
   }
-  return (
+  const identityMatches = (
     clientSendId ===
     focusAutoAckClientSendId(profile.focusWindow.windowId, thread.person.id)
+  );
+  return identityMatches && (
+    queuedText === undefined || focusAutoAckText(thread, profile) === queuedText
   );
 }
 
@@ -222,17 +226,10 @@ export function createFocusAutoAckService(deps: FocusAutoAckDeps) {
         source: "focus_auto_ack"
       });
 
-      const afterQueue = await deps.settingsStore.getOperatorProfile();
-      if (afterQueue.focusWindow.windowId === latest.focusWindow.windowId) {
-        await deps.settingsStore.updateOperatorProfile({
-          focusWindow: {
-            ...afterQueue.focusWindow,
-            ackedPersonIds: Array.from(
-              new Set([...afterQueue.focusWindow.ackedPersonIds, personId])
-            )
-          }
-        });
-      }
+      await deps.settingsStore.acknowledgeFocusWindowPerson(
+        latest.focusWindow.windowId,
+        personId
+      );
       await deps.auditLog?.({
         platform: authoritativeThread.platform,
         stage: "focus-auto-ack",
