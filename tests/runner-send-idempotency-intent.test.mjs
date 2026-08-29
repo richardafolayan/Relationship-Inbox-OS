@@ -107,6 +107,22 @@ test("identical attachment content replays across different staging paths", asyn
   assert.equal(h.rows.length, 1);
 });
 
+test("route cleanup discards newly uploaded files after an attachment replay", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const indexSource = await readFile(
+    new URL("../apps/runner/src/index.ts", import.meta.url),
+    "utf8"
+  );
+  assert.match(
+    indexSource,
+    /if \(queueResult\.replayed\) \{\s*await discardStagedAttachments\(stagedAttachments\);/s
+  );
+  assert.match(
+    indexSource,
+    /if \(scheduleResult\.replayed\) \{\s*await discardStagedAttachments\(stagedAttachments\);/s
+  );
+});
+
 test("attachment replay rejects different content at the same display name", async () => {
   const h = harness();
   await h.service.enqueueSend(immediateInput({

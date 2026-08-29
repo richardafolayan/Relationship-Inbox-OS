@@ -6,11 +6,13 @@ import { calculateRisk, stableHash } from "@inbox-os/core";
 import type { PrismaClient } from "@prisma/client";
 import type { EventBus, SettingsStore } from "../types/runtime";
 import {
+  LOCAL_RECONCILIATION_REQUIRED,
   localReconciliationMarker,
   needsLocalReconciliation,
   SEND_CLAIM_MARKER
 } from "./send";
 import {
+  classifySendFailureKind,
   consumerSendFailure,
   parsePersistedSendFailure,
   type ConsumerSendFailure
@@ -29,6 +31,8 @@ interface PollSendDeps {
     details?: Record<string, unknown>;
   }): Promise<string>;
   eventBus: Pick<EventBus, "emit">;
+  withExternalActionLock<T>(platform: PlatformName, work: () => Promise<T>): Promise<T>;
+  withPlatformLock<T>(platform: PlatformName, work: () => Promise<T>): Promise<T>;
 }
 
 interface PollSendInput {
@@ -44,6 +48,7 @@ interface PollSendInput {
   options: string[];
   allowMultipleAnswers: boolean;
   dispatch(): Promise<SendReceipt>;
+  isPreDispatchFailure?(error: unknown): boolean;
 }
 
 export type PollSendResult =
@@ -189,13 +194,11 @@ export function createPollSendService(deps: PollSendDeps) {
       return { messageId: message.id, platformMessageKey, sentAt: receipt.sentAt };
     }
 
-    async function replayExisting(): Promise<PollSendResult> {
-      const existing = await deps.prisma.sendRequest.findUnique({
-        where: { clientSendId: input.clientSendId }
-      });
-      if (!existing) {
-        throw new PollSendError("Poll reservation disappeared", 409);
-      }
+    function assertExistingIntent(existing: {
+      threadId: string;
+      source: string | null;
+      attachmentsJson: string | null;
+    }): void {
       if (
         existing.threadId !== input.thread.id ||
         existing.source !== POLL_SEND_SOURCE ||
@@ -206,6 +209,16 @@ export function createPollSendService(deps: PollSendDeps) {
           409
         );
       }
+    }
+
+    async function replayExisting(): Promise<PollSendResult> {
+      const existing = await deps.prisma.sendRequest.findUnique({
+        where: { clientSendId: input.clientSendId }
+      });
+      if (!existing) {
+        throw new PollSendError("Poll reservation disappeared", 409);
+      }
+      assertExistingIntent(existing);
       if (existing.status === "PENDING") {
         return {
           status: "pending",
@@ -252,23 +265,33 @@ export function createPollSendService(deps: PollSendDeps) {
     const existing = await deps.prisma.sendRequest.findUnique({
       where: { clientSendId: input.clientSendId }
     });
-    if (existing) return replayExisting();
-
-    try {
-      await deps.prisma.sendRequest.create({
-        data: {
-          clientSendId: input.clientSendId,
-          threadId: input.thread.id,
-          status: "PENDING",
-          requestText,
-          source: POLL_SEND_SOURCE,
-          attachmentsJson: payloadJson,
-          receiptJson: SEND_CLAIM_MARKER
-        }
+    if (existing) {
+      assertExistingIntent(existing);
+      if (existing.status !== "PENDING" || existing.receiptJson !== null) {
+        return replayExisting();
+      }
+      const claim = await deps.prisma.sendRequest.updateMany({
+        where: { id: existing.id, status: "PENDING", receiptJson: null },
+        data: { receiptJson: SEND_CLAIM_MARKER }
       });
-    } catch (error) {
-      if (!isUniqueConstraintError(error)) throw error;
-      return replayExisting();
+      if (claim.count !== 1) return replayExisting();
+    } else {
+      try {
+        await deps.prisma.sendRequest.create({
+          data: {
+            clientSendId: input.clientSendId,
+            threadId: input.thread.id,
+            status: "PENDING",
+            requestText,
+            source: POLL_SEND_SOURCE,
+            attachmentsJson: payloadJson,
+            receiptJson: SEND_CLAIM_MARKER
+          }
+        });
+      } catch (error) {
+        if (!isUniqueConstraintError(error)) throw error;
+        return send(input);
+      }
     }
 
     let dispatchStarted = false;
@@ -367,6 +390,31 @@ export function createPollSendService(deps: PollSendDeps) {
         };
       }
 
+      if (input.isPreDispatchFailure?.(error)) {
+        const failure = consumerSendFailure(classifySendFailureKind({ message }));
+        await deps.prisma.sendRequest.update({
+          where: { clientSendId: input.clientSendId },
+          data: {
+            status: "PENDING",
+            receiptJson: null,
+            errorJson: null
+          }
+        });
+        await deps.auditLog({
+          platform: input.thread.platform,
+          stage: "Send",
+          action: "POLL_SEND_PRE_DISPATCH_FAIL",
+          status: "FAIL",
+          details: {
+            threadId: input.thread.id,
+            clientSendId: input.clientSendId,
+            errorKind: failure.errorKind,
+            message
+          }
+        }).catch(() => undefined);
+        throw new PollSendError(failure.message, 409, failure);
+      }
+
       const failure = consumerSendFailure("DELIVERY_UNCERTAIN");
       let logId = "audit-unavailable";
       try {
@@ -420,5 +468,78 @@ export function createPollSendService(deps: PollSendDeps) {
     }
   }
 
-  return { send };
+  async function reconcileSentProjections(): Promise<number> {
+    const pendingRepairs = await deps.prisma.sendRequest.findMany({
+      where: {
+        status: "SENT",
+        source: POLL_SEND_SOURCE,
+        errorJson: { contains: LOCAL_RECONCILIATION_REQUIRED }
+      }
+    });
+    let repaired = 0;
+    for (const row of pendingRepairs) {
+      try {
+        const payload = JSON.parse(row.attachmentsJson ?? "null") as {
+          kind?: unknown;
+          question?: unknown;
+          options?: unknown;
+          allowMultipleAnswers?: unknown;
+        } | null;
+        if (
+          payload?.kind !== "poll" ||
+          typeof payload.question !== "string" ||
+          !Array.isArray(payload.options) ||
+          payload.options.some((option) => typeof option !== "string") ||
+          typeof payload.allowMultipleAnswers !== "boolean"
+        ) {
+          continue;
+        }
+        const question = payload.question;
+        const options = payload.options as string[];
+        const allowMultipleAnswers = payload.allowMultipleAnswers;
+        const thread = await deps.prisma.thread.findUnique({
+          where: { id: row.threadId },
+          select: {
+            id: true,
+            platform: true,
+            lastInboundAt: true,
+            lastOutboundAt: true,
+            lastMessageAt: true
+          }
+        });
+        if (!thread) continue;
+        const platform = thread.platform as PlatformName;
+        const result = await deps.withExternalActionLock(platform, () =>
+          deps.withPlatformLock(platform, () =>
+            send({
+              clientSendId: row.clientSendId,
+              thread: {
+                id: thread.id,
+                platform,
+                lastInboundAt: thread.lastInboundAt,
+                lastOutboundAt: thread.lastOutboundAt,
+                lastMessageAt: thread.lastMessageAt
+              },
+              question,
+              options,
+              allowMultipleAnswers,
+              dispatch: async () => {
+                throw new Error("startup poll reconciliation must not dispatch");
+              }
+            })
+          )
+        );
+        if (result.status === "ok" && !result.reconciliationPending) repaired += 1;
+      } catch (error) {
+        console.warn(
+          `[poll-send] startup reconciliation remains pending for ${row.clientSendId}: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
+      }
+    }
+    return repaired;
+  }
+
+  return { send, reconcileSentProjections };
 }

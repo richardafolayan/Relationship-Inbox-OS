@@ -4171,6 +4171,12 @@ export class LinkedInAdapter implements PlatformAdapter {
       };
     }
 
+    type ScrollGeometry = {
+      scrollTop: number;
+      scrollHeight: number;
+      clientHeight: number;
+      atBottom: boolean;
+    };
     const scrollResolvedContainer = async (note: string) =>
       this.runTracedPageAction({
         page,
@@ -4193,17 +4199,58 @@ export class LinkedInAdapter implements PlatformAdapter {
               target = target.parentElement;
             }
             if (!target) {
-              return false;
+              return null;
             }
+            const before = {
+              scrollTop: target.scrollTop,
+              scrollHeight: target.scrollHeight,
+              clientHeight: target.clientHeight,
+              atBottom:
+                target.scrollTop + target.clientHeight >= target.scrollHeight - 1
+            };
             const maxScrollTop = Math.max(0, target.scrollHeight - target.clientHeight);
             target.scrollTop = maxScrollTop;
             target.dispatchEvent(new Event("scroll"));
-            return true;
+            return before;
           })
       });
 
-    const scrollContainerFound = await scrollResolvedContainer("primary_scroll");
-    if (!scrollContainerFound) {
+    const readResolvedContainer = async (): Promise<ScrollGeometry | null> =>
+      listTarget.evaluate((listNode) => {
+        let target: HTMLElement | null = listNode as HTMLElement;
+        while (target) {
+          const style = window.getComputedStyle(target);
+          const overflowY = (style.overflowY ?? "").toLowerCase();
+          if (
+            (overflowY === "auto" || overflowY === "scroll") &&
+            target.scrollHeight > target.clientHeight
+          ) {
+            break;
+          }
+          target = target.parentElement;
+        }
+        if (!target) return null;
+        return {
+          scrollTop: target.scrollTop,
+          scrollHeight: target.scrollHeight,
+          clientHeight: target.clientHeight,
+          atBottom: target.scrollTop + target.clientHeight >= target.scrollHeight - 1
+        };
+      });
+
+    const geometryChanged = (
+      before: ScrollGeometry,
+      after: ScrollGeometry | null
+    ): boolean =>
+      Boolean(
+        after &&
+          (after.scrollTop !== before.scrollTop ||
+            after.scrollHeight !== before.scrollHeight ||
+            after.clientHeight !== before.clientHeight)
+      );
+
+    let beforeGeometry = await scrollResolvedContainer("primary_scroll");
+    if (!beforeGeometry) {
       return {
         didScroll: false,
         reachedBottom: false,
@@ -4225,12 +4272,22 @@ export class LinkedInAdapter implements PlatformAdapter {
     });
 
     let after = await this.collectThreadCandidates(page, selectors);
+    let afterGeometry = await readResolvedContainer();
     let moved = Boolean(
       (after.bottomKey && after.bottomKey !== state.bottomKey) ||
-      after.visibleSetHash !== state.visibleSetHash
+      after.visibleSetHash !== state.visibleSetHash ||
+      geometryChanged(beforeGeometry, afterGeometry)
     );
     if (!moved) {
-      await scrollResolvedContainer("secondary_scroll");
+      beforeGeometry = await scrollResolvedContainer("secondary_scroll");
+      if (!beforeGeometry) {
+        return {
+          didScroll: false,
+          reachedBottom: false,
+          moved: false,
+          stopReason: "no_scroll_container"
+        };
+      }
       await this.runTracedPageAction({
         page,
         stage: "collect_threads",
@@ -4244,15 +4301,17 @@ export class LinkedInAdapter implements PlatformAdapter {
         }
       });
       after = await this.collectThreadCandidates(page, selectors);
+      afterGeometry = await readResolvedContainer();
       moved = Boolean(
         (after.bottomKey && after.bottomKey !== state.bottomKey) ||
-        after.visibleSetHash !== state.visibleSetHash
+        after.visibleSetHash !== state.visibleSetHash ||
+        geometryChanged(beforeGeometry, afterGeometry)
       );
     }
 
     return {
       didScroll: true,
-      reachedBottom: !moved,
+      reachedBottom: !moved && Boolean(afterGeometry?.atBottom),
       moved
     };
   }

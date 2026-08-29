@@ -2102,13 +2102,20 @@ export default function ThreadPage() {
     const attemptKey = `send-poll:${payloadKey}`;
     const clientSendId = externalActionAttempts.getOrCreate(attemptKey, uuid);
     try {
-      const output = await apiPost<{ reconciliationPending?: boolean }>(
+      const output = await apiPost<{
+        status: "pending" | "ok";
+        reconciliationPending?: boolean;
+      }>(
         `/runner/control/thread/${thread.id}/send-poll`, {
         question,
         options,
         allowMultipleAnswers: whatsAppPollAllowMultiple,
         clientSendId
       });
+      if (output.status === "pending") {
+        setError("This poll send is still in progress. Check the conversation before trying again.");
+        return;
+      }
       externalActionAttempts.completeIfReconciled(
         attemptKey,
         output.reconciliationPending
@@ -2461,7 +2468,12 @@ export default function ThreadPage() {
     if (!thread) throw new Error("This conversation is no longer available.");
     const trimmed = text.trim();
     if (!trimmed) throw new Error("An empty message cannot be sent.");
-    const clientSendId = uuid();
+    const attemptKey = `dictation-send:${JSON.stringify({
+      threadId: thread.id,
+      text: trimmed,
+      replyToMessageId: focusedThreadParentId ?? null
+    })}`;
+    const clientSendId = externalActionAttempts.getOrCreate(attemptKey, uuid);
     const sentAt = new Date().toISOString();
     setError(null);
     setPendingSends((current) => [...current, { clientSendId, text: trimmed, sentAt, attachments: [] }]);
@@ -2473,11 +2485,12 @@ export default function ThreadPage() {
         clientRequestedAt: sentAt,
         ...(focusedThreadParentId ? { replyToMessageId: focusedThreadParentId } : {})
       });
+      externalActionAttempts.complete(attemptKey);
     } catch (sendError) {
       setPendingSends((current) => current.filter((pending) => pending.clientSendId !== clientSendId));
       throw sendError;
     }
-  }, [focusedThreadParentId, thread]);
+  }, [externalActionAttempts, focusedThreadParentId, thread]);
 
   // Cmd/Ctrl-Enter sends.
   useEffect(() => {
@@ -2499,16 +2512,24 @@ export default function ThreadPage() {
   const scheduleSend = useCallback(
     async (at: Date) => {
       if (!thread || !composer.trim() || scheduling) return;
-      const clientSendId = uuid();
       const text = composer;
+      const attemptKey = `schedule-send:${JSON.stringify({
+        threadId: thread.id,
+        text
+      })}`;
+      const attempt = externalActionAttempts.getOrCreateValue(attemptKey, () => ({
+        clientSendId: uuid(),
+        scheduledFor: at.toISOString()
+      }));
       setScheduling(true);
       setError(null);
       try {
         await apiPost(`/runner/control/thread/${thread.id}/send`, {
           text,
-          clientSendId,
-          scheduledFor: at.toISOString()
+          clientSendId: attempt.clientSendId,
+          scheduledFor: attempt.scheduledFor
         });
+        externalActionAttempts.completeValue(attemptKey);
         setComposer("");
         // Reset the source too (see onSend): a scheduled predraft empties the
         // composer, so the predraft badge/frame must not linger over a blank
@@ -2524,7 +2545,7 @@ export default function ThreadPage() {
         setScheduling(false);
       }
     },
-    [composer, refresh, scheduling, thread]
+    [composer, externalActionAttempts, refresh, scheduling, thread]
   );
 
   const cancelScheduledSend = useCallback(

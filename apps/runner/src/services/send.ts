@@ -425,6 +425,7 @@ export function createSendService(deps: SendServiceDeps) {
 
   async function reconcileSentProjectionRow(sendRequest: SendRequestRow): Promise<boolean> {
     if (
+      sendRequest.source === "manual_poll" ||
       sendRequest.status !== "SENT" ||
       !sendRequest.receiptJson ||
       !needsLocalReconciliation(sendRequest.errorJson)
@@ -469,6 +470,7 @@ export function createSendService(deps: SendServiceDeps) {
     const pendingRepairs = await prisma.sendRequest.findMany({
       where: {
         status: "SENT",
+        source: { not: "manual_poll" },
         errorJson: { contains: LOCAL_RECONCILIATION_REQUIRED }
       }
     });
@@ -801,7 +803,7 @@ export function createSendService(deps: SendServiceDeps) {
             const findSupersedingUserRequest = () => prisma.sendRequest.findFirst({
               where: {
                 threadId: thread.id,
-                source: { in: ["manual", "focus_ack"] },
+                source: { in: ["manual", "focus_ack", "manual_poll"] },
                 status: { in: ["PENDING", "SENT", "FAILED", "SCHEDULED"] },
                 createdAt: { gte: sendRequest.createdAt },
                 NOT: { id: sendRequest.id }
@@ -866,6 +868,21 @@ export function createSendService(deps: SendServiceDeps) {
               );
             }
             const finalSupersedingUserRequest = await findSupersedingUserRequest();
+            const finalProfile = await deps.settingsStore.getOperatorProfile();
+            if (
+              !focusAutoAckDispatchEligible(
+                autoAckThread,
+                finalProfile,
+                sendRequest.clientSendId,
+                new Date(),
+                sendRequest.requestText
+              )
+            ) {
+              throw new SendPolicyError(
+                "focus_auto_ack_not_eligible",
+                "Automatic focus acknowledgement is no longer eligible for this conversation"
+              );
+            }
             if (
               finalSupersedingUserRequest ||
               (userTriggeredIntentCounts.get(thread.id) ?? 0) > 0

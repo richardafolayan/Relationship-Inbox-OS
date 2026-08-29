@@ -1,7 +1,7 @@
 import { createReadStream, existsSync, mkdirSync, openSync, rmSync } from "node:fs";
-import { mkdir } from "node:fs/promises";
+import { mkdir, rm } from "node:fs/promises";
 import { createHash } from "node:crypto";
-import { basename, join, resolve } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import { spawn } from "node:child_process";
 import { performance } from "node:perf_hooks";
 import express from "express";
@@ -69,6 +69,7 @@ import {
 } from "./platforms/whatsapp/session";
 import { findWhatsAppMediaByGuid, streamWhatsAppMedia } from "./platforms/whatsapp/media";
 import {
+  isWhatsAppPollSendPreDispatchError,
   isWhatsAppPollVotePreDispatchError,
   isWhatsAppSessionUnavailableError
 } from "./platforms/whatsapp-adapter";
@@ -110,6 +111,7 @@ import {
   type MessageSyncMetric
 } from "./services/message-sync-latency";
 import { createSendService, parsePersistedSendSource } from "./services/send";
+import { createUserTriggeredIntentMiddleware } from "./services/user-triggered-intent-middleware";
 import { createSendQueue } from "./services/send-queue";
 import { createPlatformSessionResetCoordinator } from "./services/platform-session-reset-coordinator";
 import { bindFocusAutoAckEvents, createFocusAutoAckService } from "./services/focus-auto-ack";
@@ -225,6 +227,18 @@ import {
 import type { OverdueDigestRowInput } from "@inbox-os/core";
 
 const app = express();
+let registerUserTriggeredIntentForRequest = (_threadId: string): (() => void) => () => {};
+const registerUserTriggeredSendIntent = createUserTriggeredIntentMiddleware(
+  (threadId) => registerUserTriggeredIntentForRequest(threadId),
+  (req) => {
+    if (req.method !== "POST") return undefined;
+    const match = req.path.match(
+      /^\/control\/thread\/([^/]+)\/(send|send-poll|retry-send)$/
+    );
+    return match ? decodeURIComponent(match[1]!) : undefined;
+  }
+);
+app.use(registerUserTriggeredSendIntent);
 const runnerProcessInfo = {
   executableName: basename(process.execPath),
   executablePath: process.execPath,
@@ -268,6 +282,19 @@ app.use((req, res, next) => {
 // can reference them by absolute path when shelling out to osascript.
 const outgoingAttachmentsRoot = resolve(dataDir, "outgoing-attachments");
 mkdirSync(outgoingAttachmentsRoot, { recursive: true });
+async function discardStagedAttachments(
+  attachments: Array<{ absolutePath: string }>
+): Promise<void> {
+  const rootPrefix = `${outgoingAttachmentsRoot}${sep}`;
+  const directories = new Set(
+    attachments.map((attachment) => resolve(dirname(attachment.absolutePath)))
+  );
+  await Promise.all(
+    [...directories]
+      .filter((directory) => directory.startsWith(rootPrefix))
+      .map((directory) => rm(directory, { recursive: true, force: true }))
+  );
+}
 const uploadAttachments = multer({
   storage: multer.diskStorage({
     destination: (_req, _file, cb) => {
@@ -1257,11 +1284,15 @@ const sendService = createSendService({
   withPlatformLock: withPlatformControlLock,
   withExternalActionLock
 });
+registerUserTriggeredIntentForRequest = (threadId) =>
+  sendService.registerUserTriggeredIntent(threadId);
 const pollSendService = createPollSendService({
   prisma,
   settingsStore,
   auditLog: (input) => auditService.log(input),
-  eventBus
+  eventBus,
+  withExternalActionLock,
+  withPlatformLock: withPlatformControlLock
 });
 async function projectDurableExternalAction(row: DurableExternalActionProjection): Promise<void> {
   const payload = JSON.parse(row.payloadJson) as Record<string, unknown>;
@@ -1373,6 +1404,13 @@ bindFocusAutoAckEvents(eventBus, focusAutoAck);
 // (e.g. crashed mid-send, or restarted while a send was queued behind a
 // scan). The queue's `running` guard prevents duplicate processing.
 sendQueue.resume();
+void pollSendService.reconcileSentProjections().catch((error) => {
+  console.warn(
+    `[poll-send] startup reconciliation failed: ${
+      error instanceof Error ? error.message : String(error)
+    }`
+  );
+});
 void durableExternalActionService.reconcileSentProjections().catch((error) => {
   console.warn(
     `[external-action] startup reconciliation failed: ${
@@ -4015,9 +4053,7 @@ app.post("/control/platform/test-selectors", asyncRoute(async (req, res) => {
 // surface, never inline here.
 app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req, res) => {
   const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
-  const releaseUserIntent = sendService.registerUserTriggeredIntent(threadId);
-  try {
-    if (await checkPresenterGuard(res, settingsStore, { threadId, action: "send", kind: "thread-mutation" })) return;
+  if (await checkPresenterGuard(res, settingsStore, { threadId, action: "send", kind: "thread-mutation" })) return;
   // For multipart bodies, multer puts file metadata on req.files and
   // string fields on req.body. Reuse the same JSON schema for the field
   // values so the validation flow is identical between JSON and multipart.
@@ -4079,6 +4115,9 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
         attachments: stagedAttachments,
         replyToMessageId: payload.replyToMessageId
       });
+      if (scheduleResult.replayed) {
+        await discardStagedAttachments(stagedAttachments);
+      }
       res.json({
         clientSendId: scheduleResult.clientSendId,
         status: scheduleResult.status,
@@ -4126,6 +4165,9 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
       source: payload.source ?? "manual",
       replyToMessageId: payload.replyToMessageId
     });
+    if (queueResult.replayed) {
+      await discardStagedAttachments(stagedAttachments);
+    }
     res.json(queueResult);
   } catch (error) {
     await auditService.log({
@@ -4140,9 +4182,6 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
       }
     });
     throw error;
-  }
-  } finally {
-    releaseUserIntent();
   }
 }));
 
@@ -4203,6 +4242,7 @@ app.post("/control/thread/:threadId/send-poll", asyncRoute(async (req, res) => {
         question: payload.question,
         options: payload.options,
         allowMultipleAnswers: payload.allowMultipleAnswers,
+        isPreDispatchFailure: isWhatsAppPollSendPreDispatchError,
         dispatch: () =>
           adapter.sendPoll!(threadStub, {
             question: payload.question,
@@ -4689,8 +4729,8 @@ app.post("/control/thread/:threadId/message/:messageId/poll-vote", asyncRoute(as
     } catch (error) {
       if (isWhatsAppPollVotePreDispatchError(error)) {
         res.status(409).json({
-          error: "WhatsApp lost its connection. Reconnect it in Settings, then try again.",
-          reason: "whatsapp_session_unavailable"
+          error: error.message,
+          reason: error.reason
         });
         return;
       }

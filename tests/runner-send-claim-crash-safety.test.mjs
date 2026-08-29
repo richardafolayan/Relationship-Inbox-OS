@@ -467,6 +467,40 @@ test("manual intent arriving during the final database guard still supersedes au
   assert.equal(JSON.parse(h.rows[0].errorJson).reasonCode, "focus_auto_ack_superseded");
 });
 
+test("ending the focus window during the final database guard prevents auto-ack", async () => {
+  let active = true;
+  const h = makeHarness([focusAutoAckRow()], {
+    async onSupersedingQuery(count) {
+      if (count === 2) active = false;
+    },
+    getOperatorProfile: async () => ({
+      focusWindow: {
+        active,
+        autoSendAcknowledgements: true,
+        windowId: "focus-1",
+        startedAt: "2026-08-24T11:00:00.000Z",
+        endsAt: "2099-08-24T13:00:00.000Z",
+        ackedPersonIds: ["p1"],
+        audience: "favourites",
+        note: "I am focusing until [until].",
+        professionalNote: "I am focusing until [until].",
+        reason: "deep work"
+      },
+      ackTemplates: {
+        close: "I am focusing until [until].",
+        professional: "I am focusing until [until]."
+      },
+      focusSettings: { reasonLabel: false }
+    })
+  });
+
+  await h.svc.processSendRequest("sr1");
+
+  assert.equal(h.sends.length, 0);
+  assert.equal(h.rows[0].status, "FAILED");
+  assert.equal(JSON.parse(h.rows[0].errorJson).reasonCode, "focus_auto_ack_not_eligible");
+});
+
 test("worker treats an equal-timestamp manual request as superseding auto-ack", async () => {
   const createdAt = new Date("2026-08-24T12:00:00.000Z");
   const autoAck = focusAutoAckRow({ id: "auto-ack", createdAt });

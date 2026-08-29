@@ -75,20 +75,38 @@ export interface WhatsAppAdapterDeps {
 const PLATFORM_WHATSAPP: PlatformName = "WHATSAPP";
 
 export class WhatsAppSessionUnavailableError extends Error {
-  constructor() {
-    super("WhatsApp lost its connection. Reconnect it in Settings, then try again.");
+  constructor(message = "WhatsApp lost its connection. Reconnect it in Settings, then try again.") {
+    super(message);
     this.name = "WhatsAppSessionUnavailableError";
   }
 }
 
+export class WhatsAppPollSendPreDispatchError extends Error {
+  constructor(error: unknown) {
+    super(error instanceof Error ? error.message : String(error));
+    this.name = "WhatsAppPollSendPreDispatchError";
+  }
+}
+
+export function isWhatsAppPollSendPreDispatchError(
+  error: unknown
+): error is WhatsAppPollSendPreDispatchError {
+  return error instanceof WhatsAppPollSendPreDispatchError;
+}
+
 export class WhatsAppPollVotePreDispatchError extends WhatsAppSessionUnavailableError {
-  constructor() {
-    super();
+  constructor(
+    message = "WhatsApp lost its connection. Reconnect it in Settings, then try again.",
+    readonly reason: "whatsapp_session_unavailable" | "poll_unavailable" = "whatsapp_session_unavailable"
+  ) {
+    super(message);
     this.name = "WhatsAppPollVotePreDispatchError";
   }
 }
 
-export function isWhatsAppPollVotePreDispatchError(error: unknown): boolean {
+export function isWhatsAppPollVotePreDispatchError(
+  error: unknown
+): error is WhatsAppPollVotePreDispatchError {
   return error instanceof WhatsAppPollVotePreDispatchError;
 }
 
@@ -215,7 +233,7 @@ export class WhatsAppAdapter implements PlatformAdapter {
             onReady();
           }
         })
-        .catch((error) => {
+        .catch(async (error) => {
           if (!isCurrentSession()) {
             resolve();
             return;
@@ -223,9 +241,9 @@ export class WhatsAppAdapter implements PlatformAdapter {
           this.sessionEpoch += 1;
           this.client = null;
           this.ready = false;
-          this.readyPromise = null;
           this.deps.onStateChange?.("disconnected");
-          void client.destroy().catch(() => undefined);
+          await client.destroy().catch(() => undefined);
+          this.readyPromise = null;
           reject(error);
         });
     });
@@ -362,7 +380,9 @@ export class WhatsAppAdapter implements PlatformAdapter {
         }).sendMessage(thread.platformThreadId, payload, opts),
         thread.platformThreadId,
         sendStartedAt,
-        i === 0 ? text : undefined
+        i === 0 ? text : undefined,
+        undefined,
+        i === 0
       );
       acknowledgedAt ??= new Date().toISOString();
       const messageVerification = await this.waitForAcknowledgement(sent);
@@ -420,71 +440,83 @@ export class WhatsAppAdapter implements PlatformAdapter {
   }
 
   async sendPoll(thread: ThreadStub, poll: OutboundPoll): Promise<SendReceipt> {
-    const client = this.requireClient();
-    await this.awaitSendClearance(thread.platformThreadId);
+    let dispatchStarted = false;
+    try {
+      const client = this.requireClient();
+      await this.awaitSendClearance(thread.platformThreadId);
 
-    const question = poll.question.trim();
-    const options = poll.options.map((option) => option.trim()).filter(Boolean);
-    if (!question || options.length < 2) {
-      throw new Error("WhatsApp poll needs a question and at least two options");
-    }
+      const question = poll.question.trim();
+      const options = poll.options.map((option) => option.trim()).filter(Boolean);
+      if (!question || options.length < 2) {
+        throw new Error("WhatsApp poll needs a question and at least two options");
+      }
 
-    const wa = (await import("whatsapp-web.js")) as unknown as {
-      Poll?: new (
-        pollName: string,
-        pollOptions: string[],
-        options?: { allowMultipleAnswers?: boolean }
-      ) => unknown;
-      default?: {
+      const wa = (await import("whatsapp-web.js")) as unknown as {
         Poll?: new (
           pollName: string,
           pollOptions: string[],
           options?: { allowMultipleAnswers?: boolean }
         ) => unknown;
+        default?: {
+          Poll?: new (
+            pollName: string,
+            pollOptions: string[],
+            options?: { allowMultipleAnswers?: boolean }
+          ) => unknown;
+        };
       };
-    };
-    const Poll = wa.Poll ?? wa.default?.Poll;
-    if (!Poll) throw new Error("Poll export unavailable");
-    const payload = new Poll(question, options, {
-      allowMultipleAnswers: Boolean(poll.allowMultipleAnswers)
-    });
-    const sendStartedAt = Date.now();
-    const sent = await this.resolveSendResult(
-      await (client as unknown as {
-        sendMessage: (
-          jid: string,
-          content: unknown,
-          options: { waitUntilMsgSent: boolean }
-        ) => Promise<WaMessage | null | undefined>;
-      }).sendMessage(thread.platformThreadId, payload, { waitUntilMsgSent: true }),
-      thread.platformThreadId,
-      sendStartedAt,
-      undefined,
-      "poll_creation"
-    );
-    const acknowledgedAt = new Date().toISOString();
-    const verifiedBy = await this.waitForAcknowledgement(sent);
-    const structuredPoll: WhatsAppPollPayload = {
-      question,
-      options: options.map((name) => ({ name })),
-      allowMultipleAnswers: Boolean(poll.allowMultipleAnswers)
-    };
-    return {
-      sentAt: epochSecondsToIso(sent.timestamp) ?? new Date().toISOString(),
-      acknowledgedAt,
-      platformResultAt: new Date().toISOString(),
-      platformMessageKey: sent.id?._serialized,
-      verifiedBy,
-      attachments: [
-        {
-          type: "poll",
-          manualReview: false,
-          rawLabel: question,
-          kind: "poll"
+      const Poll = wa.Poll ?? wa.default?.Poll;
+      if (!Poll) throw new Error("Poll export unavailable");
+      const payload = new Poll(question, options, {
+        allowMultipleAnswers: Boolean(poll.allowMultipleAnswers)
+      });
+      const sendStartedAt = Date.now();
+      dispatchStarted = true;
+      const sent = await this.resolveSendResult(
+        await (client as unknown as {
+          sendMessage: (
+            jid: string,
+            content: unknown,
+            options: { waitUntilMsgSent: boolean }
+          ) => Promise<WaMessage | null | undefined>;
+        }).sendMessage(thread.platformThreadId, payload, { waitUntilMsgSent: true }),
+        thread.platformThreadId,
+        sendStartedAt,
+        undefined,
+        "poll_creation"
+      );
+      const acknowledgedAt = new Date().toISOString();
+      const verifiedBy = await this.waitForAcknowledgement(sent);
+      const structuredPoll: WhatsAppPollPayload = {
+        question,
+        options: options.map((name) => ({ name })),
+        allowMultipleAnswers: Boolean(poll.allowMultipleAnswers)
+      };
+      return {
+        sentAt: epochSecondsToIso(sent.timestamp) ?? new Date().toISOString(),
+        acknowledgedAt,
+        platformResultAt: new Date().toISOString(),
+        platformMessageKey: sent.id?._serialized,
+        verifiedBy,
+        attachments: [
+          {
+            type: "poll",
+            manualReview: false,
+            rawLabel: question,
+            kind: "poll"
+          }
+        ],
+        raw: { whatsapp: { poll: structuredPoll } }
+      };
+    } catch (error) {
+      if (!dispatchStarted) {
+        if (isWhatsAppSessionUnavailableError(error)) {
+          await this.closeSession("poll_send_pre_dispatch_session_unavailable");
         }
-      ],
-      raw: { whatsapp: { poll: structuredPoll } }
-    };
+        throw new WhatsAppPollSendPreDispatchError(error);
+      }
+      return this.rethrowPollSessionFailure(error);
+    }
   }
 
   /**
@@ -540,9 +572,15 @@ export class WhatsAppAdapter implements PlatformAdapter {
     chatId: string,
     sendStartedAt: number,
     expectedText?: string,
-    expectedType?: string
+    expectedType?: string,
+    allowStoreRecovery = true
   ): Promise<WaMessage> {
     if (sent) return sent;
+    if (!allowStoreRecovery) {
+      throw new Error(
+        "WhatsApp delivery could not be confirmed because the send returned no message result"
+      );
+    }
 
     const client = this.requireClient();
     if (client.pupPage) {
@@ -637,9 +675,19 @@ export class WhatsAppAdapter implements PlatformAdapter {
       dispatchStarted = true;
       await message.vote(selectedOptions);
     } catch (error) {
-      if (!dispatchStarted && isWhatsAppSessionUnavailableError(error)) {
-        await this.closeSession("poll_vote_pre_dispatch_session_unavailable");
-        throw new WhatsAppPollVotePreDispatchError();
+      if (!dispatchStarted) {
+        const sessionUnavailable = isWhatsAppSessionUnavailableError(error);
+        if (sessionUnavailable) {
+          await this.closeSession("poll_vote_pre_dispatch_session_unavailable");
+        }
+        throw new WhatsAppPollVotePreDispatchError(
+          sessionUnavailable
+            ? "WhatsApp lost its connection. Reconnect it in Settings, then try again."
+            : error instanceof Error
+              ? error.message
+              : String(error),
+          sessionUnavailable ? "whatsapp_session_unavailable" : "poll_unavailable"
+        );
       }
       await this.rethrowPollSessionFailure(error);
     }

@@ -43,7 +43,11 @@ export function FocusInboxGroup({
       if (busyKey || !active) return;
       setBusyKey(key);
       try {
-        await sendAcknowledgement(row.id, noteForRow(row, focusWindow, templates));
+        await sendAcknowledgement(
+          row.id,
+          noteForRow(row, focusWindow, templates),
+          focusWindow.windowId
+        );
         await markAcked(row.personId);
         setSent((prev) => new Set(prev).add(key));
         onChanged?.();

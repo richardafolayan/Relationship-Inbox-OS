@@ -3,6 +3,7 @@ const STORAGE_PREFIX = "rios.external-action-attempt.v1:";
 type AttemptStorage = Pick<Storage, "getItem" | "setItem" | "removeItem">;
 
 const fallbackAttempts = new Map<string, string>();
+const fallbackValues = new Map<string, unknown>();
 
 function browserStorage(): AttemptStorage | undefined {
   if (typeof window === "undefined") return undefined;
@@ -55,6 +56,44 @@ export function createExternalActionAttemptStore(
     }
   }
 
+  function valueStorageKey(attemptKey: string): string {
+    return storageKey(`value:${attemptKey}`);
+  }
+
+  function getOrCreateValue<T>(attemptKey: string, create: () => T): T {
+    const key = valueStorageKey(attemptKey);
+    try {
+      const persisted = storage?.getItem(key);
+      if (persisted) {
+        const parsed = JSON.parse(persisted) as T;
+        fallbackValues.set(key, parsed);
+        return parsed;
+      }
+    } catch {
+      // The in-memory fallback still protects retries in this renderer.
+    }
+    const existing = fallbackValues.get(key);
+    if (existing !== undefined) return existing as T;
+    const created = create();
+    fallbackValues.set(key, created);
+    try {
+      storage?.setItem(key, JSON.stringify(created));
+    } catch {
+      // Persistence is best effort when browser storage is unavailable.
+    }
+    return created;
+  }
+
+  function completeValue(attemptKey: string): void {
+    const key = valueStorageKey(attemptKey);
+    fallbackValues.delete(key);
+    try {
+      storage?.removeItem(key);
+    } catch {
+      // Completion remains valid even when browser storage is unavailable.
+    }
+  }
+
   function completeIfReconciled(
     attemptKey: string,
     reconciliationPending?: boolean
@@ -62,5 +101,11 @@ export function createExternalActionAttemptStore(
     if (!reconciliationPending) complete(attemptKey);
   }
 
-  return { getOrCreate, complete, completeIfReconciled };
+  return {
+    getOrCreate,
+    complete,
+    completeIfReconciled,
+    getOrCreateValue,
+    completeValue
+  };
 }

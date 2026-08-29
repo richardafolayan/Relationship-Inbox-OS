@@ -130,7 +130,11 @@ export function FocusReviewSheet({
       if (!active || state[key] !== "open" || busy) return;
       setBusy(true);
       try {
-        await sendAcknowledgement(row.id, notes[key] ?? noteForRow(row, focusWindow, templates));
+        await sendAcknowledgement(
+          row.id,
+          notes[key] ?? noteForRow(row, focusWindow, templates),
+          focusWindow.windowId
+        );
         await markAcked(row.personId);
         setState((prev) => ({ ...prev, [key]: "sent" }));
         setEditing(null);
@@ -163,7 +167,11 @@ export function FocusReviewSheet({
       for (const row of open) {
         const key = rowKey(row);
         try {
-          await sendAcknowledgement(row.id, notes[key] ?? noteForRow(row, focusWindow, templates));
+          await sendAcknowledgement(
+            row.id,
+            notes[key] ?? noteForRow(row, focusWindow, templates),
+            focusWindow.windowId
+          );
           setState((prev) => ({ ...prev, [key]: "sent" }));
         } catch {
           // Skip a failed send; the row stays open for a manual retry.

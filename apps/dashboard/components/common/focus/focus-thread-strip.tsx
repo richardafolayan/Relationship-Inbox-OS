@@ -145,7 +145,11 @@ export function FocusThreadStrip({
     if (busy || !candidate) return;
     setBusy(true);
     try {
-      await sendAcknowledgement(thread.id, note ?? noteForRow(row, focusWindow, templates));
+      await sendAcknowledgement(
+        thread.id,
+        note ?? noteForRow(row, focusWindow, templates),
+        focusWindow.windowId
+      );
       await markAcked(thread.personId);
       setStatus("sent");
       setEditing(false);

@@ -11,6 +11,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { apiGet, apiPost } from "@/lib/api";
 import { useCacheSeed } from "@/lib/use-cache-seed";
+import { createExternalActionAttemptStore } from "@/lib/external-action-attempts";
 import type {
   AckTemplates,
   CalendarSyncSettings,
@@ -29,6 +30,7 @@ import {
 
 const PROFILE_PATH = "/runner/data/operator-profile";
 const FOCUS_CHANGED_EVENT = "focus-window-changed";
+const focusAcknowledgementAttempts = createExternalActionAttemptStore();
 
 /** Tell every mounted focus surface to refetch the profile. */
 export function emitFocusChanged(): void {
@@ -98,13 +100,19 @@ async function reconcileExpiredWindow(windowId: string): Promise<void> {
  * send path — no new send machinery. The runner tags it sentVia:"automation"
  * and emits MESSAGE_SENT, exactly like any composer send.
  */
-export async function sendAcknowledgement(threadId: string, text: string): Promise<void> {
-  const clientSendId = newWindowId();
+export async function sendAcknowledgement(
+  threadId: string,
+  text: string,
+  focusWindowId: string
+): Promise<void> {
+  const attemptKey = `focus-ack:${JSON.stringify({ threadId, text, focusWindowId })}`;
+  const clientSendId = focusAcknowledgementAttempts.getOrCreate(attemptKey, newWindowId);
   await apiPost(`/runner/control/thread/${threadId}/send`, {
     text,
     clientSendId,
     source: "focus_ack"
   });
+  focusAcknowledgementAttempts.complete(attemptKey);
 }
 
 export interface UseFocusWindow {

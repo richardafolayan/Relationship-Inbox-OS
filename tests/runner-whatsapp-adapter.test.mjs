@@ -7,6 +7,7 @@ import { join } from "node:path";
 import {
   WhatsAppAdapter,
   extractPollPayload,
+  isWhatsAppPollSendPreDispatchError,
   isWhatsAppPollVotePreDispatchError,
   renderMessageText
 } from "../apps/runner/dist/platforms/whatsapp-adapter.js";
@@ -590,6 +591,55 @@ test("all WhatsApp attachments are readable before the first one is sent", async
   }
 });
 
+test("a later missing attachment result cannot be confirmed by an earlier attachment", async () => {
+  const first = join(tmpdir(), `whatsapp-first-${Date.now()}.txt`);
+  const second = join(tmpdir(), `whatsapp-second-${Date.now()}.txt`);
+  await writeFile(first, "first");
+  await writeFile(second, "second");
+  let sendCalls = 0;
+  const client = createFakeClient({
+    sendMessage: async () => {
+      sendCalls += 1;
+      return sendCalls === 1
+        ? { timestamp: 1700000100, id: { _serialized: "media-1" }, ack: 1 }
+        : undefined;
+    },
+    pupPage: {
+      evaluate: async () => ({
+        id: { _serialized: "media-1", fromMe: true },
+        type: "document",
+        timestamp: 1700000100,
+        ack: 1
+      })
+    }
+  });
+  const adapter = new WhatsAppAdapter({
+    ...baseDeps(),
+    createClient: () => client
+  });
+  const ready = adapter.ensureConnected();
+  setImmediate(() => client.emit("ready"));
+  await ready;
+
+  try {
+    await assert.rejects(
+      () => adapter.sendMessage(
+        { platformThreadId: "447111222333@c.us", displayName: "Alice", lastMessagePreview: "" },
+        "caption",
+        [
+          { absolutePath: first, displayName: "first.txt", mimeType: "text/plain", kind: "unknown" },
+          { absolutePath: second, displayName: "second.txt", mimeType: "text/plain", kind: "unknown" }
+        ]
+      ),
+      /delivery could not be confirmed.*no message result/i
+    );
+    assert.equal(sendCalls, 2);
+  } finally {
+    await rm(first, { force: true });
+    await rm(second, { force: true });
+  }
+});
+
 test("sendPoll sends a native WhatsApp poll and returns structured metadata", async () => {
   let sentJid = null;
   let sentPoll = null;
@@ -663,6 +713,21 @@ test("sendPoll treats a missing WhatsApp result as delivery uncertain", async ()
       { question: "Dinner?", options: ["Yes", "No"], allowMultipleAnswers: false }
     ),
     /delivery could not be confirmed.*no message result/i
+  );
+});
+
+test("sendPoll identifies failures before the platform send as proven pre-dispatch", async () => {
+  const adapter = new WhatsAppAdapter({
+    ...baseDeps(),
+    createClient: () => createFakeClient()
+  });
+
+  await assert.rejects(
+    () => adapter.sendPoll(
+      { platformThreadId: "x@c.us", displayName: "x", lastMessagePreview: "" },
+      { question: "Dinner?", options: ["Yes", "No"], allowMultipleAnswers: false }
+    ),
+    (error) => isWhatsAppPollSendPreDispatchError(error)
   );
 });
 
@@ -942,6 +1007,26 @@ test("voteOnPoll identifies a disconnected session as proven pre-dispatch", asyn
   );
 });
 
+test("voteOnPoll identifies a missing poll target as proven pre-dispatch", async () => {
+  const client = createFakeClient({ getMessageById: async () => null });
+  const adapter = new WhatsAppAdapter({
+    ...baseDeps(),
+    createClient: () => client
+  });
+  const ready = adapter.ensureConnected();
+  setImmediate(() => client.emit("ready"));
+  await ready;
+
+  await assert.rejects(
+    () => adapter.voteOnPoll(
+      { platformThreadId: "x@c.us", displayName: "x", lastMessagePreview: "" },
+      "missing-poll",
+      ["Tuesday"]
+    ),
+    (error) => isWhatsAppPollVotePreDispatchError(error)
+  );
+});
+
 test("voteOnPoll keeps a session failure from the physical vote delivery-uncertain", async () => {
   const client = createFakeClient({
     getMessageById: async () => ({
@@ -1124,11 +1209,14 @@ test("a current auth failure allows ordinary connect to create a fresh client", 
   assert.equal(createCalls, 2);
 });
 
-test("an initialize rejection allows ordinary connect to create a fresh client", async () => {
+test("an initialize rejection finishes old-client cleanup before reconnecting", async () => {
+  let finishDestroy;
+  const destroyFinished = new Promise((resolve) => { finishDestroy = resolve; });
   const firstClient = createFakeClient({
     initialize: async () => {
       throw new Error("browser failed to initialize");
-    }
+    },
+    destroy: async () => destroyFinished
   });
   const secondClient = createFakeClient();
   let createCalls = 0;
@@ -1140,10 +1228,16 @@ test("an initialize rejection allows ordinary connect to create a fresh client",
     }
   });
 
-  await assert.rejects(adapter.ensureConnected(), /browser failed to initialize/);
+  const first = adapter.ensureConnected();
+  await new Promise((resolve) => setImmediate(resolve));
   const second = adapter.ensureConnected();
+  assert.equal(createCalls, 1);
+  finishDestroy();
+  await assert.rejects(first, /browser failed to initialize/);
+  await assert.rejects(second, /browser failed to initialize/);
+  const replacement = adapter.ensureConnected();
   setImmediate(() => secondClient.emit("ready"));
-  await second;
+  await replacement;
   assert.equal(createCalls, 2);
 });
 

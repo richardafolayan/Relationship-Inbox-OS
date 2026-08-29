@@ -17,6 +17,15 @@ function harness(overrides = {}) {
         const row = rows.find((candidate) => candidate.clientSendId === where.clientSendId);
         return row ? { ...row } : null;
       },
+      async findMany({ where }) {
+        return rows
+          .filter((row) =>
+            row.status === where.status &&
+            row.source === where.source &&
+            (row.errorJson ?? "").includes(where.errorJson.contains)
+          )
+          .map((row) => ({ ...row }));
+      },
       async create({ data }) {
         if (rows.some((row) => row.clientSendId === data.clientSendId)) {
           throw Object.assign(new Error("unique"), { code: "P2002" });
@@ -30,6 +39,16 @@ function harness(overrides = {}) {
         if (!row) throw new Error("send request missing");
         Object.assign(row, data);
         return { ...row };
+      },
+      async updateMany({ where, data }) {
+        const row = rows.find((candidate) =>
+          candidate.id === where.id &&
+          candidate.status === where.status &&
+          candidate.receiptJson === where.receiptJson
+        );
+        if (!row) return { count: 0 };
+        Object.assign(row, data);
+        return { count: 1 };
       }
     },
     message: {
@@ -53,7 +72,21 @@ function harness(overrides = {}) {
       }
     },
     thread: {
+      async findUnique({ where }) {
+        if (where.id !== "thread-1") return null;
+        return {
+          id: "thread-1",
+          platform: "WHATSAPP",
+          lastInboundAt: new Date("2026-08-24T12:00:00.000Z"),
+          lastOutboundAt: null,
+          lastMessageAt: null
+        };
+      },
       async update() {
+        if ((overrides.failThreadUpdates ?? 0) > 0) {
+          overrides.failThreadUpdates -= 1;
+          throw new Error("thread projection failed");
+        }
         return {};
       }
     }
@@ -69,7 +102,9 @@ function harness(overrides = {}) {
       }
       return "audit-id";
     },
-    eventBus: { emit: (event) => events.push(event) }
+    eventBus: { emit: (event) => events.push(event) },
+    withExternalActionLock: async (_platform, work) => work(),
+    withPlatformLock: async (_platform, work) => work()
   });
 
   const input = {
@@ -89,14 +124,17 @@ function harness(overrides = {}) {
     allowMultipleAnswers: false,
     dispatch: async () => {
       physicalSends += 1;
-      if (overrides.adapterError) throw new Error(overrides.adapterError);
+      if (overrides.adapterError) throw overrides.adapterError;
       return {
         sentAt: "2026-08-24T12:01:00.000Z",
-        platformMessageKey: "poll-1",
+        ...(overrides.omitPlatformMessageKey ? {} : { platformMessageKey: "poll-1" }),
         verifiedBy: "platform_acknowledged"
       };
     }
   };
+  if (overrides.isPreDispatchFailure) {
+    input.isPreDispatchFailure = overrides.isPreDispatchFailure;
+  }
 
   return {
     service,
@@ -162,8 +200,25 @@ test("replaying a completed poll repairs local projection without redispatch", a
   assert.equal(h.rows[0].errorJson, null);
 });
 
+test("startup poll repair reuses the poll identity and never creates a duplicate bubble", async () => {
+  const overrides = { omitPlatformMessageKey: true, failThreadUpdates: 1 };
+  const h = harness(overrides);
+
+  const first = await h.service.send(h.input);
+  assert.equal(first.status, "ok");
+  assert.equal(first.reconciliationPending, true);
+  assert.equal(h.messages.length, 1);
+  const originalKey = h.messages[0].platformMessageKey;
+
+  assert.equal(await h.service.reconcileSentProjections(), 1);
+  assert.equal(h.messages.length, 1);
+  assert.equal(h.messages[0].platformMessageKey, originalKey);
+  assert.equal(h.rows[0].errorJson, null);
+  assert.equal(h.physicalSends(), 1);
+});
+
 test("a poll adapter failure after dispatch begins is never retryable", async () => {
-  const h = harness({ adapterError: "navigation timeout after submit" });
+  const h = harness({ adapterError: new Error("navigation timeout after submit") });
 
   await assert.rejects(() => h.service.send(h.input), /check the conversation/i);
 
@@ -174,6 +229,26 @@ test("a poll adapter failure after dispatch begins is never retryable", async ()
     persistedSendRetryEligibility(h.rows[0].status, h.rows[0].errorJson),
     { allowed: false, reason: "delivery_uncertain" }
   );
+});
+
+test("a proven pre-dispatch poll failure releases its claim for the same-id retry", async () => {
+  const safeFailure = new Error("adapter not connected");
+  const overrides = {
+    adapterError: safeFailure,
+    isPreDispatchFailure: (error) => error === safeFailure
+  };
+  const h = harness(overrides);
+
+  await assert.rejects(() => h.service.send(h.input), /not sent/i);
+  assert.equal(h.rows[0].status, "PENDING");
+  assert.equal(h.rows[0].receiptJson, null);
+
+  delete overrides.adapterError;
+  const retried = await h.service.send(h.input);
+  assert.equal(retried.status, "ok");
+  assert.equal(retried.replayed, false);
+  assert.equal(h.physicalSends(), 2);
+  assert.equal(h.rows[0].status, "SENT");
 });
 
 test("an in-doubt claimed poll is replayed as pending without dispatch", async () => {
