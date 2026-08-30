@@ -66,7 +66,8 @@ export interface PlatformAdapter {
   sendMessage(
     thread: ThreadStub,
     text: string,
-    attachments?: OutboundAttachment[]
+    attachments: OutboundAttachment[] | undefined,
+    beforeDispatch: () => Promise<void>
   ): Promise<SendReceipt>;
   sendPoll?(thread: ThreadStub, poll: OutboundPoll): Promise<SendReceipt>;
   openThread(thread: ThreadStub): Promise<void>;

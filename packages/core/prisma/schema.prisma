@@ -217,6 +217,11 @@ model Thread {
   personId          String
   unreadCount       Int          @default(0)
   needsReply        Boolean      @default(false)
+  // Monotonic durable fence advanced when a user-triggered send/poll/retry
+  // request is accepted, before its body is parsed. Focus acknowledgements
+  // persist the version they were created under and must still match it at
+  // the final dispatch boundary, including after a runner restart.
+  userIntentVersion Int          @default(0)
   handledAt         DateTime?
   lastMessagePreview String?
   lastMessageAt     DateTime?
@@ -347,8 +352,9 @@ model Thread {
 
   person       Person         @relation(fields: [personId], references: [id], onDelete: Cascade)
   messages     Message[]
-  drafts       Draft[]
-  sendRequests SendRequest[]
+  drafts                 Draft[]
+  sendRequests           SendRequest[]
+  externalActionRequests ExternalActionRequest[]
 
   @@unique([platform, platformThreadId])
   @@index([platform, riskLevel, needsReply, lastInboundAt])
@@ -587,6 +593,10 @@ model SendRequest {
   // Durable dispatch provenance. The worker rechecks this at the final safety
   // boundary so an automated row cannot become manual merely by restarting.
   source       String
+  // Durable user-intent fence captured for focus acknowledgements. Null for
+  // ordinary sends and legacy rows. A focus row without a baseline fails
+  // closed instead of adopting a fresh post-restart value.
+  focusIntentVersion Int?
   // Set on scheduled sends. The promoter looks for SCHEDULED rows whose
   // scheduledFor has passed and flips them to PENDING so the regular
   // send-queue worker drains them. Null on rows that were sent immediately.
@@ -615,4 +625,23 @@ model SendRequest {
   @@index([threadId, status])
   @@index([status, scheduledFor])
   @@map("send_requests")
+}
+
+model ExternalActionRequest {
+  id              String   @id @default(cuid())
+  clientActionId  String   @unique
+  threadId        String
+  targetMessageId String
+  actionType      String
+  payloadJson     String
+  status          String   @default("PENDING")
+  receiptJson     String?
+  errorJson       String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  thread Thread @relation(fields: [threadId], references: [id], onDelete: Cascade)
+
+  @@index([threadId, status])
+  @@map("external_action_requests")
 }

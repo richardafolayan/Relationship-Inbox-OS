@@ -205,6 +205,18 @@ export function classifyConsumerFailure(
     });
   }
 
+  if (status === 409 && /automatic focus acknowledgement/.test(diagnostic)) {
+    return failure({
+      code: "DELIVERY_UNCERTAIN",
+      title: "A focus note is already in progress.",
+      message: "An automatic note may already be reaching this conversation.",
+      nextAction: "Check the conversation before choosing the note again.",
+      actionLabel: "Check conversation",
+      retrySafe: false,
+      deliveryUncertain: true
+    });
+  }
+
   if (/sqlite|prisma|database|db unavailable|unable to open database|disk i\/o/.test(diagnostic)) {
     return failure({
       code: "DATABASE_UNAVAILABLE",

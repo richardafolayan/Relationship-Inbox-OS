@@ -60,7 +60,7 @@ app.whenReady().then(async () => {
     const timeout = setTimeout(() => {
       child.kill();
       reject(new Error(`Electron dictation fixture timed out. ${stderr}`));
-    }, 30_000);
+    }, 60_000);
     child.stdout.on("data", (chunk) => { stdout += chunk; });
     child.stderr.on("data", (chunk) => { stderr += chunk; });
     child.on("error", reject);

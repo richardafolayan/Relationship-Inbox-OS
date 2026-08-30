@@ -32,6 +32,23 @@ test("mutating network failures preserve data uncertainty", () => {
   assert.equal(failure.dataUncertain, true);
 });
 
+test("an automatic focus note conflict blocks retry and tells the user to check delivery", () => {
+  const failure = classifyConsumerFailure(
+    new Error("Automatic focus acknowledgement delivery could not be confirmed"),
+    {
+      path: "/runner/control/thread/t1/send",
+      method: "POST",
+      phase: "response",
+      status: 409
+    }
+  );
+
+  assert.equal(failure.code, "DELIVERY_UNCERTAIN");
+  assert.equal(failure.retrySafe, false);
+  assert.equal(failure.deliveryUncertain, true);
+  assert.match(failure.nextAction, /check the conversation/i);
+});
+
 test("significant failures map to calm recovery contracts", () => {
   const cases = [
     {

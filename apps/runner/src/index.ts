@@ -1,7 +1,7 @@
-import { existsSync, mkdirSync, openSync, rmSync } from "node:fs";
-import { mkdir } from "node:fs/promises";
-import { createHash, randomUUID } from "node:crypto";
-import { basename, join, resolve } from "node:path";
+import { createReadStream, existsSync, mkdirSync, openSync, rmSync } from "node:fs";
+import { mkdir, rm } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import { spawn } from "node:child_process";
 import { performance } from "node:perf_hooks";
 import express from "express";
@@ -68,7 +68,11 @@ import {
   hasPersistedWhatsAppSession
 } from "./platforms/whatsapp/session";
 import { findWhatsAppMediaByGuid, streamWhatsAppMedia } from "./platforms/whatsapp/media";
-import { isWhatsAppSessionUnavailableError } from "./platforms/whatsapp-adapter";
+import {
+  isWhatsAppPollSendPreDispatchError,
+  isWhatsAppPollVotePreDispatchError,
+  isWhatsAppSessionUnavailableError
+} from "./platforms/whatsapp-adapter";
 import {
   connectedPlatformCount,
   effectivePlatformStatus
@@ -106,16 +110,47 @@ import {
   MESSAGE_SYNC_METRICS,
   type MessageSyncMetric
 } from "./services/message-sync-latency";
-import { createSendService, parsePersistedSendSource } from "./services/send";
-import { createSendQueue } from "./services/send-queue";
-import { planPlatformSessionReset } from "./services/platform-session-reset";
-import { createFocusAutoAckService } from "./services/focus-auto-ack";
 import {
-  classifySendFailureKind,
-  consumerSendFailure,
+  createSendService,
+  needsLocalReconciliation,
+  parsePersistedSendSource,
+  SendPolicyError
+} from "./services/send";
+import {
+  abandonUnstartedUserTriggeredIntent,
+  beginUserTriggeredIntentOperation,
+  createUserTriggeredIntentMiddleware,
+  resolveFocusPolicyMutationIntentKey,
+  resolveUserTriggeredIntentThreadId,
+  userTriggeredIntentVersion
+} from "./services/user-triggered-intent-middleware";
+import { createSendQueue, QUEUED_MESSAGE_SOURCES } from "./services/send-queue";
+import { createPlatformSessionResetCoordinator } from "./services/platform-session-reset-coordinator";
+import {
+  bindFocusAutoAckEvents,
+  createFocusAutoAckService,
+  focusAcknowledgementClientSendIds,
+  focusManualAckClientSendId
+} from "./services/focus-auto-ack";
+import { createAdminResetCoordinator } from "./services/admin-reset-coordinator";
+import { createThreadExternalActionFence } from "./services/external-action-fence";
+import {
+  createDurableExternalActionService,
+  DurableExternalActionError,
+  type DurableExternalActionProjection
+} from "./services/durable-external-action";
+import {
   parsePersistedSendFailure,
   persistedSendRetryEligibility
 } from "./services/send-failure";
+import {
+  deriveRetryClientSendId,
+  parseRetryAttachments
+} from "./services/send-retry";
+import {
+  createPollSendService,
+  PollSendError
+} from "./services/poll-send";
 import { createReassessOnSendHandler } from "./services/reassess-on-send";
 import { createScheduledSendPromoter } from "./services/scheduled-send-promoter";
 import {
@@ -173,6 +208,8 @@ import {
   validateAdminResetGuards
 } from "./services/admin-reset";
 import { cleanupDemoData, seedDemoData } from "./services/demo";
+import { createDemoCleanupCoordinator } from "./services/demo-cleanup-coordinator";
+import type { DemoSeedManifest } from "./types/runtime";
 import { checkPresenterGuard } from "./middleware/presenter-guard";
 import { createKeyedMutex } from "./services/keyed-mutex";
 import { createRunLogger } from "./services/run-logger";
@@ -207,6 +244,22 @@ import {
 import type { OverdueDigestRowInput } from "@inbox-os/core";
 
 const app = express();
+let registerUserTriggeredIntentForRequest = (
+  _threadId: string
+):
+  | (() => void)
+  | { release: () => void; ready: Promise<number | undefined> } => () => {};
+let registerFocusPolicyMutationForRequest = (): (() => void) => () => {};
+const registerUserTriggeredSendIntent = createUserTriggeredIntentMiddleware(
+  (threadId) => registerUserTriggeredIntentForRequest(threadId),
+  resolveUserTriggeredIntentThreadId
+);
+const registerFocusPolicyMutationIntent = createUserTriggeredIntentMiddleware(
+  () => registerFocusPolicyMutationForRequest(),
+  resolveFocusPolicyMutationIntentKey
+);
+app.use(registerUserTriggeredSendIntent);
+app.use(registerFocusPolicyMutationIntent);
 const runnerProcessInfo = {
   executableName: basename(process.execPath),
   executablePath: process.execPath,
@@ -250,6 +303,19 @@ app.use((req, res, next) => {
 // can reference them by absolute path when shelling out to osascript.
 const outgoingAttachmentsRoot = resolve(dataDir, "outgoing-attachments");
 mkdirSync(outgoingAttachmentsRoot, { recursive: true });
+async function discardStagedAttachments(
+  attachments: Array<{ absolutePath: string }>
+): Promise<void> {
+  const rootPrefix = `${outgoingAttachmentsRoot}${sep}`;
+  const directories = new Set(
+    attachments.map((attachment) => resolve(dirname(attachment.absolutePath)))
+  );
+  await Promise.all(
+    [...directories]
+      .filter((directory) => directory.startsWith(rootPrefix))
+      .map((directory) => rm(directory, { recursive: true, force: true }))
+  );
+}
 const uploadAttachments = multer({
   storage: multer.diskStorage({
     destination: (_req, _file, cb) => {
@@ -275,6 +341,16 @@ function maybeMultipart(req: express.Request, res: express.Response, next: expre
   } else {
     next();
   }
+}
+
+async function sha256File(path: string): Promise<string> {
+  return new Promise((resolveHash, rejectHash) => {
+    const hash = createHash("sha256");
+    const stream = createReadStream(path);
+    stream.on("data", (chunk) => hash.update(chunk));
+    stream.on("error", rejectHash);
+    stream.on("end", () => resolveHash(hash.digest("hex")));
+  });
 }
 
 // #462 (pilot R-0061): voice-to-text dictation. The composer records a short
@@ -325,13 +401,6 @@ function kindFromMime(mime: string | undefined, filename: string | undefined): "
   if (m === "application/pdf" || n.endsWith(".pdf")) return "pdf";
   if (m.startsWith("audio/")) return /webm|opus|m4a|aac|caf/.test(m) || /audio.message/.test(n) ? "voice_note" : "audio";
   return "unknown";
-}
-
-function renderWhatsAppPollText(input: { question: string; options: string[]; allowMultipleAnswers?: boolean }): string {
-  const header = input.allowMultipleAnswers ? "📊 Poll (multi-select)" : "📊 Poll";
-  const body = input.question.trim() ? `${header}: ${input.question.trim()}` : header;
-  const options = input.options.map((option) => `• ${option.trim()}`).join("\n");
-  return options ? `${body}\n${options}` : body;
 }
 
 const settingsStore = createSettingsStore();
@@ -1233,6 +1302,63 @@ const sendService = createSendService({
   onPlatformResult: (input) => messageSyncLatency.finishSend(input),
   // Same per-platform mutex key the scan queue uses, so a send and a scan
   // never drive the shared managed page at the same time.
+  withPlatformLock: withPlatformControlLock,
+  withExternalActionLock
+});
+registerUserTriggeredIntentForRequest = (threadId) =>
+  sendService.registerDurableUserTriggeredIntent(threadId);
+registerFocusPolicyMutationForRequest = () =>
+  sendService.registerFocusPolicyMutationIntent();
+const pollSendService = createPollSendService({
+  prisma,
+  settingsStore,
+  auditLog: (input) => auditService.log(input),
+  eventBus,
+  withExternalActionLock,
+  withPlatformLock: withPlatformControlLock
+});
+async function projectDurableExternalAction(row: DurableExternalActionProjection): Promise<void> {
+  const payload = JSON.parse(row.payloadJson) as Record<string, unknown>;
+  if (row.actionType === "poll_vote") {
+    if (
+      !Array.isArray(payload.selectedOptions) ||
+      payload.selectedOptions.some((option) => typeof option !== "string")
+    ) {
+      throw new Error("poll vote reconciliation payload is invalid");
+    }
+    return;
+  }
+  const message = await prisma.message.findUnique({ where: { id: row.targetMessageId } });
+  if (!message || message.threadId !== row.threadId) {
+    throw new Error("message missing during external-action reconciliation");
+  }
+  if (row.actionType === "message_reaction") {
+    if (typeof payload.emoji !== "string" || !payload.emoji) {
+      throw new Error("reaction reconciliation payload is invalid");
+    }
+    await prisma.message.update({
+      where: { id: message.id },
+      data: { rawJson: appendOutboundReaction(message.rawJson, payload.emoji) }
+    });
+    return;
+  }
+  if (row.actionType === "message_edit") {
+    if (typeof payload.text !== "string" || !payload.text) {
+      throw new Error("edit reconciliation payload is invalid");
+    }
+    await prisma.message.update({
+      where: { id: message.id },
+      data: { text: payload.text }
+    });
+    return;
+  }
+  throw new Error(`unsupported durable external action: ${row.actionType}`);
+}
+
+const durableExternalActionService = createDurableExternalActionService({
+  prisma,
+  project: projectDurableExternalAction,
+  withExternalActionLock,
   withPlatformLock: withPlatformControlLock
 });
 
@@ -1249,6 +1375,11 @@ const focusAutoAck = createFocusAutoAckService({
   settingsStore,
   sendQueue,
   auditLog: (input) => auditService.log(input),
+  loadSendRequest: (clientSendId) =>
+    prisma.sendRequest.findUnique({
+      where: { clientSendId },
+      select: { threadId: true, source: true, status: true }
+    }),
   loadThread: async (threadId) => {
     const [thread, latestInbound, latestOutbound] = await Promise.all([
       prisma.thread.findUnique({
@@ -1284,27 +1415,37 @@ const focusAutoAck = createFocusAutoAckService({
       threadId: thread.id,
       platform: thread.platform,
       isGroup: thread.isGroup,
-      category: thread.category,
+      category:
+        thread.category === "genuine"
+          ? "genuine"
+          : thread.category === "outreach"
+            ? "outreach"
+            : null,
       person: thread.person,
       latestInboundAt: latestInbound?.timestamp ?? null,
       latestOutboundAt: latestOutbound?.timestamp ?? null
     };
   }
 });
-eventBus.subscribe((event) => {
-  if (event.type !== "MESSAGES_PERSISTED") return;
-  void focusAutoAck.handleThread(event.threadId).catch((error) => {
-    console.warn(
-      `[focus-auto-ack] failed for threadId=${event.threadId}: ${
-        error instanceof Error ? error.message : String(error)
-      }`
-    );
-  });
-});
+bindFocusAutoAckEvents(eventBus, focusAutoAck);
 // Pick up any SendRequests left in PENDING from a previous runner process
 // (e.g. crashed mid-send, or restarted while a send was queued behind a
 // scan). The queue's `running` guard prevents duplicate processing.
 sendQueue.resume();
+void pollSendService.reconcileSentProjections().catch((error) => {
+  console.warn(
+    `[poll-send] startup reconciliation failed: ${
+      error instanceof Error ? error.message : String(error)
+    }`
+  );
+});
+void durableExternalActionService.reconcileSentProjections().catch((error) => {
+  console.warn(
+    `[external-action] startup reconciliation failed: ${
+      error instanceof Error ? error.message : String(error)
+    }`
+  );
+});
 
 // Immediate reassess when the operator sends a reply. The scan loop only
 // refreshes a thread's brief when its lastInboundHash changes, so a dashboard
@@ -1473,8 +1614,50 @@ async function withPlatformControlLock<T>(platform: PlatformName, work: () => Pr
   return operationMutex.runExclusive(platformLockKey(platform), work);
 }
 
+async function withExternalActionLock<T>(
+  platform: PlatformName,
+  work: () => Promise<T>
+): Promise<T> {
+  return operationMutex.runExclusive(sendLockKeyFor(platform), work);
+}
+
 async function withGlobalResetLock<T>(work: () => Promise<T>): Promise<T> {
   return operationMutex.runExclusive(globalResetLockKey(), work);
+}
+
+async function withWhatsAppSessionLocks<T>(
+  work: () => Promise<T>
+): Promise<T> {
+  return withExternalActionLock("WHATSAPP", () =>
+    withPlatformControlLock("WHATSAPP", work)
+  );
+}
+
+const demoCleanupCoordinator = createDemoCleanupCoordinator({
+  resolvePlatforms: async (threadIds) => {
+    if (threadIds.length === 0) return [];
+    const rows = await prisma.thread.findMany({
+      where: { id: { in: [...threadIds] } },
+      select: { platform: true }
+    });
+    return rows.map((row) => row.platform as PlatformName);
+  },
+  withGlobalResetLock,
+  withExternalActionLock
+});
+
+async function cleanupDemoManifest(
+  manifest: DemoSeedManifest,
+  afterCleanup: () => Promise<void> = async () => undefined
+): Promise<void> {
+  await demoCleanupCoordinator.run(manifest.threadIds, async () => {
+    await cleanupDemoData(manifest, {
+      screenshotDir: runnerConfig.screenshotDir,
+      domDumpDir: runnerConfig.domDumpDir
+    });
+    await settingsStore.setDemoSeedManifest(null);
+    await afterCleanup();
+  });
 }
 
 function parsePlatform(value: unknown): PlatformName {
@@ -1731,7 +1914,7 @@ async function ensureRuntimeDirs(): Promise<void> {
   await mkdir(resolvePlatformSession("INSTAGRAM").profileDir, { recursive: true });
 }
 
-async function getThreadStub(threadId: string): Promise<{
+interface ThreadActionTarget {
   threadId: string;
   platform: PlatformName;
   platformThreadId: string;
@@ -1739,17 +1922,19 @@ async function getThreadStub(threadId: string): Promise<{
   displayName: string;
   recipientVerificationLabel?: string;
   personId: string;
-}> {
+}
+
+async function findThreadStub(threadId: string): Promise<ThreadActionTarget | null> {
   const thread = await prisma.thread.findUnique({
     where: { id: threadId },
     include: { person: true }
   });
 
   if (!thread) {
-    throw new Error("Thread not found");
+    return null;
   }
   if (!runnerConfig.availablePlatforms.includes(thread.platform as PlatformName)) {
-    throw new Error("Thread not found");
+    return null;
   }
 
   return {
@@ -1762,6 +1947,26 @@ async function getThreadStub(threadId: string): Promise<{
     personId: thread.personId
   };
 }
+
+async function getThreadStub(threadId: string): Promise<ThreadActionTarget> {
+  const target = await findThreadStub(threadId);
+  if (!target) throw new Error("Thread not found");
+  return target;
+}
+
+const threadExternalActionFence = createThreadExternalActionFence({
+  discoverPlatform: async (threadId) => {
+    const thread = await prisma.thread.findUnique({
+      where: { id: threadId },
+      select: { platform: true }
+    });
+    const platform = thread?.platform as PlatformName | undefined;
+    return platform && runnerConfig.availablePlatforms.includes(platform) ? platform : null;
+  },
+  loadTarget: findThreadStub,
+  withExternalActionLock,
+  withPlatformLock: withPlatformControlLock
+});
 
 /**
  * Returns every thread id belonging to a Person on a given platform. iMessage
@@ -1942,6 +2147,22 @@ async function loadVisibleThreadRows(options?: {
   return shapeThreadRows(threads as ThreadRowSource[], canonicalSiblings as ThreadRowSource[]);
 }
 
+const adminResetCoordinator = createAdminResetCoordinator({
+  platforms: allPlatforms,
+  requestAbort: (reason) => scanQueue.requestAbort(reason),
+  clearAbort: () => scanQueue.clearAbort(),
+  clearInFlight: () => {
+    connectInFlight.clear();
+    suggestedRepliesInFlight.clear();
+    threadSummaryRefreshInFlight.clear();
+  },
+  withGlobalResetLock,
+  withExternalActionLock,
+  withPlatformLock: withPlatformControlLock,
+  resetGraph: (platform) => resetPlatformInboxGraph(platform),
+  auditLog: (input) => auditService.log(input)
+});
+
 app.post("/admin/reset", asyncRoute(async (req, res) => {
   const payload = z
     .object({
@@ -1969,36 +2190,9 @@ app.post("/admin/reset", asyncRoute(async (req, res) => {
   }
 
   const requestId = uuid();
-  const resetResult = await withGlobalResetLock(async () => {
-    scanQueue.requestAbort(`admin_reset:${payload.platform.toLowerCase()}`);
-    // Drop every in-flight bookkeeping map so a wedged AI call from
-    // pre-reset state can't keep stale thread ids glued to slots.
-    connectInFlight.clear();
-    suggestedRepliesInFlight.clear();
-    threadSummaryRefreshInFlight.clear();
-    try {
-      for (const platform of allPlatforms) {
-        await operationMutex.runExclusive(platformLockKey(platform), async () => undefined);
-      }
-
-      const result = await resetPlatformInboxGraph(payload.platform);
-      await auditService.log({
-        platform: payload.platform,
-        stage: "System",
-        action: "ADMIN_RESET",
-        status: "OK",
-        details: {
-          requestId,
-          platform: payload.platform,
-          matchedThreadCount: result.matchedThreadCount,
-          deleted: result.deleted
-        }
-      });
-
-      return result;
-    } finally {
-      scanQueue.clearAbort();
-    }
+  const resetResult = await adminResetCoordinator.reset({
+    platform: payload.platform,
+    requestId
   });
 
   res.json({
@@ -3006,20 +3200,30 @@ app.post("/control/settings", asyncRoute(async (req, res) => {
       : payload.demoMode;
 
   const updatePayload = { ...payload, demoMode: derivedDemoMode };
+  const isLeavingDemo = previous.demoMode && derivedDemoMode === false;
+  if (isLeavingDemo) {
+    const manifest = await settingsStore.getDemoSeedManifest();
+    let next = previous;
+    if (manifest) {
+      await cleanupDemoManifest(manifest, async () => {
+        next = await settingsStore.updateSettings(updatePayload);
+      });
+    } else {
+      next = await settingsStore.updateSettings(updatePayload);
+    }
+    res.json(next);
+    return;
+  }
+
   const next = await settingsStore.updateSettings(updatePayload);
 
   const isEnteringDemo = !previous.demoMode && next.demoMode;
-  const isLeavingDemo = previous.demoMode && !next.demoMode;
   const seedMode = next.presenterDemoMode === "sandbox" ? "full-presenter-demo" : "generic";
 
   if (isEnteringDemo) {
     const previousManifest = await settingsStore.getDemoSeedManifest();
     if (previousManifest) {
-      await cleanupDemoData(previousManifest, {
-        screenshotDir: runnerConfig.screenshotDir,
-        domDumpDir: runnerConfig.domDumpDir
-      });
-      await settingsStore.setDemoSeedManifest(null);
+      await cleanupDemoManifest(previousManifest);
     }
 
     const manifest = await seedDemoData({
@@ -3028,17 +3232,6 @@ app.post("/control/settings", asyncRoute(async (req, res) => {
       mode: seedMode
     });
     await settingsStore.setDemoSeedManifest(manifest);
-  }
-
-  if (isLeavingDemo) {
-    const manifest = await settingsStore.getDemoSeedManifest();
-    if (manifest) {
-      await cleanupDemoData(manifest, {
-        screenshotDir: runnerConfig.screenshotDir,
-        domDumpDir: runnerConfig.domDumpDir
-      });
-      await settingsStore.setDemoSeedManifest(null);
-    }
   }
 
   res.json(next);
@@ -3170,17 +3363,20 @@ app.post("/control/overdue-digest/unsnooze-person", asyncRoute(async (req, res) 
 app.post("/control/presenter-demo/reset", asyncRoute(async (_req, res) => {
   const manifest = await settingsStore.getDemoSeedManifest();
   if (manifest) {
-    await cleanupDemoData(manifest, {
-      screenshotDir: runnerConfig.screenshotDir,
-      domDumpDir: runnerConfig.domDumpDir
+    await cleanupDemoManifest(manifest, async () => {
+      await settingsStore.updateSettings({
+        demoMode: false,
+        presenterDemoMode: "off",
+        presenterReadOnly: false
+      });
     });
-    await settingsStore.setDemoSeedManifest(null);
+  } else {
+    await settingsStore.updateSettings({
+      demoMode: false,
+      presenterDemoMode: "off",
+      presenterReadOnly: false
+    });
   }
-  await settingsStore.updateSettings({
-    demoMode: false,
-    presenterDemoMode: "off",
-    presenterReadOnly: false
-  });
   res.json({ ok: true });
 }));
 
@@ -3884,6 +4080,9 @@ app.post("/control/platform/test-selectors", asyncRoute(async (req, res) => {
 // outreach loops, batch send-all — should land in a separate gated
 // surface, never inline here.
 app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req, res) => {
+  const completeUserTriggeredIntent = beginUserTriggeredIntentOperation(res);
+  const requestIntentVersion = userTriggeredIntentVersion(res);
+  try {
   const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
   if (await checkPresenterGuard(res, settingsStore, { threadId, action: "send", kind: "thread-mutation" })) return;
   // For multipart bodies, multer puts file metadata on req.files and
@@ -3900,6 +4099,7 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
       // immediately (existing behaviour).
       scheduledFor: z.string().datetime().optional(),
       source: z.literal("focus_ack").optional(),
+      focusWindowId: z.string().min(1).max(80).optional(),
       // App-level threading. When the dashboard's focused-thread composer
       // sends a reply, it includes the parent Message.id here. The send
       // itself still goes out as a regular text bubble — the threading is
@@ -3908,18 +4108,25 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
     })
     .parse(req.body);
   const uploadedFiles = (req.files as Express.Multer.File[] | undefined) ?? [];
-  const stagedAttachments = uploadedFiles.map((f) => ({
-    absolutePath: f.path,
-    displayName: f.originalname,
-    mimeType: f.mimetype,
-    kind: kindFromMime(f.mimetype, f.originalname)
-  }));
+  const stagedAttachments = await Promise.all(
+    uploadedFiles.map(async (f) => ({
+      absolutePath: f.path,
+      displayName: f.originalname,
+      mimeType: f.mimetype,
+      kind: kindFromMime(f.mimetype, f.originalname),
+      contentDigest: await sha256File(f.path)
+    }))
+  );
   if (stagedAttachments.length === 0 && payload.text.trim().length === 0) {
     res.status(400).json({ error: "send must have text, attachments, or both" });
     return;
   }
   if (payload.source && payload.scheduledFor) {
     res.status(400).json({ error: "focus acknowledgements cannot be scheduled" });
+    return;
+  }
+  if (payload.source === "focus_ack" && !payload.focusWindowId) {
+    res.status(400).json({ error: "focus_window_required" });
     return;
   }
 
@@ -3944,6 +4151,9 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
         attachments: stagedAttachments,
         replyToMessageId: payload.replyToMessageId
       });
+      if (scheduleResult.replayed) {
+        await discardStagedAttachments(stagedAttachments);
+      }
       res.json({
         clientSendId: scheduleResult.clientSendId,
         status: scheduleResult.status,
@@ -3989,8 +4199,15 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
       clientSendId: payload.clientSendId,
       attachments: stagedAttachments,
       source: payload.source ?? "manual",
+      focusWindowId: payload.focusWindowId,
+      focusIntentVersion:
+        payload.source === "focus_ack" ? requestIntentVersion : undefined,
+      rearmPolicyBlockedFocusAcknowledgement: payload.source === "focus_ack",
       replyToMessageId: payload.replyToMessageId
     });
+    if (queueResult.replayed) {
+      await discardStagedAttachments(stagedAttachments);
+    }
     res.json(queueResult);
   } catch (error) {
     await auditService.log({
@@ -4006,9 +4223,14 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
     });
     throw error;
   }
+  } finally {
+    completeUserTriggeredIntent();
+  }
 }));
 
 app.post("/control/thread/:threadId/send-poll", asyncRoute(async (req, res) => {
+  const completeUserTriggeredIntent = beginUserTriggeredIntentOperation(res);
+  try {
   const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
   if (await checkPresenterGuard(res, settingsStore, { threadId, action: "send a poll", kind: "thread-mutation" })) return;
   const payload = z
@@ -4020,7 +4242,7 @@ app.post("/control/thread/:threadId/send-poll", asyncRoute(async (req, res) => {
         .max(12)
         .transform((options) => Array.from(new Set(options))),
       allowMultipleAnswers: z.boolean().optional().default(false),
-      clientSendId: z.string().uuid().optional()
+      clientSendId: z.string().uuid()
     })
     .parse(req.body ?? {});
   if (payload.options.length < 2) {
@@ -4028,141 +4250,66 @@ app.post("/control/thread/:threadId/send-poll", asyncRoute(async (req, res) => {
     return;
   }
 
-  const target = await getThreadStub(threadId);
-  const adapter = requireAdapter(target.platform);
-  if (!adapter.sendPoll) {
-    res.status(400).json({ error: `${target.platform} adapter does not support sending polls` });
-    return;
-  }
-  const threadRow = await prisma.thread.findUnique({
-    where: { id: threadId },
-    include: { person: true }
-  });
-  if (!threadRow) {
-    res.status(404).json({ error: "thread not found" });
-    return;
-  }
+  const clientSendId = payload.clientSendId;
 
-  const threadStub: ThreadStub = {
-    platformThreadId: target.platformThreadId,
-    displayName: target.displayName,
-    recipientVerificationLabel: target.recipientVerificationLabel,
-    threadUrl: target.threadUrl,
-    lastMessagePreview: ""
-  };
-  const clientSendId = payload.clientSendId ?? uuid();
-  const text = renderWhatsAppPollText(payload);
+  const outcome = await threadExternalActionFence.run(threadId, async (target) => {
+    const adapter = requireAdapter(target.platform);
+    if (!adapter.sendPoll) {
+      res.status(400).json({ error: `${target.platform} adapter does not support sending polls` });
+      return;
+    }
+    const threadRow = await prisma.thread.findUnique({
+      where: { id: threadId },
+      include: { person: true }
+    });
+    if (!threadRow) {
+      res.status(404).json({ error: "thread not found" });
+      return;
+    }
+    const threadStub: ThreadStub = {
+      platformThreadId: target.platformThreadId,
+      displayName: target.displayName,
+      recipientVerificationLabel: target.recipientVerificationLabel,
+      threadUrl: target.threadUrl,
+      lastMessagePreview: ""
+    };
 
-  await withPlatformControlLock(target.platform, async () => {
     try {
-      const receipt = await adapter.sendPoll!(threadStub, {
+      const result = await pollSendService.send({
+        clientSendId,
+        thread: {
+          id: threadRow.id,
+          platform: target.platform,
+          lastInboundAt: threadRow.lastInboundAt,
+          lastOutboundAt: threadRow.lastOutboundAt,
+          lastMessageAt: threadRow.lastMessageAt
+        },
         question: payload.question,
         options: payload.options,
-        allowMultipleAnswers: payload.allowMultipleAnswers
+        allowMultipleAnswers: payload.allowMultipleAnswers,
+        isPreDispatchFailure: isWhatsAppPollSendPreDispatchError,
+        dispatch: () =>
+          adapter.sendPoll!(threadStub, {
+            question: payload.question,
+            options: payload.options,
+            allowMultipleAnswers: payload.allowMultipleAnswers
+          })
       });
-      const sentAt = new Date(receipt.sentAt);
-      const settings = await settingsStore.getSettings();
-      const platformMessageKey =
-        receipt.platformMessageKey ??
-        stableHash(`${threadId}|${receipt.sentAt}|OUT|${text}|poll`);
-      const attachmentsJson =
-        receipt.attachments && receipt.attachments.length > 0
-          ? JSON.stringify(receipt.attachments)
-          : null;
-      const rawJson = receipt.raw ? JSON.stringify(receipt.raw) : null;
-
-      const message = await prisma.message.upsert({
-        where: {
-          threadId_platformMessageKey: {
-            threadId,
-            platformMessageKey
-          }
-        },
-        update: {
-          text,
-          direction: "OUT",
-          timestamp: sentAt,
-          sentVia: "automation",
-          attachmentsJson,
-          rawJson
-        },
-        create: {
-          threadId,
-          platformMessageKey,
-          direction: "OUT",
-          timestamp: sentAt,
-          text,
-          sentVia: "automation",
-          attachmentsJson,
-          rawJson
-        }
-      });
-
-      const risk = calculateRisk({
-        lastInboundAt: threadRow.lastInboundAt,
-        lastOutboundAt: sentAt,
-        amberHours: settings.amberHours,
-        redHours: settings.redHours
-      });
-      await prisma.thread.update({
-        where: { id: threadId },
-        data: {
-          needsReply: risk.needsReply,
-          riskLevel: risk.level,
-          riskReason: risk.riskReason,
-          slaDueAt: risk.slaDueAt,
-          snoozedUntil: null,
-          lastOutboundAt: sentAt,
-          lastMessageAt: sentAt,
-          unreadCount: 0,
-          lastMessageDirection: "OUT",
-          lastMessageText: text
-        }
-      });
-
-      await auditService.log({
-        platform: target.platform,
-        stage: "Send",
-        action: "POLL_SEND",
-        status: "OK",
-        details: {
-          threadId,
-          clientSendId,
-          optionCount: payload.options.length,
-          allowMultipleAnswers: payload.allowMultipleAnswers
-        }
-      });
-      eventBus.emit({
-        type: "MESSAGE_SENT",
-        jobId: "poll-send",
-        threadId,
-        platform: target.platform,
-        clientSendId
-      });
-      res.json({
-        status: "ok",
-        clientSendId,
-        messageId: message.id,
-        platformMessageKey,
-        sentAt: sentAt.toISOString()
-      });
+      res.status(result.status === "pending" ? 202 : 200).json(result);
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      const errorKind = classifySendFailureKind({ message: errorMessage });
-      const consumerFailure = consumerSendFailure(errorKind);
-      await auditService.log({
-        platform: target.platform,
-        stage: "Send",
-        action: "POLL_SEND_FAIL",
-        status: "FAIL",
-        details: { threadId, clientSendId, errorKind, ...summarizeError(error) }
-      });
-      res.status(errorKind === "DELIVERY_UNCERTAIN" ? 409 : 502).json({
-        error: consumerFailure.message,
-        failure: consumerFailure
+      if (!(error instanceof PollSendError)) throw error;
+      res.status(error.statusCode).json({
+        error: error.message,
+        failure: error.failure
       });
     }
   });
+  if (outcome.status === "missing") {
+    res.status(404).json({ error: "thread not found" });
+  }
+  } finally {
+    completeUserTriggeredIntent();
+  }
 }));
 
 app.post("/control/thread/:threadId/update-send", asyncRoute(async (req, res) => {
@@ -4236,6 +4383,9 @@ app.post("/control/thread/:threadId/cancel-send", asyncRoute(async (req, res) =>
 }));
 
 app.post("/control/thread/:threadId/retry-send", asyncRoute(async (req, res) => {
+  const completeUserTriggeredIntent = beginUserTriggeredIntentOperation(res);
+  const requestIntentVersion = userTriggeredIntentVersion(res);
+  try {
   const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
   if (await checkPresenterGuard(res, settingsStore, { threadId, action: "retry a send", kind: "thread-mutation" })) return;
   const payload = z.object({ clientSendId: z.string().uuid() }).parse(req.body);
@@ -4274,20 +4424,49 @@ app.post("/control/thread/:threadId/retry-send", asyncRoute(async (req, res) => 
   // re-sends the same message, not a text-only stub. Staged attachment files
   // persist after a FAILED send (the send service doesn't unlink them), so the
   // original absolutePath references are still valid.
-  let retryAttachments:
-    | Array<{ absolutePath: string; displayName: string; mimeType?: string; kind?: string }>
-    | undefined;
-  if (original.attachmentsJson) {
-    try {
-      const parsed = JSON.parse(original.attachmentsJson);
-      if (Array.isArray(parsed) && parsed.length > 0) {
-        retryAttachments = parsed;
-      }
-    } catch {
-      retryAttachments = undefined;
-    }
+  let retryAttachments;
+  try {
+    retryAttachments = parseRetryAttachments(original.attachmentsJson);
+  } catch {
+    res.status(409).json({ error: "invalid_attachment_metadata" });
+    return;
   }
-  const newClientSendId = randomUUID();
+  if (originalSource === "focus_auto_ack") {
+    res.status(409).json({ error: "automatic_focus_ack_retry_not_operator_triggered" });
+    return;
+  }
+  if (originalSource === "focus_ack") {
+    const [profile, focusThread] = await Promise.all([
+      settingsStore.getOperatorProfile(),
+      prisma.thread.findUnique({
+        where: { id: threadId },
+        select: { personId: true }
+      })
+    ]);
+    if (
+      !focusThread ||
+      !profile.focusWindow.windowId ||
+      original.clientSendId !==
+        focusManualAckClientSendId(profile.focusWindow.windowId, focusThread.personId)
+    ) {
+      res.status(409).json({ error: "focus_window_changed" });
+      return;
+    }
+    const queueResult = await sendQueue.enqueueAndKick({
+      threadId,
+      text: original.requestText,
+      clientSendId: original.clientSendId,
+      source: "focus_ack",
+      focusWindowId: profile.focusWindow.windowId,
+      focusIntentVersion: requestIntentVersion,
+      retryFailedFocusAcknowledgement: true,
+      attachments: retryAttachments,
+      replyToMessageId: original.replyToMessageId ?? undefined
+    });
+    res.json(queueResult);
+    return;
+  }
+  const newClientSendId = deriveRetryClientSendId(original.clientSendId);
   try {
     const queueResult = await sendQueue.enqueueAndKick({
       threadId,
@@ -4308,6 +4487,64 @@ app.post("/control/thread/:threadId/retry-send", asyncRoute(async (req, res) => 
     });
     throw error;
   }
+  } finally {
+    completeUserTriggeredIntent();
+  }
+}));
+
+app.post("/control/thread/:threadId/focus-ack/complete", asyncRoute(async (req, res) => {
+  const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
+  if (await checkPresenterGuard(res, settingsStore, {
+    threadId,
+    action: "complete a focus acknowledgement",
+    kind: "thread-mutation"
+  })) return;
+  const payload = z.object({
+    clientSendId: z.string().uuid(),
+    focusWindowId: z.string().min(1).max(80)
+  }).parse(req.body);
+  const request = await prisma.sendRequest.findUnique({
+    where: { clientSendId: payload.clientSendId },
+    include: { thread: { select: { personId: true } } }
+  });
+  if (!request) {
+    res.status(404).json({ error: "send_request_not_found" });
+    return;
+  }
+  if (
+    request.threadId !== threadId ||
+    (request.source !== "focus_ack" && request.source !== "focus_auto_ack")
+  ) {
+    res.status(409).json({ error: "focus_ack_intent_mismatch" });
+    return;
+  }
+  if (request.status !== "SENT") {
+    res.status(409).json({ error: `focus_ack_not_delivered:${request.status}` });
+    return;
+  }
+  const profile = await settingsStore.getOperatorProfile();
+  const windowStartedAt = Date.parse(profile.focusWindow.startedAt);
+  if (
+    profile.focusWindow.windowId !== payload.focusWindowId ||
+    !Number.isFinite(windowStartedAt) ||
+    request.createdAt.getTime() < windowStartedAt ||
+    !focusAcknowledgementClientSendIds(
+      payload.focusWindowId,
+      request.thread.personId
+    ).includes(request.clientSendId)
+  ) {
+    res.status(409).json({ error: "focus_window_changed" });
+    return;
+  }
+  const acknowledged = await settingsStore.acknowledgeFocusWindowPerson(
+    payload.focusWindowId,
+    request.thread.personId
+  );
+  if (!acknowledged) {
+    res.status(409).json({ error: "focus_window_changed" });
+    return;
+  }
+  res.json({ status: "acknowledged", clientSendId: payload.clientSendId });
 }));
 
 app.post("/control/thread/:threadId/open", asyncRoute(async (req, res) => {
@@ -4415,54 +4652,73 @@ app.post("/control/thread/:threadId/message/:messageId/react", asyncRoute(async 
     .object({ threadId: z.string().min(1), messageId: z.string().min(1) })
     .parse(req.params);
   if (await checkPresenterGuard(res, settingsStore, { threadId, action: "react to a message", kind: "thread-mutation" })) return;
-  const payload = z.object({ emoji: z.string().trim().min(1).max(16) }).parse(req.body ?? {});
+  const payload = z.object({
+    clientActionId: z.string().uuid(),
+    emoji: z.string().trim().min(1).max(16)
+  }).parse(req.body ?? {});
 
-  const message = await prisma.message.findUnique({ where: { id: messageId } });
-  if (!message || message.threadId !== threadId) {
-    res.status(404).json({ error: "message not found in thread" });
-    return;
-  }
+  const outcome = await threadExternalActionFence.run(threadId, async (target) => {
+    const message = await prisma.message.findUnique({ where: { id: messageId } });
+    if (!message || message.threadId !== threadId) {
+      res.status(404).json({ error: "message not found in thread" });
+      return;
+    }
+    const adapter = requireAdapter(target.platform);
+    if (!adapter.reactToMessage) {
+      res.status(400).json({ error: `${target.platform} adapter does not support message reactions` });
+      return;
+    }
+    const threadStub: ThreadStub = {
+      platformThreadId: target.platformThreadId,
+      displayName: target.displayName,
+      recipientVerificationLabel: target.recipientVerificationLabel,
+      threadUrl: target.threadUrl,
+      lastMessagePreview: ""
+    };
 
-  const target = await getThreadStub(threadId);
-  const adapter = requireAdapter(target.platform);
-  if (!adapter.reactToMessage) {
-    res.status(400).json({ error: `${target.platform} adapter does not support message reactions` });
-    return;
-  }
-  const threadStub: ThreadStub = {
-    platformThreadId: target.platformThreadId,
-    displayName: target.displayName,
-    recipientVerificationLabel: target.recipientVerificationLabel,
-    threadUrl: target.threadUrl,
-    lastMessagePreview: ""
-  };
-
-  await withPlatformControlLock(target.platform, async () => {
     try {
-      await adapter.reactToMessage!(threadStub, message.platformMessageKey, payload.emoji);
-      // Persist the operator's reaction onto rawJson so the dashboard badge
-      // renders immediately, without waiting for a re-scan to read it back.
-      const updatedRawJson = appendOutboundReaction(message.rawJson, payload.emoji);
-      await prisma.message.update({ where: { id: message.id }, data: { rawJson: updatedRawJson } });
-      await auditService.log({
-        platform: target.platform,
-        stage: "Send",
-        action: "MESSAGE_REACT",
-        status: "OK",
-        details: { threadId, messageId, emoji: payload.emoji }
+      const result = await durableExternalActionService.execute({
+        clientActionId: payload.clientActionId,
+        threadId,
+        targetMessageId: messageId,
+        actionType: "message_reaction",
+        payload: { emoji: payload.emoji },
+        dispatch: () =>
+          adapter.reactToMessage!(threadStub, message.platformMessageKey, payload.emoji),
+        auditSuccess: () =>
+          auditService.log({
+            platform: target.platform,
+            stage: "Send",
+            action: "MESSAGE_REACT",
+            status: "OK",
+            details: { threadId, messageId, emoji: payload.emoji }
+          }),
+        auditFailure: (error) =>
+          auditService.log({
+            platform: target.platform,
+            stage: "Send",
+            action: "MESSAGE_REACT_FAIL",
+            status: "FAIL",
+            details: { threadId, messageId, emoji: payload.emoji, ...summarizeError(error) }
+          })
       });
-      res.json({ status: "ok", emoji: payload.emoji });
+      res.json({
+        status: "ok",
+        emoji: payload.emoji,
+        replayed: result.replayed,
+        reconciliationPending: result.reconciliationPending ?? false
+      });
     } catch (error) {
-      await auditService.log({
-        platform: target.platform,
-        stage: "Send",
-        action: "MESSAGE_REACT_FAIL",
-        status: "FAIL",
-        details: { threadId, messageId, emoji: payload.emoji, ...summarizeError(error) }
-      });
+      if (error instanceof DurableExternalActionError) {
+        res.status(409).json({ error: error.message, reason: error.reason });
+        return;
+      }
       throw error;
     }
   });
+  if (outcome.status === "missing") {
+    res.status(404).json({ error: "thread not found" });
+  }
 }));
 
 app.post("/control/thread/:threadId/message/:messageId/edit", asyncRoute(async (req, res) => {
@@ -4470,55 +4726,77 @@ app.post("/control/thread/:threadId/message/:messageId/edit", asyncRoute(async (
     .object({ threadId: z.string().min(1), messageId: z.string().min(1) })
     .parse(req.params);
   if (await checkPresenterGuard(res, settingsStore, { threadId, action: "edit a message", kind: "thread-mutation" })) return;
-  const payload = z.object({ text: z.string().trim().min(1).max(8_000) }).parse(req.body ?? {});
+  const payload = z.object({
+    clientActionId: z.string().uuid(),
+    text: z.string().trim().min(1).max(8_000)
+  }).parse(req.body ?? {});
 
-  const message = await prisma.message.findUnique({ where: { id: messageId } });
-  if (!message || message.threadId !== threadId) {
-    res.status(404).json({ error: "message not found in thread" });
-    return;
-  }
-  if (message.direction !== "OUT") {
-    res.status(400).json({ error: "only outbound messages can be edited" });
-    return;
-  }
+  const outcome = await threadExternalActionFence.run(threadId, async (target) => {
+    const message = await prisma.message.findUnique({ where: { id: messageId } });
+    if (!message || message.threadId !== threadId) {
+      res.status(404).json({ error: "message not found in thread" });
+      return;
+    }
+    if (message.direction !== "OUT") {
+      res.status(400).json({ error: "only outbound messages can be edited" });
+      return;
+    }
+    const adapter = requireAdapter(target.platform);
+    if (!adapter.editMessage) {
+      res.status(400).json({ error: `${target.platform} adapter does not support message edits` });
+      return;
+    }
+    const threadStub: ThreadStub = {
+      platformThreadId: target.platformThreadId,
+      displayName: target.displayName,
+      recipientVerificationLabel: target.recipientVerificationLabel,
+      threadUrl: target.threadUrl,
+      lastMessagePreview: ""
+    };
 
-  const target = await getThreadStub(threadId);
-  const adapter = requireAdapter(target.platform);
-  if (!adapter.editMessage) {
-    res.status(400).json({ error: `${target.platform} adapter does not support message edits` });
-    return;
-  }
-  const threadStub: ThreadStub = {
-    platformThreadId: target.platformThreadId,
-    displayName: target.displayName,
-    recipientVerificationLabel: target.recipientVerificationLabel,
-    threadUrl: target.threadUrl,
-    lastMessagePreview: ""
-  };
-
-  await withPlatformControlLock(target.platform, async () => {
     try {
-      await adapter.editMessage!(threadStub, message.platformMessageKey, payload.text);
-      await prisma.message.update({ where: { id: message.id }, data: { text: payload.text } });
-      await auditService.log({
-        platform: target.platform,
-        stage: "Send",
-        action: "MESSAGE_EDIT",
-        status: "OK",
-        details: { threadId, messageId }
+      const result = await durableExternalActionService.execute({
+        clientActionId: payload.clientActionId,
+        threadId,
+        targetMessageId: messageId,
+        actionType: "message_edit",
+        payload: { text: payload.text },
+        dispatch: () =>
+          adapter.editMessage!(threadStub, message.platformMessageKey, payload.text),
+        auditSuccess: () =>
+          auditService.log({
+            platform: target.platform,
+            stage: "Send",
+            action: "MESSAGE_EDIT",
+            status: "OK",
+            details: { threadId, messageId }
+          }),
+        auditFailure: (error) =>
+          auditService.log({
+            platform: target.platform,
+            stage: "Send",
+            action: "MESSAGE_EDIT_FAIL",
+            status: "FAIL",
+            details: { threadId, messageId, ...summarizeError(error) }
+          })
       });
-      res.json({ status: "ok", text: payload.text });
+      res.json({
+        status: "ok",
+        text: payload.text,
+        replayed: result.replayed,
+        reconciliationPending: result.reconciliationPending ?? false
+      });
     } catch (error) {
-      await auditService.log({
-        platform: target.platform,
-        stage: "Send",
-        action: "MESSAGE_EDIT_FAIL",
-        status: "FAIL",
-        details: { threadId, messageId, ...summarizeError(error) }
-      });
+      if (error instanceof DurableExternalActionError) {
+        res.status(409).json({ error: error.message, reason: error.reason });
+        return;
+      }
       throw error;
     }
   });
+  if (outcome.status === "missing") {
+    res.status(404).json({ error: "thread not found" });
+  }
 }));
 
 app.post("/control/thread/:threadId/message/:messageId/poll-vote", asyncRoute(async (req, res) => {
@@ -4527,62 +4805,89 @@ app.post("/control/thread/:threadId/message/:messageId/poll-vote", asyncRoute(as
     .parse(req.params);
   if (await checkPresenterGuard(res, settingsStore, { threadId, action: "vote on a poll", kind: "thread-mutation" })) return;
   const payload = z.object({
+    clientActionId: z.string().uuid(),
     selectedOptions: z.array(z.string().trim().min(1).max(280)).min(1).max(12)
   }).parse(req.body ?? {});
 
-  const message = await prisma.message.findUnique({ where: { id: messageId } });
-  if (!message || message.threadId !== threadId) {
-    res.status(404).json({ error: "message not found in thread" });
-    return;
-  }
-  if (!message.platformMessageKey) {
-    res.status(400).json({ error: "message has no platform key" });
-    return;
-  }
+  const outcome = await threadExternalActionFence.run(threadId, async (target) => {
+    const message = await prisma.message.findUnique({ where: { id: messageId } });
+    if (!message || message.threadId !== threadId) {
+      res.status(404).json({ error: "message not found in thread" });
+      return;
+    }
+    if (!message.platformMessageKey) {
+      res.status(400).json({ error: "message has no platform key" });
+      return;
+    }
+    const adapter = requireAdapter(target.platform);
+    if (!adapter.voteOnPoll) {
+      res.status(400).json({ error: `${target.platform} adapter does not support poll votes` });
+      return;
+    }
+    const threadStub: ThreadStub = {
+      platformThreadId: target.platformThreadId,
+      displayName: target.displayName,
+      recipientVerificationLabel: target.recipientVerificationLabel,
+      threadUrl: target.threadUrl,
+      lastMessagePreview: ""
+    };
 
-  const target = await getThreadStub(threadId);
-  const adapter = requireAdapter(target.platform);
-  if (!adapter.voteOnPoll) {
-    res.status(400).json({ error: `${target.platform} adapter does not support poll votes` });
-    return;
-  }
-  const threadStub: ThreadStub = {
-    platformThreadId: target.platformThreadId,
-    displayName: target.displayName,
-    recipientVerificationLabel: target.recipientVerificationLabel,
-    threadUrl: target.threadUrl,
-    lastMessagePreview: ""
-  };
-
-  await withPlatformControlLock(target.platform, async () => {
     try {
-      await adapter.voteOnPoll!(threadStub, message.platformMessageKey!, payload.selectedOptions);
-      await auditService.log({
-        platform: target.platform,
-        stage: "Send",
-        action: "POLL_VOTE",
-        status: "OK",
-        details: { threadId, messageId, optionCount: payload.selectedOptions.length }
+      const result = await durableExternalActionService.execute({
+        clientActionId: payload.clientActionId,
+        threadId,
+        targetMessageId: messageId,
+        actionType: "poll_vote",
+        payload: { selectedOptions: payload.selectedOptions },
+        isPreDispatchFailure: isWhatsAppPollVotePreDispatchError,
+        dispatch: () =>
+          adapter.voteOnPoll!(threadStub, message.platformMessageKey!, payload.selectedOptions),
+        auditSuccess: () =>
+          auditService.log({
+            platform: target.platform,
+            stage: "Send",
+            action: "POLL_VOTE",
+            status: "OK",
+            details: { threadId, messageId, optionCount: payload.selectedOptions.length }
+          }),
+        auditFailure: (error) =>
+          auditService.log({
+            platform: target.platform,
+            stage: "Send",
+            action: "POLL_VOTE_FAIL",
+            status: "FAIL",
+            details: {
+              threadId,
+              messageId,
+              optionCount: payload.selectedOptions.length,
+              ...summarizeError(error)
+            }
+          })
       });
-      res.json({ status: "ok", selectedOptions: payload.selectedOptions });
+      res.json({
+        status: "ok",
+        selectedOptions: payload.selectedOptions,
+        replayed: result.replayed,
+        reconciliationPending: result.reconciliationPending ?? false
+      });
     } catch (error) {
-      await auditService.log({
-        platform: target.platform,
-        stage: "Send",
-        action: "POLL_VOTE_FAIL",
-        status: "FAIL",
-        details: { threadId, messageId, optionCount: payload.selectedOptions.length, ...summarizeError(error) }
-      });
-      if (isWhatsAppSessionUnavailableError(error)) {
+      if (isWhatsAppPollVotePreDispatchError(error)) {
         res.status(409).json({
-          error: "WhatsApp lost its connection. Reconnect it in Settings, then try again.",
-          reason: "whatsapp_session_unavailable"
+          error: error.message,
+          reason: error.reason
         });
+        return;
+      }
+      if (error instanceof DurableExternalActionError) {
+        res.status(409).json({ error: error.message, reason: error.reason });
         return;
       }
       throw error;
     }
   });
+  if (outcome.status === "missing") {
+    res.status(404).json({ error: "thread not found" });
+  }
 }));
 
 // Live poll tallies for the dashboard's "View votes" affordance
@@ -6229,6 +6534,7 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
     isGroup: thread.isGroup,
     groupName: thread.groupName ?? null,
     platform: thread.platform,
+    category: (thread.category as "outreach" | "genuine" | null) ?? null,
     // Sibling cohort for this Person (iMessage phone + email handle rows; a
     // single-element [thread.id] for everything else). The thread page matches
     // SSE THREAD_UPDATED / SUGGESTED_REPLIES_UPDATED / SCAN_THREAD_* events on
@@ -6537,7 +6843,11 @@ app.get("/data/archived", asyncRoute(async (_req, res) => {
 app.get("/data/send-queue", asyncRoute(async (_req, res) => {
   const [activeRows, scheduledRows, recentDoneRows] = await Promise.all([
     prisma.sendRequest.findMany({
-      where: { status: "PENDING", thread: { platform: { in: runnerConfig.availablePlatforms } } },
+      where: {
+        status: "PENDING",
+        source: { in: QUEUED_MESSAGE_SOURCES },
+        thread: { platform: { in: runnerConfig.availablePlatforms } }
+      },
       include: {
         thread: {
           include: { person: true }
@@ -6560,6 +6870,7 @@ app.get("/data/send-queue", asyncRoute(async (_req, res) => {
     prisma.sendRequest.findMany({
       where: {
         status: { in: ["SENT", "FAILED"] },
+        source: { in: QUEUED_MESSAGE_SOURCES },
         thread: { platform: { in: runnerConfig.availablePlatforms } }
       },
       include: {
@@ -6673,6 +6984,55 @@ app.get("/data/send-status/:clientSendId", asyncRoute(async (req, res) => {
     errorKind: failure?.errorKind,
     retrySafe: failure?.retrySafe ?? false,
     deliveryUncertain: failure?.deliveryUncertain ?? false
+  });
+}));
+
+app.get("/data/external-action-status/:clientId", asyncRoute(async (req, res) => {
+  const { clientId } = z.object({ clientId: z.string().uuid() }).parse(req.params);
+  let [sendRequest, actionRequest] = await Promise.all([
+    prisma.sendRequest.findUnique({
+      where: { clientSendId: clientId },
+      select: { status: true, errorJson: true, source: true }
+    }),
+    prisma.externalActionRequest.findUnique({
+      where: { clientActionId: clientId },
+      select: { status: true, errorJson: true }
+    })
+  ]);
+
+  if (sendRequest?.status === "SENT" && needsLocalReconciliation(sendRequest.errorJson)) {
+    if (sendRequest.source === "manual_poll") {
+      await pollSendService.reconcileSentProjections().catch(() => undefined);
+    } else {
+      await sendService.reconcileSentProjections().catch(() => undefined);
+    }
+  }
+  if (
+    actionRequest?.status === "SENT" &&
+    actionRequest.errorJson?.includes("local_projection_required")
+  ) {
+    await durableExternalActionService.reconcileSentProjections().catch(() => undefined);
+  }
+  if (sendRequest || actionRequest) {
+    [sendRequest, actionRequest] = await Promise.all([
+      prisma.sendRequest.findUnique({
+        where: { clientSendId: clientId },
+        select: { status: true, errorJson: true, source: true }
+      }),
+      prisma.externalActionRequest.findUnique({
+        where: { clientActionId: clientId },
+        select: { status: true, errorJson: true }
+      })
+    ]);
+  }
+
+  const exactlyOneRecord = Boolean(sendRequest) !== Boolean(actionRequest);
+  const record = sendRequest ?? actionRequest;
+  res.json({
+    clientId,
+    status: record?.status ?? "NOT_FOUND",
+    safeToReplace:
+      exactlyOneRecord && record?.status === "SENT" && record.errorJson === null
   });
 }));
 
@@ -7282,6 +7642,7 @@ app.get("/data/operator-profile", asyncRoute(async (_req, res) => {
 // adapter's onQr callback and is polled from `/status` as a data-URL PNG the
 // operator scans in WhatsApp > Linked Devices. `/status` never blocks.
 app.post("/control/whatsapp/connect", asyncRoute(async (_req, res) => {
+  if (await checkPresenterGuard(res, settingsStore, { action: "connect WhatsApp", kind: "external-action" })) return;
   if (!runnerConfig.whatsapp.enabled) {
     res.status(409).json({ ok: false, reason: "disabled", message: "Set WHATSAPP_ENABLED=true and restart to use WhatsApp." });
     return;
@@ -7299,19 +7660,24 @@ app.post("/control/whatsapp/connect", asyncRoute(async (_req, res) => {
     res.status(202).json({ ok: true, state: whatsappConnect.state });
     return;
   }
-  // ensureConnected resolves on "ready"; don't await it (first connect waits
-  // on the human scanning the QR). Kick it and return immediately.
-  void adapter.ensureConnected().catch((error) => {
+  whatsappConnect.state = "connecting";
+  whatsappConnect.updatedAt = new Date().toISOString();
+  void (async () => {
+    let ready = Promise.resolve();
+    await withWhatsAppSessionLocks(async () => {
+      ready = adapter.ensureConnected();
+    });
+    await ready;
+  })().catch((error) => {
     console.warn(`[whatsapp] connect failed: ${error instanceof Error ? error.message : String(error)}`);
     whatsappConnect.state = "disconnected";
     whatsappConnect.updatedAt = new Date().toISOString();
   });
-  whatsappConnect.state = "connecting";
-  whatsappConnect.updatedAt = new Date().toISOString();
   res.status(202).json({ ok: true, state: whatsappConnect.state });
 }));
 
 app.post("/control/whatsapp/refresh-qr", asyncRoute(async (_req, res) => {
+  if (await checkPresenterGuard(res, settingsStore, { action: "refresh the WhatsApp QR code", kind: "external-action" })) return;
   if (!runnerConfig.whatsapp.enabled) {
     res.status(409).json({ ok: false, reason: "disabled", message: "Set WHATSAPP_ENABLED=true and restart to use WhatsApp." });
     return;
@@ -7321,12 +7687,18 @@ app.post("/control/whatsapp/refresh-qr", asyncRoute(async (_req, res) => {
     res.status(500).json({ ok: false, reason: "no_adapter" });
     return;
   }
-  await adapter.closeSession("refresh_qr");
   whatsappConnect.qr = null;
   whatsappConnect.qrDataUrl = null;
   whatsappConnect.state = "connecting";
   whatsappConnect.updatedAt = new Date().toISOString();
-  void adapter.ensureConnected().catch((error) => {
+  void (async () => {
+    let ready = Promise.resolve();
+    await withWhatsAppSessionLocks(async () => {
+      await adapter.closeSession("refresh_qr");
+      ready = adapter.ensureConnected();
+    });
+    await ready;
+  })().catch((error) => {
     console.warn(`[whatsapp] QR refresh failed: ${error instanceof Error ? error.message : String(error)}`);
     whatsappConnect.state = "disconnected";
     whatsappConnect.updatedAt = new Date().toISOString();
@@ -7345,6 +7717,7 @@ app.get("/data/whatsapp/status", asyncRoute(async (_req, res) => {
 }));
 
 app.post("/control/whatsapp/reset", asyncRoute(async (_req, res) => {
+  if (await checkPresenterGuard(res, settingsStore, { action: "reset WhatsApp", kind: "external-action" })) return;
   if (!runnerConfig.whatsapp.enabled) {
     res.status(409).json({
       ok: false,
@@ -7359,7 +7732,7 @@ app.post("/control/whatsapp/reset", asyncRoute(async (_req, res) => {
     return;
   }
 
-  await withPlatformControlLock("WHATSAPP", async () => {
+  await withWhatsAppSessionLocks(async () => {
     await adapter.closeSession("manual_reset");
     await clearPersistedWhatsAppSession(runnerConfig.profileDirs.WHATSAPP);
     whatsappConnect.qr = null;
@@ -7367,13 +7740,12 @@ app.post("/control/whatsapp/reset", asyncRoute(async (_req, res) => {
     whatsappConnect.state = "disconnected";
     whatsappConnect.updatedAt = new Date().toISOString();
     await syncWhatsAppPlatformRow("disconnected");
-  });
-
-  await auditService.log({
-    platform: "WHATSAPP",
-    stage: "Connect",
-    action: "RESET_WHATSAPP_SESSION",
-    status: "OK"
+    await auditService.log({
+      platform: "WHATSAPP",
+      stage: "Connect",
+      action: "RESET_WHATSAPP_SESSION",
+      status: "OK"
+    });
   });
   res.json({ ok: true, state: "disconnected", hasPersistedSession: false });
 }));
@@ -7391,6 +7763,8 @@ app.get("/data/link-preview", asyncRoute(async (req, res) => {
 }));
 
 app.post("/control/operator-profile", asyncRoute(async (req, res) => {
+  const completeFocusPolicyMutation = beginUserTriggeredIntentOperation(res);
+  try {
   if (await checkPresenterGuard(res, settingsStore, { action: "save your profile", kind: "operator-write" })) return;
   const payload = z
     .object({
@@ -7460,6 +7834,9 @@ app.post("/control/operator-profile", asyncRoute(async (req, res) => {
     void calendarFocusService.refresh().catch(() => undefined);
   }
   res.json(updated);
+  } finally {
+    completeFocusPolicyMutation();
+  }
 }));
 
 // Calendar auto-focus (#786): the Settings "check calendar" button. Fetches
@@ -8389,72 +8766,59 @@ app.post("/control/thread/:threadId/unsnooze", asyncRoute(async (req, res) => {
   res.json({ status: "ok", threadId });
 }));
 
+const platformSessionResetCoordinator = createPlatformSessionResetCoordinator({
+  platforms: allPlatforms,
+  requestAbort: (reason) => scanQueue.requestAbort(reason),
+  clearAbort: () => scanQueue.clearAbort(),
+  clearInFlight: () => {
+    connectInFlight.clear();
+    suggestedRepliesInFlight.clear();
+    threadSummaryRefreshInFlight.clear();
+  },
+  withGlobalResetLock,
+  withExternalActionLock,
+  withPlatformLock: withPlatformControlLock,
+  resetSharedSession: async () => {
+    await sessionManager.resetPersonSession({
+      personKey: defaultPersonKey,
+      reason: "manual_reset",
+      clearProfileDir: true
+    });
+  },
+  resetInstagramSession: async () => {
+    const route = resolvePlatformSession("INSTAGRAM");
+    await route.sessionManager.resetPersonSession({
+      personKey: route.personKey,
+      reason: "manual_reset",
+      clearProfileDir: true
+    });
+  },
+  persistStatus: async (platform) => {
+    await prisma.platform.upsert({
+      where: { name: platform },
+      update: {
+        status: "NOT_CONNECTED",
+        connectedAt: null,
+        lastError: null
+      },
+      create: {
+        name: platform,
+        status: "NOT_CONNECTED"
+      }
+    });
+  },
+  auditLog: (input) => auditService.log(input)
+});
+
 app.post("/control/platform/reset-session", asyncRoute(async (req, res) => {
   if (await checkPresenterGuard(res, settingsStore, { action: "reset the platform session", kind: "external-action" })) return;
   const payload = z.object({ platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE", "GOOGLE_MESSAGES"]).optional() }).parse(req.body ?? {});
 
-  await withGlobalResetLock(async () => {
-    scanQueue.requestAbort("session_reset:manual");
-    // Drop AI bookkeeping along with connect promises so a hung pre-reset
-    // call can't keep a thread id slot occupied across the reset.
-    connectInFlight.clear();
-    suggestedRepliesInFlight.clear();
-    threadSummaryRefreshInFlight.clear();
-
-    for (const platform of allPlatforms) {
-      await operationMutex.runExclusive(platformLockKey(platform), async () => undefined);
-    }
-
-    const resetPlan = planPlatformSessionReset(allPlatforms, payload.platform);
-    if (resetPlan.resetSharedSession) {
-      await sessionManager.resetPersonSession({
-        personKey: defaultPersonKey,
-        reason: "manual_reset",
-        clearProfileDir: true
-      });
-    }
-    if (resetPlan.resetInstagramSession) {
-      const route = resolvePlatformSession("INSTAGRAM");
-      await route.sessionManager.resetPersonSession({
-        personKey: route.personKey,
-        reason: "manual_reset",
-        clearProfileDir: true
-      });
-    }
-
-    for (const platform of resetPlan.statusPlatforms) {
-      await prisma.platform.upsert({
-        where: { name: platform },
-        update: {
-          status: "NOT_CONNECTED",
-          connectedAt: null,
-          lastError: null
-        },
-        create: {
-          name: platform,
-          status: "NOT_CONNECTED"
-        }
-      });
-    }
-
-    await auditService.log({
-      platform: payload.platform,
-      stage: "Connect",
-      action: "RESET_SESSION",
-      status: "OK",
-      details: {
-        resetScope: resetPlan.resetScope,
-        resetSharedSession: resetPlan.resetSharedSession,
-        resetInstagramSession: resetPlan.resetInstagramSession,
-        affectedPlatformCount: resetPlan.statusPlatforms.length
-      }
-    });
-
-    res.json({
-      status: "ok",
-      resetScope: resetPlan.resetScope,
-      affectedPlatforms: resetPlan.statusPlatforms
-    });
+  const resetPlan = await platformSessionResetCoordinator.reset(payload.platform);
+  res.json({
+    status: "ok",
+    resetScope: resetPlan.resetScope,
+    affectedPlatforms: resetPlan.statusPlatforms
   });
 }));
 
@@ -8544,10 +8908,20 @@ app.post("/control/system/restart", asyncRoute(async (_req, res) => {
   }, 250);
 }));
 
+app.use((_req, res, next) => {
+  abandonUnstartedUserTriggeredIntent(res);
+  next();
+});
+
 app.use((error: unknown, req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  abandonUnstartedUserTriggeredIntent(res);
   const path = normalizeControlPath(req.path);
   const trace = getControlTrace(res);
-  const statusCode = error instanceof z.ZodError ? 400 : 500;
+  const statusCode = error instanceof z.ZodError
+    ? 400
+    : error instanceof SendPolicyError
+      ? 409
+      : 500;
   const message =
     error instanceof z.ZodError
       ? error.issues

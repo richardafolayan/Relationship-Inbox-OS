@@ -350,13 +350,20 @@ export class GoogleMessagesAdapter implements PlatformAdapter {
   async sendMessage(
     thread: ThreadStub,
     text: string,
-    attachments?: OutboundAttachment[]
+    attachments?: OutboundAttachment[],
+    beforeDispatch?: () => Promise<void>
   ): Promise<SendReceipt> {
     const selectors = await this.selectors();
     const page = await this.getPage();
     await this.openConversation(page, selectors, thread);
     const messageCountBefore = await page.locator(selectors.message_item).count();
     const files = (attachments ?? []).map((attachment) => attachment.absolutePath).filter(Boolean);
+    let dispatchAuthorized = false;
+    const authorizeDispatch = async () => {
+      if (dispatchAuthorized) return;
+      await beforeDispatch?.();
+      dispatchAuthorized = true;
+    };
     if (files.length) {
       let input = page.locator("input[type='file']").first();
       if ((await input.count()) === 0) {
@@ -382,6 +389,13 @@ export class GoogleMessagesAdapter implements PlatformAdapter {
       selectors.send_button,
       { timeout: 10_000 }
     );
+    try {
+      await authorizeDispatch();
+    } catch (error) {
+      await page.locator(selectors.composer_input).first().fill("").catch(() => undefined);
+      await page.locator("input[type='file']").first().setInputFiles([]).catch(() => undefined);
+      throw error;
+    }
     await send.click();
     const bubbleDetected = await page
       .waitForFunction(

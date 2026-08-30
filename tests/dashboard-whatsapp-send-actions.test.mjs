@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 const ROOT = join(fileURLToPath(new URL("..", import.meta.url)));
 const THREAD_PAGE = readFileSync(join(ROOT, "apps/dashboard/app/thread/[id]/page.tsx"), "utf8");
 const RUNNER_INDEX = readFileSync(join(ROOT, "apps/runner/src/index.ts"), "utf8");
+const POLL_SEND = readFileSync(join(ROOT, "apps/runner/src/services/poll-send.ts"), "utf8");
 
 test("WhatsApp composer exposes rich text, poll and media send controls", () => {
   assert.match(THREAD_PAGE, /thread\.platform === "WHATSAPP"/);
@@ -25,6 +26,16 @@ test("WhatsApp composer exposes rich text, poll and media send controls", () => 
 test("runner exposes a dedicated WhatsApp poll send route", () => {
   assert.match(RUNNER_INDEX, /\/control\/thread\/:threadId\/send-poll/);
   assert.match(RUNNER_INDEX, /adapter\.sendPoll/);
-  assert.match(RUNNER_INDEX, /rawJson = receipt\.raw \? JSON\.stringify\(receipt\.raw\) : null/);
-  assert.match(RUNNER_INDEX, /attachmentsJson/);
+  assert.match(RUNNER_INDEX, /pollSendService\.send/);
+  assert.match(POLL_SEND, /receiptJson:\s*SEND_CLAIM_MARKER/);
+  assert.match(POLL_SEND, /rawJson = receipt\.raw \? JSON\.stringify\(receipt\.raw\) : null/);
+  assert.match(POLL_SEND, /attachmentsJson/);
+});
+
+test("ambiguous poll retries reuse the same durable client id", () => {
+  assert.match(THREAD_PAGE, /const scope = `send-poll:\$\{thread\.id\}`/);
+  assert.match(THREAD_PAGE, /const intent = \{\s*threadId: thread\.id,\s*question,\s*options,\s*allowMultipleAnswers: whatsAppPollAllowMultiple\s*\}/);
+  assert.match(THREAD_PAGE, /externalActionAttempts\.getOrCreateScopedValue\(\s*scope,\s*intent,/);
+  assert.match(THREAD_PAGE, /clientSendId\s*\n\s*}\);/);
+  assert.match(THREAD_PAGE, /externalActionAttempts\.completeScopedValue<\{ clientSendId: string \}>\(/);
 });

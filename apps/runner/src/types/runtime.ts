@@ -96,6 +96,7 @@ export interface SettingsStore {
   setDemoSeedManifest(manifest: DemoSeedManifest | null): Promise<void>;
   getOperatorProfile(): Promise<OperatorProfile>;
   updateOperatorProfile(partial: Partial<OperatorProfile>): Promise<OperatorProfile>;
+  acknowledgeFocusWindowPerson(windowId: string, personId: string): Promise<boolean>;
 }
 
 /** Reply tone the operator picks during voice setup. "" = not chosen yet. */

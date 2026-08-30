@@ -444,6 +444,12 @@ test("database-only repairs a legacy database even when the schema stamp is curr
     database = new Database(databasePath);
     assert.deepEqual(database.prepare("SELECT id FROM drafts").all(), [{ id: "new" }]);
     assertUniqueDraftIndex(database);
+    assert.equal(
+      database
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
+        .get("external_action_requests")?.name,
+      "external_action_requests"
+    );
     assert.deepEqual(
       database
         .prepare('SELECT "id", "valueJson" FROM "settings" WHERE "key" = ?')

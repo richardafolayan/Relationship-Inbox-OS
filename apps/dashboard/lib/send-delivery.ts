@@ -3,7 +3,7 @@ export interface SendStatusResponse {
   threadId?: string;
   status: "NOT_FOUND" | "PENDING" | "SCHEDULED" | "SENT" | "FAILED" | "CANCELLED";
   errorMessage?: string;
-  errorKind?: "AUTH_REQUIRED" | "SELECTOR_FAIL" | "PROFILE_LOCKED" | "TRANSIENT" | "DELIVERY_UNCERTAIN" | "UNKNOWN";
+  errorKind?: "AUTH_REQUIRED" | "SELECTOR_FAIL" | "PROFILE_LOCKED" | "TRANSIENT" | "POLICY_BLOCKED" | "DELIVERY_UNCERTAIN" | "UNKNOWN";
   retrySafe?: boolean;
   deliveryUncertain?: boolean;
 }
@@ -37,4 +37,21 @@ export function resolveSendRecovery(response: SendStatusResponse): SendRecoveryO
     message: response.errorMessage ?? "The message was not sent. Check the account before trying again.",
     errorKind: response.errorKind
   };
+}
+
+export async function waitForTerminalSendStatus(
+  clientSendId: string,
+  readStatus: (path: string) => Promise<SendStatusResponse>,
+  wait: (delayMs: number) => Promise<void> = (delayMs) =>
+    new Promise((resolve) => setTimeout(resolve, delayMs)),
+  maxAttempts = 120
+): Promise<SendStatusResponse> {
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const status = await readStatus(
+      `/runner/data/send-status/${encodeURIComponent(clientSendId)}`
+    );
+    if (status.status !== "PENDING" && status.status !== "SCHEDULED") return status;
+    await wait(Math.min(250 + attempt * 50, 1_000));
+  }
+  throw new Error("Delivery is still pending. Its status must be checked before retrying.");
 }

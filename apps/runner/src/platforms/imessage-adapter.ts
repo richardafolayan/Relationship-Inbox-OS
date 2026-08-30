@@ -342,7 +342,12 @@ export class IMessageAdapter implements PlatformAdapter {
     return this.getDb().findFutureScheduledOutboundGuids(thread.platformThreadId);
   }
 
-  async sendMessage(thread: ThreadStub, text: string, attachments?: OutboundAttachment[]): Promise<SendReceipt> {
+  async sendMessage(
+    thread: ThreadStub,
+    text: string,
+    attachments?: OutboundAttachment[],
+    beforeDispatch?: () => Promise<void>
+  ): Promise<SendReceipt> {
     const db = this.getDb();
     // Look up the chat to recover handle + group flag. We re-list one row;
     // chat.db doesn't have a single-row-by-guid method that also computes
@@ -375,7 +380,7 @@ export class IMessageAdapter implements PlatformAdapter {
           }
         );
       }
-      return this.sendToGroupChat(chat.guid, thread, text);
+      return this.sendToGroupChat(chat.guid, thread, text, beforeDispatch);
     }
     // Pick the best handle to send to. The chat row we picked above is keyed
     // by *one* of the contact's handles (e.g. their phone). If that handle
@@ -414,7 +419,8 @@ export class IMessageAdapter implements PlatformAdapter {
         handle,
         service: handleService,
         text,
-        attachmentPaths: (attachments ?? []).map((a) => a.absolutePath)
+        attachmentPaths: (attachments ?? []).map((a) => a.absolutePath),
+        beforeDispatch
       });
     } catch (error) {
       const stderr = (error as { stderr?: string }).stderr ?? "";
@@ -543,12 +549,13 @@ export class IMessageAdapter implements PlatformAdapter {
   private async sendToGroupChat(
     chatGuid: string,
     thread: ThreadStub,
-    text: string
+    text: string,
+    beforeDispatch?: () => Promise<void>
   ): Promise<SendReceipt> {
     const db = this.getDb();
     const sendStartedAt = Date.now();
     try {
-      await sendIMessageToChat({ chatGuid, text });
+      await sendIMessageToChat({ chatGuid, text, beforeDispatch });
     } catch (error) {
       const stderr = (error as { stderr?: string }).stderr ?? "";
       const message = (error as Error).message ?? "";

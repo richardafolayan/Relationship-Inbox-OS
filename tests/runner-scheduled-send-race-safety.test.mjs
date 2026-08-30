@@ -163,6 +163,7 @@ function makeSendHarness(initialRows, opts = {}) {
     eventBus: noopEventBus,
     settingsStore: {},
     auditLog: async () => "",
+    withExternalActionLock: (_platform, work) => work(),
     withPlatformLock: (_platform, work) => work(),
     prisma
   });

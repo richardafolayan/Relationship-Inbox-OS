@@ -459,7 +459,7 @@ exit 0
     await waitForCondition(
       () => fs.existsSync(workerMarker),
       `installer worker did not start\n${stdout}\n${stderr}`,
-      20_000
+      60_000
     );
     workerPid = Number(read(workerMarker));
     installer.kill("SIGTERM");

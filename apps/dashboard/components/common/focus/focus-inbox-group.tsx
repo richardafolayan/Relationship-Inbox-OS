@@ -24,9 +24,10 @@ export function FocusInboxGroup({
   rows: InboxRow[];
   onChanged?: () => void;
 }) {
-  const { focusWindow, settings, templates, active, markAcked } = useFocusWindow();
+  const { focusWindow, settings, templates, active } = useFocusWindow();
   const [sent, setSent] = useState<Set<string>>(new Set());
   const [busyKey, setBusyKey] = useState<string | null>(null);
+  const [errors, setErrors] = useState<Record<string, string>>({});
 
   const candidates = useMemo(() => {
     if (!active) return [];
@@ -42,18 +43,26 @@ export function FocusInboxGroup({
       // and a note promising "till X" must never go out after X.
       if (busyKey || !active) return;
       setBusyKey(key);
+      setErrors((current) => ({ ...current, [key]: "" }));
       try {
-        await sendAcknowledgement(row.id, noteForRow(row, focusWindow, templates));
-        await markAcked(row.personId);
+        await sendAcknowledgement(
+          row.id,
+          row.personId,
+          noteForRow(row, focusWindow, templates),
+          focusWindow.windowId
+        );
         setSent((prev) => new Set(prev).add(key));
         onChanged?.();
-      } catch {
-        // Leave the row actionable for a retry.
+      } catch (error) {
+        setErrors((current) => ({
+          ...current,
+          [key]: error instanceof Error ? error.message : "The focus note was not sent."
+        }));
       } finally {
         setBusyKey(null);
       }
     },
-    [busyKey, active, focusWindow, templates, markAcked, onChanged]
+    [busyKey, active, focusWindow, templates, onChanged]
   );
 
   if (!active || candidates.length === 0) return null;
@@ -89,6 +98,11 @@ export function FocusInboxGroup({
               <span className="block truncate text-[13px] text-ink-3">
                 {normalizePreview(row.preview)}
               </span>
+              {errors[key] ? (
+                <span className="mt-1 block text-[12px] text-risk-overdue" role="alert">
+                  {errors[key]}
+                </span>
+              ) : null}
             </div>
             <div className="col-start-2 flex flex-wrap items-center justify-between gap-2 sm:col-auto sm:flex-nowrap sm:justify-start sm:gap-3">
               <span className="font-mono text-[10.5px] text-ink-3">

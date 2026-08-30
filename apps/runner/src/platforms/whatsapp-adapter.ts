@@ -75,10 +75,39 @@ export interface WhatsAppAdapterDeps {
 const PLATFORM_WHATSAPP: PlatformName = "WHATSAPP";
 
 export class WhatsAppSessionUnavailableError extends Error {
-  constructor() {
-    super("WhatsApp lost its connection. Reconnect it in Settings, then try again.");
+  constructor(message = "WhatsApp lost its connection. Reconnect it in Settings, then try again.") {
+    super(message);
     this.name = "WhatsAppSessionUnavailableError";
   }
+}
+
+export class WhatsAppPollSendPreDispatchError extends Error {
+  constructor(error: unknown) {
+    super(error instanceof Error ? error.message : String(error));
+    this.name = "WhatsAppPollSendPreDispatchError";
+  }
+}
+
+export function isWhatsAppPollSendPreDispatchError(
+  error: unknown
+): error is WhatsAppPollSendPreDispatchError {
+  return error instanceof WhatsAppPollSendPreDispatchError;
+}
+
+export class WhatsAppPollVotePreDispatchError extends WhatsAppSessionUnavailableError {
+  constructor(
+    message = "WhatsApp lost its connection. Reconnect it in Settings, then try again.",
+    readonly reason: "whatsapp_session_unavailable" | "poll_unavailable" = "whatsapp_session_unavailable"
+  ) {
+    super(message);
+    this.name = "WhatsAppPollVotePreDispatchError";
+  }
+}
+
+export function isWhatsAppPollVotePreDispatchError(
+  error: unknown
+): error is WhatsAppPollVotePreDispatchError {
+  return error instanceof WhatsAppPollVotePreDispatchError;
 }
 
 export function isWhatsAppSessionUnavailableError(error: unknown): boolean {
@@ -95,6 +124,9 @@ export class WhatsAppAdapter implements PlatformAdapter {
   private client: Client | null = null;
   private ready = false;
   private readyPromise: Promise<void> | null = null;
+  private teardownPromise: Promise<void> | null = null;
+  private terminateCurrentSession: ((error: Error) => Promise<void>) | null = null;
+  private sessionEpoch = 0;
   private indexedExistingChats = false;
 
   constructor(private readonly deps: WhatsAppAdapterDeps) {}
@@ -106,6 +138,10 @@ export class WhatsAppAdapter implements PlatformAdapter {
    * can be re-entered without spinning up a second Puppeteer.
    */
   async ensureConnected(): Promise<void> {
+    if (this.teardownPromise) {
+      await this.teardownPromise;
+      return this.ensureConnected();
+    }
     if (this.ready) return;
     if (this.readyPromise) return this.readyPromise;
 
@@ -115,70 +151,121 @@ export class WhatsAppAdapter implements PlatformAdapter {
     const factory =
       this.deps.createClient ?? ((authDir: string) => createWhatsAppClient({ authDir }));
     const client = factory(this.deps.authDir);
+    const sessionEpoch = ++this.sessionEpoch;
+    const isCurrentSession = () =>
+      sessionEpoch === this.sessionEpoch && this.client === client;
     this.client = client;
     this.deps.onStateChange?.("connecting");
 
-    this.readyPromise = new Promise<void>((resolve, reject) => {
-      const onReady = () => {
-        if (this.ready) return;
-        this.ready = true;
-        this.deps.onStateChange?.("connected");
+    let settled = false;
+    let terminalClaimed = false;
+    let resolveConnection!: () => void;
+    let rejectConnection!: (error: Error) => void;
+    const connectionPromise = new Promise<void>((resolve, reject) => {
+      resolveConnection = () => {
+        if (settled) return;
+        settled = true;
         resolve();
       };
-      const onAuthFailure = (msg: string) => {
-        this.deps.onStateChange?.("disconnected");
-        reject(new Error(`WhatsApp auth_failure: ${msg}`));
+      rejectConnection = (error) => {
+        if (settled) return;
+        settled = true;
+        reject(error);
       };
-      const onDisconnected = (reason: string) => {
-        this.ready = false;
-        this.deps.onStateChange?.("disconnected");
-        if (!this.ready) reject(new Error(`WhatsApp disconnected before ready: ${reason}`));
-      };
-
-      client.on("qr", (qr: string) => {
-        this.deps.onStateChange?.("qr_ready");
-        this.deps.onQr?.(qr);
-      });
-      client.on("ready", onReady);
-      client.on("auth_failure", onAuthFailure);
-      client.on("disconnected", onDisconnected);
-
-      // Near-real-time inbound. wweb.js emits "message" for messages from
-      // others (not fromMe). We don't read the payload here — the hook just
-      // nudges the runner to enqueue a debounced WhatsApp scan, which does
-      // the real collect/persist/AI work through the same path as a
-      // scheduled scan. Guarded so a listener error can never bubble into
-      // the library's event loop.
-      if (this.deps.onIncomingMessage) {
-        const notify = this.deps.onIncomingMessage;
-        client.on("message", (message: WaMessage) => {
-          try {
-            notify({
-              platformThreadId: message.from,
-              sourceChangedAt: new Date().toISOString()
-            });
-          } catch {
-            // Fire-and-forget: never let a scan-enqueue hiccup crash the
-            // wweb.js message pipeline.
-          }
-        });
-      }
-
-      client
-        .initialize()
-        .then(async () => {
-          if (this.ready) return;
-          // A restored session can finish syncing before whatsapp-web.js
-          // attaches its one-shot hasSynced listener, so recover from the
-          // missed ready event using the authoritative socket state.
-          if ((await client.getState()) === "CONNECTED") {
-            onReady();
-          }
-        })
-        .catch(reject);
     });
+    this.readyPromise = connectionPromise;
 
-    return this.readyPromise;
+    const terminate = (error: Error): Promise<void> => {
+      if (terminalClaimed) return this.teardownPromise ?? Promise.resolve();
+      if (!isCurrentSession()) return this.teardownPromise ?? Promise.resolve();
+      terminalClaimed = true;
+      const teardown = this.beginClientTeardown(client, sessionEpoch);
+      void teardown.finally(() => rejectConnection(error));
+      return teardown;
+    };
+    this.terminateCurrentSession = terminate;
+
+    const onReady = () => {
+      if (!isCurrentSession() || terminalClaimed) return;
+      if (this.ready) return;
+      this.ready = true;
+      this.deps.onStateChange?.("connected");
+      resolveConnection();
+    };
+    const onAuthFailure = (msg: string) => {
+      void terminate(new Error(`WhatsApp auth_failure: ${msg}`));
+    };
+    const onDisconnected = (reason: string) => {
+      void terminate(new Error(`WhatsApp disconnected before ready: ${reason}`));
+    };
+
+    client.on("qr", (qr: string) => {
+      if (!isCurrentSession() || terminalClaimed) return;
+      this.deps.onStateChange?.("qr_ready");
+      this.deps.onQr?.(qr);
+    });
+    client.on("ready", onReady);
+    client.on("auth_failure", onAuthFailure);
+    client.on("disconnected", onDisconnected);
+
+    if (this.deps.onIncomingMessage) {
+      const notify = this.deps.onIncomingMessage;
+      client.on("message", (message: WaMessage) => {
+        if (!isCurrentSession() || terminalClaimed) return;
+        try {
+          notify({
+            platformThreadId: message.from,
+            sourceChangedAt: new Date().toISOString()
+          });
+        } catch {
+          // Fire-and-forget: never let a scan-enqueue hiccup crash the
+          // wweb.js message pipeline.
+        }
+      });
+    }
+
+    void client
+      .initialize()
+      .then(async () => {
+        if (!isCurrentSession() || terminalClaimed || this.ready) return;
+        if ((await client.getState()) === "CONNECTED") {
+          onReady();
+        }
+      })
+      .catch((error) => terminate(error instanceof Error ? error : new Error(String(error))));
+
+    return connectionPromise;
+  }
+
+  private beginClientTeardown(client: Client, sessionEpoch: number): Promise<void> {
+    if (this.teardownPromise) return this.teardownPromise;
+    if (this.client !== client || this.sessionEpoch !== sessionEpoch) {
+      return Promise.resolve();
+    }
+
+    this.sessionEpoch += 1;
+    this.client = null;
+    this.ready = false;
+    this.readyPromise = null;
+    this.deps.onStateChange?.("disconnected");
+
+    const teardown = (async () => {
+      try {
+        await client.destroy();
+      } catch (error) {
+        console.warn(
+          `[whatsapp] client.destroy() failed (continuing teardown): ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
+      }
+    })();
+    this.teardownPromise = teardown;
+    void teardown.finally(() => {
+      if (this.teardownPromise === teardown) this.teardownPromise = null;
+      if (this.terminateCurrentSession) this.terminateCurrentSession = null;
+    });
+    return teardown;
   }
 
   async scanUnreadThreads(): Promise<ThreadStub[]> {
@@ -223,7 +310,8 @@ export class WhatsAppAdapter implements PlatformAdapter {
   async sendMessage(
     thread: ThreadStub,
     text: string,
-    attachments?: OutboundAttachment[]
+    attachments?: OutboundAttachment[],
+    beforeDispatch?: () => Promise<void>
   ): Promise<SendReceipt> {
     const client = this.requireClient();
     await this.awaitSendClearance(thread.platformThreadId);
@@ -232,6 +320,7 @@ export class WhatsAppAdapter implements PlatformAdapter {
     // returns the sent Message object, whose timestamp we mirror.
     const media = (attachments ?? []).filter((a) => a.absolutePath && a.absolutePath.length > 0);
     if (media.length === 0) {
+      await beforeDispatch?.();
       const sendStartedAt = Date.now();
       const sent = await this.resolveSendResult(
         await (client as unknown as {
@@ -263,30 +352,35 @@ export class WhatsAppAdapter implements PlatformAdapter {
     // send-guard min-interval indirectly via the rolling-24h cap; we
     // don't re-check the per-recipient interval between the media sends
     // because they're all part of one operator action.
+    const wa = (await import("whatsapp-web.js")) as unknown as {
+      MessageMedia?: { fromFilePath: (path: string) => unknown };
+      default?: { MessageMedia?: { fromFilePath: (path: string) => unknown } };
+    };
+    const MessageMedia = wa.MessageMedia ?? wa.default?.MessageMedia;
+    if (!MessageMedia) throw new Error("MessageMedia export unavailable");
+    const preparedMedia = media.map((attachment) => {
+      try {
+        return {
+          attachment,
+          payload: MessageMedia.fromFilePath(attachment.absolutePath)
+        };
+      } catch (error) {
+        throw new Error(
+          `WhatsApp attachment unreadable (${attachment.displayName}): ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
+      }
+    });
+
     const sentAttachments: AttachmentPlaceholder[] = [];
     let firstSentTs: number | undefined;
     let firstMessageKey: string | undefined;
     let everyMessageAcknowledged = true;
     let acknowledgedAt: string | undefined;
-    for (let i = 0; i < media.length; i++) {
-      const a = media[i]!;
-      let payload: unknown;
-      try {
-        // MessageMedia.fromFilePath is a static factory on the wweb.js
-        // export. The dynamic require here avoids importing fs at the
-        // top of the file (the helper itself does fs.readFileSync).
-        const wa = (await import("whatsapp-web.js")) as unknown as {
-          MessageMedia?: { fromFilePath: (path: string) => unknown };
-          default?: { MessageMedia?: { fromFilePath: (path: string) => unknown } };
-        };
-        const MM = wa.MessageMedia ?? wa.default?.MessageMedia;
-        if (!MM) throw new Error("MessageMedia export unavailable");
-        payload = MM.fromFilePath(a.absolutePath);
-      } catch (err) {
-        throw new Error(
-          `WhatsApp attachment unreadable (${a.displayName}): ${err instanceof Error ? err.message : String(err)}`
-        );
-      }
+    await beforeDispatch?.();
+    for (let i = 0; i < preparedMedia.length; i++) {
+      const { attachment: a, payload } = preparedMedia[i]!;
       // wweb.js's options bag accepts `caption` (for image/video) and
       // `sendMediaAsDocument` / `sendAudioAsVoice` flags. Voice notes
       // become PTT (push-to-talk) so the recipient sees the waveform UI.
@@ -306,7 +400,9 @@ export class WhatsAppAdapter implements PlatformAdapter {
         }).sendMessage(thread.platformThreadId, payload, opts),
         thread.platformThreadId,
         sendStartedAt,
-        i === 0 ? text : undefined
+        i === 0 ? text : undefined,
+        undefined,
+        i === 0
       );
       acknowledgedAt ??= new Date().toISOString();
       const messageVerification = await this.waitForAcknowledgement(sent);
@@ -364,71 +460,83 @@ export class WhatsAppAdapter implements PlatformAdapter {
   }
 
   async sendPoll(thread: ThreadStub, poll: OutboundPoll): Promise<SendReceipt> {
-    const client = this.requireClient();
-    await this.awaitSendClearance(thread.platformThreadId);
+    let dispatchStarted = false;
+    try {
+      const client = this.requireClient();
+      await this.awaitSendClearance(thread.platformThreadId);
 
-    const question = poll.question.trim();
-    const options = poll.options.map((option) => option.trim()).filter(Boolean);
-    if (!question || options.length < 2) {
-      throw new Error("WhatsApp poll needs a question and at least two options");
-    }
+      const question = poll.question.trim();
+      const options = poll.options.map((option) => option.trim()).filter(Boolean);
+      if (!question || options.length < 2) {
+        throw new Error("WhatsApp poll needs a question and at least two options");
+      }
 
-    const wa = (await import("whatsapp-web.js")) as unknown as {
-      Poll?: new (
-        pollName: string,
-        pollOptions: string[],
-        options?: { allowMultipleAnswers?: boolean }
-      ) => unknown;
-      default?: {
+      const wa = (await import("whatsapp-web.js")) as unknown as {
         Poll?: new (
           pollName: string,
           pollOptions: string[],
           options?: { allowMultipleAnswers?: boolean }
         ) => unknown;
+        default?: {
+          Poll?: new (
+            pollName: string,
+            pollOptions: string[],
+            options?: { allowMultipleAnswers?: boolean }
+          ) => unknown;
+        };
       };
-    };
-    const Poll = wa.Poll ?? wa.default?.Poll;
-    if (!Poll) throw new Error("Poll export unavailable");
-    const payload = new Poll(question, options, {
-      allowMultipleAnswers: Boolean(poll.allowMultipleAnswers)
-    });
-    const sendStartedAt = Date.now();
-    const sent = await this.resolveSendResult(
-      await (client as unknown as {
-        sendMessage: (
-          jid: string,
-          content: unknown,
-          options: { waitUntilMsgSent: boolean }
-        ) => Promise<WaMessage | null | undefined>;
-      }).sendMessage(thread.platformThreadId, payload, { waitUntilMsgSent: true }),
-      thread.platformThreadId,
-      sendStartedAt,
-      undefined,
-      "poll_creation"
-    );
-    const acknowledgedAt = new Date().toISOString();
-    const verifiedBy = await this.waitForAcknowledgement(sent);
-    const structuredPoll: WhatsAppPollPayload = {
-      question,
-      options: options.map((name) => ({ name })),
-      allowMultipleAnswers: Boolean(poll.allowMultipleAnswers)
-    };
-    return {
-      sentAt: epochSecondsToIso(sent.timestamp) ?? new Date().toISOString(),
-      acknowledgedAt,
-      platformResultAt: new Date().toISOString(),
-      platformMessageKey: sent.id?._serialized,
-      verifiedBy,
-      attachments: [
-        {
-          type: "poll",
-          manualReview: false,
-          rawLabel: question,
-          kind: "poll"
+      const Poll = wa.Poll ?? wa.default?.Poll;
+      if (!Poll) throw new Error("Poll export unavailable");
+      const payload = new Poll(question, options, {
+        allowMultipleAnswers: Boolean(poll.allowMultipleAnswers)
+      });
+      const sendStartedAt = Date.now();
+      dispatchStarted = true;
+      const sent = await this.resolveSendResult(
+        await (client as unknown as {
+          sendMessage: (
+            jid: string,
+            content: unknown,
+            options: { waitUntilMsgSent: boolean }
+          ) => Promise<WaMessage | null | undefined>;
+        }).sendMessage(thread.platformThreadId, payload, { waitUntilMsgSent: true }),
+        thread.platformThreadId,
+        sendStartedAt,
+        undefined,
+        "poll_creation"
+      );
+      const acknowledgedAt = new Date().toISOString();
+      const verifiedBy = await this.waitForAcknowledgement(sent);
+      const structuredPoll: WhatsAppPollPayload = {
+        question,
+        options: options.map((name) => ({ name })),
+        allowMultipleAnswers: Boolean(poll.allowMultipleAnswers)
+      };
+      return {
+        sentAt: epochSecondsToIso(sent.timestamp) ?? new Date().toISOString(),
+        acknowledgedAt,
+        platformResultAt: new Date().toISOString(),
+        platformMessageKey: sent.id?._serialized,
+        verifiedBy,
+        attachments: [
+          {
+            type: "poll",
+            manualReview: false,
+            rawLabel: question,
+            kind: "poll"
+          }
+        ],
+        raw: { whatsapp: { poll: structuredPoll } }
+      };
+    } catch (error) {
+      if (!dispatchStarted) {
+        if (isWhatsAppSessionUnavailableError(error)) {
+          await this.closeSession("poll_send_pre_dispatch_session_unavailable");
         }
-      ],
-      raw: { whatsapp: { poll: structuredPoll } }
-    };
+        throw new WhatsAppPollSendPreDispatchError(error);
+      }
+      return this.rethrowPollSessionFailure(error);
+    }
   }
 
   /**
@@ -484,9 +592,15 @@ export class WhatsAppAdapter implements PlatformAdapter {
     chatId: string,
     sendStartedAt: number,
     expectedText?: string,
-    expectedType?: string
+    expectedType?: string,
+    allowStoreRecovery = true
   ): Promise<WaMessage> {
     if (sent) return sent;
+    if (!allowStoreRecovery) {
+      throw new Error(
+        "WhatsApp delivery could not be confirmed because the send returned no message result"
+      );
+    }
 
     const client = this.requireClient();
     if (client.pupPage) {
@@ -569,6 +683,7 @@ export class WhatsAppAdapter implements PlatformAdapter {
     platformMessageKey: string,
     selectedOptions: string[]
   ): Promise<void> {
+    let dispatchStarted = false;
     try {
       const client = this.requireClient();
       const message = await (client as unknown as {
@@ -577,8 +692,23 @@ export class WhatsAppAdapter implements PlatformAdapter {
       if (!message || message.type !== "poll_creation" || typeof message.vote !== "function") {
         throw new Error("WhatsApp poll vote failed: poll message not found");
       }
+      dispatchStarted = true;
       await message.vote(selectedOptions);
     } catch (error) {
+      if (!dispatchStarted) {
+        const sessionUnavailable = isWhatsAppSessionUnavailableError(error);
+        if (sessionUnavailable) {
+          await this.closeSession("poll_vote_pre_dispatch_session_unavailable");
+        }
+        throw new WhatsAppPollVotePreDispatchError(
+          sessionUnavailable
+            ? "WhatsApp lost its connection. Reconnect it in Settings, then try again."
+            : error instanceof Error
+              ? error.message
+              : String(error),
+          sessionUnavailable ? "whatsapp_session_unavailable" : "poll_unavailable"
+        );
+      }
       await this.rethrowPollSessionFailure(error);
     }
   }
@@ -658,21 +788,24 @@ export class WhatsAppAdapter implements PlatformAdapter {
     // because this.client wasn't set yet, so subsequent /connect calls
     // saw a "connecting" state and short-circuited via the alreadyInFlight
     // guard. Operator was effectively locked out until a runner restart.
+    if (this.teardownPromise) {
+      await this.teardownPromise;
+      return;
+    }
+    if (this.terminateCurrentSession) {
+      await this.terminateCurrentSession(
+        new Error("WhatsApp session closed before connection completed")
+      );
+      return;
+    }
     const client = this.client;
-    this.client = null;
+    if (client) {
+      await this.beginClientTeardown(client, this.sessionEpoch);
+      return;
+    }
+    this.sessionEpoch += 1;
     this.ready = false;
     this.readyPromise = null;
-    if (client) {
-      try {
-        await client.destroy();
-      } catch (error) {
-        console.warn(
-          `[whatsapp] client.destroy() failed (continuing teardown): ${
-            error instanceof Error ? error.message : String(error)
-          }`
-        );
-      }
-    }
     this.deps.onStateChange?.("disconnected");
   }
 

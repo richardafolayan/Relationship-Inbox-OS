@@ -119,8 +119,8 @@ test("adapter routes group sends through the chat-guid path", () => {
   );
   assert.doesNotMatch(adapterSource, /GROUP_SEND_UNSUPPORTED/);
   assert.match(adapterSource, /GROUP_ATTACHMENT_UNSUPPORTED/);
-  assert.match(adapterSource, /sendToGroupChat\(chat\.guid, thread, text\)/);
-  assert.match(adapterSource, /sendIMessageToChat\(\{ chatGuid, text \}\)/);
+  assert.match(adapterSource, /sendToGroupChat\(chat\.guid, thread, text, beforeDispatch\)/);
+  assert.match(adapterSource, /sendIMessageToChat\(\{ chatGuid, text, beforeDispatch \}\)/);
 });
 
 test("every recipient-context prompt site also injects groupChatContext", () => {

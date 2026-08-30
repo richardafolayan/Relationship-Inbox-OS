@@ -41,7 +41,7 @@ import {
 } from "lucide-react";
 import { Menu } from "@/components/ui/menu";
 import { ActionSheet, type ActionSheetGroup } from "@/components/ui/action-sheet";
-import { apiGet, apiPost, apiPostForm, peekCache, runAction } from "@/lib/api";
+import { apiGet, apiGetRaw, apiPost, apiPostForm, peekCache, runAction } from "@/lib/api";
 import { BrandLoader } from "@/components/common/brand-loader";
 import {
   SiblingPlatformFilter,
@@ -55,6 +55,7 @@ import { readThreadSource } from "@/lib/thread-source";
 import { shouldApplyThreadScopedResult, shouldRefetchForThreadEvent } from "@/lib/thread-identity-guard";
 import { computeRepliesGenerating } from "@/lib/suggestions-spinner";
 import { composerSourceAfterClear } from "@/lib/composer-source";
+import { createExternalActionAttemptStore } from "@/lib/external-action-attempts";
 import { ageOnNextBirthday, birthdayCountdownLabel, daysUntilBirthday } from "@inbox-os/core/birthday";
 import { cn } from "@/lib/utils";
 import type {
@@ -148,7 +149,11 @@ import {
 } from "@/lib/message-sync-latency";
 import { nextSendReconcileDelayMs } from "@/lib/send-reconcile";
 import { classifyConsumerFailure } from "@/lib/consumer-failure";
-import { resolveSendRecovery, type SendStatusResponse } from "@/lib/send-delivery";
+import {
+  resolveSendRecovery,
+  waitForTerminalSendStatus,
+  type SendStatusResponse
+} from "@/lib/send-delivery";
 import { openPilotFeedback } from "@/lib/pilot";
 import {
   snapshotTimelineViewport,
@@ -198,6 +203,18 @@ const SCROLL_BOTTOM_THRESHOLD = 200;
 const JUMP_TO_LATEST_THRESHOLD = 600;
 const PHONE_LAYOUT_MEDIA_QUERY = "(max-width: 767px), (hover: none) and (pointer: coarse)";
 
+async function canReplaceExternalActionAttempt(value: {
+  clientActionId?: string;
+  clientSendId?: string;
+}): Promise<boolean> {
+  const clientId = value.clientActionId ?? value.clientSendId;
+  if (!clientId) return false;
+  const status = await apiGetRaw<{ safeToReplace: boolean }>(
+    `/runner/data/external-action-status/${encodeURIComponent(clientId)}`
+  );
+  return status.safeToReplace;
+}
+
 type ComposerAttachment = {
   id: string;
   file: File;
@@ -213,7 +230,7 @@ type PendingSend = {
   failed?: boolean;
   uncertain?: boolean;
   errorMessage?: string;
-  errorKind?: "AUTH_REQUIRED" | "SELECTOR_FAIL" | "PROFILE_LOCKED" | "TRANSIENT" | "DELIVERY_UNCERTAIN" | "UNKNOWN";
+  errorKind?: "AUTH_REQUIRED" | "SELECTOR_FAIL" | "PROFILE_LOCKED" | "TRANSIENT" | "POLICY_BLOCKED" | "DELIVERY_UNCERTAIN" | "UNKNOWN";
 };
 
 // Picks the topmost visible message bubble to anchor scroll preservation
@@ -621,6 +638,7 @@ export default function ThreadPage() {
   const [whatsAppPollAllowMultiple, setWhatsAppPollAllowMultiple] = useState(true);
   const [whatsAppPollSending, setWhatsAppPollSending] = useState(false);
   const [whatsAppPollSent, setWhatsAppPollSent] = useState(false);
+  const externalActionAttempts = useMemo(() => createExternalActionAttemptStore(), []);
   // False from the start when the cache seeded `thread` above - the
   // conversation is already on screen, the mount fetch is a revalidation.
   const [loading, setLoading] = useState(
@@ -1567,7 +1585,7 @@ export default function ThreadPage() {
         threadId?: string;
         clientSendId?: string;
         errorMessage?: string;
-        errorKind?: "AUTH_REQUIRED" | "SELECTOR_FAIL" | "PROFILE_LOCKED" | "TRANSIENT" | "DELIVERY_UNCERTAIN" | "UNKNOWN";
+        errorKind?: "AUTH_REQUIRED" | "SELECTOR_FAIL" | "PROFILE_LOCKED" | "TRANSIENT" | "POLICY_BLOCKED" | "DELIVERY_UNCERTAIN" | "UNKNOWN";
         stage?: string;
         platform?: "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE" | "WHATSAPP" | "GOOGLE_MESSAGES";
         syncTiming?: {
@@ -2078,7 +2096,9 @@ export default function ThreadPage() {
   const sendWhatsAppPoll = useCallback(async () => {
     if (!thread || whatsAppPollSending) return;
     const question = whatsAppPollQuestion.trim();
-    const options = whatsAppPollOptions.map((option) => option.trim()).filter(Boolean);
+    const options = [
+      ...new Set(whatsAppPollOptions.map((option) => option.trim()).filter(Boolean))
+    ];
     if (!question) {
       setError("Add a poll question.");
       return;
@@ -2091,13 +2111,40 @@ export default function ThreadPage() {
     setWhatsAppPollSending(true);
     setWhatsAppPollSent(false);
     setError(null);
+    const scope = `send-poll:${thread.id}`;
+    const intent = {
+      threadId: thread.id,
+      question,
+      options,
+      allowMultipleAnswers: whatsAppPollAllowMultiple
+    };
     try {
-      await apiPost(`/runner/control/thread/${thread.id}/send-poll`, {
+      const { clientSendId } = await externalActionAttempts.getOrCreateScopedValue(
+        scope,
+        intent,
+        () => ({ clientSendId: uuid() }),
+        canReplaceExternalActionAttempt
+      );
+      const output = await apiPost<{
+        status: "pending" | "ok";
+        reconciliationPending?: boolean;
+      }>(
+        `/runner/control/thread/${thread.id}/send-poll`, {
         question,
         options,
         allowMultipleAnswers: whatsAppPollAllowMultiple,
-        clientSendId: uuid()
+        clientSendId
       });
+      if (output.status === "pending") {
+        setError("This poll send is still in progress. Check the conversation before trying again.");
+        return;
+      }
+      if (!output.reconciliationPending) {
+        await externalActionAttempts.completeScopedValue<{ clientSendId: string }>(
+          scope,
+          (value) => value.clientSendId === clientSendId
+        );
+      }
       setWhatsAppPollQuestion("");
       setWhatsAppPollOptions(["", ""]);
       setWhatsAppPollAllowMultiple(true);
@@ -2111,7 +2158,7 @@ export default function ThreadPage() {
     } finally {
       setWhatsAppPollSending(false);
     }
-  }, [refresh, thread, whatsAppPollAllowMultiple, whatsAppPollOptions, whatsAppPollQuestion, whatsAppPollSending]);
+  }, [externalActionAttempts, refresh, thread, whatsAppPollAllowMultiple, whatsAppPollOptions, whatsAppPollQuestion, whatsAppPollSending]);
 
   // Revoke any outstanding image preview object URLs when the thread view
   // unmounts (e.g. navigating away mid-compose) so they don't leak.
@@ -2442,27 +2489,83 @@ export default function ThreadPage() {
     window.requestAnimationFrame(() => composerInputRef.current?.focus());
   }, [dictationTranscript]);
 
-  const sendDictationMessage = useCallback(async (text: string) => {
+  const sendDictationMessage = useCallback(async (messageId: string, text: string) => {
     if (!thread) throw new Error("This conversation is no longer available.");
     const trimmed = text.trim();
     if (!trimmed) throw new Error("An empty message cannot be sent.");
-    const clientSendId = uuid();
+    const scope = `dictation-send:${thread.id}:${messageId}`;
+    const intent = {
+      threadId: thread.id,
+      text: trimmed,
+      replyToMessageId: focusedThreadParentId ?? null
+    };
+    let { clientSendId } = await externalActionAttempts.getOrCreateScopedValue(
+      scope,
+      intent,
+      () => ({ clientSendId: uuid() }),
+      canReplaceExternalActionAttempt
+    );
     const sentAt = new Date().toISOString();
     setError(null);
     setPendingSends((current) => [...current, { clientSendId, text: trimmed, sentAt, attachments: [] }]);
     stickToBottomRef.current = true;
     try {
-      await apiPost(`/runner/control/thread/${thread.id}/send`, {
+      const queued = await apiPost<{ clientSendId: string }>(`/runner/control/thread/${thread.id}/send`, {
         text: trimmed,
         clientSendId,
         clientRequestedAt: sentAt,
         ...(focusedThreadParentId ? { replyToMessageId: focusedThreadParentId } : {})
       });
+      if (queued.clientSendId !== clientSendId) {
+        const previousClientSendId = clientSendId;
+        const replaced = await externalActionAttempts.replaceScopedValue(
+          scope,
+          (value: { clientSendId: string }) => value.clientSendId === previousClientSendId,
+          { clientSendId: queued.clientSendId }
+        );
+        if (!replaced) throw new Error("This dictated message changed in another window. Check it before retrying.");
+        clientSendId = queued.clientSendId;
+        setPendingSends((current) => current.map((pending) =>
+          pending.clientSendId === previousClientSendId
+            ? { ...pending, clientSendId }
+            : pending
+        ));
+      }
+      let status = await waitForTerminalSendStatus(clientSendId, apiGetRaw);
+      if (status.status === "FAILED" && status.retrySafe) {
+        const previousClientSendId = clientSendId;
+        const retry = await apiPost<{ clientSendId: string }>(
+          `/runner/control/thread/${thread.id}/retry-send`,
+          { clientSendId }
+        );
+        const replaced = await externalActionAttempts.replaceScopedValue(
+          scope,
+          (value: { clientSendId: string }) => value.clientSendId === previousClientSendId,
+          { clientSendId: retry.clientSendId }
+        );
+        if (!replaced) throw new Error("This dictated message changed in another window. Check it before retrying.");
+        clientSendId = retry.clientSendId;
+        setPendingSends((current) => current.map((pending) =>
+          pending.clientSendId === previousClientSendId
+            ? { ...pending, clientSendId }
+            : pending
+        ));
+        status = await waitForTerminalSendStatus(clientSendId, apiGetRaw);
+      }
+      const recovery = resolveSendRecovery(status);
+      if (recovery.kind === "waiting") {
+        throw new Error("Delivery is still pending. Check it before retrying.");
+      }
+      if (recovery.kind !== "sent") throw new Error(recovery.message);
+      await externalActionAttempts.completeScopedValue<{ clientSendId: string }>(
+        scope,
+        (value) => value.clientSendId === clientSendId
+      );
     } catch (sendError) {
       setPendingSends((current) => current.filter((pending) => pending.clientSendId !== clientSendId));
       throw sendError;
     }
-  }, [focusedThreadParentId, thread]);
+  }, [externalActionAttempts, focusedThreadParentId, thread]);
 
   // Cmd/Ctrl-Enter sends.
   useEffect(() => {
@@ -2484,16 +2587,32 @@ export default function ThreadPage() {
   const scheduleSend = useCallback(
     async (at: Date) => {
       if (!thread || !composer.trim() || scheduling) return;
-      const clientSendId = uuid();
       const text = composer;
+      const scheduledFor = at.toISOString();
+      const scope = `schedule-send:${thread.id}`;
+      const intent = {
+        threadId: thread.id,
+        text,
+        scheduledFor
+      };
       setScheduling(true);
       setError(null);
       try {
+        const { clientSendId } = await externalActionAttempts.getOrCreateScopedValue(
+          scope,
+          intent,
+          () => ({ clientSendId: uuid() }),
+          canReplaceExternalActionAttempt
+        );
         await apiPost(`/runner/control/thread/${thread.id}/send`, {
           text,
           clientSendId,
-          scheduledFor: at.toISOString()
+          scheduledFor
         });
+        await externalActionAttempts.completeScopedValue<{ clientSendId: string }>(
+          scope,
+          (value) => value.clientSendId === clientSendId
+        );
         setComposer("");
         // Reset the source too (see onSend): a scheduled predraft empties the
         // composer, so the predraft badge/frame must not linger over a blank
@@ -2509,7 +2628,7 @@ export default function ThreadPage() {
         setScheduling(false);
       }
     },
-    [composer, refresh, scheduling, thread]
+    [composer, externalActionAttempts, refresh, scheduling, thread]
   );
 
   const cancelScheduledSend = useCallback(
@@ -2869,10 +2988,27 @@ export default function ThreadPage() {
       [messageId]: [...(prev[messageId] ?? []), optimistic]
     }));
     try {
-      await apiPost<{ status: string; emoji: string }>(
-        `/runner/control/thread/${thread.id}/message/${messageId}/react`,
-        { emoji }
+      const scope = `reaction:${thread.id}:${messageId}`;
+      const { clientActionId } = await externalActionAttempts.getOrCreateScopedValue(
+        scope,
+        { threadId: thread.id, messageId, emoji },
+        () => ({ clientActionId: uuid() }),
+        canReplaceExternalActionAttempt
       );
+      const output = await apiPost<{
+        status: string;
+        emoji: string;
+        reconciliationPending?: boolean;
+      }>(
+        `/runner/control/thread/${thread.id}/message/${messageId}/react`,
+        { clientActionId, emoji }
+      );
+      if (!output.reconciliationPending) {
+        await externalActionAttempts.completeScopedValue<{ clientActionId: string }>(
+          scope,
+          (value) => value.clientActionId === clientActionId
+        );
+      }
       setError(null);
       // The runner has persisted the reaction; the refresh below pulls the
       // authoritative copy. Drop our optimistic overlay for this message so
@@ -2909,10 +3045,28 @@ export default function ThreadPage() {
 
   const voteOnPoll = async (messageId: string, selectedOptions: string[]) => {
     if (!thread) return;
-    await apiPost<{ status: string; selectedOptions: string[] }>(
-      `/runner/control/thread/${thread.id}/message/${messageId}/poll-vote`,
-      { selectedOptions }
+    const scope = `poll-vote:${thread.id}:${messageId}`;
+    const normalizedSelectedOptions = [...selectedOptions].sort();
+    const { clientActionId } = await externalActionAttempts.getOrCreateScopedValue(
+      scope,
+      { threadId: thread.id, messageId, selectedOptions: normalizedSelectedOptions },
+      () => ({ clientActionId: uuid() }),
+      canReplaceExternalActionAttempt
     );
+    const output = await apiPost<{
+      status: string;
+      selectedOptions: string[];
+      reconciliationPending?: boolean;
+    }>(
+      `/runner/control/thread/${thread.id}/message/${messageId}/poll-vote`,
+      { clientActionId, selectedOptions: normalizedSelectedOptions }
+    );
+    if (!output.reconciliationPending) {
+      await externalActionAttempts.completeScopedValue<{ clientActionId: string }>(
+        scope,
+        (value) => value.clientActionId === clientActionId
+      );
+    }
     await refresh();
   };
 
@@ -2963,10 +3117,27 @@ export default function ThreadPage() {
       return next;
     });
     try {
-      const output = await apiPost<{ status: string; text: string }>(
-        `/runner/control/thread/${thread.id}/message/${messageId}/edit`,
-        { text: nextText }
+      const scope = `edit:${thread.id}:${messageId}`;
+      const { clientActionId } = await externalActionAttempts.getOrCreateScopedValue(
+        scope,
+        { threadId: thread.id, messageId, text: nextText },
+        () => ({ clientActionId: uuid() }),
+        canReplaceExternalActionAttempt
       );
+      const output = await apiPost<{
+        status: string;
+        text: string;
+        reconciliationPending?: boolean;
+      }>(
+        `/runner/control/thread/${thread.id}/message/${messageId}/edit`,
+        { clientActionId, text: nextText }
+      );
+      if (!output.reconciliationPending) {
+        await externalActionAttempts.completeScopedValue<{ clientActionId: string }>(
+          scope,
+          (value) => value.clientActionId === clientActionId
+        );
+      }
       const confirmedText = output.text || nextText;
       setOptimisticTextByMessageId((prev) => ({ ...prev, [messageId]: confirmedText }));
       setEditDraft(confirmedText);
@@ -5209,6 +5380,8 @@ export default function ThreadPage() {
                             ? "selector failed"
                             : pending.errorKind === "PROFILE_LOCKED"
                               ? "profile locked"
+                              : pending.errorKind === "POLICY_BLOCKED"
+                                ? "no longer eligible"
                               : "failed"}
                       </span>
                       {pending.uncertain ? (
@@ -5232,7 +5405,7 @@ export default function ThreadPage() {
                           </button>
                         ) : null;
                       })()}
-                      {!pending.uncertain ? (
+                      {!pending.uncertain && pending.errorKind !== "POLICY_BLOCKED" ? (
                         <button
                           type="button"
                           onClick={() => retryPendingSend(pending.clientSendId)}

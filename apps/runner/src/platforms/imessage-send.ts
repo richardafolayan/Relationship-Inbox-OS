@@ -178,6 +178,7 @@ export interface SendIMessageOptions {
   text: string;
   /** Absolute paths of files to attach (sent as separate Messages.app bubbles). */
   attachmentPaths?: string[];
+  beforeDispatch?: () => Promise<void>;
   timeoutMs?: number;
 }
 
@@ -188,6 +189,7 @@ export interface SendIMessageToChatOptions {
    */
   chatGuid: string;
   text: string;
+  beforeDispatch?: () => Promise<void>;
   timeoutMs?: number;
 }
 
@@ -223,6 +225,7 @@ export async function sendIMessageToChat(opts: SendIMessageToChatOptions): Promi
   if (opts.text.trim().length === 0) return;
   const timeout = opts.timeoutMs ?? 30_000;
   const script = buildChatSendScript({ chatGuid: opts.chatGuid, text: opts.text });
+  await opts.beforeDispatch?.();
   await execFileAsync("osascript", ["-e", script], { timeout });
 }
 
@@ -237,15 +240,21 @@ export async function sendIMessage(opts: SendIMessageOptions): Promise<void> {
   const handle = escapeAppleScript(opts.handle);
   const timeout = opts.timeoutMs ?? 30_000;
 
-  // Send each attachment as its own Messages.app bubble (Apple's UI does
-  // the same — one media per bubble). Then the text body. Order matters
-  // for how the recipient reads the conversation.
+  const preparedAttachmentPaths: string[] = [];
   for (const rawPath of opts.attachmentPaths ?? []) {
     // Browser MediaRecorder hands us webm/opus or mp4. Apple's native
     // voice-memo container is .caf with ima4 codec — transcode to that
     // when possible so delivery doesn't bounce.
     const transcoded = await maybeTranscodeAudioToCaf(rawPath);
-    const path = stageInReadableTmp(transcoded);
+    preparedAttachmentPaths.push(stageInReadableTmp(transcoded));
+  }
+
+  await opts.beforeDispatch?.();
+
+  // Send each attachment as its own Messages.app bubble (Apple's UI does
+  // the same — one media per bubble). Then the text body. Order matters
+  // for how the recipient reads the conversation.
+  for (const path of preparedAttachmentPaths) {
     await sendFileViaUiScripting({
       filePath: path,
       handle: opts.handle,

@@ -1,10 +1,18 @@
-import { prisma } from "../db";
+import type { PrismaClient } from "@prisma/client";
+import { prisma as defaultPrisma } from "../db";
 import type { EventBus } from "../types/runtime";
 import type { SendService, SendSource } from "./send";
+
+export const QUEUED_MESSAGE_SOURCES: SendSource[] = [
+  "manual",
+  "focus_ack",
+  "focus_auto_ack"
+];
 
 interface SendQueueDeps {
   sendService: SendService;
   eventBus: EventBus;
+  prisma?: PrismaClient;
 }
 
 /**
@@ -36,7 +44,17 @@ export interface SendQueueService {
     text: string;
     clientSendId: string;
     source?: SendSource;
-    attachments?: Array<{ absolutePath: string; displayName: string; mimeType?: string; kind?: string }>;
+    focusWindowId?: string;
+    focusIntentVersion?: number;
+    retryFailedFocusAcknowledgement?: boolean;
+    rearmPolicyBlockedFocusAcknowledgement?: boolean;
+    attachments?: Array<{
+      absolutePath: string;
+      displayName: string;
+      mimeType?: string;
+      kind?: string;
+      contentDigest?: string;
+    }>;
     /**
      * App-level threading. Forwarded to sendService.enqueueSend → persisted
      * on the SendRequest, then copied onto the resulting Message row so the
@@ -58,65 +76,104 @@ export interface SendQueueService {
 }
 
 export function createSendQueue(deps: SendQueueDeps): SendQueueService {
+  const prisma = deps.prisma ?? defaultPrisma;
   let running = false;
+  let rerunRequested = false;
+  let startupRecoveryComplete = false;
+  let startupRecovery: Promise<boolean> | null = null;
+
+  function recoverBeforeDrain(): Promise<boolean> {
+    if (startupRecoveryComplete) return Promise.resolve(true);
+    if (startupRecovery) return startupRecovery;
+    startupRecovery = (async () => {
+      try {
+        const reconciled = await deps.sendService.reconcileInterruptedSends();
+        if (reconciled > 0) {
+          console.warn(
+            `[send-queue] reconciled ${reconciled} interrupted send(s) to FAILED after restart`
+          );
+        }
+        await deps.sendService.reconcileSentProjections();
+        startupRecoveryComplete = true;
+        return true;
+      } catch (error) {
+        console.warn(
+          `[send-queue] startup recovery failed; queue remains paused: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
+        return false;
+      } finally {
+        startupRecovery = null;
+      }
+    })();
+    return startupRecovery;
+  }
 
   async function tick(): Promise<void> {
-    if (running) return;
+    if (running) {
+      rerunRequested = true;
+      return;
+    }
     running = true;
     try {
-      while (true) {
-        const next = await prisma.sendRequest.findFirst({
-          // `receiptJson: null` excludes in-doubt rows — a PENDING row that a
-          // previous (crashed) process already claimed carries the claim marker
-          // in receiptJson. Those must not be re-dispatched (the adapter send is
-          // not idempotent); resume() reconciles them to FAILED separately.
-          where: { status: "PENDING", receiptJson: null },
-          orderBy: { createdAt: "asc" }
-        });
-        if (!next) break;
-        try {
-          await deps.sendService.processSendRequest(next.id);
-        } catch (error) {
-          // processSendRequest is supposed to record FAILED status on the row
-          // before throwing only for programmer-error cases (missing thread,
-          // etc.). Defensively mark the row failed here so the worker doesn't
-          // get stuck looping on the same PENDING row forever.
-          console.warn(
-            `[send-queue] processSendRequest crashed for ${next.id}: ${
-              error instanceof Error ? error.message : String(error)
-            }`
-          );
-          await prisma.sendRequest
-            .update({
-              where: { id: next.id },
-              data: {
-                status: "FAILED",
-                errorJson: JSON.stringify({
-                  message: error instanceof Error ? error.message : String(error)
-                })
-              }
-            })
-            .catch(() => undefined);
-        }
-
-        // Emit a queue-state update after each row so the dashboard's status
-        // bar can update without waiting for its 3-second poll tick.
-        const remaining = await prisma.sendRequest.count({ where: { status: "PENDING" } });
-        deps.eventBus.emit({
-          type: "SEND_QUEUE_UPDATED",
-          jobId: "send-queue",
-          activeCount: remaining
-        });
+      rerunRequested = false;
+      if (!(await recoverBeforeDrain())) {
+        const retry = setTimeout(() => kick(), 5_000);
+        retry.unref?.();
+        return;
       }
+      do {
+        rerunRequested = false;
+        while (true) {
+          const next = await prisma.sendRequest.findFirst({
+            where: {
+              status: "PENDING",
+              receiptJson: null,
+              source: { in: QUEUED_MESSAGE_SOURCES }
+            },
+            orderBy: { createdAt: "asc" }
+          });
+          if (!next) break;
+          try {
+            await deps.sendService.processSendRequest(next.id);
+          } catch (error) {
+            console.warn(
+              `[send-queue] processSendRequest crashed for ${next.id}: ${
+                error instanceof Error ? error.message : String(error)
+              }`
+            );
+            await prisma.sendRequest
+              .update({
+                where: { id: next.id },
+                data: {
+                  status: "FAILED",
+                  errorJson: JSON.stringify({
+                    message: error instanceof Error ? error.message : String(error)
+                  })
+                }
+              })
+              .catch(() => undefined);
+          }
+
+          const remaining = await prisma.sendRequest.count({
+            where: { status: "PENDING", source: { in: QUEUED_MESSAGE_SOURCES } }
+          });
+          deps.eventBus.emit({
+            type: "SEND_QUEUE_UPDATED",
+            jobId: "send-queue",
+            activeCount: remaining
+          });
+        }
+      } while (rerunRequested);
     } finally {
       running = false;
+      if (rerunRequested) void tick();
     }
   }
 
   function kick(): void {
-    // Fire-and-forget. If the loop is already running, this is a no-op
-    // (the running flag inside tick() returns immediately). If not, the
-    // loop starts and drains pending rows until the table is empty.
+    rerunRequested = true;
     void tick();
   }
 
@@ -124,29 +181,11 @@ export function createSendQueue(deps: SendQueueDeps): SendQueueService {
     // First reconcile any in-doubt rows: a PENDING row claimed by the previous
     // process but never terminalised (it crashed between the physical send and
     // the SENT write). Re-dispatching those would re-message the recipient, so
-    // they are flipped to FAILED (INTERRUPTED) for the operator to verify. THEN
-    // drain the genuinely-unclaimed PENDING rows. Reconcile is fire-and-forget
-    // before the kick — the drain's findFirst already filters claimed rows out,
-    // so ordering between the two is not load-bearing for safety.
-    void deps.sendService
-      .reconcileInterruptedSends()
-      .then((reconciled) => {
-        if (reconciled > 0) {
-          console.warn(
-            `[send-queue] reconciled ${reconciled} interrupted send(s) to FAILED after restart`
-          );
-        }
-      })
-      .catch((error) => {
-        console.warn(
-          `[send-queue] reconcileInterruptedSends failed: ${
-            error instanceof Error ? error.message : String(error)
-          }`
-        );
-      });
-    // Same as kick — the loop will find any leftover (unclaimed) PENDING rows
-    // from before the last process exited. Separate name for clarity at the
-    // call site (createPlatformFactory at runner boot).
+    // they are flipped to FAILED (INTERRUPTED) for the operator to verify. Then
+    // repair SENT projections before draining genuinely-unclaimed rows, because
+    // automatic focus decisions must observe completed manual sends first.
+    // tick() gates every future kick on this recovery, including sends queued
+    // while the database is temporarily unavailable.
     kick();
   }
 
@@ -155,11 +194,21 @@ export function createSendQueue(deps: SendQueueDeps): SendQueueService {
     text: string;
     clientSendId: string;
     source?: SendSource;
+    focusWindowId?: string;
+    focusIntentVersion?: number;
+    retryFailedFocusAcknowledgement?: boolean;
+    rearmPolicyBlockedFocusAcknowledgement?: boolean;
     // attachments must mirror the public interface above so iMessage
     // voice notes / photos survive the type contract — without this the
     // field is silently dropped by any future refactor that relies on
     // the inferred parameter type.
-    attachments?: Array<{ absolutePath: string; displayName: string; mimeType?: string; kind?: string }>;
+    attachments?: Array<{
+      absolutePath: string;
+      displayName: string;
+      mimeType?: string;
+      kind?: string;
+      contentDigest?: string;
+    }>;
     /**
      * App-level threading. Forwarded to sendService.enqueueSend → persisted
      * on the SendRequest, then copied onto the resulting Message row so the
@@ -176,11 +225,11 @@ export function createSendQueue(deps: SendQueueDeps): SendQueueService {
   }> {
     const result = await deps.sendService.enqueueSend(input);
     const activeRows = await prisma.sendRequest.findMany({
-      where: { status: "PENDING" },
+      where: { status: "PENDING", source: { in: QUEUED_MESSAGE_SOURCES } },
       orderBy: { createdAt: "asc" },
       select: { id: true, clientSendId: true }
     });
-    const queuePosition = activeRows.findIndex((row) => row.clientSendId === input.clientSendId);
+    const queuePosition = activeRows.findIndex((row) => row.clientSendId === result.clientSendId);
     deps.eventBus.emit({
       type: "SEND_QUEUE_UPDATED",
       jobId: "send-queue",
@@ -202,7 +251,9 @@ export function createSendQueue(deps: SendQueueDeps): SendQueueService {
   }
 
   async function getActiveCount(): Promise<number> {
-    return prisma.sendRequest.count({ where: { status: "PENDING" } });
+    return prisma.sendRequest.count({
+      where: { status: "PENDING", source: { in: QUEUED_MESSAGE_SOURCES } }
+    });
   }
 
   return { enqueueAndKick, kick, resume, getActiveCount };

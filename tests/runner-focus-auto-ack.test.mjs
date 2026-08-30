@@ -1,10 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  bindFocusAutoAckEvents,
   createFocusAutoAckService,
   focusAutoAckCoverage,
-  focusAutoAckText
+  focusAutoAckText,
+  focusManualAckClientSendId
 } from "../apps/runner/src/services/focus-auto-ack.ts";
+import { createEventBus } from "../apps/runner/src/services/event-bus.ts";
+import { mergeFocusWindowUpdate } from "../apps/runner/src/services/settings.ts";
 
 const now = new Date("2026-07-22T12:00:00.000Z");
 
@@ -67,8 +71,15 @@ function thread(overrides = {}) {
   };
 }
 
-function harness({ profileValue = profile(), threadValue = thread() } = {}) {
+function harness({
+  profileValue = profile(),
+  threadValue = thread(),
+  loadThread,
+  afterEnqueue,
+  queueStatus = "PENDING"
+} = {}) {
   let current = structuredClone(profileValue);
+  let deliveredSendRequest = null;
   const queued = [];
   const writes = [];
   const service = createFocusAutoAckService({
@@ -77,21 +88,39 @@ function harness({ profileValue = profile(), threadValue = thread() } = {}) {
       async getOperatorProfile() {
         return structuredClone(current);
       },
-      async updateOperatorProfile(partial) {
-        current = { ...current, ...structuredClone(partial) };
-        writes.push(structuredClone(partial));
-        return structuredClone(current);
+      async acknowledgeFocusWindowPerson(windowId, personId) {
+        if (current.focusWindow.windowId !== windowId) {
+          return false;
+        }
+        current = {
+          ...current,
+          focusWindow: {
+            ...current.focusWindow,
+            ackedPersonIds: Array.from(new Set([...current.focusWindow.ackedPersonIds, personId]))
+          }
+        };
+        writes.push({ focusWindow: structuredClone(current.focusWindow) });
+        return true;
       }
     },
-    async loadThread() {
-      return threadValue;
+    async loadThread(threadId) {
+      return loadThread ? loadThread(threadId) : threadValue;
+    },
+    async loadSendRequest(clientSendId) {
+      return deliveredSendRequest?.clientSendId === clientSendId
+        ? { ...deliveredSendRequest }
+        : null;
     },
     sendQueue: {
       async enqueueAndKick(input) {
         queued.push(input);
+        await afterEnqueue?.({
+          read: () => structuredClone(current),
+          write: (next) => { current = structuredClone(next); }
+        });
         return {
           clientSendId: input.clientSendId,
-          status: "PENDING",
+          status: queueStatus,
           replayed: false,
           queuePosition: 0,
           activeCount: 1
@@ -99,11 +128,29 @@ function harness({ profileValue = profile(), threadValue = thread() } = {}) {
       }
     }
   });
-  return { service, queued, writes, current: () => current };
+  return {
+    service,
+    queued,
+    writes,
+    current: () => current,
+    markDelivered() {
+      const send = queued.at(-1);
+      if (!send) throw new Error("no queued focus acknowledgement");
+      deliveredSendRequest = {
+        clientSendId: send.clientSendId,
+        threadId: send.threadId,
+        source: send.source,
+        status: "SENT"
+      };
+    },
+    setDelivered(request) {
+      deliveredSendRequest = { ...request, status: "SENT" };
+    }
+  };
 }
 
 test("explicit focus opt-in queues the operator's note once and records the person", async () => {
-  const h = harness();
+  const h = harness({ queueStatus: "SENT" });
   const result = await h.service.handleThread("thread-1");
   assert.equal(result.type, "queued");
   assert.equal(h.queued.length, 1);
@@ -115,6 +162,94 @@ test("explicit focus opt-in queues the operator's note once and records the pers
   assert.equal(h.queued.length, 1);
 });
 
+test("a queued but not yet delivered automatic note is not marked acknowledged", async () => {
+  const h = harness();
+
+  const result = await h.service.handleThread("thread-1");
+
+  assert.equal(result.type, "queued");
+  assert.equal(h.queued.length, 1);
+  assert.deepEqual(h.current().focusWindow.ackedPersonIds, []);
+  assert.deepEqual(h.writes, []);
+});
+
+test("a delivered automatic note is acknowledged when its send event arrives", async () => {
+  const h = harness();
+  const eventBus = createEventBus();
+  const unsubscribe = bindFocusAutoAckEvents(eventBus, h.service);
+  const settle = () => new Promise((resolve) => setImmediate(resolve));
+
+  await h.service.handleThread("thread-1");
+  h.markDelivered();
+  eventBus.emit({
+    type: "MESSAGE_SENT",
+    jobId: "focus-auto-ack-sent",
+    threadId: "thread-1",
+    platform: "IMESSAGE",
+    clientSendId: h.queued[0].clientSendId,
+    verifiedBy: "best_effort"
+  });
+  await settle();
+
+  assert.deepEqual(h.current().focusWindow.ackedPersonIds, ["person-1"]);
+  assert.equal(h.queued.length, 1);
+  unsubscribe();
+});
+
+test("a delivered manual focus note is reconciled without enqueueing an automatic duplicate", async () => {
+  const h = harness();
+  const eventBus = createEventBus();
+  const unsubscribe = bindFocusAutoAckEvents(eventBus, h.service);
+  const clientSendId = focusManualAckClientSendId("focus-1", "person-1");
+  h.setDelivered({
+    clientSendId,
+    threadId: "thread-1",
+    source: "focus_ack"
+  });
+
+  eventBus.emit({
+    type: "MESSAGE_SENT",
+    jobId: "focus-manual-ack-sent",
+    threadId: "thread-1",
+    platform: "IMESSAGE",
+    clientSendId,
+    verifiedBy: "best_effort"
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(h.current().focusWindow.ackedPersonIds, ["person-1"]);
+  assert.equal(h.queued.length, 0);
+  unsubscribe();
+});
+
+test("recording the queued person cannot reactivate a focus window ended concurrently", async () => {
+  const h = harness({
+    queueStatus: "SENT",
+    afterEnqueue: async ({ read, write }) => {
+      const ended = read();
+      write({ ...ended, focusWindow: { ...ended.focusWindow, active: false } });
+    }
+  });
+
+  assert.equal((await h.service.handleThread("thread-1")).type, "queued");
+  assert.equal(h.current().focusWindow.active, false);
+  assert.deepEqual(h.current().focusWindow.ackedPersonIds, ["person-1"]);
+});
+
+test("ending the same focus window preserves acknowledgements recorded concurrently", () => {
+  const current = profile({ ackedPersonIds: ["person-1"] }).focusWindow;
+  const endedFromStaleClient = {
+    ...profile().focusWindow,
+    active: false,
+    ackedPersonIds: []
+  };
+
+  assert.deepEqual(
+    mergeFocusWindowUpdate(current, endedFromStaleClient),
+    { ...endedFromStaleClient, ackedPersonIds: ["person-1"] }
+  );
+});
+
 test("automatic sending stays off unless the active window explicitly opts in", async () => {
   const h = harness({ profileValue: profile({ autoSendAcknowledgements: false }) });
   assert.deepEqual(await h.service.handleThread("thread-1"), {
@@ -124,10 +259,27 @@ test("automatic sending stays off unless the active window explicitly opts in", 
   assert.equal(h.queued.length, 0);
 });
 
+test("automatic sending fails closed when either focus-window boundary is invalid", async () => {
+  for (const invalidWindow of [
+    { startedAt: "", endsAt: "2026-07-22T13:30:00.000Z" },
+    { startedAt: "not-a-date", endsAt: "2026-07-22T13:30:00.000Z" },
+    { startedAt: "2026-07-22T11:30:00.000Z", endsAt: "" },
+    { startedAt: "2026-07-22T11:30:00.000Z", endsAt: "not-a-date" }
+  ]) {
+    const h = harness({ profileValue: profile(invalidWindow) });
+    assert.deepEqual(await h.service.handleThread("thread-1"), {
+      type: "skipped",
+      reason: "disabled"
+    });
+    assert.equal(h.queued.length, 0);
+  }
+});
+
 test("group chats, outreach, and unknown unstarred handles are never covered", () => {
   const base = profile({ audience: "all_personal" });
   assert.equal(focusAutoAckCoverage(thread({ isGroup: true }), base), false);
   assert.equal(focusAutoAckCoverage(thread({ category: "outreach" }), base), false);
+  assert.equal(focusAutoAckCoverage(thread({ category: null }), base), false);
   assert.equal(
     focusAutoAckCoverage(
       thread({
@@ -142,6 +294,69 @@ test("group chats, outreach, and unknown unstarred handles are never covered", (
     ),
     false
   );
+});
+
+test("auto-ack revalidates authoritative classification immediately before queueing", async () => {
+  let reads = 0;
+  const h = harness({
+    loadThread: async () => {
+      reads += 1;
+      return reads === 1 ? thread({ category: "genuine" }) : thread({ category: "outreach" });
+    }
+  });
+
+  assert.deepEqual(await h.service.handleThread("thread-1"), {
+    type: "skipped",
+    reason: "not_covered"
+  });
+  assert.equal(reads, 2);
+  assert.equal(h.queued.length, 0);
+});
+
+test("post-projection events retry genuine auto-ack without duplicating concurrent events", async () => {
+  let currentThread = thread({ category: null });
+  const h = harness({ loadThread: async () => currentThread });
+  const eventBus = createEventBus();
+  const unsubscribe = bindFocusAutoAckEvents(eventBus, h.service);
+  const settle = () => new Promise((resolve) => setImmediate(resolve));
+
+  eventBus.emit({
+    type: "MESSAGES_PERSISTED",
+    jobId: "persisted-null",
+    threadId: "thread-1",
+    platform: "IMESSAGE",
+    syncTiming: {
+      sourceChangedAt: now.toISOString(),
+      persistedAt: now.toISOString(),
+      trigger: "test"
+    }
+  });
+  await settle();
+  assert.equal(h.queued.length, 0);
+
+  currentThread = thread({ category: "outreach" });
+  eventBus.emit({ type: "THREAD_UPDATED", jobId: "classified-outreach", threadId: "thread-1" });
+  await settle();
+  assert.equal(h.queued.length, 0);
+
+  currentThread = thread({ category: "genuine" });
+  eventBus.emit({
+    type: "MESSAGES_PERSISTED",
+    jobId: "persisted-genuine",
+    threadId: "thread-1",
+    platform: "IMESSAGE",
+    syncTiming: {
+      sourceChangedAt: now.toISOString(),
+      persistedAt: now.toISOString(),
+      trigger: "test"
+    }
+  });
+  eventBus.emit({ type: "THREAD_UPDATED", jobId: "classified-genuine", threadId: "thread-1" });
+  await settle();
+  await settle();
+
+  assert.equal(h.queued.length, 1);
+  unsubscribe();
 });
 
 test("all-personal covers a saved iMessage contact but not the same unstarred LinkedIn contact", () => {

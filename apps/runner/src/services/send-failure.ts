@@ -3,6 +3,7 @@ export type SendFailureKind =
   | "SELECTOR_FAIL"
   | "PROFILE_LOCKED"
   | "TRANSIENT"
+  | "POLICY_BLOCKED"
   | "DELIVERY_UNCERTAIN"
   | "UNKNOWN";
 
@@ -79,6 +80,13 @@ export function consumerSendFailure(errorKind: SendFailureKind): ConsumerSendFai
         retrySafe: true,
         deliveryUncertain: false
       };
+    case "POLICY_BLOCKED":
+      return {
+        errorKind,
+        message: "This message is no longer eligible and was not sent.",
+        retrySafe: false,
+        deliveryUncertain: false
+      };
     case "DELIVERY_UNCERTAIN":
       return {
         errorKind,
@@ -116,6 +124,7 @@ export function parsePersistedSendFailure(errorJson?: string | null): ConsumerSe
       "SELECTOR_FAIL",
       "PROFILE_LOCKED",
       "TRANSIENT",
+      "POLICY_BLOCKED",
       "DELIVERY_UNCERTAIN"
     ]).has(persistedKind as SendFailureKind)
       ? (persistedKind as SendFailureKind)
@@ -129,11 +138,19 @@ export function parsePersistedSendFailure(errorJson?: string | null): ConsumerSe
 export function persistedSendRetryEligibility(
   status: string,
   errorJson?: string | null
-): { allowed: true } | { allowed: false; reason: "not_failed" | "delivery_uncertain" } {
+): {
+  allowed: true;
+} | {
+  allowed: false;
+  reason: "not_failed" | "delivery_uncertain" | "policy_blocked";
+} {
   if (status !== "FAILED") {
     return { allowed: false, reason: "not_failed" };
   }
   const failure = parsePersistedSendFailure(errorJson);
+  if (failure.errorKind === "POLICY_BLOCKED") {
+    return { allowed: false, reason: "policy_blocked" };
+  }
   return failure.retrySafe && !failure.deliveryUncertain
     ? { allowed: true }
     : { allowed: false, reason: "delivery_uncertain" };

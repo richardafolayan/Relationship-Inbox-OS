@@ -18,6 +18,13 @@ const scanQueueSource = await readFile(
   new URL("../apps/runner/src/services/scan-queue.ts", import.meta.url),
   "utf8"
 );
+const resetCoordinatorSource = await readFile(
+  new URL(
+    "../apps/runner/src/services/platform-session-reset-coordinator.ts",
+    import.meta.url
+  ),
+  "utf8"
+);
 const schemaSource = await readFile(
   new URL("../packages/core/prisma/schema.prisma", import.meta.url),
   "utf8"
@@ -47,10 +54,20 @@ test("server setup validation and interactive connection include Instagram", () 
 });
 
 test("session reset uses the isolated-platform reset plan", () => {
-  assert.match(runnerSource, /planPlatformSessionReset\(allPlatforms, payload\.platform\)/);
-  assert.match(runnerSource, /if \(resetPlan\.resetInstagramSession\)/);
+  assert.match(
+    resetCoordinatorSource,
+    /planPlatformSessionReset\(\[\.\.\.deps\.platforms\], requestedPlatform\)/
+  );
+  assert.match(resetCoordinatorSource, /if \(plan\.resetInstagramSession\)/);
   assert.match(runnerSource, /resolvePlatformSession\("INSTAGRAM"\)/);
-  assert.match(runnerSource, /for \(const platform of resetPlan\.statusPlatforms\)/);
+  assert.match(
+    resetCoordinatorSource,
+    /for \(const platform of plan\.statusPlatforms\)/
+  );
+  assert.match(
+    runnerSource,
+    /platformSessionResetCoordinator\.reset\(payload\.platform\)/
+  );
 });
 
 test("Instagram selectors and adapter never use a first-row or Enter-key send fallback", () => {

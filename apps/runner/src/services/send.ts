@@ -1,12 +1,25 @@
 import type { PlatformAdapter, PlatformName, SendReceipt, ThreadStub } from "@inbox-os/core";
 import { calculateRisk, stableHash } from "@inbox-os/core";
-import { Prisma, type PrismaClient } from "@prisma/client";
+import { Prisma, type PrismaClient, type SendRequest as SendRequestRow } from "@prisma/client";
 import { v4 as uuid } from "uuid";
 import { prisma as defaultPrisma } from "../db";
 import type { EventBus, SettingsStore } from "../types/runtime";
 import { AdapterFailure } from "../platforms/utils";
 import { buildDemoSendReceipt } from "./demo-send";
-import { classifySendFailureKind, consumerSendFailure } from "./send-failure";
+import {
+  classifySendFailureKind,
+  consumerSendFailure,
+  parsePersistedSendFailure
+} from "./send-failure";
+import {
+  focusAcknowledgementClientSendIds,
+  focusAutoAckDispatchEligible,
+  focusAutoAckClientSendId,
+  focusManualAckClientSendId,
+  focusManualAckDispatchEligible,
+  type FocusAutoAckThread
+} from "./focus-auto-ack";
+import { createKeyedMutex } from "./keyed-mutex";
 
 interface SendServiceDeps {
   // Partial: not every PlatformName has an adapter on main today. The
@@ -33,6 +46,14 @@ interface SendServiceDeps {
    * navigations/DOM reads on one page.
    */
   withPlatformLock: <T>(platform: PlatformName, work: () => Promise<T>) => Promise<T>;
+  /**
+   * Fences every externally visible action against an administrative reset.
+   * The fixed lock order is external action first, then the page/platform lock.
+   */
+  withExternalActionLock: <T>(
+    platform: PlatformName,
+    work: () => Promise<T>
+  ) => Promise<T>;
   /** Override the Prisma client. Defaults to the runner's singleton; tests inject a fake. */
   prisma?: PrismaClient;
   onPlatformResult?: (input: {
@@ -119,10 +140,31 @@ function isUniqueConstraintError(error: unknown): boolean {
 // row it is never read. The SENT write overwrites this marker with the real
 // receipt JSON.
 export const SEND_CLAIM_MARKER = "__claimed__";
+export const LOCAL_RECONCILIATION_REQUIRED = "local_projection_required";
 
 /** True when a PENDING row carries the in-flight claim marker (vs. a real receipt). */
 export function isClaimMarker(receiptJson: string | null | undefined): boolean {
   return receiptJson === SEND_CLAIM_MARKER;
+}
+
+export function localReconciliationMarker(): string {
+  return JSON.stringify({
+    reconciliationRequired: true,
+    reason: LOCAL_RECONCILIATION_REQUIRED
+  });
+}
+
+export function needsLocalReconciliation(errorJson: string | null | undefined): boolean {
+  if (!errorJson) return false;
+  try {
+    const payload = JSON.parse(errorJson) as Record<string, unknown>;
+    return (
+      payload.reconciliationRequired === true &&
+      payload.reason === LOCAL_RECONCILIATION_REQUIRED
+    );
+  } catch {
+    return false;
+  }
 }
 
 export interface EnqueueSendResult {
@@ -141,6 +183,118 @@ export interface ScheduleSendResult {
 }
 
 export type SendSource = "manual" | "focus_ack" | "focus_auto_ack";
+
+type SendAttachment = {
+  absolutePath: string;
+  displayName: string;
+  mimeType?: string;
+  kind?: string;
+  contentDigest?: string;
+};
+
+type PersistedSendIntent = {
+  threadId: string;
+  requestText: string;
+  source: string;
+  attachmentsJson: string | null;
+  replyToMessageId: string | null;
+  scheduledFor: Date | null;
+};
+
+function normalizedAttachmentsJson(attachments?: SendAttachment[]): string | null {
+  if (!attachments || attachments.length === 0) return null;
+  return JSON.stringify(
+    attachments.map((attachment) => ({
+      absolutePath: attachment.absolutePath,
+      displayName: attachment.displayName,
+      mimeType: attachment.mimeType ?? null,
+      kind: attachment.kind ?? null,
+      contentDigest: attachment.contentDigest ?? null
+    }))
+  );
+}
+
+function attachmentIntentJson(attachments?: SendAttachment[]): string | null {
+  if (!attachments || attachments.length === 0) return null;
+  return JSON.stringify(
+    attachments.map((attachment) => ({
+      displayName: attachment.displayName,
+      mimeType: attachment.mimeType ?? null,
+      kind: attachment.kind ?? null,
+      contentDigest: attachment.contentDigest ?? null,
+      legacyAbsolutePath: attachment.contentDigest ? null : attachment.absolutePath
+    }))
+  );
+}
+
+function normalizePersistedAttachmentsJson(value: string | null): string | null {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!Array.isArray(parsed) || parsed.length === 0) return null;
+    return attachmentIntentJson(
+      parsed.map((attachment) => {
+        if (!attachment || typeof attachment !== "object") {
+          throw new Error("invalid attachment");
+        }
+        const candidate = attachment as Record<string, unknown>;
+        if (
+          typeof candidate.absolutePath !== "string" ||
+          typeof candidate.displayName !== "string"
+        ) {
+          throw new Error("invalid attachment");
+        }
+        return {
+          absolutePath: candidate.absolutePath,
+          displayName: candidate.displayName,
+          mimeType: typeof candidate.mimeType === "string" ? candidate.mimeType : undefined,
+          kind: typeof candidate.kind === "string" ? candidate.kind : undefined,
+          contentDigest:
+            typeof candidate.contentDigest === "string" ? candidate.contentDigest : undefined
+        };
+      })
+    );
+  } catch {
+    return "__invalid__";
+  }
+}
+
+function assertExistingSendIntent(
+  existing: PersistedSendIntent,
+  expected: {
+    threadId: string;
+    text: string;
+    source: SendSource;
+    attachments?: SendAttachment[];
+    replyToMessageId?: string;
+    scheduledFor?: Date;
+  },
+  options: { allowRequestTextChange?: boolean } = {}
+): void {
+  const existingScheduledFor = existing.scheduledFor?.getTime() ?? null;
+  const expectedScheduledFor = expected.scheduledFor?.getTime() ?? null;
+  if (
+    existing.threadId !== expected.threadId ||
+    (!options.allowRequestTextChange && existing.requestText !== expected.text) ||
+    existing.source !== expected.source ||
+    normalizePersistedAttachmentsJson(existing.attachmentsJson) !==
+      attachmentIntentJson(expected.attachments) ||
+    (existing.replyToMessageId ?? null) !== (expected.replyToMessageId ?? null) ||
+    existingScheduledFor !== expectedScheduledFor
+  ) {
+    throw new Error("clientSendId is already linked to a different send intent");
+  }
+}
+
+export class SendPolicyError extends Error {
+  constructor(
+    readonly reasonCode: string,
+    message: string
+  ) {
+    super(message);
+    this.name = "SendPolicyError";
+  }
+}
 
 export function parsePersistedSendSource(value: unknown): SendSource | null {
   return value === "manual" || value === "focus_ack" || value === "focus_auto_ack"
@@ -169,6 +323,231 @@ export function createSendService(deps: SendServiceDeps) {
   // Default to the runner's singleton; tests inject a fake to exercise the
   // scheduled-send race guards without a real database.
   const prisma = deps.prisma ?? defaultPrisma;
+  const userTriggeredIntentCounts = new Map<string, number>();
+  const userTriggeredIntentEpochs = new Map<string, number>();
+  const durableUserIntentVersionMutex = createKeyedMutex();
+  let focusPolicyMutationIntentCount = 0;
+  let focusPolicyMutationIntentEpoch = 0;
+  const focusAcknowledgementEnqueueMutex = createKeyedMutex();
+  const focusAcknowledgementDispatchBaselines = new Map<string, {
+    threadIntentEpoch: number;
+    focusPolicyIntentEpoch: number;
+    selfIntentAllowance: number;
+  }>();
+
+  function registerUserTriggeredIntent(threadId: string): () => void {
+    userTriggeredIntentEpochs.set(
+      threadId,
+      (userTriggeredIntentEpochs.get(threadId) ?? 0) + 1
+    );
+    userTriggeredIntentCounts.set(
+      threadId,
+      (userTriggeredIntentCounts.get(threadId) ?? 0) + 1
+    );
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const remaining = (userTriggeredIntentCounts.get(threadId) ?? 1) - 1;
+      if (remaining > 0) {
+        userTriggeredIntentCounts.set(threadId, remaining);
+      } else {
+        userTriggeredIntentCounts.delete(threadId);
+      }
+    };
+  }
+
+  function registerDurableUserTriggeredIntent(threadId: string): {
+    release: () => void;
+    ready: Promise<number | undefined>;
+  } {
+    const release = registerUserTriggeredIntent(threadId);
+    const ready = durableUserIntentVersionMutex.runExclusive(threadId, async () => {
+      const updated = await prisma.thread.updateMany({
+        where: { id: threadId },
+        data: { userIntentVersion: { increment: 1 } }
+      });
+      if (updated.count !== 1) return undefined;
+      const thread = await prisma.thread.findUnique({
+        where: { id: threadId },
+        select: { userIntentVersion: true }
+      });
+      if (!thread) return undefined;
+      return thread.userIntentVersion;
+    });
+    return { release, ready };
+  }
+
+  function registerFocusPolicyMutationIntent(): () => void {
+    focusPolicyMutationIntentEpoch += 1;
+    focusPolicyMutationIntentCount += 1;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      focusPolicyMutationIntentCount = Math.max(
+        0,
+        focusPolicyMutationIntentCount - 1
+      );
+    };
+  }
+
+  async function withUserTriggeredIntent<T>(
+    threadId: string,
+    work: () => Promise<T>
+  ): Promise<T> {
+    const release = registerUserTriggeredIntent(threadId);
+    try {
+      return await work();
+    } finally {
+      release();
+    }
+  }
+
+  async function projectSentRequest(
+    sendRequest: SendRequestRow,
+    receipt: SendReceipt
+  ): Promise<void> {
+    const thread = await prisma.thread.findUnique({
+      where: { id: sendRequest.threadId }
+    });
+    if (!thread) throw new Error("Thread not found while reconciling a sent message");
+
+    const settings = await deps.settingsStore.getSettings();
+    const sentAt = new Date(receipt.sentAt);
+    if (Number.isNaN(sentAt.getTime())) {
+      throw new Error("Send receipt has an invalid sentAt timestamp");
+    }
+    const attachmentsJson =
+      receipt.attachments && receipt.attachments.length > 0
+        ? JSON.stringify(receipt.attachments)
+        : null;
+    const rawJson = receipt.raw ? JSON.stringify(receipt.raw) : null;
+    const platformMessageKey =
+      receipt.platformMessageKey ??
+      stableHash(`${thread.id}|${receipt.sentAt}|OUT|${sendRequest.requestText}`);
+
+    const projectedMessage = await prisma.message.upsert({
+      where: {
+        threadId_platformMessageKey: {
+          threadId: thread.id,
+          platformMessageKey
+        }
+      },
+      update: {
+        direction: "OUT"
+      },
+      create: {
+        threadId: thread.id,
+        platformMessageKey,
+        direction: "OUT",
+        timestamp: sentAt,
+        text: sendRequest.requestText,
+        sentVia: "automation",
+        attachmentsJson,
+        rawJson,
+        replyToMessageId: sendRequest.replyToMessageId ?? null
+      },
+      select: { text: true }
+    });
+
+    const lastOutboundAt =
+      thread.lastOutboundAt && thread.lastOutboundAt > sentAt
+        ? thread.lastOutboundAt
+        : sentAt;
+    const risk = calculateRisk({
+      lastInboundAt: thread.lastInboundAt,
+      lastOutboundAt,
+      amberHours: settings.amberHours,
+      redHours: settings.redHours
+    });
+    const sendIsLatest = !thread.lastMessageAt || sentAt >= thread.lastMessageAt;
+    await prisma.thread.update({
+      where: { id: thread.id },
+      data: {
+        needsReply: risk.needsReply,
+        riskLevel: risk.level,
+        riskReason: risk.riskReason,
+        slaDueAt: risk.slaDueAt,
+        lastOutboundAt,
+        ...(sendIsLatest
+          ? {
+              snoozedUntil: null,
+              lastMessageAt: sentAt,
+              unreadCount: 0,
+              lastMessageDirection: "OUT" as const,
+              lastMessageText: projectedMessage.text
+            }
+          : {})
+      }
+    });
+  }
+
+  async function reconcileSentProjectionRow(sendRequest: SendRequestRow): Promise<boolean> {
+    if (
+      sendRequest.source === "manual_poll" ||
+      sendRequest.status !== "SENT" ||
+      !sendRequest.receiptJson ||
+      !needsLocalReconciliation(sendRequest.errorJson)
+    ) {
+      return false;
+    }
+    let receipt: SendReceipt;
+    try {
+      receipt = JSON.parse(sendRequest.receiptJson) as SendReceipt;
+    } catch {
+      return false;
+    }
+    const thread = await prisma.thread.findUnique({
+      where: { id: sendRequest.threadId },
+      select: { platform: true }
+    });
+    if (!thread) return false;
+    await deps.withExternalActionLock(thread.platform as PlatformName, () =>
+      deps.withPlatformLock(thread.platform as PlatformName, async () => {
+        const authoritative = await prisma.sendRequest.findUnique({
+          where: { id: sendRequest.id }
+        });
+        if (
+          !authoritative ||
+          authoritative.status !== "SENT" ||
+          !authoritative.receiptJson ||
+          !needsLocalReconciliation(authoritative.errorJson)
+        ) {
+          return;
+        }
+        await projectSentRequest(authoritative, JSON.parse(authoritative.receiptJson));
+        await prisma.sendRequest.update({
+          where: { id: authoritative.id },
+          data: { errorJson: null }
+        });
+      })
+    );
+    return true;
+  }
+
+  async function reconcileSentProjections(): Promise<number> {
+    const pendingRepairs = await prisma.sendRequest.findMany({
+      where: {
+        status: "SENT",
+        source: { not: "manual_poll" },
+        errorJson: { contains: LOCAL_RECONCILIATION_REQUIRED }
+      }
+    });
+    let repaired = 0;
+    for (const sendRequest of pendingRepairs) {
+      try {
+        if (await reconcileSentProjectionRow(sendRequest)) repaired += 1;
+      } catch (error) {
+        console.warn(
+          `[send] local reconciliation remains pending for ${sendRequest.clientSendId}: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
+      }
+    }
+    return repaired;
+  }
 
   /**
    * Insert a SendRequest in PENDING state and return immediately. The actual
@@ -184,8 +563,12 @@ export function createSendService(deps: SendServiceDeps) {
     threadId: string;
     text: string;
     clientSendId: string;
-    attachments?: Array<{ absolutePath: string; displayName: string; mimeType?: string; kind?: string }>;
+    attachments?: SendAttachment[];
     source?: SendSource;
+    focusWindowId?: string;
+    focusIntentVersion?: number;
+    retryFailedFocusAcknowledgement?: boolean;
+    rearmPolicyBlockedFocusAcknowledgement?: boolean;
     /**
      * App-level threading: when set, the resulting Message row links back
      * to the parent (a Message.id cuid in the same thread). The send still
@@ -200,70 +583,358 @@ export function createSendService(deps: SendServiceDeps) {
     if (!thread) {
       throw new Error("Thread not found");
     }
-    assertInstagramManualTextSend({
-      platform: thread.platform as PlatformName,
-      attachmentCount: input.attachments?.length ?? 0,
-      source: input.source ?? "manual"
-    });
+    const source = input.source ?? "manual";
 
-    const existing = await prisma.sendRequest.findUnique({
-      where: { clientSendId: input.clientSendId }
-    });
-    if (existing) {
-      if (existing.threadId !== input.threadId) {
-        throw new Error("clientSendId is already linked to another thread");
+    const enqueue = async (): Promise<EnqueueSendResult> => {
+      let focusIntentVersion: number | undefined;
+      const existing = await prisma.sendRequest.findUnique({
+        where: { clientSendId: input.clientSendId }
+      });
+      const rearmingPolicyBlockedFocusAcknowledgement = Boolean(
+        existing &&
+        source === "focus_ack" &&
+        existing.source === "focus_ack" &&
+        existing.status === "FAILED" &&
+        existing.receiptJson === null &&
+        input.rearmPolicyBlockedFocusAcknowledgement &&
+        parsePersistedSendFailure(existing.errorJson).errorKind === "POLICY_BLOCKED"
+      );
+      if (existing) {
+        assertExistingSendIntent(
+          existing,
+          { ...input, source },
+          { allowRequestTextChange: rearmingPolicyBlockedFocusAcknowledgement }
+        );
       }
-      if (existing.status === "SENT" && existing.receiptJson) {
-        return {
-          clientSendId: input.clientSendId,
-          status: "SENT",
-          replayed: true,
-          result: { ...parseReceipt(existing.receiptJson), replayed: true }
-        };
+
+      assertInstagramManualTextSend({
+        platform: thread.platform as PlatformName,
+        attachmentCount: input.attachments?.length ?? 0,
+        source
+      });
+
+      if (source === "focus_ack" || source === "focus_auto_ack") {
+        if (!input.focusWindowId) {
+          throw new SendPolicyError(
+            "focus_window_required",
+            "Focus acknowledgements require the active focus window"
+          );
+        }
+        const expectedClientSendId = source === "focus_ack"
+          ? focusManualAckClientSendId(input.focusWindowId, thread.personId)
+          : focusAutoAckClientSendId(input.focusWindowId, thread.personId);
+        if (input.clientSendId !== expectedClientSendId) {
+          throw new SendPolicyError(
+            "focus_ack_identity_mismatch",
+            "Focus acknowledgement identity does not match this window and person"
+          );
+        }
+        focusIntentVersion =
+          source === "focus_ack" ? input.focusIntentVersion : thread.userIntentVersion;
+        if (!Number.isInteger(focusIntentVersion) || focusIntentVersion! < 0) {
+          throw new SendPolicyError(
+            "focus_ack_intent_baseline_required",
+            "Focus acknowledgement safety state is unavailable"
+          );
+        }
+
+        const deliveryIds = focusAcknowledgementClientSendIds(
+          input.focusWindowId,
+          thread.personId
+        );
+        let winner = await prisma.sendRequest.findFirst({
+          where: { clientSendId: { in: deliveryIds } },
+          orderBy: [{ createdAt: "asc" }, { id: "asc" }]
+        });
+        if (
+          winner &&
+          winner.clientSendId !== input.clientSendId &&
+          source === "focus_ack" &&
+          winner.source === "focus_auto_ack" &&
+          winner.status === "CANCELLED"
+        ) {
+          winner = existing;
+        }
+        if (winner && winner.clientSendId !== input.clientSendId) {
+          if (
+            source === "focus_ack" &&
+            winner.source === "focus_auto_ack" &&
+            winner.status === "PENDING" &&
+            winner.receiptJson === null
+          ) {
+            const cancelled = await prisma.sendRequest.updateMany({
+              where: {
+                id: winner.id,
+                status: "PENDING",
+                receiptJson: null,
+                source: "focus_auto_ack"
+              },
+              data: { status: "CANCELLED" }
+            });
+            if (cancelled.count === 1) winner = existing;
+          } else if (
+            source === "focus_ack" &&
+            winner.source === "focus_auto_ack" &&
+            winner.status === "FAILED" &&
+            winner.receiptJson === null &&
+            !/"errorKind":"(?:DELIVERY_UNCERTAIN|INTERRUPTED)"/.test(
+              winner.errorJson ?? ""
+            )
+          ) {
+            winner = existing;
+          }
+        }
+        if (
+          winner &&
+          winner.clientSendId !== input.clientSendId &&
+          source === "focus_ack" &&
+          winner.source === "focus_auto_ack" &&
+          winner.status === "PENDING"
+        ) {
+          throw new SendPolicyError(
+            "focus_auto_ack_in_progress",
+            "An automatic focus acknowledgement is already being processed"
+          );
+        }
+        if (
+          winner &&
+          winner.clientSendId !== input.clientSendId &&
+          source === "focus_ack" &&
+          winner.source === "focus_auto_ack" &&
+          winner.status === "FAILED"
+        ) {
+          throw new SendPolicyError(
+            "focus_auto_ack_delivery_unconfirmed",
+            "Automatic focus acknowledgement delivery could not be confirmed"
+          );
+        }
+        if (winner && winner.clientSendId !== input.clientSendId) {
+          if (winner.status === "SENT" && winner.receiptJson) {
+            await reconcileSentProjectionRow(winner).catch(() => false);
+            return {
+              clientSendId: winner.clientSendId,
+              status: "SENT",
+              replayed: true,
+              result: { ...parseReceipt(winner.receiptJson), replayed: true }
+            };
+          }
+          if (winner.status === "FAILED") {
+            return {
+              clientSendId: winner.clientSendId,
+              status: "FAILED",
+              replayed: true,
+              errorMessage: parseFailedSendMessage(winner.errorJson)
+            };
+          }
+          if (winner.status === "PENDING") {
+            return {
+              clientSendId: winner.clientSendId,
+              status: "PENDING",
+              replayed: true
+            };
+          }
+          throw new SendPolicyError(
+            "focus_ack_already_claimed",
+            "This person already has a focus acknowledgement for this window"
+          );
+        }
+
+        const profile = await deps.settingsStore.getOperatorProfile();
+        const endsAt = Date.parse(profile.focusWindow.endsAt);
+        if (
+          profile.focusWindow.windowId !== input.focusWindowId ||
+          !profile.focusWindow.active ||
+          !Number.isFinite(endsAt) ||
+          endsAt <= Date.now() ||
+          profile.focusWindow.ackedPersonIds.includes(thread.personId)
+        ) {
+          throw new SendPolicyError(
+            "focus_ack_not_eligible",
+            "This focus acknowledgement is no longer eligible"
+          );
+        }
+        if (existing && source === "focus_ack" && existing.status === "PENDING") {
+          if (!Number.isInteger(existing.focusIntentVersion)) {
+            throw new SendPolicyError(
+              "focus_ack_intent_baseline_required",
+              "Focus acknowledgement safety state is unavailable"
+            );
+          }
+          if (existing.focusIntentVersion !== focusIntentVersion) {
+            throw new SendPolicyError(
+              "focus_ack_superseded",
+              "The focus acknowledgement was superseded by a user-triggered action"
+            );
+          }
+        }
+        if (existing && rearmingPolicyBlockedFocusAcknowledgement) {
+          const reset = await prisma.sendRequest.updateMany({
+            where: {
+              id: existing.id,
+              status: "FAILED",
+              receiptJson: null,
+              errorJson: existing.errorJson
+            },
+            data: {
+              status: "PENDING",
+              requestText: input.text,
+              errorJson: null,
+              focusIntentVersion
+            }
+          });
+          if (reset.count !== 1) {
+            throw new SendPolicyError(
+              "focus_ack_rearm_state_changed",
+              "The focus acknowledgement changed while it was being re-armed"
+            );
+          }
+          focusAcknowledgementDispatchBaselines.set(input.clientSendId, {
+            threadIntentEpoch: userTriggeredIntentEpochs.get(thread.id) ?? 0,
+            focusPolicyIntentEpoch: focusPolicyMutationIntentEpoch,
+            selfIntentAllowance: 1
+          });
+          return {
+            clientSendId: input.clientSendId,
+            status: "PENDING",
+            replayed: true
+          };
+        }
       }
-      if (existing.status === "FAILED") {
-        return {
-          clientSendId: input.clientSendId,
-          status: "FAILED",
-          replayed: true,
-          errorMessage: parseFailedSendMessage(existing.errorJson)
-        };
+
+      if (existing) {
+        if (existing.status === "SENT" && existing.receiptJson) {
+          await reconcileSentProjectionRow(existing).catch(() => false);
+          return {
+            clientSendId: input.clientSendId,
+            status: "SENT",
+            replayed: true,
+            result: { ...parseReceipt(existing.receiptJson), replayed: true }
+          };
+        }
+        if (existing.status === "FAILED") {
+          if (
+            source === "focus_ack" &&
+            input.retryFailedFocusAcknowledgement &&
+            existing.receiptJson === null
+          ) {
+            const reset = await prisma.sendRequest.updateMany({
+              where: {
+                id: existing.id,
+                status: "FAILED",
+                receiptJson: null
+              },
+              data: {
+                status: "PENDING",
+                errorJson: null,
+                focusIntentVersion
+              }
+            });
+            if (reset.count !== 1) {
+              throw new SendPolicyError(
+                "focus_ack_retry_state_changed",
+                "The focus acknowledgement changed while it was being retried"
+              );
+            }
+            focusAcknowledgementDispatchBaselines.set(input.clientSendId, {
+              threadIntentEpoch: userTriggeredIntentEpochs.get(thread.id) ?? 0,
+              focusPolicyIntentEpoch: focusPolicyMutationIntentEpoch,
+              selfIntentAllowance: 1
+            });
+            return {
+              clientSendId: input.clientSendId,
+              status: "PENDING",
+              replayed: true
+            };
+          }
+          return {
+            clientSendId: input.clientSendId,
+            status: "FAILED",
+            replayed: true,
+            errorMessage: parseFailedSendMessage(existing.errorJson)
+          };
+        }
+        if (existing.status === "PENDING") {
+          return { clientSendId: input.clientSendId, status: "PENDING", replayed: true };
+        }
+        // SCHEDULED / CANCELLED: the immediate-send path can't replay these. A
+        // SCHEDULED row is drained by the scheduled-send promoter, not the
+        // PENDING worker, and a CANCELLED row is intentionally dead. Returning
+        // "PENDING" here would tell the dashboard the send is queued while
+        // nothing ever sends. Surface the real state (mirrors
+        // enqueueScheduledSend's conflict throw).
+        throw new Error(`Send request ${input.clientSendId} already exists in status ${existing.status}`);
       }
-      if (existing.status === "PENDING") {
+
+      try {
+        await prisma.sendRequest.create({
+          data: {
+            clientSendId: input.clientSendId,
+            threadId: input.threadId,
+            requestText: input.text,
+            status: "PENDING",
+            source,
+            focusIntentVersion,
+            attachmentsJson: normalizedAttachmentsJson(input.attachments),
+            replyToMessageId: input.replyToMessageId ?? null
+          }
+        });
+      } catch (error) {
+        if (!isUniqueConstraintError(error)) {
+          throw error;
+        }
+        const winner = await prisma.sendRequest.findUnique({
+          where: { clientSendId: input.clientSendId }
+        });
+        if (!winner) throw new Error("clientSendId conflict could not be reconciled");
+        assertExistingSendIntent(winner, { ...input, source });
+        if (winner.status === "SENT" && winner.receiptJson) {
+          await reconcileSentProjectionRow(winner).catch(() => false);
+          return {
+            clientSendId: input.clientSendId,
+            status: "SENT",
+            replayed: true,
+            result: { ...parseReceipt(winner.receiptJson), replayed: true }
+          };
+        }
+        if (winner.status === "FAILED") {
+          return {
+            clientSendId: input.clientSendId,
+            status: "FAILED",
+            replayed: true,
+            errorMessage: parseFailedSendMessage(winner.errorJson)
+          };
+        }
+        if (winner.status !== "PENDING") {
+          throw new Error(
+            `Send request ${input.clientSendId} already exists in status ${winner.status}`
+          );
+        }
         return { clientSendId: input.clientSendId, status: "PENDING", replayed: true };
       }
-      // SCHEDULED / CANCELLED: the immediate-send path can't replay these. A
-      // SCHEDULED row is drained by the scheduled-send promoter, not the
-      // PENDING worker, and a CANCELLED row is intentionally dead. Returning
-      // "PENDING" here would tell the dashboard the send is queued while
-      // nothing ever sends. Surface the real state (mirrors
-      // enqueueScheduledSend's conflict throw).
-      throw new Error(`Send request ${input.clientSendId} already exists in status ${existing.status}`);
-    }
 
-    try {
-      await prisma.sendRequest.create({
-        data: {
-          clientSendId: input.clientSendId,
-          threadId: input.threadId,
-          requestText: input.text,
-          status: "PENDING",
-          source: input.source ?? "manual",
-          attachmentsJson: input.attachments && input.attachments.length > 0
-            ? JSON.stringify(input.attachments)
-            : null,
-          replyToMessageId: input.replyToMessageId ?? null
-        }
-      });
-    } catch (error) {
-      if (!isUniqueConstraintError(error)) {
-        throw error;
+      if (source === "focus_ack" || source === "focus_auto_ack") {
+        focusAcknowledgementDispatchBaselines.set(input.clientSendId, {
+          threadIntentEpoch: userTriggeredIntentEpochs.get(thread.id) ?? 0,
+          focusPolicyIntentEpoch: focusPolicyMutationIntentEpoch,
+          selfIntentAllowance:
+            source === "focus_ack" &&
+            (userTriggeredIntentCounts.get(thread.id) ?? 0) > 0
+              ? 1
+              : 0
+        });
       }
-      // Concurrent insert beat us; treat as replay of the existing row.
-      return { clientSendId: input.clientSendId, status: "PENDING", replayed: true };
-    }
 
-    return { clientSendId: input.clientSendId, status: "PENDING", replayed: false };
+      return { clientSendId: input.clientSendId, status: "PENDING", replayed: false };
+    };
+
+    if (source === "focus_ack" || source === "focus_auto_ack") {
+      const windowId = input.focusWindowId ?? "missing";
+      return focusAcknowledgementEnqueueMutex.runExclusive(
+        `${windowId}:${thread.personId}`,
+        enqueue
+      );
+    }
+    return enqueue();
   }
 
   /**
@@ -274,16 +945,52 @@ export function createSendService(deps: SendServiceDeps) {
    * MESSAGE_SENT / MESSAGE_SEND_FAILED event so the dashboard's optimistic
    * UI can match by clientSendId.
    *
-   * Throws only on programmer-error situations (missing thread row); adapter
-   * errors are caught and recorded as FAILED on the SendRequest.
+   * Rows removed by an administrative reset are safe no-ops. Adapter errors
+   * are caught and recorded as FAILED on the SendRequest.
    */
   async function processSendRequest(sendRequestId: string): Promise<void> {
+    const discoveredRequest = await prisma.sendRequest.findUnique({
+      where: { id: sendRequestId }
+    });
+    if (
+      !discoveredRequest ||
+      discoveredRequest.status !== "PENDING" ||
+      isClaimMarker(discoveredRequest.receiptJson)
+    ) {
+      return;
+    }
+    const discoveredThread = await prisma.thread.findUnique({
+      where: { id: discoveredRequest.threadId },
+      select: { platform: true }
+    });
+    if (!discoveredThread) return;
+    const platform = discoveredThread.platform as PlatformName;
+
+    try {
+      await deps.withExternalActionLock(platform, () =>
+        processSendRequestWithExternalLock(sendRequestId, platform)
+      );
+    } finally {
+      if (
+        discoveredRequest.source === "focus_ack" ||
+        discoveredRequest.source === "focus_auto_ack"
+      ) {
+        focusAcknowledgementDispatchBaselines.delete(
+          discoveredRequest.clientSendId
+        );
+      }
+    }
+  }
+
+  async function processSendRequestWithExternalLock(
+    sendRequestId: string,
+    expectedPlatform: PlatformName
+  ): Promise<void> {
     const sendRequest = await prisma.sendRequest.findUnique({
       where: { id: sendRequestId }
     });
-    if (!sendRequest) {
-      throw new Error(`SendRequest ${sendRequestId} not found`);
-    }
+    if (!sendRequest) return;
+    const claimedSendRequest = sendRequest;
     if (sendRequest.status !== "PENDING") {
       // Already processed — nothing to do. Defensive against double-kicks.
       return;
@@ -296,30 +1003,34 @@ export function createSendService(deps: SendServiceDeps) {
     if (isClaimMarker(sendRequest.receiptJson)) {
       return;
     }
-
-    // Atomically claim the row BEFORE the (non-idempotent) adapter send. Only
-    // the worker whose guarded write wins (count === 1) proceeds; a concurrent
-    // kick or a post-restart resume() sees `receiptJson` already set and bails.
-    // Without this, a crash between the physical send and the SENT write at the
-    // bottom of this function leaves the row PENDING, and resume() re-dispatches
-    // it — sending the message twice.
-    const claim = await prisma.sendRequest.updateMany({
-      where: { id: sendRequestId, status: "PENDING", receiptJson: null },
-      data: { receiptJson: SEND_CLAIM_MARKER }
-    });
-    if (claim.count !== 1) {
-      // Lost the race — another worker already claimed (or terminalised) this
-      // row. Do nothing; the winner owns the send.
-      return;
-    }
+    const rememberedDispatchBaseline = focusAcknowledgementDispatchBaselines.get(
+      sendRequest.clientSendId
+    );
+    const expectedThreadIntentEpoch =
+      rememberedDispatchBaseline?.threadIntentEpoch ??
+      userTriggeredIntentEpochs.get(sendRequest.threadId) ??
+      0;
+    const expectedFocusPolicyIntentEpoch =
+      rememberedDispatchBaseline?.focusPolicyIntentEpoch ??
+      focusPolicyMutationIntentEpoch;
+    const selfIntentAllowance =
+      rememberedDispatchBaseline?.selfIntentAllowance ?? 0;
 
     const thread = await prisma.thread.findUnique({
       where: { id: sendRequest.threadId },
       include: { person: true }
     });
-    if (!thread) {
-      throw new Error(`Thread ${sendRequest.threadId} not found for SendRequest ${sendRequestId}`);
-    }
+    if (!thread || thread.platform !== expectedPlatform) return;
+
+    // Claim only after the external-action fence and authoritative graph read.
+    // A reset that entered the fence first can delete the graph, leaving this
+    // worker with nothing to claim or dispatch. The guarded write still keeps
+    // concurrent workers and crash recovery idempotent.
+    const claim = await prisma.sendRequest.updateMany({
+      where: { id: sendRequestId, status: "PENDING", receiptJson: null },
+      data: { receiptJson: SEND_CLAIM_MARKER }
+    });
+    if (claim.count !== 1) return;
 
     // The threads table can hold rows whose `platform` column has values
     // the typed `PlatformAdapter` registry doesn't cover (e.g. iMessage
@@ -342,6 +1053,47 @@ export function createSendService(deps: SendServiceDeps) {
 
     const jobId = uuid();
     const input = { threadId: thread.id, text: sendRequest.requestText, clientSendId: sendRequest.clientSendId };
+    let dispatchStarted = false;
+    let deliveredReceipt: SendReceipt | null = null;
+    let sentStatePersisted = false;
+
+    function notifyPlatformResult(
+      outcome: "success" | "failure",
+      finishedAt: string
+    ): void {
+      try {
+        deps.onPlatformResult?.({
+          clientSendId: input.clientSendId,
+          platform: expectedPlatform,
+          outcome,
+          finishedAt
+        });
+      } catch (error) {
+        console.warn(
+          `[send] platform-result observer failed for ${input.clientSendId}: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
+      }
+    }
+
+    async function persistDeliveredReceipt(receipt: SendReceipt): Promise<void> {
+      deliveredReceipt = receipt;
+      await prisma.sendRequest.update({
+        where: { clientSendId: input.clientSendId },
+        data: {
+          status: "SENT",
+          receiptJson: JSON.stringify(receipt),
+          errorJson: localReconciliationMarker()
+        }
+      });
+      sentStatePersisted = true;
+      await projectSentRequest(claimedSendRequest, receipt);
+      await prisma.sendRequest.update({
+        where: { clientSendId: input.clientSendId },
+        data: { errorJson: null }
+      });
+    }
 
     try {
       await deps.auditLog({
@@ -363,7 +1115,13 @@ export function createSendService(deps: SendServiceDeps) {
       const inSandbox = settings.presenterDemoMode === "sandbox";
       let receipt: SendReceipt;
       const stagedAttachments = sendRequest.attachmentsJson
-        ? (JSON.parse(sendRequest.attachmentsJson) as Array<{ absolutePath: string; displayName: string; mimeType?: string; kind?: string }>)
+        ? (JSON.parse(sendRequest.attachmentsJson) as Array<{
+            absolutePath: string;
+            displayName: string;
+            mimeType?: string;
+            kind?: string;
+            contentDigest?: string;
+          }>)
         : [];
       const source = parsePersistedSendSource(sendRequest.source);
       if (!source) {
@@ -383,6 +1141,7 @@ export function createSendService(deps: SendServiceDeps) {
           );
         }
         receipt = buildDemoSendReceipt();
+        await persistDeliveredReceipt(receipt);
       } else {
         if (!adapter) {
           throw new Error(
@@ -391,112 +1150,136 @@ export function createSendService(deps: SendServiceDeps) {
         }
         // Serialize the page-driving send against scans on the shared managed
         // page. The demo branch above drives no page, so it stays unlocked.
-        receipt = await deps.withPlatformLock(thread.platform as PlatformName, () =>
-          adapter.sendMessage(
+        receipt = await deps.withPlatformLock(thread.platform as PlatformName, async () => {
+          const assertFocusAcknowledgementDispatchEligible =
+            source === "focus_auto_ack" || source === "focus_ack"
+            ? async () => {
+              const [
+                supersedingUserRequest,
+                unresolvedSentProjection,
+                authoritativeThread,
+                profile
+              ] = await Promise.all([
+                prisma.sendRequest.findFirst({
+                  where: {
+                    threadId: thread.id,
+                    source: { in: ["manual", "focus_ack", "manual_poll"] },
+                    status: { in: ["PENDING", "SENT", "FAILED", "SCHEDULED"] },
+                    createdAt: { gte: sendRequest.createdAt },
+                    NOT: { id: sendRequest.id }
+                  },
+                  select: { id: true }
+                }),
+                prisma.sendRequest.findFirst({
+                  where: {
+                    threadId: thread.id,
+                    source: { in: ["manual", "focus_ack", "manual_poll"] },
+                    status: "SENT",
+                    errorJson: { contains: LOCAL_RECONCILIATION_REQUIRED },
+                    NOT: { id: sendRequest.id }
+                  },
+                  select: { id: true }
+                }),
+                prisma.thread.findUnique({
+                  where: { id: thread.id },
+                  select: {
+                    id: true,
+                    platform: true,
+                    category: true,
+                    isGroup: true,
+                    userIntentVersion: true,
+                    lastInboundAt: true,
+                    lastOutboundAt: true,
+                    person: {
+                      select: {
+                        id: true,
+                        displayName: true,
+                        birthday: true,
+                        favouritedAt: true
+                      }
+                    }
+                  }
+                }),
+                deps.settingsStore.getOperatorProfile()
+              ]);
+              const autoAckThread: FocusAutoAckThread | null = authoritativeThread
+                ? {
+                    threadId: authoritativeThread.id,
+                    platform: authoritativeThread.platform as PlatformName,
+                    isGroup: authoritativeThread.isGroup,
+                    category:
+                      authoritativeThread.category === "genuine" ||
+                      authoritativeThread.category === "outreach"
+                        ? authoritativeThread.category
+                        : null,
+                    person: authoritativeThread.person,
+                    latestInboundAt: authoritativeThread.lastInboundAt,
+                    latestOutboundAt: authoritativeThread.lastOutboundAt
+                  }
+                : null;
+              if (
+                !autoAckThread ||
+                !(source === "focus_auto_ack"
+                  ? focusAutoAckDispatchEligible(
+                      autoAckThread,
+                      profile,
+                      sendRequest.clientSendId,
+                      new Date(),
+                      sendRequest.requestText
+                    )
+                  : focusManualAckDispatchEligible(
+                      autoAckThread,
+                      profile,
+                      sendRequest.clientSendId,
+                      new Date()
+                    ))
+              ) {
+                throw new SendPolicyError(
+                  `${source}_not_eligible`,
+                  "Focus acknowledgement is no longer eligible for this conversation"
+                );
+              }
+              if (
+                supersedingUserRequest ||
+                unresolvedSentProjection ||
+                !Number.isInteger(sendRequest.focusIntentVersion) ||
+                authoritativeThread?.userIntentVersion !==
+                  sendRequest.focusIntentVersion ||
+                (userTriggeredIntentCounts.get(thread.id) ?? 0) >
+                  selfIntentAllowance ||
+                (userTriggeredIntentEpochs.get(thread.id) ?? 0) !== expectedThreadIntentEpoch ||
+                focusPolicyMutationIntentCount > 0 ||
+                focusPolicyMutationIntentEpoch !== expectedFocusPolicyIntentEpoch
+              ) {
+                throw new SendPolicyError(
+                  `${source}_superseded`,
+                  "Focus acknowledgement was superseded by a user-triggered action"
+                );
+              }
+            }
+            : undefined;
+
+          await assertFocusAcknowledgementDispatchEligible?.();
+          const beforeDispatch = async () => {
+            await assertFocusAcknowledgementDispatchEligible?.();
+            dispatchStarted = true;
+          };
+          const delivered = await adapter.sendMessage(
             threadStub,
             input.text,
             stagedAttachments.map((a) => ({
               absolutePath: a.absolutePath,
               displayName: a.displayName,
               mimeType: a.mimeType,
-              kind: (a.kind as "voice_note" | "photo" | "video" | "audio" | "pdf" | "sticker" | "gif" | "unknown" | undefined) ?? undefined
-            }))
-          )
-        );
+              kind: (a.kind as "voice_note" | "photo" | "video" | "audio" | "pdf" | "sticker" | "gif" | "unknown" | undefined) ?? undefined,
+              contentDigest: a.contentDigest
+            })),
+            beforeDispatch
+          );
+          await persistDeliveredReceipt(delivered);
+          return delivered;
+        });
       }
-
-      // Persist platform-side attachments on the OUT row when the adapter
-      // captured them post-send (iMessage adapter looks them up from
-      // chat.db). Without this, voice notes / photos / videos sent from
-      // the composer only show as a text bubble in the dashboard — the
-      // attachment guid the IMessageMedia component needs is missing.
-      const attachmentsJson =
-        receipt.attachments && receipt.attachments.length > 0
-          ? JSON.stringify(receipt.attachments)
-          : null;
-      const rawJson = receipt.raw ? JSON.stringify(receipt.raw) : null;
-      // App-level threading: when the operator hit "Reply" in the
-      // focused-thread view, the SendRequest row carries the parent
-      // Message.id. Copy it onto the resulting outbound row so the
-      // dashboard renders the new bubble inline under its parent on the
-      // next refresh. The send itself goes out as a normal text bubble
-      // — the recipient on Messages.app sees no threading at all.
-      const replyToMessageId = sendRequest.replyToMessageId ?? null;
-      // Prefer the platform-side stable id when the adapter could
-      // recover it (iMessage polls chat.db post-send for the row's
-      // guid). Falling back to a synthetic stableHash for adapters
-      // that can't observe the real id (LinkedIn web UI, group chats
-      // without a delivery-status path). Aligning the key with what a
-      // later scan writes is how we avoid the same outbound message
-      // showing up twice in the timeline.
-      const platformMessageKey =
-        receipt.platformMessageKey ??
-        stableHash(`${thread.id}|${receipt.sentAt}|OUT|${input.text}`);
-      await prisma.message.upsert({
-        where: {
-          threadId_platformMessageKey: {
-            threadId: thread.id,
-            platformMessageKey
-          }
-        },
-        update: {
-          text: input.text,
-          direction: "OUT",
-          timestamp: new Date(receipt.sentAt),
-          sentVia: "automation",
-          attachmentsJson,
-          rawJson,
-          replyToMessageId
-        },
-        create: {
-          threadId: thread.id,
-          platformMessageKey,
-          direction: "OUT",
-          timestamp: new Date(receipt.sentAt),
-          text: input.text,
-          sentVia: "automation",
-          attachmentsJson,
-          rawJson,
-          replyToMessageId
-        }
-      });
-
-      const risk = calculateRisk({
-        lastInboundAt: thread.lastInboundAt,
-        lastOutboundAt: new Date(receipt.sentAt),
-        amberHours: settings.amberHours,
-        redHours: settings.redHours
-      });
-
-      await prisma.thread.update({
-        where: { id: thread.id },
-        data: {
-          needsReply: risk.needsReply,
-          riskLevel: risk.level,
-          riskReason: risk.riskReason,
-          slaDueAt: risk.slaDueAt,
-          // Operator replied — the thread no longer needs to be hidden.
-          // Clearing snoozedUntil keeps the active inbox honest about
-          // whether the conversation is still in deferred state.
-          snoozedUntil: null,
-          lastOutboundAt: new Date(receipt.sentAt),
-          lastMessageAt: new Date(receipt.sentAt),
-          unreadCount: 0,
-          // Phase 2: keep the inbox-row preview in sync with whoever sent the
-          // most recent message. Without these, the row preview stayed pinned
-          // to the last INBOUND even after the operator replied.
-          lastMessageDirection: "OUT",
-          lastMessageText: input.text
-        }
-      });
-
-      await prisma.sendRequest.update({
-        where: { clientSendId: input.clientSendId },
-        data: {
-          status: "SENT",
-          receiptJson: JSON.stringify(receipt)
-        }
-      });
 
       await deps.auditLog({
         platform: thread.platform as PlatformName,
@@ -508,41 +1291,101 @@ export function createSendService(deps: SendServiceDeps) {
           verifiedBy: receipt.verifiedBy
         },
         screenshotFile: receipt.screenshotFile
+      }).catch((error) => {
+        console.warn(
+          `[send] verification audit failed for ${input.clientSendId}: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
       });
 
       const platformResultAt = receipt.platformResultAt ?? new Date().toISOString();
-      deps.onPlatformResult?.({
-        clientSendId: input.clientSendId,
-        platform: thread.platform as PlatformName,
-        outcome: "success",
-        finishedAt: platformResultAt
-      });
-      deps.eventBus.emit({
-        type: "MESSAGE_SENT",
-        jobId,
-        threadId: thread.id,
-        platform: thread.platform as PlatformName,
-        clientSendId: input.clientSendId,
-        verifiedBy: receipt.verifiedBy,
-        acknowledgedAt: receipt.acknowledgedAt,
-        platformResultAt
-      });
+      notifyPlatformResult("success", platformResultAt);
+      try {
+        deps.eventBus.emit({
+          type: "MESSAGE_SENT",
+          jobId,
+          threadId: thread.id,
+          platform: thread.platform as PlatformName,
+          clientSendId: input.clientSendId,
+          verifiedBy: receipt.verifiedBy,
+          acknowledgedAt: receipt.acknowledgedAt,
+          platformResultAt
+        });
+      } catch (error) {
+        console.warn(
+          `[send] success event failed for ${input.clientSendId}: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
+      }
     } catch (error) {
       const adapterError = error instanceof AdapterFailure ? error : undefined;
       const errorMessage = describeSendError(error);
 
+      if (sentStatePersisted && (deliveredReceipt as SendReceipt | null)) {
+        const reconciledReceipt = deliveredReceipt as unknown as SendReceipt;
+        await deps
+          .auditLog({
+            platform: thread.platform as PlatformName,
+            stage: "Verify",
+            action: "MESSAGE_SENT_LOCAL_RECONCILIATION_FAILED",
+            status: "FAIL",
+            details: {
+              threadId: thread.id,
+              clientSendId: input.clientSendId,
+              message: errorMessage
+            }
+          })
+          .catch((auditError) => {
+            console.warn(
+              `[send] reconciliation audit failed for ${input.clientSendId}: ${
+                auditError instanceof Error ? auditError.message : String(auditError)
+              }`
+            );
+          });
+        const platformResultAt =
+          reconciledReceipt.platformResultAt ?? new Date().toISOString();
+        notifyPlatformResult("success", platformResultAt);
+        try {
+          deps.eventBus.emit({
+            type: "MESSAGE_SENT",
+            jobId,
+            threadId: thread.id,
+            platform: thread.platform as PlatformName,
+            clientSendId: input.clientSendId,
+            verifiedBy: reconciledReceipt.verifiedBy,
+            acknowledgedAt: reconciledReceipt.acknowledgedAt,
+            platformResultAt
+          });
+        } catch (eventError) {
+          console.warn(
+            `[send] reconciliation event failed for ${input.clientSendId}: ${
+              eventError instanceof Error ? eventError.message : String(eventError)
+            }`
+          );
+        }
+        return;
+      }
+
       // Map the (often opaque) error to a coarse kind the dashboard can
       // turn into a one-tap recovery action ("Open browser to sign in",
       // "Run selector tests", "Reset session", "Retry now").
-      const errorKind = classifySendFailureKind({
-        message: errorMessage,
-        adapterKind: adapterError?.kind
-      });
+      const errorKind = error instanceof SendPolicyError
+        ? "POLICY_BLOCKED"
+        : dispatchStarted
+          ? "DELIVERY_UNCERTAIN"
+          : classifySendFailureKind({
+            message: errorMessage,
+            adapterKind: adapterError?.kind
+          });
       const consumerFailure = consumerSendFailure(errorKind);
       const persistedErrorMessage =
         thread.platform === "INSTAGRAM" ? consumerFailure.message : errorMessage;
       const reasonCode =
-        thread.platform === "INSTAGRAM"
+        error instanceof SendPolicyError
+          ? error.reasonCode
+          : thread.platform === "INSTAGRAM"
           ? (typeof adapterError?.details?.reason === "string" &&
               /^[a-z][a-z0-9_]{0,80}$/.test(adapterError.details.reason)
               ? adapterError.details.reason
@@ -552,55 +1395,78 @@ export function createSendService(deps: SendServiceDeps) {
               : undefined)
           : undefined;
 
-      const logId = await deps.auditLog({
-        platform: thread.platform as PlatformName,
-        stage: "Send",
-        action: "MESSAGE_SEND_FAILED",
-        status: "FAIL",
-        details: {
-          threadId: thread.id,
-          message: errorMessage,
-          errorKind
-        },
-        screenshotFile: adapterError?.screenshotFile,
-        domDumpFile: adapterError?.domDumpFile
-      });
+      let logId: string | undefined;
+      try {
+        logId = await deps.auditLog({
+          platform: thread.platform as PlatformName,
+          stage: "Send",
+          action: "MESSAGE_SEND_FAILED",
+          status: "FAIL",
+          details: {
+            threadId: thread.id,
+            message: errorMessage,
+            errorKind
+          },
+          screenshotFile: adapterError?.screenshotFile,
+          domDumpFile: adapterError?.domDumpFile
+        });
+      } catch (auditError) {
+        console.warn(
+          `[send] failure audit failed for ${input.clientSendId}: ${
+            auditError instanceof Error ? auditError.message : String(auditError)
+          }`
+        );
+      }
 
-      await prisma.sendRequest.update({
-        where: { clientSendId: input.clientSendId },
-        data: {
-          status: "FAILED",
-          errorJson: JSON.stringify({
-            message: persistedErrorMessage,
-            errorKind,
-            reasonCode,
-            screenshotFile:
-              thread.platform === "INSTAGRAM" ? undefined : adapterError?.screenshotFile,
-            domDumpFile:
-              thread.platform === "INSTAGRAM" ? undefined : adapterError?.domDumpFile,
-            logId
-          })
-        }
-      });
+      await prisma.sendRequest
+        .update({
+          where: { clientSendId: input.clientSendId },
+          data: {
+            status: "FAILED",
+            receiptJson: deliveredReceipt
+              ? JSON.stringify(deliveredReceipt)
+              : sendRequest.receiptJson,
+            errorJson: JSON.stringify({
+              message: persistedErrorMessage,
+              errorKind,
+              reasonCode,
+              screenshotFile:
+                thread.platform === "INSTAGRAM" ? undefined : adapterError?.screenshotFile,
+              domDumpFile:
+                thread.platform === "INSTAGRAM" ? undefined : adapterError?.domDumpFile,
+              logId
+            })
+          }
+        })
+        .catch((writeError) => {
+          console.warn(
+            `[send] terminal failure write failed for ${input.clientSendId}; durable claim retained: ${
+              writeError instanceof Error ? writeError.message : String(writeError)
+            }`
+          );
+        });
 
       const platformResultAt = new Date().toISOString();
-      deps.onPlatformResult?.({
-        clientSendId: input.clientSendId,
-        platform: thread.platform as PlatformName,
-        outcome: "failure",
-        finishedAt: platformResultAt
-      });
-      deps.eventBus.emit({
-        type: "MESSAGE_SEND_FAILED",
-        jobId,
-        threadId: thread.id,
-        platform: thread.platform as PlatformName,
-        logId,
-        clientSendId: input.clientSendId,
-        errorMessage: consumerFailure.message,
-        errorKind,
-        platformResultAt
-      });
+      notifyPlatformResult("failure", platformResultAt);
+      try {
+        deps.eventBus.emit({
+          type: "MESSAGE_SEND_FAILED",
+          jobId,
+          threadId: thread.id,
+          platform: thread.platform as PlatformName,
+          logId: logId ?? "audit-unavailable",
+          clientSendId: input.clientSendId,
+          errorMessage: consumerFailure.message,
+          errorKind,
+          platformResultAt
+        });
+      } catch (eventError) {
+        console.warn(
+          `[send] failure event failed for ${input.clientSendId}: ${
+            eventError instanceof Error ? eventError.message : String(eventError)
+          }`
+        );
+      }
 
       // Don't rethrow — the worker already logged FAILED state. Rethrowing
       // would crash the worker loop; we want it to pick up the next pending
@@ -624,7 +1490,7 @@ export function createSendService(deps: SendServiceDeps) {
     text: string;
     clientSendId: string;
     scheduledFor: Date;
-    attachments?: Array<{ absolutePath: string; displayName: string; mimeType?: string; kind?: string }>;
+    attachments?: SendAttachment[];
     replyToMessageId?: string;
   }): Promise<ScheduleSendResult> {
     const thread = await prisma.thread.findUnique({
@@ -650,9 +1516,10 @@ export function createSendService(deps: SendServiceDeps) {
       where: { clientSendId: input.clientSendId }
     });
     if (existing) {
-      if (existing.threadId !== input.threadId) {
-        throw new Error("clientSendId is already linked to another thread");
-      }
+      assertExistingSendIntent(existing, {
+        ...input,
+        source: "manual"
+      });
       if (existing.status === "SCHEDULED" && existing.scheduledFor) {
         return {
           clientSendId: input.clientSendId,
@@ -674,20 +1541,30 @@ export function createSendService(deps: SendServiceDeps) {
           source: "manual",
           scheduledFor: input.scheduledFor,
           replyToMessageId: input.replyToMessageId ?? null,
-          attachmentsJson: input.attachments && input.attachments.length > 0
-            ? JSON.stringify(input.attachments)
-            : null
+          attachmentsJson: normalizedAttachmentsJson(input.attachments)
         }
       });
     } catch (error) {
       if (!isUniqueConstraintError(error)) {
         throw error;
       }
-      // Concurrent insert beat us; treat as replay.
+      const winner = await prisma.sendRequest.findUnique({
+        where: { clientSendId: input.clientSendId }
+      });
+      if (!winner) throw new Error("clientSendId conflict could not be reconciled");
+      assertExistingSendIntent(winner, {
+        ...input,
+        source: "manual"
+      });
+      if (winner.status !== "SCHEDULED" || !winner.scheduledFor) {
+        throw new Error(
+          `Send request ${input.clientSendId} already exists in status ${winner.status}`
+        );
+      }
       return {
         clientSendId: input.clientSendId,
         status: "SCHEDULED",
-        scheduledFor: input.scheduledFor.toISOString(),
+        scheduledFor: winner.scheduledFor.toISOString(),
         replayed: true
       };
     }
@@ -875,7 +1752,12 @@ export function createSendService(deps: SendServiceDeps) {
     cancelScheduledSend,
     updateScheduledSend,
     processSendRequest,
-    reconcileInterruptedSends
+    reconcileInterruptedSends,
+    reconcileSentProjections,
+    withUserTriggeredIntent,
+    registerUserTriggeredIntent,
+    registerDurableUserTriggeredIntent,
+    registerFocusPolicyMutationIntent
   };
 }
 

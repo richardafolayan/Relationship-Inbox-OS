@@ -105,7 +105,10 @@ export function readAckTemplates(profile: OperatorProfile | null | undefined): A
 }
 
 export function readFocusSettings(profile: OperatorProfile | null | undefined): FocusSettings {
-  return profile?.focusSettings ?? DEFAULT_FOCUS_SETTINGS;
+  return {
+    ...(profile?.focusSettings ?? DEFAULT_FOCUS_SETTINGS),
+    oneNotePerPerson: true
+  };
 }
 
 export function readCalendarSync(
@@ -228,8 +231,10 @@ export function coverageForRow(
   const tier = tierForRow(row);
   if (row.platform === "INSTAGRAM") return { covered: false, tier };
   if (row.isGroup) return { covered: false, tier };
-  // Outreach / business threads are never acknowledged, in any audience.
-  if (row.category === "outreach") return { covered: false, tier };
+  // Only positively classified personal conversations are eligible. Unknown
+  // classification fails closed so the dashboard and runner cannot disagree
+  // at the send boundary.
+  if (row.category !== "genuine") return { covered: false, tier };
   if (row.personFavourite) return { covered: true, tier };
   if (audience === "all_personal" && row.platform === "IMESSAGE") {
     const realName = !looksLikePhoneOrEmail(row.personName);
@@ -304,7 +309,7 @@ export type FocusAckExclusion =
 export function focusAckExclusion(
   row: FocusRow,
   window: FocusWindowState,
-  settings: FocusSettings,
+  _settings: FocusSettings,
   opts: { now?: Date } = {}
 ): FocusAckExclusion {
   const now = opts.now ?? new Date();
@@ -317,7 +322,7 @@ export function focusAckExclusion(
   if (row.needsReply === false) return "handled";
   if (alreadyHeardSinceInbound(row)) return "already_heard";
   if (!coverageForRow(row, window.audience).covered) return "not_covered";
-  if (settings.oneNotePerPerson && isAcked(row, window)) return "already_acked";
+  if (isAcked(row, window)) return "already_acked";
   if (window.autoSendAcknowledgements) return "automatic";
   return "candidate";
 }

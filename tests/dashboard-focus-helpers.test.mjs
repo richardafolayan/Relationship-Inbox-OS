@@ -52,7 +52,7 @@ const row = (over = {}) => ({
   needsReply: true,
   lastInboundAt: "2026-06-07T10:00:00.000Z",
   lastOutboundAt: null,
-  category: null,
+  category: "genuine",
   personBirthday: null,
   ...over
 });
@@ -113,6 +113,14 @@ test("outreach / business threads are never covered, even when favourited", () =
   const r = row({ category: "outreach" });
   assert.equal(coverageForRow(r, "favourites").covered, false);
   assert.equal(coverageForRow(r, "all_personal").covered, false);
+});
+
+test("unclassified threads fail closed on every focus acknowledgement surface", () => {
+  assert.equal(coverageForRow(row({ category: null }), "favourites").covered, false);
+  assert.equal(
+    focusAckExclusion(row({ category: null }), baseWindow(), settings(), { now: NOW }),
+    "not_covered"
+  );
 });
 
 test("group chats are never covered, even when favourited", () => {
@@ -178,10 +186,9 @@ test("explicit automatic mode removes the duplicate manual-send candidate", () =
 test("one note per person: an already-acked person is not a candidate", () => {
   const window = baseWindow({ ackedPersonIds: ["p1"] });
   assert.equal(isFocusAckCandidate(row(), window, settings(), { now: NOW }), false);
-  // ...unless the operator turned the one-note rule off.
   assert.equal(
     isFocusAckCandidate(row(), window, settings({ oneNotePerPerson: false }), { now: NOW }),
-    true
+    false
   );
 });
 
@@ -277,6 +284,17 @@ test("readers fall back to defaults for a profile that predates the feature", ()
   assert.deepEqual(readFocusSettings(legacy), DEFAULT_FOCUS_SETTINGS);
   assert.deepEqual(readAckTemplates(legacy), DEFAULT_ACK_TEMPLATES);
   assert.deepEqual(readFocusWindow(null), EMPTY_FOCUS_WINDOW);
+  assert.equal(
+    readFocusSettings({
+      ...legacy,
+      focusSettings: {
+        reasonLabel: false,
+        oneNotePerPerson: false,
+        audience: "all_personal"
+      }
+    }).oneNotePerPerson,
+    true
+  );
 });
 
 // ─────────────────────────── pure decision invariant ───────────────────────────
@@ -485,10 +503,9 @@ test("focusAckExclusion names the gate that excluded each row", () => {
     focusAckExclusion(row(), baseWindow({ ackedPersonIds: ["p1"] }), settings(), { now: NOW }),
     "already_acked"
   );
-  // ...unless the one-note rule is off.
   assert.equal(
     focusAckExclusion(row(), baseWindow({ ackedPersonIds: ["p1"] }), settings({ oneNotePerPerson: false }), { now: NOW }),
-    "candidate"
+    "already_acked"
   );
 });
 

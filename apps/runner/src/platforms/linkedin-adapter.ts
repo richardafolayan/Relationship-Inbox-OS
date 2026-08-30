@@ -5,6 +5,7 @@ import { join } from "node:path";
 import type {
   AttachmentPlaceholder,
   NormalizedMessage,
+  OutboundAttachment,
   PlatformAdapter,
   SelectorRegistry,
   SendReceipt,
@@ -1961,8 +1962,6 @@ export function linkedInCollectionCompleteness(
   }
   if (
     stopReason === "zero_threads_found" ||
-    stopReason === "end_of_list_reached" ||
-    stopReason === "deep_scroll_exhausted" ||
     stopReason === "unchanged_streak"
   ) {
     return "complete";
@@ -3997,6 +3996,7 @@ export class LinkedInAdapter implements PlatformAdapter {
     threadItemCount: number;
     spinnerCount: number;
     visibleSetHash: string;
+    listWindowHash: string;
     bottomKey: string | null;
   }> {
     const threadListLocator = page.locator(selectors.thread_list).first();
@@ -4004,6 +4004,7 @@ export class LinkedInAdapter implements PlatformAdapter {
     const rowRoots = page.locator(".msg-conversation-listitem");
     const selectorItemCount = await rowRoots.count().catch(() => 0);
     const rows: LinkedInThreadSnapshot[] = [];
+    const listWindowKeys: string[] = [];
 
     const readText = async (locator: Locator): Promise<string | null> => {
       const first = locator.first();
@@ -4056,14 +4057,28 @@ export class LinkedInAdapter implements PlatformAdapter {
           (await readText(scope.locator("span.msg-conversation-card__pill"))) ??
           ""
       );
-      if (isSponsoredPillText(pillText)) {
-        continue;
-      }
       const lastMessageAt = cleanText(
         (await readText(scope.locator("time.msg-conversation-listitem__time-stamp"))) ??
           (await readText(scope.locator("time"))) ??
           ""
       );
+
+      const urnToken =
+        (await readAttr(scope, "data-conversation-urn")) ??
+        (await readAttr(scope, "data-urn")) ??
+        (await readAttr(scope, "data-event-urn")) ??
+        (await readAttr(scope, "data-conversation-id")) ??
+        (await readAttr(scope, "data-id")) ??
+        (await readAttr(scope, "id")) ??
+        "";
+      listWindowKeys.push(
+        [urnToken, href, displayName, preview, lastMessageAt, pillText]
+          .map((part) => cleanText(part))
+          .join("\u001f") || `mounted-row:${index}`
+      );
+      if (isSponsoredPillText(pillText)) {
+        continue;
+      }
 
       const unreadContainer = scope.locator(".msg-conversation-card__unread-count").first();
       const unreadContainerExists = (await unreadContainer.count().catch(() => 0)) > 0;
@@ -4082,14 +4097,6 @@ export class LinkedInAdapter implements PlatformAdapter {
           ? 1
           : 0;
 
-      const urnToken =
-        (await readAttr(scope, "data-conversation-urn")) ??
-        (await readAttr(scope, "data-urn")) ??
-        (await readAttr(scope, "data-event-urn")) ??
-        (await readAttr(scope, "data-conversation-id")) ??
-        (await readAttr(scope, "data-id")) ??
-        (await readAttr(scope, "id")) ??
-        "";
       const canonicalId = normalizeCanonicalLinkedInThreadId({
         threadUrl: href || undefined,
         activeKey: urnToken || undefined
@@ -4131,6 +4138,7 @@ export class LinkedInAdapter implements PlatformAdapter {
       threadItemCount: selectorItemCount,
       spinnerCount: await page.locator(linkedInLoadingSpinnerSelector).count().catch(() => 0),
       visibleSetHash,
+      listWindowHash: listWindowKeys.join("|"),
       bottomKey
     };
   }
@@ -4145,6 +4153,7 @@ export class LinkedInAdapter implements PlatformAdapter {
     threadItemCount: number;
     spinnerCount: number;
     visibleSetHash: string;
+    listWindowHash: string;
     bottomKey: string | null;
   }> {
     return this.collectThreadCandidates(page, selectors);
@@ -4153,85 +4162,177 @@ export class LinkedInAdapter implements PlatformAdapter {
   async deepScrollThreadList(
     page: Page,
     selectors: SelectorRegistry,
-    state: { bottomKey: string | null; visibleSetHash: string }
-  ): Promise<{ didScroll: boolean; reachedBottom: boolean; moved: boolean }> {
+    state: { bottomKey: string | null; visibleSetHash: string; listWindowHash?: string }
+  ): Promise<{
+    didScroll: boolean;
+    reachedBottom: boolean;
+    moved: boolean;
+    stopReason?: "no_scroll_container";
+  }> {
     const listTarget = page.locator(selectors.thread_list).first();
-    const listTargetCount = await listTarget.count().catch(() => 0);
+    const listTargetCount = await listTarget.count();
     if (listTargetCount <= 0) {
-      return { didScroll: false, reachedBottom: true, moved: false };
+      return {
+        didScroll: false,
+        reachedBottom: false,
+        moved: false,
+        stopReason: "no_scroll_container"
+      };
     }
 
-    const rowRoots = page.locator(".msg-conversation-listitem");
-    const beforeCount = await rowRoots.count().catch(() => 0);
-    if (beforeCount > 0) {
-      await this.runTracedPageAction({
+    type ScrollGeometry = {
+      scrollTop: number;
+      scrollHeight: number;
+      clientHeight: number;
+      atBottom: boolean;
+    };
+    const scrollResolvedContainer = async (note: string) =>
+      this.runTracedPageAction({
         page,
         stage: "collect_threads",
-        action: "scroll_into_view",
-        note: "row_tail_scroll",
-        run: async () => {
-          await rowRoots
-            .nth(beforeCount - 1)
-            .scrollIntoViewIfNeeded()
-            .catch(() => undefined);
-        }
-      });
-    } else {
-      await this.runTracedPageAction({
-        page,
-        stage: "collect_threads",
-        action: "scroll_into_view",
+        action: "scroll_container",
         selector: selectors.thread_list,
-        note: "container_scroll",
-        run: async () => {
-          await listTarget.scrollIntoViewIfNeeded().catch(() => undefined);
-        }
+        note,
+        run: async () =>
+          listTarget.evaluate((listNode) => {
+            let target: HTMLElement | null = listNode as HTMLElement;
+            while (target) {
+              const style = window.getComputedStyle(target);
+              const overflowY = (style.overflowY ?? "").toLowerCase();
+              if (
+                (overflowY === "auto" || overflowY === "scroll") &&
+                target.scrollHeight > target.clientHeight
+              ) {
+                break;
+              }
+              target = target.parentElement;
+            }
+            if (!target) {
+              return null;
+            }
+            const before = {
+              scrollTop: target.scrollTop,
+              scrollHeight: target.scrollHeight,
+              clientHeight: target.clientHeight,
+              atBottom:
+                target.scrollTop + target.clientHeight >= target.scrollHeight - 1
+            };
+            const maxScrollTop = Math.max(0, target.scrollHeight - target.clientHeight);
+            target.scrollTop = maxScrollTop;
+            target.dispatchEvent(new Event("scroll"));
+            return before;
+          })
       });
-    }
 
-    await this.tracedScrollContainer(page, selectors.thread_list, 840, {
-      stage: "collect_threads",
-      note: "primary_scroll"
-    });
-    await this.runTracedPageAction({
-      page,
-      stage: "collect_threads",
-      action: "wait_for_timeout",
-      note: "after_primary_scroll",
-      details: {
-        delayMs: Math.max(80, this.deps.scanScrollWaitMs)
-      },
-      run: async () => {
-        await page.waitForTimeout(Math.max(80, this.deps.scanScrollWaitMs));
+    const readResolvedContainer = async (): Promise<ScrollGeometry | null> =>
+      listTarget.evaluate((listNode) => {
+        let target: HTMLElement | null = listNode as HTMLElement;
+        while (target) {
+          const style = window.getComputedStyle(target);
+          const overflowY = (style.overflowY ?? "").toLowerCase();
+          if (
+            (overflowY === "auto" || overflowY === "scroll") &&
+            target.scrollHeight > target.clientHeight
+          ) {
+            break;
+          }
+          target = target.parentElement;
+        }
+        if (!target) return null;
+        return {
+          scrollTop: target.scrollTop,
+          scrollHeight: target.scrollHeight,
+          clientHeight: target.clientHeight,
+          atBottom: target.scrollTop + target.clientHeight >= target.scrollHeight - 1
+        };
+      });
+
+    const geometryChanged = (
+      before: ScrollGeometry,
+      after: ScrollGeometry | null
+    ): boolean =>
+      Boolean(
+        after &&
+          (after.scrollTop !== before.scrollTop ||
+            after.scrollHeight !== before.scrollHeight ||
+            after.clientHeight !== before.clientHeight)
+      );
+
+    const waitForListProgress = async (
+      note: string,
+      before: ScrollGeometry
+    ): Promise<{
+      snapshot: Awaited<ReturnType<LinkedInAdapter["collectThreadCandidates"]>>;
+      geometry: ScrollGeometry | null;
+      moved: boolean;
+    }> => {
+      const intervalMs = Math.max(50, Math.min(200, this.deps.scanScrollWaitMs));
+      const totalWaitMs = Math.max(600, Math.min(2_000, this.deps.scanScrollWaitMs * 4));
+      const deadline = Date.now() + totalWaitMs;
+      let snapshot = await this.collectThreadCandidates(page, selectors);
+      let geometry = await readResolvedContainer();
+      const listWindowMoved = () =>
+        state.listWindowHash !== undefined && snapshot.listWindowHash !== state.listWindowHash;
+      let moved = Boolean(
+        (snapshot.bottomKey && snapshot.bottomKey !== state.bottomKey) ||
+        snapshot.visibleSetHash !== state.visibleSetHash ||
+        listWindowMoved() ||
+        geometryChanged(before, geometry)
+      );
+      while (!moved && Date.now() < deadline) {
+        await this.runTracedPageAction({
+          page,
+          stage: "collect_threads",
+          action: "wait_for_timeout",
+          note,
+          details: { delayMs: intervalMs },
+          run: async () => {
+            await page.waitForTimeout(intervalMs);
+          }
+        });
+        snapshot = await this.collectThreadCandidates(page, selectors);
+        geometry = await readResolvedContainer();
+        moved = Boolean(
+          (snapshot.bottomKey && snapshot.bottomKey !== state.bottomKey) ||
+          snapshot.visibleSetHash !== state.visibleSetHash ||
+          listWindowMoved() ||
+          geometryChanged(before, geometry)
+        );
       }
-    });
+      return { snapshot, geometry, moved };
+    };
 
-    let after = await this.collectThreadCandidates(page, selectors).catch(() => null);
-    let moved = Boolean(after && after.bottomKey && after.bottomKey !== state.bottomKey);
+    let beforeGeometry = await scrollResolvedContainer("primary_scroll");
+    if (!beforeGeometry) {
+      return {
+        didScroll: false,
+        reachedBottom: false,
+        moved: false,
+        stopReason: "no_scroll_container"
+      };
+    }
+    let progress = await waitForListProgress("after_primary_scroll", beforeGeometry);
+    let moved = progress.moved;
     if (!moved) {
-      await this.tracedScrollContainer(page, selectors.thread_list, 840, {
-        stage: "collect_threads",
-        note: "secondary_scroll"
-      });
-      await this.runTracedPageAction({
-        page,
-        stage: "collect_threads",
-        action: "wait_for_timeout",
-        note: "after_secondary_scroll",
-        details: {
-          delayMs: Math.max(80, this.deps.scanScrollWaitMs)
-        },
-        run: async () => {
-          await page.waitForTimeout(Math.max(80, this.deps.scanScrollWaitMs));
-        }
-      });
-      after = await this.collectThreadCandidates(page, selectors).catch(() => null);
-      moved = Boolean(after && after.bottomKey && after.bottomKey !== state.bottomKey);
+      beforeGeometry = await scrollResolvedContainer("secondary_scroll");
+      if (!beforeGeometry) {
+        return {
+          didScroll: false,
+          reachedBottom: false,
+          moved: false,
+          stopReason: "no_scroll_container"
+        };
+      }
+      progress = await waitForListProgress("after_secondary_scroll", beforeGeometry);
+      moved = progress.moved;
     }
 
     return {
       didScroll: true,
-      reachedBottom: !moved,
+      // Geometry at the current bottom is not authoritative for LinkedIn's
+      // lazy virtualized list. Without a native end marker, a quiet window is
+      // an incomplete no-progress result, not proof that all rows were seen.
+      reachedBottom: false,
       moved
     };
   }
@@ -4306,6 +4407,7 @@ export class LinkedInAdapter implements PlatformAdapter {
     let bottomRepeatStreak = 0;
     let scrollNoMoveStreak = 0;
     let previousBottomKey: string | null = null;
+    let previousListWindowHash: string | null = null;
     let stopReason: LinkedInCollectionStopReason = "max_iterations";
 
     this.logTraceEvent({
@@ -4462,16 +4564,19 @@ export class LinkedInAdapter implements PlatformAdapter {
       }
       const nextCount = merged.size;
       const grew = nextCount > previousCount;
+      const listWindowChanged =
+        previousListWindowHash !== null && snapshot.listWindowHash !== previousListWindowHash;
       const bottomRepeated = Boolean(snapshot.bottomKey && snapshot.bottomKey === previousBottomKey);
 
-      if (grew) {
+      if (grew || listWindowChanged) {
         noProgressStreak = 0;
       } else {
         noProgressStreak += 1;
       }
-      bottomRepeatStreak = bottomRepeated ? bottomRepeatStreak + 1 : 0;
+      bottomRepeatStreak = bottomRepeated && !listWindowChanged ? bottomRepeatStreak + 1 : 0;
 
       previousBottomKey = snapshot.bottomKey;
+      previousListWindowHash = snapshot.listWindowHash;
 
       if (nextCount >= cappedMaxThreads) {
         stopReason = "max_threads";
@@ -4536,7 +4641,8 @@ export class LinkedInAdapter implements PlatformAdapter {
 
       const scrollOutcome = await this.deepScrollThreadList(page, selectors, {
         bottomKey: snapshot.bottomKey,
-        visibleSetHash: snapshot.visibleSetHash
+        visibleSetHash: snapshot.visibleSetHash,
+        listWindowHash: snapshot.listWindowHash
       });
       scrollIterations += 1;
       this.logTraceEvent({
@@ -4555,6 +4661,18 @@ export class LinkedInAdapter implements PlatformAdapter {
         scrollNoMoveStreak += 1;
       } else {
         scrollNoMoveStreak = 0;
+      }
+      if (scrollOutcome.stopReason) {
+        stopReason = scrollOutcome.stopReason;
+        this.logTraceDecision({
+          stage: "collect_threads",
+          decision: "Stopped collection because no trustworthy scroll container was available",
+          details: {
+            mergedCount: merged.size,
+            stopReason
+          }
+        });
+        break;
       }
       if (!scrollOutcome.didScroll || scrollOutcome.reachedBottom) {
         stopReason = merged.size > 0 ? "end_of_list_reached" : "zero_threads_found";
@@ -10115,7 +10233,12 @@ export class LinkedInAdapter implements PlatformAdapter {
     };
   }
 
-  async sendMessage(thread: ThreadStub, text: string): Promise<SendReceipt> {
+  async sendMessage(
+    thread: ThreadStub,
+    text: string,
+    _attachments?: OutboundAttachment[],
+    beforeDispatch?: () => Promise<void>
+  ): Promise<SendReceipt> {
     // Stdout-visible breadcrumbs for the send flow. The send-queue worker
     // doesn't have a runLogger attached so logTraceDecision is a no-op for
     // this path; without these console.warns a hung send shows up as silence
@@ -10187,7 +10310,25 @@ export class LinkedInAdapter implements PlatformAdapter {
         await readingPause(700, 1800);
         console.warn(`${tag} click send_button (selector=${selectors.send_button})`);
         const sendBtn = page.locator(selectors.send_button).first();
-        await humanClick(page, sendBtn, { timeout: 10_000, reading: null });
+        let dispatchAuthorized = false;
+        try {
+          await humanClick(page, sendBtn, {
+            timeout: 10_000,
+            reading: null,
+            beforeClick: async () => {
+              await beforeDispatch?.();
+              dispatchAuthorized = true;
+            }
+          });
+        } catch (error) {
+          if (!dispatchAuthorized) {
+            await composer.fill("").catch(async () => {
+              await page.keyboard.press("Meta+A").catch(() => undefined);
+              await page.keyboard.press("Backspace").catch(() => undefined);
+            });
+          }
+          throw error;
+        }
         const acknowledgedAt = new Date().toISOString();
         console.warn(`${tag} send_button clicked, entering verify loop`);
 

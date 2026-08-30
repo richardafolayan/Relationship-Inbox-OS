@@ -4,6 +4,25 @@ import {
   createSendService,
   parsePersistedSendSource
 } from "../apps/runner/dist/services/send.js";
+import {
+  focusAutoAckClientSendId,
+  focusManualAckClientSendId
+} from "../apps/runner/dist/services/focus-auto-ack.js";
+
+const focusWindowId = "focus-window-1";
+const personId = "person-1";
+const focusSettingsStore = {
+  async getOperatorProfile() {
+    return {
+      focusWindow: {
+        windowId: focusWindowId,
+        active: true,
+        endsAt: "2099-01-01T00:00:00.000Z",
+        ackedPersonIds: []
+      }
+    };
+  }
+};
 
 test("persisted provenance accepts only known send sources", () => {
   assert.equal(parsePersistedSendSource("manual"), "manual");
@@ -19,15 +38,22 @@ test("enqueue persists auto-ack provenance for the worker safety boundary", asyn
   const service = createSendService({
     adapters: {},
     eventBus: { emit: () => undefined },
-    settingsStore: {},
+    settingsStore: focusSettingsStore,
     auditLog: async () => "audit-id",
+    withExternalActionLock: async (_platform, work) => work(),
     withPlatformLock: async (_platform, work) => work(),
     prisma: {
       thread: {
-        findUnique: async () => ({ id: "thread-1", platform: "LINKEDIN" })
+        findUnique: async () => ({
+          id: "thread-1",
+          personId,
+          platform: "LINKEDIN",
+          userIntentVersion: 0
+        })
       },
       sendRequest: {
         findUnique: async () => null,
+        findFirst: async () => null,
         create: async ({ data }) => {
           created = data;
           return data;
@@ -39,11 +65,13 @@ test("enqueue persists auto-ack provenance for the worker safety boundary", asyn
   await service.enqueueSend({
     threadId: "thread-1",
     text: "Saved focus note",
-    clientSendId: "client-1",
-    source: "focus_auto_ack"
+    clientSendId: focusAutoAckClientSendId(focusWindowId, personId),
+    source: "focus_auto_ack",
+    focusWindowId
   });
 
   assert.equal(created.source, "focus_auto_ack");
+  assert.equal(created.focusIntentVersion, 0);
 });
 
 test("enqueue persists user-triggered focus provenance instead of disguising it as manual", async () => {
@@ -51,15 +79,22 @@ test("enqueue persists user-triggered focus provenance instead of disguising it 
   const service = createSendService({
     adapters: {},
     eventBus: { emit: () => undefined },
-    settingsStore: {},
+    settingsStore: focusSettingsStore,
     auditLog: async () => "audit-id",
+    withExternalActionLock: async (_platform, work) => work(),
     withPlatformLock: async (_platform, work) => work(),
     prisma: {
       thread: {
-        findUnique: async () => ({ id: "thread-1", platform: "LINKEDIN" })
+        findUnique: async () => ({
+          id: "thread-1",
+          personId,
+          platform: "LINKEDIN",
+          userIntentVersion: 0
+        })
       },
       sendRequest: {
         findUnique: async () => null,
+        findFirst: async () => null,
         create: async ({ data }) => {
           created = data;
           return data;
@@ -71,11 +106,14 @@ test("enqueue persists user-triggered focus provenance instead of disguising it 
   await service.enqueueSend({
     threadId: "thread-1",
     text: "Saved focus note",
-    clientSendId: "client-1",
-    source: "focus_ack"
+    clientSendId: focusManualAckClientSendId(focusWindowId, personId),
+    source: "focus_ack",
+    focusWindowId,
+    focusIntentVersion: 0
   });
 
   assert.equal(created.source, "focus_ack");
+  assert.equal(created.focusIntentVersion, 0);
 });
 
 test("Instagram rejects user-triggered focus provenance at enqueue", async () => {
@@ -84,6 +122,7 @@ test("Instagram rejects user-triggered focus provenance at enqueue", async () =>
     eventBus: { emit: () => undefined },
     settingsStore: {},
     auditLog: async () => "audit-id",
+    withExternalActionLock: async (_platform, work) => work(),
     withPlatformLock: async (_platform, work) => work(),
     prisma: {
       thread: {
