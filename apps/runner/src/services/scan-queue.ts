@@ -119,6 +119,8 @@ interface ScanQueueDeps {
    * (the /control/scan route already 409s an unlinked WhatsApp scan).
    */
   isPlatformScannable?: (platform: PlatformName) => boolean;
+  /** Immediate reserved-selection gate for work created after an opt-out intent. */
+  isPlatformSelectedForNewWork?: (platform: PlatformName) => boolean;
   recordLatency?: (input: {
     metric: MessageSyncMetric;
     durationMs: number;
@@ -1468,11 +1470,13 @@ export function createScanQueue(deps: ScanQueueDeps) {
     };
 
     for (const platform of scanPlatforms) {
+      if (deps.isPlatformSelectedForNewWork?.(platform) === false) continue;
       const beforeLockSettings = await deps.settingsStore.getSettings();
       if (!beforeLockSettings.enabledPlatforms.includes(platform)) {
         continue;
       }
       await deps.platformMutex.runWithQueueOne(lockKey(platform), async () => {
+        if (deps.isPlatformSelectedForNewWork?.(platform) === false) return;
         const authoritativeSettings = await deps.settingsStore.getSettings();
         if (!authoritativeSettings.enabledPlatforms.includes(platform)) {
           return;
@@ -3802,7 +3806,12 @@ export function createScanQueue(deps: ScanQueueDeps) {
           },
           select: { id: true }
         });
+        if (!optionalWorkStillAllowed()) skipAi = true;
         for (const row of persistedAudioRows) {
+          if (!optionalWorkStillAllowed()) {
+            skipAi = true;
+            break;
+          }
           try {
             deps.onAudioMessage({ messageId: row.id });
           } catch (error) {
@@ -4020,7 +4029,8 @@ export function createScanQueue(deps: ScanQueueDeps) {
           ? (JSON.parse(thread.rememberJson) as RememberItem[])
           : [],
         messages: latestMessages.map(prismaMessageToPrompt).filter(isAiVisibleMessage),
-        needsReply: resolvedNeedsReply
+        needsReply: resolvedNeedsReply,
+        shouldContinue: optionalWorkStillAllowed
       });
 
       // Defensive sanitiser: AI output (or its fallback path) can contain
@@ -4054,7 +4064,8 @@ export function createScanQueue(deps: ScanQueueDeps) {
           displayName: person.displayName,
           messages: latestMessages.map(prismaMessageToPrompt).filter(isAiVisibleMessage),
           summary: summary ?? null,
-          whatTheyWant: whatTheyWant ?? null
+          whatTheyWant: whatTheyWant ?? null,
+          shouldContinue: optionalWorkStillAllowed
         })
         .catch(() => null);
       if (classified && optionalWorkStillAllowed()) {
@@ -4106,7 +4117,8 @@ export function createScanQueue(deps: ScanQueueDeps) {
           .classifyThreadClosed({
             displayName: person.displayName,
             messages: classifierMessages,
-            summary: summary ?? null
+            summary: summary ?? null,
+            shouldContinue: optionalWorkStillAllowed
           })
           .catch(() => null);
         if (verdict && optionalWorkStillAllowed()) {

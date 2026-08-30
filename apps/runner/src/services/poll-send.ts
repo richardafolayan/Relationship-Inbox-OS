@@ -48,6 +48,7 @@ interface PollSendInput {
   options: string[];
   allowMultipleAnswers: boolean;
   dispatch(): Promise<SendReceipt>;
+  beforeDispatch?(): Promise<void>;
   isPreDispatchFailure?(error: unknown): boolean;
 }
 
@@ -321,6 +322,7 @@ export function createPollSendService(deps: PollSendDeps) {
     }
 
     try {
+      await input.beforeDispatch?.();
       dispatchStarted = true;
       receipt = await input.dispatch();
       await deps.prisma.sendRequest.update({
@@ -390,7 +392,7 @@ export function createPollSendService(deps: PollSendDeps) {
         };
       }
 
-      if (input.isPreDispatchFailure?.(error)) {
+      if (!dispatchStarted || input.isPreDispatchFailure?.(error)) {
         const failure = consumerSendFailure(classifySendFailureKind({ message }));
         await deps.prisma.sendRequest.update({
           where: { clientSendId: input.clientSendId },

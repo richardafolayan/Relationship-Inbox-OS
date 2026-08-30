@@ -93,3 +93,40 @@ test("a connect queued behind a newer deselection cannot reopen or reselect the 
   assert.equal(physicalConnects, 0);
   assert.deepEqual(enabled, []);
 });
+
+test("a reserved deselection rejects new target work while an earlier platform lock drains", async () => {
+  let enabled = ["GOOGLE_MESSAGES", "LINKEDIN"];
+  const googleEntered = deferred();
+  const releaseGoogle = deferred();
+  let linkedInLockEntries = 0;
+  const coordinator = createPlatformSelectionCoordinator({
+    platforms: ["GOOGLE_MESSAGES", "LINKEDIN"],
+    getEnabledPlatforms: async () => enabled,
+    requestAbort: () => undefined,
+    withPlatformLocks: async (platform, work) => {
+      if (platform === "GOOGLE_MESSAGES") {
+        googleEntered.resolve();
+        await releaseGoogle.promise;
+      } else {
+        linkedInLockEntries += 1;
+      }
+      return work();
+    }
+  });
+
+  const mutation = coordinator.mutate(["GOOGLE_MESSAGES"], async () => {
+    enabled = ["GOOGLE_MESSAGES"];
+  });
+  await googleEntered.promise;
+
+  await assert.rejects(
+    coordinator.withSelectedPlatform("LINKEDIN", async () => {
+      throw new Error("must not run");
+    }),
+    PlatformNotSelectedError
+  );
+  assert.equal(linkedInLockEntries, 0);
+
+  releaseGoogle.resolve();
+  await mutation;
+});

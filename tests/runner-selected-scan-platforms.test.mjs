@@ -67,6 +67,14 @@ test("direct ingestion routes hold the selected-platform fence while persisting"
     imessageImport.indexOf("syncThreadForIngest") >
       imessageImport.indexOf('withSelectedPlatform("IMESSAGE"')
   );
+  assert.ok(
+    imessageImport.indexOf("new IMessageDb") >
+      imessageImport.indexOf('withSelectedPlatform("IMESSAGE"')
+  );
+  assert.ok(
+    imessageImport.indexOf("if (payload.dryRun)") >
+      imessageImport.indexOf('withSelectedPlatform("IMESSAGE"')
+  );
 
   const threadRescan = route(
     "/control/thread/:threadId/rescan",

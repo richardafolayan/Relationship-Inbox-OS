@@ -15,6 +15,7 @@ process.env.DATABASE_URL = `file:${join(tempDir, "scan.sqlite")}`;
 
 const platformRows = new Map();
 let transactionHook = () => {};
+let audioRowsHook = null;
 let persistedMessage = null;
 const baseThread = {
   id: "thread-1",
@@ -85,7 +86,12 @@ const prisma = {
       };
       return persistedMessage;
     },
-    findMany: async () => persistedMessage ? [persistedMessage] : [],
+    findMany: async (args) => {
+      if (args?.where?.platformMessageKey?.in && audioRowsHook) {
+        return audioRowsHook();
+      }
+      return persistedMessage ? [persistedMessage] : [];
+    },
     findFirst: async () => persistedMessage,
     findUnique: async () => null,
     aggregate: async ({ where }) => ({
@@ -140,18 +146,40 @@ function mutex() {
   };
 }
 
+const emptyLinkedInStreamResult = {
+  stopReason: "end_of_list",
+  iterations: 1,
+  scrollIterations: 0,
+  processedRows: 0,
+  actionableRows: 0,
+  unreadRows: 0,
+  needsReplyRows: 0,
+  openedRows: 0,
+  skippedRows: 0,
+  skippedUnchangedRows: 0,
+  fullBackfillRows: 0,
+  failures: 0,
+  selectorThreadItemCount: 0,
+  selectorThreadSnippetCount: 0,
+  collectorMode: "primary_stream",
+  fallbackEligible: false,
+  fallbackTriggered: false
+};
+
 test("an ALL scan rechecks selection before a future platform can reconnect", async () => {
   const enteredLinkedIn = deferred();
   const releaseLinkedIn = deferred();
   let instagramConnects = 0;
-  let enabledPlatforms = ["LINKEDIN", "INSTAGRAM"];
+  const enabledPlatforms = ["LINKEDIN", "INSTAGRAM"];
+  const reservedPlatforms = new Set(enabledPlatforms);
   const queue = createScanQueue({
     adapters: {
       LINKEDIN: adapter("LINKEDIN", {
         ensureConnected: async () => {
           enteredLinkedIn.resolve();
           await releaseLinkedIn.promise;
-        }
+        },
+        scanInboxThreadsStream: async () => emptyLinkedInStreamResult
       }),
       INSTAGRAM: adapter("INSTAGRAM", {
         ensureConnected: async () => { instagramConnects += 1; }
@@ -171,15 +199,48 @@ test("an ALL scan rechecks selection before a future platform can reconnect", as
     platformMutex: mutex(),
     screenshotDir: tempDir,
     domDumpDir: tempDir,
-    auditLog: async () => "audit"
+    auditLog: async () => "audit",
+    isPlatformSelectedForNewWork: (platform) => reservedPlatforms.has(platform)
   });
 
   const running = queue.runJob({ jobId: "all-selection", scope: "update" });
   await enteredLinkedIn.promise;
-  enabledPlatforms = ["LINKEDIN"];
+  reservedPlatforms.delete("INSTAGRAM");
   releaseLinkedIn.resolve();
   await running;
   assert.equal(instagramConnects, 0);
+});
+
+test("an ALL scan reaches a later selected platform when no revocation occurs", async () => {
+  let instagramConnects = 0;
+  const queue = createScanQueue({
+    adapters: {
+      LINKEDIN: adapter("LINKEDIN", {
+        scanInboxThreadsStream: async () => emptyLinkedInStreamResult
+      }),
+      INSTAGRAM: adapter("INSTAGRAM", {
+        ensureConnected: async () => { instagramConnects += 1; }
+      })
+    },
+    eventBus: { emit: () => undefined },
+    settingsStore: {
+      getSettings: async () => ({
+        demoMode: false,
+        recentThreadSweepCount: 10,
+        maxMessagesPerThread: 20,
+        scanIntervalSeconds: 60,
+        enabledPlatforms: ["LINKEDIN", "INSTAGRAM"]
+      })
+    },
+    aiService: {},
+    platformMutex: mutex(),
+    screenshotDir: tempDir,
+    domDumpDir: tempDir,
+    auditLog: async () => "audit"
+  });
+
+  await queue.runJob({ jobId: "all-selection-control", scope: "update" });
+  assert.equal(instagramConnects, 1);
 });
 
 test("revocation after message commit emits durable visibility but skips audio and AI", async () => {
@@ -248,4 +309,71 @@ test("revocation after message commit emits durable visibility but skips audio a
   assert.ok(events.includes("MESSAGES_PERSISTED"));
   assert.ok(events.includes("THREAD_UPDATED"));
   transactionHook = () => {};
+});
+
+test("revocation while audio rows are loading prevents transcription enqueue", async () => {
+  persistedMessage = null;
+  const enteredAudioLookup = deferred();
+  const releaseAudioLookup = deferred();
+  let audioCalls = 0;
+  const queue = createScanQueue({
+    adapters: { LINKEDIN: adapter("LINKEDIN") },
+    eventBus: { emit: () => undefined },
+    settingsStore: {
+      getSettings: async () => ({
+        demoMode: false,
+        recentThreadSweepCount: 10,
+        maxMessagesPerThread: 20,
+        scanIntervalSeconds: 60,
+        enabledPlatforms: ["LINKEDIN"],
+        amberHours: 6,
+        redHours: 18
+      }),
+      getOperatorProfile: async () => ({ aiHelpLevel: "writing_support" })
+    },
+    aiService: {
+      updateThreadSummary: async () => { throw new Error("must not run"); },
+      classifyThreadCategory: async () => null,
+      classifyThreadClosed: async () => null
+    },
+    platformMutex: mutex(),
+    screenshotDir: tempDir,
+    domDumpDir: tempDir,
+    auditLog: async () => "audit",
+    onAudioMessage: () => { audioCalls += 1; }
+  });
+  const shouldContinue = queue.createContinueGate();
+  transactionHook = () => {};
+  audioRowsHook = async () => {
+    enteredAudioLookup.resolve();
+    await releaseAudioLookup.promise;
+    return [{ id: "message-1" }];
+  };
+
+  const running = queue.syncThreadForIngest({
+    platform: "LINKEDIN",
+    candidate: {
+      platformThreadId: "platform-thread-1",
+      displayName: "Alex",
+      lastMessagePreview: "Voice note"
+    },
+    maxMessages: 20,
+    requestId: "audio-query-revoke",
+    messages: [{
+      platformMessageKey: "message-key-2",
+      direction: "IN",
+      timestamp: new Date("2026-08-30T10:01:00.000Z").toISOString(),
+      text: "Voice note",
+      senderName: "Alex",
+      attachments: [{ kind: "voice_note", url: "file:///tmp/voice-2.m4a" }]
+    }],
+    shouldContinue
+  });
+  await enteredAudioLookup.promise;
+  queue.requestAbort("platform_selection_changed");
+  releaseAudioLookup.resolve();
+  await running;
+
+  assert.equal(audioCalls, 0);
+  audioRowsHook = null;
 });

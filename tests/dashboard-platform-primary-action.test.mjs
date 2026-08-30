@@ -53,6 +53,16 @@ test("NOT_CONNECTED leads with Connect", () => {
   assert.equal(platformScanEligible(row({ status: "NOT_CONNECTED" })), false);
 });
 
+test("an unselected source is setup-primary and never scan-eligible", () => {
+  const disabled = row({
+    enabled: false,
+    status: "CONNECTED",
+    connectedAt: "2026-06-01T10:00:00.000Z"
+  });
+  assert.equal(resolvePlatformPrimaryAction(disabled), "setup");
+  assert.equal(platformScanEligible(disabled), false);
+});
+
 test("ERROR without auth/session stays scan-eligible", () => {
   const errorRow = row({
     status: "ERROR",

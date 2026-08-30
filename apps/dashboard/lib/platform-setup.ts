@@ -15,7 +15,7 @@ export function isIMessageFullDiskAccessProblem(row?: PlatformCard): boolean {
   return /Full Disk Access|chat\.db|Cannot read iMessage|unable to open database file/i.test(text);
 }
 
-export type PlatformPrimaryAction = "scan" | "connect" | "reconnect";
+export type PlatformPrimaryAction = "setup" | "scan" | "connect" | "reconnect";
 
 function platformFailureText(row: PlatformCard): string {
   return [
@@ -55,6 +55,7 @@ export function isPlatformAuthOrSessionError(row?: PlatformCard | null): boolean
  * scan-primary. Non-auth ERROR stays scan-primary.
  */
 export function resolvePlatformPrimaryAction(row: PlatformCard): PlatformPrimaryAction {
+  if (row.enabled === false) return "setup";
   if (isPlatformAuthOrSessionError(row)) {
     return row.connectedAt || row.lastScanAt ? "reconnect" : "connect";
   }
@@ -67,5 +68,5 @@ export function resolvePlatformPrimaryAction(row: PlatformCard): PlatformPrimary
 }
 
 export function platformScanEligible(row: PlatformCard): boolean {
-  return resolvePlatformPrimaryAction(row) === "scan";
+  return row.enabled !== false && resolvePlatformPrimaryAction(row) === "scan";
 }

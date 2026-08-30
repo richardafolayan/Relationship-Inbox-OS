@@ -29,6 +29,16 @@ export function markSetupComplete(storage: SetupWizardStorage): void {
   storage.setItem(SETUP_WIZARD_COMPLETE_KEY, "1");
 }
 
+export function nextSetupStepIfCurrent<T>(
+  current: T,
+  expected: T,
+  steps: readonly T[]
+): T {
+  if (current !== expected) return current;
+  const index = Math.max(0, steps.indexOf(current));
+  return steps[Math.min(index + 1, steps.length - 1)] ?? current;
+}
+
 export type SetupGateDecision =
   /** Fresh install with no previous setup state: show the wizard. */
   | "show"

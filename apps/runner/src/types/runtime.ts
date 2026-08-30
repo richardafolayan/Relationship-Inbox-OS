@@ -353,6 +353,8 @@ export interface AiService {
      * spend per raced call.
      */
     race?: boolean;
+    /** Final privacy gate checked immediately before provider dispatch. */
+    shouldContinue?: () => boolean;
   }): Promise<SummaryOutput>;
   generateSuggestedReplies(input: {
     /** Group chat flags (#753). */
@@ -458,6 +460,8 @@ export interface AiService {
      * #382 — pilot R-0029). Operator-initiated paths only.
      */
     race?: boolean;
+    /** Final privacy gate checked immediately before provider dispatch. */
+    shouldContinue?: () => boolean;
   }): Promise<"outreach" | "genuine" | null>;
   /**
    * Conversation-end verdict (#287 phase 2.5). "closed" = last inbound
@@ -470,6 +474,8 @@ export interface AiService {
     displayName: string;
     messages: MessageForPrompt[];
     summary?: string | null;
+    /** Final privacy gate checked immediately before provider dispatch. */
+    shouldContinue?: () => boolean;
   }): Promise<{ status: "closed" | "open"; reason: string } | null>;
   /**
    * Reconnect-worthy scorer (#287 phase 3.5). Returns a 0-100 integer

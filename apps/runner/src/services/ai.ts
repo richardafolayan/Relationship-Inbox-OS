@@ -1669,6 +1669,7 @@ export interface CreateAiServiceOptions {
   forceProviderId?: AiProvider;
   onProviderCall?: (metric: AiProviderCallMetric) => void;
   now?: () => Date;
+  fetchImpl?: typeof fetch;
 }
 
 export function createAiService(
@@ -1717,12 +1718,15 @@ export function createAiService(
       return cachedClient;
     };
   }
-  const openAiCache = makeClientCache((key) => new OpenAI({ apiKey: key, ...AI_CLIENT_OPTIONS }));
+  const transport = options.fetchImpl ? { fetch: options.fetchImpl } : {};
+  const openAiCache = makeClientCache((key) =>
+    new OpenAI({ apiKey: key, ...AI_CLIENT_OPTIONS, ...transport })
+  );
   const glmCache = makeClientCache(
-    (key) => new OpenAI({ apiKey: key, baseURL: runnerConfig.zAiBaseUrl, ...AI_CLIENT_OPTIONS })
+    (key) => new OpenAI({ apiKey: key, baseURL: runnerConfig.zAiBaseUrl, ...AI_CLIENT_OPTIONS, ...transport })
   );
   const geminiCache = makeClientCache(
-    (key) => new OpenAI({ apiKey: key, baseURL: runnerConfig.geminiBaseUrl, ...GEMINI_CLIENT_OPTIONS })
+    (key) => new OpenAI({ apiKey: key, baseURL: runnerConfig.geminiBaseUrl, ...GEMINI_CLIENT_OPTIONS, ...transport })
   );
   const openAiClient = (): OpenAI | null => openAiCache(runnerConfig.openAiApiKey);
   const glmClient = (): OpenAI | null => glmCache(runnerConfig.zAiApiKey);
@@ -1761,13 +1765,19 @@ export function createAiService(
     return null;
   }
 
-  async function resolveActive(): Promise<{ client: OpenAI | null; model: string; provider: AiProvider }> {
+  async function resolveActive(): Promise<{
+    enabled: boolean;
+    client: OpenAI | null;
+    model: string;
+    provider: AiProvider;
+  }> {
     // Settings.aiProvider is the live override; runnerConfig.aiProvider is
     // the cold-start default seeded from the AI_PROVIDER env var. Settings
     // reads are a single SQLite row lookup — cheap enough to do per call.
     const settings = await settingsStore.getSettings();
     if (settings.aiEnabled === false) {
       return {
+        enabled: false,
         client: null,
         model: runnerConfig.openAiModel,
         provider: settings.aiProvider ?? runnerConfig.aiProvider
@@ -1785,13 +1795,13 @@ export function createAiService(
     const providerId = pickActiveProvider(requested, configured);
     if (providerId === "glm") {
       const model = settings.glmModel?.trim() || runnerConfig.glmModel;
-      return { client: glmClient(), model, provider: providerId };
+      return { enabled: true, client: glmClient(), model, provider: providerId };
     }
     if (providerId === "gemini") {
       const model = settings.geminiModel?.trim() || runnerConfig.geminiModel;
-      return { client: geminiClient(), model, provider: providerId };
+      return { enabled: true, client: geminiClient(), model, provider: providerId };
     }
-    return { client: openAiClient(), model: runnerConfig.openAiModel, provider: providerId };
+    return { enabled: true, client: openAiClient(), model: runnerConfig.openAiModel, provider: providerId };
   }
 
   /**
@@ -1805,8 +1815,10 @@ export function createAiService(
     model: string,
     prompt: string,
     parser: (value: unknown) => T,
-    systemContent: string = SYSTEM_PROMPT
+    systemContent: string = SYSTEM_PROMPT,
+    shouldContinue: () => boolean = () => true
   ): Promise<{ ok: true; result: T } | { ok: false; classification: AiErrorClassification | null }> {
+    if (!shouldContinue()) return { ok: false, classification: null };
     const entry = providerRegistry[providerId];
     const { client } = resolveProvider(providerId);
     if (!client) {
@@ -1815,6 +1827,7 @@ export function createAiService(
 
     let lastClass: AiErrorClassification | null = null;
     for (let attempt = 1; attempt <= entry.maxAttempts; attempt++) {
+      if (!shouldContinue()) return { ok: false, classification: null };
       const startedAt = performance.now();
       try {
         const response = await client.chat.completions.create({
@@ -1926,9 +1939,16 @@ export function createAiService(
     fallback: T,
     parser: (value: unknown) => T,
     systemContent?: string,
-    opts?: { forceProviderId?: AiProvider; forceModel?: string }
+    opts?: {
+      forceProviderId?: AiProvider;
+      forceModel?: string;
+      shouldContinue?: () => boolean;
+    }
   ): Promise<{ result: T; source: AiSource | null }> {
-    const { provider: activeId, model: activeModel } = await resolveActive();
+    const { enabled, provider: activeId, model: activeModel } = await resolveActive();
+    if (!enabled || opts?.shouldContinue?.() === false) {
+      return { result: fallback, source: null };
+    }
     const forcedProviderId = opts?.forceProviderId ?? options.forceProviderId;
     const chain: AiProvider[] = forcedProviderId
       ? [forcedProviderId]
@@ -1946,7 +1966,14 @@ export function createAiService(
       const isActiveProvider = providerId === activeId;
       const isFirstInChain = i === 0;
       const model = opts?.forceModel ?? (isActiveProvider ? activeModel : resolveProvider(providerId).model);
-      const outcome = await tryProvider(providerId, model, prompt, parser, systemContent);
+      const outcome = await tryProvider(
+        providerId,
+        model,
+        prompt,
+        parser,
+        systemContent,
+        opts?.shouldContinue
+      );
       if (outcome.ok) {
         const entry = providerRegistry[providerId];
         // `fellBack` describes the chain walk (active failed, fallback
@@ -2012,22 +2039,30 @@ export function createAiService(
     fallback: T,
     parser: (value: unknown) => T,
     systemContent: string | undefined,
-    raceLabel: string
+    raceLabel: string,
+    shouldContinue?: () => boolean
   ): Promise<{ result: T; source: AiSource | null }> {
-    const { provider: activeId } = await resolveActive();
+    const { enabled, provider: activeId } = await resolveActive();
+    if (!enabled || shouldContinue?.() === false) return { result: fallback, source: null };
     const secondaryId = pickRaceSecondary(activeId);
     if (!secondaryId) {
-      return modelJson(prompt, fallback, parser, systemContent);
+      return modelJson(prompt, fallback, parser, systemContent, { shouldContinue });
     }
     try {
       const outcome = await raceAiProviders<{ result: T; source: AiSource | null }>({
         primary: {
           providerId: activeId,
-          call: () => modelJson(prompt, fallback, parser, systemContent, { forceProviderId: activeId })
+          call: () => modelJson(prompt, fallback, parser, systemContent, {
+            forceProviderId: activeId,
+            shouldContinue
+          })
         },
         secondary: {
           providerId: secondaryId,
-          call: () => modelJson(prompt, fallback, parser, systemContent, { forceProviderId: secondaryId })
+          call: () => modelJson(prompt, fallback, parser, systemContent, {
+            forceProviderId: secondaryId,
+            shouldContinue
+          })
         },
         // Real provider source means the underlying tryProvider
         // succeeded; the caller fallback ships with source.providerId
@@ -2048,7 +2083,7 @@ export function createAiService(
       console.warn(
         `[ai-race ${raceLabel}] both ${activeId} and ${secondaryId} failed; falling back to chained modelJson. ${error instanceof Error ? error.message : String(error)}`
       );
-      return modelJson(prompt, fallback, parser, systemContent);
+      return modelJson(prompt, fallback, parser, systemContent, { shouldContinue });
     }
   }
 
@@ -2083,6 +2118,7 @@ export function createAiService(
      * background AI without a separate cost conversation.
      */
     race?: boolean;
+    shouldContinue?: () => boolean;
   }): Promise<SummaryOutput> {
     const lastInbound = [...input.messages].reverse().find((msg) => msg.direction === "IN");
     const lastMessage = input.messages[input.messages.length - 1];
@@ -2433,8 +2469,17 @@ ${transcript}`;
     // today.
     const parseSummary = (value: unknown) => summarySchema.parse(value);
     const { result, source } = input.race
-      ? await raceModelJson(prompt, fallback, parseSummary, undefined, "reassess-summary")
-      : await modelJson(prompt, fallback, parseSummary);
+      ? await raceModelJson(
+          prompt,
+          fallback,
+          parseSummary,
+          undefined,
+          "reassess-summary",
+          input.shouldContinue
+        )
+      : await modelJson(prompt, fallback, parseSummary, undefined, {
+          shouldContinue: input.shouldContinue
+        });
     // Safety net. The prompt asks for a complete, self-contained ask within
     // ~200 chars; this guards a runaway multi-sentence response. capAskSummary
     // backs up to a whole word at the 200-char budget AND drops a trailing
@@ -2931,6 +2976,7 @@ ${recentExchange || "(no recent messages)"}`;
      * only, doubles spend per raced call.
      */
     race?: boolean;
+    shouldContinue?: () => boolean;
   }): Promise<"outreach" | "genuine" | null> {
     const inboundMessages = input.messages
       .filter((m) => m.direction === "IN")
@@ -2961,8 +3007,10 @@ ${inboundMessages.map((m, i) => `${i + 1}. ${m}`).join("\n")}`;
     // path can treat "still running but slow" and "failed silently" the
     // same way — caller already handles null.
     const callOne = async (providerId: AiProvider): Promise<"outreach" | "genuine" | null> => {
+      if (input.shouldContinue?.() === false) return null;
       const { client, model } = resolveProvider(providerId);
       if (!client) return null;
+      if (input.shouldContinue?.() === false) return null;
       try {
         const response = await client.chat.completions.create({
           model,
@@ -2988,7 +3036,8 @@ ${inboundMessages.map((m, i) => `${i + 1}. ${m}`).join("\n")}`;
       }
     };
 
-    const { provider: activeId } = await resolveActive();
+    const { enabled, provider: activeId } = await resolveActive();
+    if (!enabled || input.shouldContinue?.() === false) return null;
 
     // Issue #382. Race two providers when the operator-initiated path
     // opts in. Falls back to a single active-provider call when no
@@ -3024,6 +3073,7 @@ ${inboundMessages.map((m, i) => `${i + 1}. ${m}`).join("\n")}`;
       }
     }
 
+    if (input.shouldContinue?.() === false) return null;
     return callOne(activeId);
   }
 
@@ -3894,7 +3944,9 @@ Safe metadata: ${safeTruncate(JSON.stringify(input.meta), 1200)}`;
      *  attribution discipline applies. */
     messages: MessageForPrompt[];
     summary?: string | null;
+    shouldContinue?: () => boolean;
   }): Promise<{ status: "closed" | "open"; reason: string } | null> {
+    if (input.shouldContinue?.() === false) return null;
     const { client, model, provider } = await resolveActive();
     if (!client) {
       return null;
@@ -3939,6 +3991,7 @@ Recent messages (oldest first):
 ${recentTurns.map((m, i) => `${i + 1}. [${m.direction}] ${m.text}`).join("\n")}`;
 
     try {
+      if (input.shouldContinue?.() === false) return null;
       const response = await client.chat.completions.create({
         model,
         ...(shouldUseJsonResponseFormat(provider, model)

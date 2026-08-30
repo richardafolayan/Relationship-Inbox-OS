@@ -22,6 +22,7 @@ import {
   type FocusAutoAckThread
 } from "./focus-auto-ack";
 import { createKeyedMutex } from "./keyed-mutex";
+import { PlatformNotSelectedError } from "./platform-selection-coordinator";
 
 interface SendServiceDeps {
   // Partial: not every PlatformName has an adapter on main today. The
@@ -56,6 +57,7 @@ interface SendServiceDeps {
     platform: PlatformName,
     work: () => Promise<T>
   ) => Promise<T>;
+  assertPlatformSelected?: (platform: PlatformName) => Promise<void>;
   /** Override the Prisma client. Defaults to the runner's singleton; tests inject a fake. */
   prisma?: PrismaClient;
   onPlatformResult?: (input: {
@@ -1428,7 +1430,9 @@ export function createSendService(deps: SendServiceDeps) {
             : undefined;
 
           await assertFocusAcknowledgementDispatchEligible?.();
+          await deps.assertPlatformSelected?.(thread.platform as PlatformName);
           const beforeDispatch = async () => {
+            await deps.assertPlatformSelected?.(thread.platform as PlatformName);
             await assertFocusAcknowledgementDispatchEligible?.();
             await assertRecoveryPredecessorDispatchEligible();
             dispatchStarted = true;
@@ -1542,7 +1546,7 @@ export function createSendService(deps: SendServiceDeps) {
       // Map the (often opaque) error to a coarse kind the dashboard can
       // turn into a one-tap recovery action ("Open browser to sign in",
       // "Run selector tests", "Reset session", "Retry now").
-      const errorKind = error instanceof SendPolicyError
+      const errorKind = error instanceof SendPolicyError || error instanceof PlatformNotSelectedError
         ? "POLICY_BLOCKED"
         : dispatchStarted
           ? "DELIVERY_UNCERTAIN"
@@ -1556,6 +1560,8 @@ export function createSendService(deps: SendServiceDeps) {
       const reasonCode =
         error instanceof SendPolicyError
           ? error.reasonCode
+          : error instanceof PlatformNotSelectedError
+            ? "platform_not_selected"
           : thread.platform === "INSTAGRAM"
           ? (typeof adapterError?.details?.reason === "string" &&
               /^[a-z][a-z0-9_]{0,80}$/.test(adapterError.details.reason)

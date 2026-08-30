@@ -1,5 +1,13 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  linkSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  writeFileSync
+} from "node:fs";
 import { basename, dirname, resolve } from "node:path";
 import dotenv from "dotenv";
 
@@ -84,6 +92,7 @@ export interface StagedEnvFileValue {
 
 interface EnvFileValueTransactionJournal {
   transactionId: string;
+  ownerPid: number;
   existed: boolean;
   backupName: string | null;
 }
@@ -105,7 +114,8 @@ function removeTransactionArtifacts(
 export function stageEnvFileValue(
   filePath: string,
   key: string,
-  value: string
+  value: string,
+  ownerPid = process.pid
 ): StagedEnvFileValue {
   const current = existsSync(filePath) ? readFileSync(filePath, "utf8") : "";
   const next = upsertEnvContent(current, key, value);
@@ -132,12 +142,17 @@ export function stageEnvFileValue(
         journalTempPath,
         JSON.stringify({
           transactionId,
+          ownerPid,
           existed,
           backupName: existed ? basename(backupPath) : null
         } satisfies EnvFileValueTransactionJournal),
         { encoding: "utf8", mode: 0o600 }
       );
-      renameSync(journalTempPath, journalPath);
+      try {
+        linkSync(journalTempPath, journalPath);
+      } finally {
+        rmSync(journalTempPath, { force: true });
+      }
       renameSync(tempPath, filePath);
       state = "promoted";
     },
@@ -160,12 +175,8 @@ export function stageEnvFileValue(
     },
     discard: () => {
       if (state !== "pending") return;
-      if (existsSync(journalPath)) {
-        recoverEnvFileValueTransaction(filePath, null);
-      } else {
-        rmSync(tempPath, { force: true });
-        rmSync(backupPath, { force: true });
-      }
+      rmSync(tempPath, { force: true });
+      rmSync(backupPath, { force: true });
       state = "settled";
     }
   };
@@ -174,7 +185,7 @@ export function stageEnvFileValue(
 export function recoverEnvFileValueTransaction(
   filePath: string,
   committedTransactionId: string | null | undefined
-): "none" | "rolled_back" | "committed" {
+): "none" | "active" | "rolled_back" | "committed" {
   const journalPath = transactionJournalPath(filePath);
   if (!existsSync(journalPath)) return "none";
   let journal: EnvFileValueTransactionJournal;
@@ -188,6 +199,8 @@ export function recoverEnvFileValueTransaction(
   if (
     typeof journal.transactionId !== "string" ||
     !/^[0-9a-f-]{36}$/i.test(journal.transactionId) ||
+    !Number.isSafeInteger(journal.ownerPid) ||
+    journal.ownerPid <= 0 ||
     typeof journal.existed !== "boolean" ||
     (journal.existed && journal.backupName !== expectedBackupName) ||
     (!journal.existed && journal.backupName !== null)
@@ -199,6 +212,13 @@ export function recoverEnvFileValueTransaction(
   if (journal.transactionId === committedTransactionId) {
     removeTransactionArtifacts(journalPath, null, backupPath);
     return "committed";
+  }
+  try {
+    process.kill(journal.ownerPid, 0);
+    return "active";
+  } catch (error) {
+    const code = error && typeof error === "object" && "code" in error ? error.code : null;
+    if (code === "EPERM") return "active";
   }
   if (journal.existed) {
     if (!backupPath || !existsSync(backupPath)) {

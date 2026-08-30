@@ -23,6 +23,7 @@ import { startPilotTour } from "@/lib/pilot-tour";
 import {
   isSetupComplete,
   markSetupComplete,
+  nextSetupStepIfCurrent,
   onSetupWizardStart
 } from "@/lib/setup-wizard";
 import type { OperatorProfile, PlatformCard } from "@/lib/types";
@@ -111,6 +112,7 @@ export function SetupWizard() {
   const [savingPreferences, setSavingPreferences] = useState(false);
   const [finishing, setFinishing] = useState(false);
   const [connectingSource, setConnectingSource] = useState(false);
+  const [stepBusy, setStepBusy] = useState(false);
   const [persistenceError, setPersistenceError] = useState("");
   const pendingPreferenceWrites = useRef(0);
   const preferenceWriter = useMemo(
@@ -190,6 +192,8 @@ export function SetupWizard() {
   const index = Math.max(0, steps.indexOf(step));
   const next = () => setStep(steps[Math.min(index + 1, steps.length - 1)]!);
   const back = () => setStep(steps[Math.max(index - 1, 0)]!);
+  const advanceFrom = (expected: Step) =>
+    setStep((current) => nextSetupStepIfCurrent(current, expected, steps));
 
   const savePreferences = useCallback(async (partial: SetupPreferencesUpdate) => {
     pendingPreferenceWrites.current += 1;
@@ -340,7 +344,7 @@ export function SetupWizard() {
             ))}
           </div>
           {step !== "done" ? (
-            <button type="button" disabled={finishing || savingPreferences || connectingSource} onClick={() => void finish()} className="font-mono text-[11px] text-ink-3 underline underline-offset-2 hover:text-ink disabled:opacity-50">
+            <button type="button" disabled={finishing || savingPreferences || connectingSource || stepBusy} onClick={() => void finish()} className="font-mono text-[11px] text-ink-3 underline underline-offset-2 hover:text-ink disabled:opacity-50">
               {finishing ? "Saving..." : "Finish later"}
             </button>
           ) : null}
@@ -359,15 +363,16 @@ export function SetupWizard() {
           </Card>
         ) : null}
 
-        {step === "profile" ? <ProfileStep initial={status?.operatorProfile} onBack={back} onNext={next} /> : null}
+        {step === "profile" ? <ProfileStep initial={status?.operatorProfile} onBusyChange={setStepBusy} onBack={back} onNext={() => advanceFrom("profile")} /> : null}
 
         {step === "sources" ? (
           <SourcesStep
             selected={selected}
             available={status?.platforms.map((platform) => platform.name) ?? []}
             onChange={setSelected}
+            onBusyChange={setStepBusy}
             onBack={back}
-            onNext={async () => { await savePreferences({ selectedPlatforms: selected }); next(); }}
+            onNext={async () => { await savePreferences({ selectedPlatforms: selected }); advanceFrom("sources"); }}
           />
         ) : null}
 
@@ -398,13 +403,14 @@ export function SetupWizard() {
   );
 }
 
-function ProfileStep({ initial, onBack, onNext }: { initial?: OperatorProfile; onBack: () => void; onNext: () => void }) {
+function ProfileStep({ initial, onBusyChange, onBack, onNext }: { initial?: OperatorProfile; onBusyChange: (busy: boolean) => void; onBack: () => void; onNext: () => void }) {
   const [name, setName] = useState(initial?.displayName ?? "");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const save = async () => {
     if (!name.trim()) { onNext(); return; }
     setBusy(true);
+    onBusyChange(true);
     setError("");
     try {
       await apiPost("/runner/control/operator-profile", { displayName: name.trim() });
@@ -414,16 +420,17 @@ function ProfileStep({ initial, onBack, onNext }: { initial?: OperatorProfile; o
       setError(`Your name was not saved. Check that ${APP_NAME} is running and try again.`);
     } finally {
       setBusy(false);
+      onBusyChange(false);
     }
   };
   return <Card icon={<UserRound />} eyebrow="About you" title={`What should ${APP_NAME} call you?`} body="This name stays in your app and makes the welcome screen feel like yours.">
     <label className="mt-5 block text-[13px] text-ink-2">Your first name<input value={name} onChange={(event) => setName(event.target.value)} autoFocus className="mt-2 block w-full rounded-[8px] border border-hairline bg-paper px-3 py-[10px] text-[14px] text-ink focus:border-hairline-strong focus:outline-none" placeholder="For example, Maya" /></label>
     {error ? <Notice>{error}</Notice> : null}
-    <Actions><Back onClick={onBack} /><Primary disabled={busy} onClick={() => void save()}>{busy ? "Saving..." : name.trim() ? "Save and continue" : "Skip for now"}</Primary></Actions>
+    <Actions><Back disabled={busy} onClick={onBack} /><Primary disabled={busy} onClick={() => void save()}>{busy ? "Saving..." : name.trim() ? "Save and continue" : "Skip for now"}</Primary></Actions>
   </Card>;
 }
 
-function SourcesStep({ selected, available, onChange, onBack, onNext }: { selected: SetupPlatform[]; available: SetupPlatform[]; onChange: (value: SetupPlatform[]) => void; onBack: () => void; onNext: () => Promise<void> }) {
+function SourcesStep({ selected, available, onChange, onBusyChange, onBack, onNext }: { selected: SetupPlatform[]; available: SetupPlatform[]; onChange: (value: SetupPlatform[]) => void; onBusyChange: (busy: boolean) => void; onBack: () => void; onNext: () => Promise<void> }) {
   const [busy, setBusy] = useState(false);
   const allChoices: Array<[SetupPlatform, string, string]> = [
     ["IMESSAGE", "iMessage", "Messages and Contacts on this Mac"],
@@ -436,7 +443,7 @@ function SourcesStep({ selected, available, onChange, onBack, onNext }: { select
   const toggle = (platform: SetupPlatform) => onChange(selected.includes(platform) ? selected.filter((item) => item !== platform) : [...selected, platform]);
   return <Card icon={<MessageSquareText />} eyebrow="Message sources" title="Where do you get messages?" body="Select only what you use. Unselected services stay inactive and do not need to be connected.">
     <div className="mt-5 grid gap-3">{choices.map(([value, label, body]) => <button key={value} type="button" aria-pressed={selected.includes(value)} onClick={() => toggle(value)} className={cn("flex items-center gap-3 rounded-[10px] border px-4 py-4 text-left", selected.includes(value) ? "border-accent bg-accent/5" : "border-hairline bg-paper-2/40")}><span className={cn("grid h-5 w-5 place-items-center rounded-[5px] border", selected.includes(value) ? "border-accent bg-accent text-white" : "border-hairline-strong")}>{selected.includes(value) ? <Check className="h-3.5 w-3.5" /> : null}</span><span><span className="block text-[15px] font-medium text-ink">{label}</span><span className="mt-0.5 block text-[12.5px] text-ink-3">{body}</span></span></button>)}</div>
-    <Actions><Back onClick={onBack} /><Primary disabled={busy} onClick={() => { setBusy(true); void onNext().catch(() => undefined).finally(() => setBusy(false)); }}>{busy ? "Saving..." : selected.length ? "Set up these sources" : "Continue without messages"}</Primary></Actions>
+    <Actions><Back disabled={busy} onClick={onBack} /><Primary disabled={busy} onClick={() => { setBusy(true); onBusyChange(true); void onNext().catch(() => undefined).finally(() => { setBusy(false); onBusyChange(false); }); }}>{busy ? "Saving..." : selected.length ? "Set up these sources" : "Continue without messages"}</Primary></Actions>
   </Card>;
 }
 

@@ -10,6 +10,7 @@ import { AdapterFailure } from "../apps/runner/dist/platforms/utils.js";
 import { createKeyedMutex } from "../apps/runner/dist/services/keyed-mutex.js";
 import { createAdminResetCoordinator } from "../apps/runner/dist/services/admin-reset-coordinator.js";
 import { persistedSendRetryEligibility } from "../apps/runner/dist/services/send-failure.js";
+import { PlatformNotSelectedError } from "../apps/runner/dist/services/platform-selection-coordinator.js";
 import {
   focusAutoAckClientSendId,
   focusManualAckClientSendId
@@ -311,6 +312,7 @@ function makeHarness(initialRows, opts = {}) {
     withExternalActionLock:
       opts.withExternalActionLock ?? ((_platform, work) => work()),
     withPlatformLock: opts.withPlatformLock ?? ((_platform, work) => work()),
+    assertPlatformSelected: opts.assertPlatformSelected,
     prisma
   });
 
@@ -1625,6 +1627,41 @@ test("an active send persists terminal state before admin reset deletes its grap
   assert.ok(
     h.events.indexOf("send-terminal-persisted") < h.events.indexOf("graph-deleted")
   );
+});
+
+test("manual and scheduled workers fail policy-closed when opt-out wins before dispatch", async () => {
+  for (const row of [
+    pendingRow({ id: "manual", clientSendId: "manual", source: "manual" }),
+    pendingRow({
+      id: "scheduled",
+      clientSendId: "scheduled",
+      source: "manual",
+      scheduledFor: new Date("2026-08-31T10:00:00.000Z")
+    })
+  ]) {
+    let releaseWorker;
+    let selected = true;
+    const held = new Promise((resolve) => { releaseWorker = resolve; });
+    const h = makeHarness([row], {
+      withExternalActionLock: async (_platform, work) => {
+        await held;
+        return work();
+      },
+      assertPlatformSelected: async (platform) => {
+        if (!selected) throw new PlatformNotSelectedError(platform);
+      }
+    });
+
+    const running = h.svc.processSendRequest(row.id);
+    selected = false;
+    releaseWorker();
+    await running;
+
+    assert.equal(h.sends.length, 0);
+    assert.equal(h.rows[0].status, "FAILED");
+    assert.match(h.rows[0].errorJson, /POLICY_BLOCKED/);
+    assert.match(h.rows[0].errorJson, /platform_not_selected/);
+  }
 });
 
 test("REGRESSION: resume() does NOT re-send a row left in-doubt by a crash; it reconciles to FAILED", async () => {

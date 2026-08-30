@@ -13,8 +13,10 @@ export function createIMessageSelectionLifecycle(
 ) {
   let active = false;
   let tail: Promise<void> = Promise.resolve();
+  let desired = false;
+  let revision = 0;
 
-  const apply = async (selected: boolean): Promise<void> => {
+  const apply = async (selected: boolean, expectedRevision: number): Promise<void> => {
     if (selected === active) return;
     if (!selected) {
       deps.stopBirthdaySync();
@@ -24,6 +26,7 @@ export function createIMessageSelectionLifecycle(
       return;
     }
     await deps.probe();
+    if (revision !== expectedRevision || !desired) return;
     deps.startBirthdaySync();
     deps.startNameSync();
     deps.startWatcher();
@@ -32,7 +35,9 @@ export function createIMessageSelectionLifecycle(
 
   return {
     reconcile(selected: boolean): Promise<void> {
-      const next = tail.catch(() => undefined).then(() => apply(selected));
+      desired = selected;
+      const expectedRevision = ++revision;
+      const next = tail.catch(() => undefined).then(() => apply(selected, expectedRevision));
       tail = next;
       return next;
     },

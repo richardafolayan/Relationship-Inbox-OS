@@ -799,6 +799,8 @@ function globalResetLockKey(): string {
   return `${defaultPersonKey}:GLOBAL_RESET`;
 }
 
+let platformSelectionAllowsNewWork = (_platform: PlatformName): boolean => true;
+
 // Forward reference: the scan-queue's `onNewPerson` hook needs to call
 // the enrichment queue's `enqueue`, but the enrichment queue is built
 // AFTER scan-queue (it depends on sessionManager + lock vocabulary that
@@ -828,15 +830,20 @@ const imessageAttachmentResolver: AttachmentResolver | null = runnerConfig.imess
           filename: string | null;
           transferName: string | null;
         } | null = null;
-        try {
-          const db = new IMessageDb(runnerConfig.imessage.dbPath);
+        const selected =
+          platformSelectionAllowsNewWork("IMESSAGE") &&
+          (await settingsStore.getSettings()).enabledPlatforms.includes("IMESSAGE");
+        if (selected) {
           try {
-            live = db.findAttachmentByGuid(guid) ?? null;
-          } finally {
-            db.close();
+            const db = new IMessageDb(runnerConfig.imessage.dbPath);
+            try {
+              live = db.findAttachmentByGuid(guid) ?? null;
+            } finally {
+              db.close();
+            }
+          } catch {
+            // chat.db unreadable (Full Disk Access?); the snapshot can still serve.
           }
-        } catch {
-          // chat.db unreadable (Full Disk Access?); the snapshot can still serve.
         }
         if (live?.absolutePath && existsSync(live.absolutePath)) {
           return {
@@ -933,6 +940,12 @@ function isVoiceNoteAttachment(meta: {
 // matters when we also transcribe). Best-effort; never throws into the scan.
 async function snapshotMessageVoiceNotes(messageId: string): Promise<void> {
   if (!runnerConfig.imessage.enabled || !runnerConfig.audioTranscription.enabled) return;
+  if (!platformSelectionAllowsNewWork("IMESSAGE")) return;
+  const settings = await settingsStore.getSettings();
+  if (
+    !platformSelectionAllowsNewWork("IMESSAGE") ||
+    !settings.enabledPlatforms.includes("IMESSAGE")
+  ) return;
   let attachmentsJson: string | null;
   try {
     const row = await prisma.message.findUnique({
@@ -1283,6 +1296,8 @@ const scanQueue = createScanQueue({
       enabled: runnerConfig.whatsapp.enabled,
       state: whatsappConnect.state
     }),
+  isPlatformSelectedForNewWork: (platform) =>
+    platformSelectionAllowsNewWork(platform),
   onAudioMessage: (input) => {
     // Snapshot the audio bytes first (sync copy, while Apple's file still
     // exists), then enqueue transcription — which reads back from the
@@ -1458,7 +1473,8 @@ const sendService = createSendService({
   // Same per-platform mutex key the scan queue uses, so a send and a scan
   // never drive the shared managed page at the same time.
   withPlatformLock: withPlatformControlLock,
-  withExternalActionLock
+  withExternalActionLock,
+  assertPlatformSelected: assertPlatformSelectedForExternalAction
 });
 registerUserTriggeredIntentForRequest = (threadId) =>
   sendService.registerDurableUserTriggeredIntent(threadId);
@@ -1793,7 +1809,10 @@ const enrichmentQueue = createEnrichmentQueue({
       throw new Error("LinkedIn adapter is not configured; enrichment cannot ensure session");
     }
     await linkedin.ensureConnected();
-  }
+  },
+  isPlatformSelected: async (platform) =>
+    platformSelectionAllowsNewWork(platform) &&
+    (await settingsStore.getSettings()).enabledPlatforms.includes(platform)
 });
 // Auto-enrichment is OFF by default. Visiting strangers' profiles
 // to scrape their posts/headline/etc. is the highest-fingerprint
@@ -1822,8 +1841,27 @@ if (autoEnrichmentEnabled) {
   );
 }
 
-async function withPlatformControlLock<T>(platform: PlatformName, work: () => Promise<T>): Promise<T> {
+async function withPlatformControlLockUnchecked<T>(
+  platform: PlatformName,
+  work: () => Promise<T>
+): Promise<T> {
   return operationMutex.runExclusive(platformLockKey(platform), work);
+}
+
+async function withPlatformControlLock<T>(platform: PlatformName, work: () => Promise<T>): Promise<T> {
+  if (!platformSelectionAllowsNewWork(platform)) {
+    throw new PlatformNotSelectedError(platform);
+  }
+  return withPlatformControlLockUnchecked(platform, async () => {
+    if (!platformSelectionAllowsNewWork(platform)) {
+      throw new PlatformNotSelectedError(platform);
+    }
+    const settings = await settingsStore.getSettings();
+    if (!settings.enabledPlatforms.includes(platform)) {
+      throw new PlatformNotSelectedError(platform);
+    }
+    return work();
+  });
 }
 
 async function withExternalActionLock<T>(
@@ -1837,11 +1875,26 @@ async function withGlobalResetLock<T>(work: () => Promise<T>): Promise<T> {
   return operationMutex.runExclusive(globalResetLockKey(), work);
 }
 
+async function assertPlatformSelectedForExternalAction(
+  platform: PlatformName
+): Promise<void> {
+  if (!platformSelectionAllowsNewWork(platform)) {
+    throw new PlatformNotSelectedError(platform);
+  }
+  const settings = await settingsStore.getSettings();
+  if (
+    !platformSelectionAllowsNewWork(platform) ||
+    !settings.enabledPlatforms.includes(platform)
+  ) {
+    throw new PlatformNotSelectedError(platform);
+  }
+}
+
 async function withWhatsAppSessionLocks<T>(
   work: () => Promise<T>
 ): Promise<T> {
   return withExternalActionLock("WHATSAPP", () =>
-    withPlatformControlLock("WHATSAPP", work)
+    withPlatformControlLockUnchecked("WHATSAPP", work)
   );
 }
 
@@ -1850,8 +1903,10 @@ const platformSelectionCoordinator = createPlatformSelectionCoordinator({
   getEnabledPlatforms: async () => (await settingsStore.getSettings()).enabledPlatforms,
   requestAbort: (reason) => scanQueue.requestAbort(reason),
   withPlatformLocks: (platform, work) =>
-    withExternalActionLock(platform, () => withPlatformControlLock(platform, work))
+    withExternalActionLock(platform, () => withPlatformControlLockUnchecked(platform, work))
 });
+platformSelectionAllowsNewWork = (platform) =>
+  platformSelectionCoordinator.isPlatformSelectedForNewWork(platform);
 
 const managedSessionPlatforms: PlatformName[] = [
   "LINKEDIN",
@@ -1871,7 +1926,7 @@ async function reconcilePlatformSelection(): Promise<void> {
     requestAbort: (reason) => scanQueue.requestAbort(reason),
     managedPlatforms: managedSessionPlatforms.filter((platform) => Boolean(adapters[platform])),
     withPlatformLocks: (platform, work) =>
-      withExternalActionLock(platform, () => withPlatformControlLock(platform, work)),
+      withExternalActionLock(platform, () => withPlatformControlLockUnchecked(platform, work)),
     closeSession: async (platform) => {
       await adapters[platform]?.closeSession("disabled_by_settings");
       if (platform === "WHATSAPP") {
@@ -2424,7 +2479,7 @@ const adminResetCoordinator = createAdminResetCoordinator({
   },
   withGlobalResetLock,
   withExternalActionLock,
-  withPlatformLock: withPlatformControlLock,
+  withPlatformLock: withPlatformControlLockUnchecked,
   resetGraph: (platform) => resetPlatformInboxGraph(platform),
   auditLog: (input) => auditService.log(input)
 });
@@ -2824,67 +2879,60 @@ app.post("/control/imessage/import-history", asyncRoute(async (req, res) => {
       dryRun: z.boolean().optional()
     })
     .parse(req.body ?? {});
-  const settings = await settingsStore.getSettings();
-  if (!settings.enabledPlatforms.includes("IMESSAGE")) {
-    res.status(409).json({ error: "iMessage is not selected in Settings.", reason: "platform_not_selected" });
-    return;
-  }
   const sinceDays = payload.sinceDays ?? 365;
   const cutoffMs = Date.now() - sinceDays * 24 * 60 * 60 * 1000;
 
-  let db: IMessageDb;
   try {
-    db = new IMessageDb(runnerConfig.imessage.dbPath);
-  } catch {
-    res.status(503).json({ error: "cannot open chat.db (Full Disk Access?)" });
-    return;
-  }
+    const result = await platformSelectionCoordinator.withSelectedPlatform("IMESSAGE", async () => {
+      let db: IMessageDb;
+      try {
+        db = new IMessageDb(runnerConfig.imessage.dbPath);
+      } catch {
+        return {
+          statusCode: 503,
+          body: { error: "cannot open chat.db (Full Disk Access?)" }
+        };
+      }
+      let rows: ReturnType<IMessageDb["listThreads"]>;
+      try {
+        rows = db.listThreads(5000, { unreadOnly: false });
+      } finally {
+        db.close();
+      }
+      const candidates = rows.filter(
+        (row) => row.lastMessageAt !== undefined && Date.parse(row.lastMessageAt) >= cutoffMs
+      );
+      const resolver = loadBestContactResolver({
+        vcfPath: runnerConfig.imessage.contactsVcfPath
+      });
+      const resolveName = (row: (typeof rows)[number]): string => {
+        if (row.userSetName) return row.userSetName;
+        if (row.isGroup) return row.displayName;
+        return resolver.resolve(row.chatIdentifier) ?? row.displayName;
+      };
+      if (payload.dryRun) {
+        return {
+          statusCode: 200,
+          body: {
+            ok: true,
+            dryRun: true,
+            sinceDays,
+            totalNonAutomatedChats: rows.length,
+            wouldIngest: candidates.length,
+            sample: candidates.slice(0, 8).map((candidate) => resolveName(candidate))
+          }
+        };
+      }
 
-  // listThreads already drops automated/shortcode senders and decodes
-  // lastMessageAt. 5000 comfortably exceeds the total chat count.
-  const rows = db.listThreads(5000, { unreadOnly: false });
-  // listThreads materialises its rows; the rest of the handler uses scanQueue,
-  // not db. Close the chat.db handle now so each import-history call doesn't
-  // leak an open SQLite connection.
-  db.close();
-  const candidates = rows.filter(
-    (r) => r.lastMessageAt !== undefined && Date.parse(r.lastMessageAt) >= cutoffMs
-  );
-
-  // Resolve handles to real names via the same source the scanner uses
-  // (live macOS Contacts + optional vCard). Without this, `chat.db` only
-  // stores the raw phone/email so every imported person lands as
-  // "+447506440284" instead of "Lubosi" and is unsearchable by name.
-  // Mirrors the adapter's resolveDisplayName: an operator-set chat name
-  // wins; 1:1s resolve the chatIdentifier; groups keep chat.db's
-  // participant-join name (per-member resolution happens later in the
-  // scanner / backfill).
-  const resolver = loadBestContactResolver({ vcfPath: runnerConfig.imessage.contactsVcfPath });
-  const resolveName = (r: (typeof rows)[number]): string => {
-    if (r.userSetName) return r.userSetName;
-    if (r.isGroup) return r.displayName;
-    return resolver.resolve(r.chatIdentifier) ?? r.displayName;
-  };
-
-  if (payload.dryRun) {
-    res.json({
-      ok: true,
-      dryRun: true,
-      sinceDays,
-      totalNonAutomatedChats: rows.length,
-      wouldIngest: candidates.length,
-      sample: candidates.slice(0, 8).map((c) => resolveName(c))
-    });
-    return;
-  }
-
-  const requestId = uuid();
-  const startedAt = Date.now();
-  const summary = { threadsIngested: 0, messagesParsed: 0, updatedThreads: 0, threadFailures: 0 };
-  const shouldContinue = scanQueue.createContinueGate();
-
-  try {
-    await platformSelectionCoordinator.withSelectedPlatform("IMESSAGE", async () => {
+      const requestId = uuid();
+      const startedAt = Date.now();
+      const summary = {
+        threadsIngested: 0,
+        messagesParsed: 0,
+        updatedThreads: 0,
+        threadFailures: 0
+      };
+      const shouldContinue = scanQueue.createContinueGate();
       let index = 0;
       for (const r of candidates) {
         if (!shouldContinue()) break;
@@ -2926,7 +2974,19 @@ app.post("/control/imessage/import-history", asyncRoute(async (req, res) => {
           );
         }
       }
+      return {
+        statusCode: 200,
+        body: {
+          ok: true,
+          sinceDays,
+          requestId,
+          threadsConsidered: candidates.length,
+          ...summary,
+          durationMs: Date.now() - startedAt
+        }
+      };
     });
+    res.status(result.statusCode).json(result.body);
   } catch (error) {
     if (error instanceof PlatformNotSelectedError) {
       res.status(409).json({
@@ -2937,15 +2997,6 @@ app.post("/control/imessage/import-history", asyncRoute(async (req, res) => {
     }
     throw error;
   }
-
-  res.json({
-    ok: true,
-    sinceDays,
-    requestId,
-    threadsConsidered: candidates.length,
-    ...summary,
-    durationMs: Date.now() - startedAt
-  });
 }));
 
 // Stream a Messages.app attachment (photo / voice note / video) to the
@@ -2965,15 +3016,21 @@ app.get("/data/imessage-attachment/:guid", asyncRoute(async (req, res) => {
   // that's what keeps replay working after expiry.
   let live: ReturnType<IMessageDb["findAttachmentByGuid"]> | null = null;
   let dbOpenFailed = false;
-  try {
-    const db = new IMessageDb(runnerConfig.imessage.dbPath);
+  const settings = await settingsStore.getSettings();
+  const selected =
+    platformSelectionAllowsNewWork("IMESSAGE") &&
+    settings.enabledPlatforms.includes("IMESSAGE");
+  if (selected) {
     try {
-      live = db.findAttachmentByGuid(guid) ?? null;
-    } finally {
-      db.close();
+      const db = new IMessageDb(runnerConfig.imessage.dbPath);
+      try {
+        live = db.findAttachmentByGuid(guid) ?? null;
+      } finally {
+        db.close();
+      }
+    } catch {
+      dbOpenFailed = true;
     }
-  } catch {
-    dbOpenFailed = true;
   }
   if (live?.absolutePath && existsSync(live.absolutePath)) {
     await streamIMessageAttachment({
@@ -2995,6 +3052,13 @@ app.get("/data/imessage-attachment/:guid", asyncRoute(async (req, res) => {
       transferName: live?.transferName ?? snapshot.transferName,
       filename: live?.filename ?? snapshot.filename,
       res
+    });
+    return;
+  }
+  if (!selected) {
+    res.status(409).json({
+      error: "iMessage is not selected in Settings.",
+      reason: "platform_not_selected"
     });
     return;
   }
@@ -3126,10 +3190,17 @@ app.post("/control/setup/ai-key", asyncRoute(async (req, res) => {
   }).parse(req.body);
   let result;
   try {
-    result = await operationMutex.runExclusive("setup:gemini-key", () =>
-      applyGeminiKey(payload.key, {
+    result = await operationMutex.runExclusive("setup:gemini-key", async () => {
+      const envWritePath = resolveEnvWritePath();
+      const currentSettings = await settingsStore.getSettings();
+      const recovery = recoverEnvFileValueTransaction(
+        envWritePath,
+        currentSettings.setupGeminiKeyTransactionId
+      );
+      if (recovery !== "active") discardStaleEnvFileStages(envWritePath);
+      return applyGeminiKey(payload.key, {
         validate: (key) => validateGeminiKey(key, runnerConfig.geminiBaseUrl),
-        stage: (key) => stageEnvFileValue(resolveEnvWritePath(), "GEMINI_API_KEY", key),
+        stage: (key) => stageEnvFileValue(envWritePath, "GEMINI_API_KEY", key),
         commitState: (transactionId) =>
           setupPreferencesCoordinator.enableAiProvider(
             "gemini",
@@ -3140,8 +3211,8 @@ app.post("/control/setup/ai-key", asyncRoute(async (req, res) => {
           process.env.GEMINI_API_KEY = key;
           runnerConfig.geminiApiKey = key;
         }
-      })
-    );
+      });
+    });
   } catch (error) {
     if (error instanceof SetupPreferencesConflictError) {
       res.status(409).json({
@@ -4558,6 +4629,13 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
   // Same guard as /open and /rescan; see requireAdapter.
   const target = await getThreadStub(threadId);
   requireAdapter(target.platform);
+  if (!platformSelectionAllowsNewWork(target.platform)) {
+    throw new PlatformNotSelectedError(target.platform);
+  }
+  const sendSettings = await settingsStore.getSettings();
+  if (!sendSettings.enabledPlatforms.includes(target.platform)) {
+    throw new PlatformNotSelectedError(target.platform);
+  }
 
   // Schedule path: persist a SCHEDULED row and return immediately. The
   // dashboard renders a "scheduled for X" pill instead of pushing the
@@ -4733,6 +4811,8 @@ app.post("/control/thread/:threadId/send-poll", asyncRoute(async (req, res) => {
         question: payload.question,
         options: payload.options,
         allowMultipleAnswers: payload.allowMultipleAnswers,
+        beforeDispatch: () =>
+          assertPlatformSelectedForExternalAction(target.platform),
         isPreDispatchFailure: isWhatsAppPollSendPreDispatchError,
         dispatch: () =>
           adapter.sendPoll!(threadStub, {
@@ -5130,6 +5210,8 @@ app.post("/control/thread/:threadId/message/:messageId/react", asyncRoute(async 
         targetMessageId: messageId,
         actionType: "message_reaction",
         payload: { emoji: payload.emoji },
+        beforeDispatch: () =>
+          assertPlatformSelectedForExternalAction(target.platform),
         dispatch: () =>
           adapter.reactToMessage!(threadStub, message.platformMessageKey, payload.emoji),
         auditSuccess: () =>
@@ -5208,6 +5290,8 @@ app.post("/control/thread/:threadId/message/:messageId/edit", asyncRoute(async (
         targetMessageId: messageId,
         actionType: "message_edit",
         payload: { text: payload.text },
+        beforeDispatch: () =>
+          assertPlatformSelectedForExternalAction(target.platform),
         dispatch: () =>
           adapter.editMessage!(threadStub, message.platformMessageKey, payload.text),
         auditSuccess: () =>
@@ -5286,6 +5370,8 @@ app.post("/control/thread/:threadId/message/:messageId/poll-vote", asyncRoute(as
         targetMessageId: messageId,
         actionType: "poll_vote",
         payload: { selectedOptions: payload.selectedOptions },
+        beforeDispatch: () =>
+          assertPlatformSelectedForExternalAction(target.platform),
         isPreDispatchFailure: isWhatsAppPollVotePreDispatchError,
         dispatch: () =>
           adapter.voteOnPoll!(threadStub, message.platformMessageKey!, payload.selectedOptions),
@@ -7146,7 +7232,10 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
 }));
 
 app.get("/data/platforms", asyncRoute(async (_req, res) => {
-  const platforms = await prisma.platform.findMany({ orderBy: { name: "asc" } });
+  const [platforms, settings] = await Promise.all([
+    prisma.platform.findMany({ orderBy: { name: "asc" } }),
+    settingsStore.getSettings()
+  ]);
   const platformsForDisplay = runnerConfig.availablePlatforms;
   const failureActions = ["SCAN_FAIL", "SELECTOR_FAIL", "SCAN_AUTH_REQUIRED"] as const;
   const recoveryActions = ["SCAN_END", "SELECTOR_TEST", "POST_SCAN_END", "POST_PLATFORM_TEST_SELECTORS_END"] as const;
@@ -7187,7 +7276,7 @@ app.get("/data/platforms", asyncRoute(async (_req, res) => {
         lastScanAt: row?.lastScanAt?.toISOString() ?? null,
         connectedAt: row?.connectedAt?.toISOString() ?? null,
         lastError: row?.lastError ?? null,
-        enabled: true,
+        enabled: settings.enabledPlatforms.includes(platform),
         supported,
         unavailableReason:
           supported ? null : "iMessage is only available on macOS.",
@@ -7713,8 +7802,12 @@ app.post("/control/imessage/contacts/resync", asyncRoute(async (_req, res) => {
     });
     return;
   }
-  const settings = await settingsStore.getSettings();
-  if (!settings.enabledPlatforms.includes("IMESSAGE")) {
+  try {
+    await platformSelectionCoordinator.withSelectedPlatform("IMESSAGE", () =>
+      imessageNameSync.tick()
+    );
+  } catch (error) {
+    if (!(error instanceof PlatformNotSelectedError)) throw error;
     res.status(409).json({
       ok: false,
       reason: "platform_not_selected",
@@ -7722,7 +7815,6 @@ app.post("/control/imessage/contacts/resync", asyncRoute(async (_req, res) => {
     });
     return;
   }
-  await imessageNameSync.tick();
   res.json({ ok: true, health: imessageNameSync.getHealth() });
 }));
 
@@ -9457,6 +9549,8 @@ app.use((error: unknown, req: express.Request, res: express.Response, _next: exp
     ? 400
     : error instanceof SendPolicyError
       ? 409
+      : error instanceof PlatformNotSelectedError
+        ? 409
       : 500;
   const message =
     error instanceof z.ZodError
@@ -9498,6 +9592,8 @@ app.use((error: unknown, req: express.Request, res: express.Response, _next: exp
     error: message,
     ...(error instanceof SendPolicyError
       ? { reasonCode: error.reasonCode, ...error.details }
+      : error instanceof PlatformNotSelectedError
+        ? { reasonCode: "platform_not_selected" }
       : {})
   });
 });
@@ -9538,11 +9634,11 @@ async function start(): Promise<void> {
   await ensureRuntimeDirs();
   const startupSettings = await settingsStore.getSettings();
   const envWritePath = resolveEnvWritePath();
-  recoverEnvFileValueTransaction(
+  const setupKeyRecovery = recoverEnvFileValueTransaction(
     envWritePath,
     startupSettings.setupGeminiKeyTransactionId
   );
-  discardStaleEnvFileStages(envWritePath);
+  if (setupKeyRecovery !== "active") discardStaleEnvFileStages(envWritePath);
   const recoveredGeminiKey = readEnvFileValue(envWritePath, "GEMINI_API_KEY");
   if (recoveredGeminiKey) process.env.GEMINI_API_KEY = recoveredGeminiKey;
   else delete process.env.GEMINI_API_KEY;

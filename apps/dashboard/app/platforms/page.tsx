@@ -21,6 +21,7 @@ import {
 } from "@/lib/platform-setup";
 import { ReceiptsDrawer } from "@/components/common/receipts-drawer";
 import { cn } from "@/lib/utils";
+import { startSetupWizard } from "@/lib/setup-wizard";
 
 const PLATFORM_DISPLAY: Record<PlatformCard["platform"], string> = {
   LINKEDIN: "LinkedIn",
@@ -102,7 +103,9 @@ export default function PlatformsPage() {
   );
 
   const visibleRows = rows;
-  const connected = visibleRows.filter((row) => row.status === "CONNECTED").length;
+  const connected = visibleRows.filter(
+    (row) => row.enabled !== false && row.status === "CONNECTED"
+  ).length;
   const total = visibleRows.length;
 
   return (
@@ -126,7 +129,7 @@ export default function PlatformsPage() {
       <MacContactsHint />
 
       {visibleRows
-        .filter((row) => row.status === "DEGRADED")
+        .filter((row) => row.enabled !== false && row.status === "DEGRADED")
         .map((row) => (
           <DegradedBanner
             key={row.platform}
@@ -221,6 +224,8 @@ function PlatformCardView({
   const statusToken =
     !supported
       ? { className: "text-ink-3", label: "Not available" }
+      : row.enabled === false
+        ? { className: "text-ink-3", label: "Off" }
       : connected
         ? { className: "text-risk-fresh", label: "Connected" }
         : row.status === "DEGRADED"
@@ -238,7 +243,9 @@ function PlatformCardView({
         : null;
 
   const connectHint =
-    !row.lastScanAt && row.lastError && !scanEligible
+    row.enabled === false
+      ? "Choose this source in setup"
+      : !row.lastScanAt && row.lastError && !scanEligible
       ? classifyConsumerFailure(new Error(row.lastError), {
           path: "/runner/control/platform/connect",
           method: "POST"
@@ -253,6 +260,8 @@ function PlatformCardView({
 
   const primaryLabel = !supported
     ? "Not available"
+    : row.enabled === false
+      ? "Add in setup"
     : primaryAction === "scan"
       ? "Scan now"
       : primaryAction === "reconnect"
@@ -296,6 +305,10 @@ function PlatformCardView({
 
   const runPrimary = () => {
     if (!supported) return;
+    if (row.enabled === false) {
+      startSetupWizard();
+      return;
+    }
     if (primaryAction === "scan") {
       runScan();
       return;
@@ -307,7 +320,7 @@ function PlatformCardView({
     runConnect();
   };
 
-  const moreItems: MenuItem[] = [
+  const moreItems: MenuItem[] = row.enabled === false ? [] : [
     ...(primaryAction === "scan"
       ? [
           {
@@ -442,7 +455,7 @@ function PlatformCardView({
               Not available
             </Button>
           )}
-          {supported ? (
+          {supported && moreItems.length > 0 ? (
             <Menu
               trigger={
                 <button

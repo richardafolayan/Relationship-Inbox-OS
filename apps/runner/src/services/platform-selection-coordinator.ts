@@ -30,6 +30,11 @@ export function createPlatformSelectionCoordinator(
 ) {
   const orderedPlatforms = [...new Set(deps.platforms)].sort();
   let latestMutationVersion = 0;
+  let desiredSelection: Set<PlatformName> | null = null;
+
+  function isPlatformSelectedForNewWork(platform: PlatformName): boolean {
+    return desiredSelection?.has(platform) ?? true;
+  }
 
   async function withAllPlatformLocks<T>(work: () => Promise<T>): Promise<T> {
     const enter = (index: number): Promise<T> => {
@@ -42,18 +47,26 @@ export function createPlatformSelectionCoordinator(
   }
 
   function reserveMutation(
-    _selectedPlatforms: readonly PlatformName[]
+    selectedPlatforms: readonly PlatformName[]
   ): ReservedPlatformSelectionMutation {
     const version = ++latestMutationVersion;
+    desiredSelection = new Set(selectedPlatforms);
     deps.requestAbort("platform_selection_changed");
     return {
-      run<T>(work: () => Promise<T>): Promise<T> {
-        return withAllPlatformLocks(async () => {
-          if (version !== latestMutationVersion) {
-            throw new PlatformSelectionSupersededError();
+      async run<T>(work: () => Promise<T>): Promise<T> {
+        try {
+          return await withAllPlatformLocks(async () => {
+            if (version !== latestMutationVersion) {
+              throw new PlatformSelectionSupersededError();
+            }
+            return work();
+          });
+        } catch (error) {
+          if (version === latestMutationVersion) {
+            desiredSelection = new Set(await deps.getEnabledPlatforms().catch(() => []));
           }
-          return work();
-        });
+          throw error;
+        }
       }
     };
   }
@@ -69,7 +82,13 @@ export function createPlatformSelectionCoordinator(
     platform: PlatformName,
     work: () => Promise<T>
   ): Promise<T> {
+    if (!isPlatformSelectedForNewWork(platform)) {
+      throw new PlatformNotSelectedError(platform);
+    }
     return deps.withPlatformLocks(platform, async () => {
+      if (!isPlatformSelectedForNewWork(platform)) {
+        throw new PlatformNotSelectedError(platform);
+      }
       const current = await deps.getEnabledPlatforms();
       if (!current.includes(platform)) {
         throw new PlatformNotSelectedError(platform);
@@ -78,5 +97,10 @@ export function createPlatformSelectionCoordinator(
     });
   }
 
-  return { reserveMutation, mutate, withSelectedPlatform };
+  return {
+    reserveMutation,
+    mutate,
+    withSelectedPlatform,
+    isPlatformSelectedForNewWork
+  };
 }

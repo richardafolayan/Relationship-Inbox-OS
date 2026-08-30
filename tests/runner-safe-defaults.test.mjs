@@ -87,3 +87,31 @@ test("loading a real predecessor row persists its upgraded compatibility fields"
   assert.deepEqual(upgradedRow.enabledPlatforms, ["LINKEDIN", "IMESSAGE"]);
   assert.equal(upgradedRow.aiEnabled, true);
 });
+
+for (const [label, valueJson] of [
+  ["malformed JSON", "{broken"],
+  ["JSON null", "null"],
+  ["a JSON array", "[]"]
+]) {
+  test(`loading ${label} fails closed and persists the safe repair`, async () => {
+    const rows = new Map([[APP_SETTINGS_KEY, { key: APP_SETTINGS_KEY, valueJson }]]);
+    const store = createSettingsStore({
+      setting: {
+        findUnique: async ({ where }) => rows.get(where.key) ?? null,
+        upsert: async ({ where, update, create }) => {
+          const current = rows.get(where.key);
+          const next = current ? { ...current, ...update } : create;
+          rows.set(where.key, next);
+          return next;
+        }
+      }
+    });
+
+    const loaded = await store.getSettings();
+    const repaired = JSON.parse(rows.get(APP_SETTINGS_KEY).valueJson);
+    assert.deepEqual(loaded.enabledPlatforms, []);
+    assert.equal(loaded.aiEnabled, false);
+    assert.deepEqual(repaired.enabledPlatforms, []);
+    assert.equal(repaired.aiEnabled, false);
+  });
+}

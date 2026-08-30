@@ -8,6 +8,7 @@ import {
   setupNavigationDisabled,
   persistCompletedSetup
 } from "../apps/dashboard/lib/setup-preference-writes.ts";
+import { nextSetupStepIfCurrent } from "../apps/dashboard/lib/setup-wizard.ts";
 
 const setupWizardSource = readFileSync(
   new URL("../apps/dashboard/components/common/SetupWizard.tsx", import.meta.url),
@@ -19,6 +20,14 @@ test("connection navigation stays disabled until the active connection request s
   assert.match(setupWizardSource, /<Back disabled=\{busy !== null\}/);
   assert.match(setupWizardSource, /<Primary disabled=\{busy !== null\} onClick=\{onNext\}>Continue/);
   assert.match(setupWizardSource, /finishing \|\| savingPreferences \|\| connectingSource/);
+  assert.match(setupWizardSource, /connectingSource \|\| stepBusy/);
+  assert.match(setupWizardSource, /<Back disabled=\{busy\} onClick=\{onBack\}/);
+});
+
+test("a deferred step success cannot advance after navigation moved elsewhere", () => {
+  const steps = ["welcome", "profile", "sources", "connect"];
+  assert.equal(nextSetupStepIfCurrent("profile", "profile", steps), "sources");
+  assert.equal(nextSetupStepIfCurrent("welcome", "profile", steps), "welcome");
 });
 
 test("a lost transcription response refreshes authoritative download status", () => {

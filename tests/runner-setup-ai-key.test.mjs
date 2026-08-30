@@ -347,7 +347,7 @@ test("startup rolls back a promoted key whose setup transaction never committed"
   const file = join(dir, ".env");
   writeFileSync(file, "GEMINI_API_KEY=old\n");
   try {
-    const staged = stageEnvFileValue(file, "GEMINI_API_KEY", "new");
+    const staged = stageEnvFileValue(file, "GEMINI_API_KEY", "new", 99_999_999);
     staged.commit();
     assert.equal(readFileSync(file, "utf8"), "GEMINI_API_KEY=new\n");
 
@@ -378,6 +378,50 @@ test("startup keeps a promoted key when the matching setup transaction committed
   }
 });
 
+test("a second staged transaction cannot discard another committed key journal", async () => {
+  const {
+    recoverEnvFileValueTransaction,
+    stageEnvFileValue
+  } = await import("../apps/runner/dist/services/setup-ai-key.js");
+  const dir = mkdtempSync(join(tmpdir(), "rios-setup-ai-key-owner-"));
+  const file = join(dir, ".env");
+  writeFileSync(file, "GEMINI_API_KEY=old\n");
+  try {
+    const committed = stageEnvFileValue(file, "GEMINI_API_KEY", "committed");
+    committed.commit();
+    const competing = stageEnvFileValue(file, "GEMINI_API_KEY", "competing");
+    assert.throws(() => competing.commit(), /requires recovery/);
+    competing.discard();
+    assert.equal(readFileSync(file, "utf8"), "GEMINI_API_KEY=committed\n");
+    assert.equal(
+      recoverEnvFileValueTransaction(file, committed.transactionId),
+      "committed"
+    );
+    assert.equal(readFileSync(file, "utf8"), "GEMINI_API_KEY=committed\n");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("recovery never rolls back a live uncommitted transaction", async () => {
+  const {
+    recoverEnvFileValueTransaction,
+    stageEnvFileValue
+  } = await import("../apps/runner/dist/services/setup-ai-key.js");
+  const dir = mkdtempSync(join(tmpdir(), "rios-setup-ai-key-live-owner-"));
+  const file = join(dir, ".env");
+  writeFileSync(file, "GEMINI_API_KEY=old\n");
+  try {
+    const active = stageEnvFileValue(file, "GEMINI_API_KEY", "active");
+    active.commit();
+    assert.equal(recoverEnvFileValueTransaction(file, null), "active");
+    assert.equal(readFileSync(file, "utf8"), "GEMINI_API_KEY=active\n");
+    active.rollback();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("startup reads quoted dotenv values without keeping quotes or comments", async () => {
   const { readEnvFileValue } = await import("../apps/runner/dist/services/setup-ai-key.js");
   const dir = mkdtempSync(join(tmpdir(), "rios-setup-ai-key-read-"));
@@ -401,6 +445,7 @@ test("startup rejects a recovery journal whose backup escapes the config directo
     `${file}.setup-key-transaction.json`,
     JSON.stringify({
       transactionId: "123e4567-e89b-12d3-a456-426614174000",
+      ownerPid: process.pid,
       existed: true,
       backupName: "../outside"
     })

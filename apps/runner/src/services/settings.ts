@@ -332,8 +332,18 @@ export function createSettingsStore(
         return cloneSettings(settingsCache);
       }
 
-      const parsed = safeJsonParse<Partial<AppSettings>>(record.valueJson, {});
-      const { settings: loaded, shouldPersistUpgrade } = mergePersistedAppSettings(parsed);
+      let parsed: Partial<AppSettings> | null = null;
+      try {
+        const candidate: unknown = JSON.parse(record.valueJson);
+        if (candidate && typeof candidate === "object" && !Array.isArray(candidate)) {
+          parsed = candidate as Partial<AppSettings>;
+        }
+      } catch {
+        parsed = null;
+      }
+      const { settings: loaded, shouldPersistUpgrade } = parsed
+        ? mergePersistedAppSettings(parsed)
+        : { settings: cloneSettings(defaultSettings), shouldPersistUpgrade: true };
       if (shouldPersistUpgrade) {
         await database.setting.upsert({
           where: { key: APP_SETTINGS_KEY },
