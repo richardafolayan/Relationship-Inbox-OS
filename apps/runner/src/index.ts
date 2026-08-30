@@ -4174,6 +4174,7 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
         status: scheduleResult.status,
         scheduledFor: scheduleResult.scheduledFor,
         replayed: scheduleResult.replayed,
+        draftConsumed: scheduleResult.draftConsumed,
         // Surfaced for parity with enqueueAndKick's response shape so the
         // dashboard doesn't need a separate fetch to refresh the bar.
         activeCount: await sendQueue.getActiveCount(),

@@ -4,6 +4,7 @@ import test from "node:test";
 const {
   consumeThreadComposerSession,
   readThreadComposerSession,
+  rotateThreadComposerSession,
   safeSendFailureDisposition,
   snapshotThreadComposerSession,
   __test
@@ -233,4 +234,21 @@ test("safe send failure restores only an untouched cleared composer", () => {
     safeSendFailureDisposition("thread-a", "thread-b", cleared, cleared),
     "leave_route_session"
   );
+});
+
+test("a definite failed send rotates the recovered intent to a new delivery generation", () => {
+  const storage = makeStorage();
+  const intent = {
+    attachments: [],
+    customScheduleValue: "",
+    replyToMessageId: null,
+    source: "user",
+    text: "Try this again"
+  };
+  const failed = snapshotThreadComposerSession("thread-a", intent, storage);
+  const recovered = rotateThreadComposerSession("thread-a", intent, storage);
+
+  assert.equal(recovered.text, failed.text);
+  assert.equal(recovered.revision, failed.revision + 1);
+  assert.notEqual(recovered.revisionId, failed.revisionId);
 });

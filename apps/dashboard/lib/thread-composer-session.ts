@@ -216,6 +216,30 @@ export function snapshotThreadComposerSession(
   }
 }
 
+export function rotateThreadComposerSession(
+  threadId: string,
+  draft: ThreadComposerIntentDraft,
+  storage: StorageLike | null = defaultStorage()
+): ThreadComposerSession | null {
+  if (!storage || !threadId) return null;
+  const intent = normalizeThreadComposerIntent(draft);
+  if (!intent || isEmptyIntent(intent)) return null;
+  try {
+    const current = readThreadComposerSession(threadId, storage);
+    const revisionId = createRevisionId();
+    if (!revisionId) return null;
+    const next: ThreadComposerSession = {
+      ...intent,
+      revision: (current?.revision ?? 0) + 1,
+      revisionId
+    };
+    storage.setItem(keyFor(threadId), JSON.stringify(next));
+    return next;
+  } catch {
+    return null;
+  }
+}
+
 export function consumeThreadComposerSession(
   threadId: string,
   expectedRevision: number,

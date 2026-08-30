@@ -171,6 +171,7 @@ export interface EnqueueSendResult {
   clientSendId: string;
   status: "PENDING" | "SENT" | "FAILED";
   replayed: boolean;
+  draftConsumed?: boolean;
   result?: SendResult;
   errorMessage?: string;
 }
@@ -180,6 +181,7 @@ export interface ScheduleSendResult {
   status: "SCHEDULED";
   scheduledFor: string;
   replayed: boolean;
+  draftConsumed?: boolean;
 }
 
 export type SendSource = "manual" | "focus_ack" | "focus_auto_ack";
@@ -866,6 +868,7 @@ export function createSendService(deps: SendServiceDeps) {
         throw new Error(`Send request ${input.clientSendId} already exists in status ${existing.status}`);
       }
 
+      let draftConsumed = false;
       try {
         const data = {
           clientSendId: input.clientSendId,
@@ -878,15 +881,16 @@ export function createSendService(deps: SendServiceDeps) {
           replyToMessageId: input.replyToMessageId ?? null
         };
         if (input.consumeDraft) {
-          await prisma.$transaction(async (transaction) => {
+          draftConsumed = await prisma.$transaction(async (transaction) => {
             await transaction.sendRequest.create({ data });
-            await transaction.draft.deleteMany({
+            const deletion = await transaction.draft.deleteMany({
               where: {
                 threadId: input.threadId,
                 text: input.consumeDraft!.text,
                 updatedAt: input.consumeDraft!.updatedAt
               }
             });
+            return deletion.count === 1;
           });
         } else {
           await prisma.sendRequest.create({ data });
@@ -937,7 +941,12 @@ export function createSendService(deps: SendServiceDeps) {
         });
       }
 
-      return { clientSendId: input.clientSendId, status: "PENDING", replayed: false };
+      return {
+        clientSendId: input.clientSendId,
+        status: "PENDING",
+        replayed: false,
+        draftConsumed
+      };
     };
 
     if (source === "focus_ack" || source === "focus_auto_ack") {
@@ -1545,6 +1554,7 @@ export function createSendService(deps: SendServiceDeps) {
       throw new Error(`Send request ${input.clientSendId} already exists in status ${existing.status}`);
     }
 
+    let draftConsumed = false;
     try {
       const data = {
         clientSendId: input.clientSendId,
@@ -1557,15 +1567,16 @@ export function createSendService(deps: SendServiceDeps) {
         attachmentsJson: normalizedAttachmentsJson(input.attachments)
       };
       if (input.consumeDraft) {
-        await prisma.$transaction(async (transaction) => {
+        draftConsumed = await prisma.$transaction(async (transaction) => {
           await transaction.sendRequest.create({ data });
-          await transaction.draft.deleteMany({
+          const deletion = await transaction.draft.deleteMany({
             where: {
               threadId: input.threadId,
               text: input.consumeDraft!.text,
               updatedAt: input.consumeDraft!.updatedAt
             }
           });
+          return deletion.count === 1;
         });
       } else {
         await prisma.sendRequest.create({ data });
@@ -1611,7 +1622,8 @@ export function createSendService(deps: SendServiceDeps) {
       clientSendId: input.clientSendId,
       status: "SCHEDULED",
       scheduledFor: input.scheduledFor.toISOString(),
-      replayed: false
+      replayed: false,
+      draftConsumed
     };
   }
 

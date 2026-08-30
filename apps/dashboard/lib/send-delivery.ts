@@ -6,6 +6,7 @@ export interface SendStatusResponse {
   errorKind?: "AUTH_REQUIRED" | "SELECTOR_FAIL" | "PROFILE_LOCKED" | "TRANSIENT" | "POLICY_BLOCKED" | "DELIVERY_UNCERTAIN" | "UNKNOWN";
   retrySafe?: boolean;
   deliveryUncertain?: boolean;
+  draftConsumed?: boolean;
 }
 
 export type SendRecoveryOutcome =

@@ -4,6 +4,9 @@ import {
   type ThreadComposerIntentDraft,
   type ThreadComposerSession
 } from "./thread-composer-session";
+import { v5 as uuidv5 } from "uuid";
+
+const COMPOSER_SEND_ID_NAMESPACE = "74c50680-8d7a-4ef3-a470-1dbd2730ff63";
 
 export type ThreadComposerSendAttemptKind = "immediate" | "scheduled";
 
@@ -17,13 +20,14 @@ export interface ThreadComposerSendAttemptIntent {
   draftRevision: ThreadComposerDraftRevision | null;
   kind: ThreadComposerSendAttemptKind;
   scheduledFor: string | null;
+  sessionRevisionId?: string;
   threadId: string;
 }
 
 export interface ThreadComposerSendAttemptValue {
   attachmentNamespace?: string;
   clientSendId: string;
-  notFoundRecovery?: "replay" | "restore";
+  notFoundRecovery?: "blocked" | "replay" | "restore";
   requestedAt: string;
   sessionRevision: number;
   sessionRevisionId?: string;
@@ -84,6 +88,10 @@ export function normalizeThreadComposerSendAttempt(
     typeof rawIntent.threadId !== "string" ||
     !rawIntent.threadId ||
     !(rawIntent.scheduledFor === null || validIsoDate(rawIntent.scheduledFor)) ||
+    !(
+      rawIntent.sessionRevisionId === undefined ||
+      (typeof rawIntent.sessionRevisionId === "string" && rawIntent.sessionRevisionId)
+    ) ||
     normalizedDraftRevision === undefined ||
     !(
       rawValue.attachmentNamespace === undefined ||
@@ -91,6 +99,7 @@ export function normalizeThreadComposerSendAttempt(
     ) ||
     !(
       rawValue.notFoundRecovery === undefined ||
+      rawValue.notFoundRecovery === "blocked" ||
       rawValue.notFoundRecovery === "replay" ||
       rawValue.notFoundRecovery === "restore"
     ) ||
@@ -114,6 +123,9 @@ export function normalizeThreadComposerSendAttempt(
       draftRevision: normalizedDraftRevision,
       kind: rawIntent.kind,
       scheduledFor: rawIntent.scheduledFor,
+      ...(typeof rawIntent.sessionRevisionId === "string"
+        ? { sessionRevisionId: rawIntent.sessionRevisionId }
+        : {}),
       threadId: rawIntent.threadId
     },
     value: {
@@ -121,7 +133,9 @@ export function normalizeThreadComposerSendAttempt(
         ? { attachmentNamespace: rawValue.attachmentNamespace }
         : {}),
       clientSendId: rawValue.clientSendId,
-      ...(rawValue.notFoundRecovery === "replay" || rawValue.notFoundRecovery === "restore"
+      ...(rawValue.notFoundRecovery === "blocked" ||
+      rawValue.notFoundRecovery === "replay" ||
+      rawValue.notFoundRecovery === "restore"
         ? { notFoundRecovery: rawValue.notFoundRecovery }
         : {}),
       requestedAt: rawValue.requestedAt,
@@ -131,6 +145,10 @@ export function normalizeThreadComposerSendAttempt(
         : {})
     }
   };
+}
+
+export function composerClientSendId(sessionRevisionId: string): string {
+  return uuidv5(sessionRevisionId, COMPOSER_SEND_ID_NAMESPACE);
 }
 
 export function shouldHideComposerSessionForAttempt(
@@ -198,7 +216,9 @@ export function composerNotFoundRecoveryAfterDispatchFailure(
 ): "replay" | "restore" {
   if (!error || typeof error !== "object" || !("status" in error)) return "replay";
   const status = (error as { status?: unknown }).status;
-  return typeof status === "number" && status > 0 ? "restore" : "replay";
+  return typeof status === "number" && status >= 400 && status < 500
+    ? "restore"
+    : "replay";
 }
 
 export function composerSendRecoveryDisposition(status: {

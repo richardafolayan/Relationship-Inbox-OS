@@ -261,8 +261,16 @@ export function peekCache<T>(path: string): T | undefined {
 export function invalidateCache(path?: string): void {
   if (path === undefined) {
     responseCache.clear();
+    const storage = snapshotStorage();
+    if (storage) {
+      for (let index = storage.length - 1; index >= 0; index -= 1) {
+        const key = storage.key(index);
+        if (key?.startsWith(SNAPSHOT_PREFIX_BASE)) storage.removeItem(key);
+      }
+    }
   } else {
     responseCache.delete(path);
+    snapshotStorage()?.removeItem(SNAPSHOT_PREFIX + path);
   }
 }
 
@@ -311,15 +319,17 @@ export async function apiGet<T>(path: string, opts?: ApiGetOptions): Promise<T> 
   if (!inflight) {
     inflight = apiGetRaw<T>(path, init)
       .then((data) => {
-        responseCache.set(path, { data, ts: Date.now() });
-        writeSnapshot(path, data);
+        if (responseCache.get(path)?.inflight === inflight) {
+          responseCache.set(path, { data, ts: Date.now() });
+          writeSnapshot(path, data);
+        }
         return data;
       })
       .catch((err) => {
         // Drop the in-flight marker but keep any prior stale value so the
         // next call retries instead of wedging on a rejected promise.
         const cur = responseCache.get(path);
-        if (cur) {
+        if (cur && cur.inflight === inflight) {
           responseCache.set(path, { data: cur.data, ts: cur.ts });
         }
         throw err;

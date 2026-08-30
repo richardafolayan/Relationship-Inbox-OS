@@ -3,7 +3,12 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import test from "node:test";
 
-import { mergeSavedDraftRevision } from "../apps/dashboard/lib/saved-draft-revision.ts";
+import {
+  draftRevisionForComposerSend,
+  mergeDeletedDraftRevision,
+  mergeSavedDraftRevision,
+  shouldClearComposerAfterDraftDelete
+} from "../apps/dashboard/lib/saved-draft-revision.ts";
 
 test("the authoritative saved draft revision replaces the page's stale revision", () => {
   const current = {
@@ -38,6 +43,87 @@ test("a late save response cannot overwrite another route", () => {
     }),
     current
   );
+});
+
+test("a delayed delete clears only the exact visible intent represented by the deleted draft", () => {
+  const deletedDraft = {
+    text: "Saved reply",
+    updatedAt: "2026-08-30T09:05:00.000Z"
+  };
+  const capturedIntent = {
+    attachments: [],
+    customScheduleValue: "",
+    replyToMessageId: null,
+    source: "draft",
+    text: "Saved reply"
+  };
+
+  assert.equal(
+    shouldClearComposerAfterDraftDelete(
+      "thread-a",
+      "thread-a",
+      capturedIntent,
+      capturedIntent,
+      deletedDraft
+    ),
+    true
+  );
+  assert.equal(
+    shouldClearComposerAfterDraftDelete(
+      "thread-b",
+      "thread-a",
+      capturedIntent,
+      capturedIntent,
+      deletedDraft
+    ),
+    false
+  );
+  assert.equal(
+    shouldClearComposerAfterDraftDelete(
+      "thread-a",
+      "thread-a",
+      { ...capturedIntent, text: "Newer reply" },
+      capturedIntent,
+      deletedDraft
+    ),
+    false
+  );
+  assert.equal(
+    shouldClearComposerAfterDraftDelete(
+      "thread-a",
+      "thread-a",
+      capturedIntent,
+      { ...capturedIntent, replyToMessageId: "message-parent" },
+      deletedDraft
+    ),
+    false
+  );
+});
+
+test("a delete response clears only its target thread's authoritative draft metadata", () => {
+  const threadA = {
+    id: "thread-a",
+    draft: "Saved reply",
+    draftUpdatedAt: "2026-08-30T09:05:00.000Z"
+  };
+  assert.deepEqual(mergeDeletedDraftRevision(threadA, "thread-a"), {
+    ...threadA,
+    draft: "",
+    draftUpdatedAt: null
+  });
+
+  const threadB = { ...threadA, id: "thread-b" };
+  assert.equal(mergeDeletedDraftRevision(threadB, "thread-a"), threadB);
+});
+
+test("send consumes only the saved draft whose text it actually supersedes", () => {
+  const saved = {
+    text: "Newer reply B",
+    updatedAt: "2026-08-30T09:05:00.000Z"
+  };
+  assert.deepEqual(draftRevisionForComposerSend(saved, "Newer reply B"), saved);
+  assert.equal(draftRevisionForComposerSend(saved, "Recovered failed reply A"), null);
+  assert.equal(draftRevisionForComposerSend(null, "Anything"), null);
 });
 
 test("the draft endpoint returns the exact persisted revision used by send consumption", () => {

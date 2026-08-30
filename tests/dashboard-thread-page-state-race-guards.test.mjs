@@ -32,7 +32,11 @@ test("a dismissed AI predraft is not re-injected on the next refresh", () => {
   assert.match(SRC, /const predraftDismissedRef = useRef<Set<string>>\(new Set\(\)\)/, "predraftDismissedRef declared");
   // dismissed in both Discard and Delete-draft
   assert.match(SRC, /predraftDismissedRef\.current\.add\(threadId\)/, "Discard adds to the dismissed latch");
-  assert.match(SRC, /predraftDismissedRef\.current\.add\(thread\.id\)/, "Delete-draft adds to the dismissed latch");
+  assert.match(
+    SRC,
+    /predraftDismissedRef\.current\.add\(targetThreadId\)/,
+    "Delete-draft adds its captured route to the dismissed latch"
+  );
   // cleared on navigation
   assert.match(SRC, /predraftDismissedRef\.current\.delete\(threadId\)/, "reset effect clears the latch");
   // applyThread skips the predraft branch when dismissed

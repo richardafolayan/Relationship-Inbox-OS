@@ -109,7 +109,7 @@ test("creating a send consumes only the exact saved draft revision in the same t
     { threadId: "thread-2", text: "Keep me", updatedAt: expectedUpdatedAt }
   );
 
-  await h.service.enqueueSend(
+  const result = await h.service.enqueueSend(
     immediateInput({
       consumeDraft: { text: "Original text", updatedAt: expectedUpdatedAt }
     })
@@ -119,6 +119,7 @@ test("creating a send consumes only the exact saved draft revision in the same t
     { threadId: "thread-2", text: "Keep me", updatedAt: expectedUpdatedAt }
   ]);
   assert.equal(h.rows.length, 1);
+  assert.equal(result.draftConsumed, true);
 });
 
 test("a newer saved draft survives an older send's guarded consume", async () => {
@@ -127,7 +128,7 @@ test("a newer saved draft survives an older send's guarded consume", async () =>
   const newUpdatedAt = new Date("2026-08-30T09:01:00.000Z");
   h.drafts.push({ threadId: "thread-1", text: "Newer draft", updatedAt: newUpdatedAt });
 
-  await h.service.enqueueSend(
+  const result = await h.service.enqueueSend(
     immediateInput({
       consumeDraft: { text: "Original text", updatedAt: oldUpdatedAt }
     })
@@ -136,6 +137,7 @@ test("a newer saved draft survives an older send's guarded consume", async () =>
   assert.deepEqual(h.drafts, [
     { threadId: "thread-1", text: "Newer draft", updatedAt: newUpdatedAt }
   ]);
+  assert.equal(result.draftConsumed, false);
 });
 
 test("identical attachment content replays across different staging paths", async () => {
@@ -252,7 +254,7 @@ test("creating a scheduled send atomically consumes only its captured draft revi
   const updatedAt = new Date("2026-08-30T09:00:00.000Z");
   h.drafts.push({ threadId: "thread-1", text: "Scheduled text", updatedAt });
 
-  await h.service.enqueueScheduledSend({
+  const result = await h.service.enqueueScheduledSend({
     threadId: "thread-1",
     text: "Scheduled text",
     clientSendId: "7d7eed73-6437-42e3-9e51-769522640b2a",
@@ -262,6 +264,27 @@ test("creating a scheduled send atomically consumes only its captured draft revi
 
   assert.deepEqual(h.drafts, []);
   assert.equal(h.rows[0].status, "SCHEDULED");
+  assert.equal(result.draftConsumed, true);
+});
+
+test("a scheduled send reports when a newer draft survived its guarded consume", async () => {
+  const h = harness();
+  const oldUpdatedAt = new Date("2026-08-30T09:00:00.000Z");
+  const newUpdatedAt = new Date("2026-08-30T09:01:00.000Z");
+  h.drafts.push({ threadId: "thread-1", text: "Newer draft", updatedAt: newUpdatedAt });
+
+  const result = await h.service.enqueueScheduledSend({
+    threadId: "thread-1",
+    text: "Scheduled text",
+    clientSendId: "c13eed73-6437-42e3-9e51-769522640b2a",
+    scheduledFor: new Date(Date.now() + 3_600_000),
+    consumeDraft: { text: "Scheduled text", updatedAt: oldUpdatedAt }
+  });
+
+  assert.deepEqual(h.drafts, [
+    { threadId: "thread-1", text: "Newer draft", updatedAt: newUpdatedAt }
+  ]);
+  assert.equal(result.draftConsumed, false);
 });
 
 test("a concurrent scheduled-send uniqueness loser returns the authoritative timestamp only for identical intent", async () => {

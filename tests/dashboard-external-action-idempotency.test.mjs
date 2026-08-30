@@ -471,3 +471,56 @@ test("a copied composer revision reuses its content-free completed send marker",
   );
   assert.deepEqual(copiedTab.readCompletedScopedValues(scope), [value]);
 });
+
+test("a copied stale pin cannot suppress a later identical composer intent with a new revision", async () => {
+  const values = new Map();
+  const firstPins = new Map();
+  const copiedPins = new Map();
+  const storage = {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, value),
+    removeItem: (key) => values.delete(key)
+  };
+  const pinStorage = (pins) => ({
+    getItem: (key) => pins.get(key) ?? null,
+    setItem: (key, value) => pins.set(key, value),
+    removeItem: (key) => pins.delete(key)
+  });
+  const scope = "composer-send:thread-a";
+  const oldIntent = {
+    composerIntent: { text: "Same words" },
+    sessionRevisionId: "28d6bb4f-0fe9-4a94-8284-e5c166097c60"
+  };
+  const oldValue = {
+    clientSendId: "send-original",
+    sessionRevisionId: oldIntent.sessionRevisionId
+  };
+  const first = createExternalActionAttemptStore(
+    storage,
+    undefined,
+    pinStorage(firstPins)
+  );
+  const copied = createExternalActionAttemptStore(
+    storage,
+    undefined,
+    pinStorage(copiedPins)
+  );
+
+  await first.getOrCreateScopedValue(scope, oldIntent, () => oldValue);
+  await copied.getOrCreateScopedValue(scope, oldIntent, () => oldValue);
+  await first.completeScopedValue(scope, () => true, true);
+
+  const newRevisionId = "9b35961d-a8fc-441d-986f-a2f366bcc9e3";
+  const next = await copied.getOrCreateScopedValue(
+    scope,
+    {
+      composerIntent: { text: "Same words" },
+      sessionRevisionId: newRevisionId
+    },
+    () => ({ clientSendId: "send-new", sessionRevisionId: newRevisionId }),
+    async () => true,
+    (candidate) => candidate.sessionRevisionId === newRevisionId
+  );
+
+  assert.equal(next.clientSendId, "send-new");
+});

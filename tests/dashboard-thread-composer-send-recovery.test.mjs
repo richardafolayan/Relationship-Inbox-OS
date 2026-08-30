@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  composerClientSendId,
   composerDispatchFailureIsAmbiguous,
   composerNotFoundRecoveryAfterDispatchFailure,
   composerReplayPreflight,
@@ -43,6 +44,7 @@ const attempt = {
   value: {
     attachmentNamespace: "tab-a",
     clientSendId: "44c44306-517c-484b-9076-9915fa21163e",
+    notFoundRecovery: "blocked",
     requestedAt: "2026-08-30T09:01:00.000Z",
     sessionRevision: 3,
     sessionRevisionId: "ae5926d5-3ec7-48b0-bb35-047d8eb2a431"
@@ -132,14 +134,25 @@ test("dispatch failures stay unresolved when the response can follow durable ins
   assert.equal(composerDispatchFailureIsAmbiguous(new Error("network"), true), true);
   assert.equal(
     composerNotFoundRecoveryAfterDispatchFailure({ status: 500 }),
-    "restore"
+    "replay"
   );
   assert.equal(
     composerNotFoundRecoveryAfterDispatchFailure({ status: 200 }),
-    "restore"
+    "replay"
   );
+  assert.equal(composerNotFoundRecoveryAfterDispatchFailure({ status: 400 }), "restore");
   assert.equal(composerNotFoundRecoveryAfterDispatchFailure({ status: 0 }), "replay");
   assert.equal(composerNotFoundRecoveryAfterDispatchFailure(new Error("network")), "replay");
+});
+
+test("a composer revision has one durable send id even after finite completion history expires", () => {
+  const first = composerClientSendId("ae5926d5-3ec7-48b0-bb35-047d8eb2a431");
+  const copiedTab = composerClientSendId("ae5926d5-3ec7-48b0-bb35-047d8eb2a431");
+  const laterRevision = composerClientSendId("9b35961d-a8fc-441d-986f-a2f366bcc9e3");
+
+  assert.equal(copiedTab, first);
+  assert.notEqual(laterRevision, first);
+  assert.match(first, /^[0-9a-f-]{36}$/i);
 });
 
 test("delivery recovery retains ambiguity, replays missing status with the same id, and cleans only sent", () => {
