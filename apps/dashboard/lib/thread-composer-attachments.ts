@@ -30,7 +30,9 @@ export interface ThreadComposerAttachmentStore {
     descriptors: ThreadComposerAttachmentDescriptor[],
     namespace?: string
   ): Promise<RecoveredThreadComposerAttachment[]>;
-  purgeStale(): Promise<void>;
+  purgeStale(
+    ownerIsLive?: (threadId: string, ownerId: string) => boolean | null
+  ): Promise<void>;
   remove(threadId: string, attachmentIds: string[], namespace?: string): Promise<void>;
   removeUnowned(threadId: string, attachmentIds: string[], namespace?: string): Promise<void>;
   releaseOwnership(threadId: string, ownerId: string, namespace?: string): Promise<void>;
@@ -182,6 +184,7 @@ interface PersistedAttachmentOwner {
   attachmentKey: string;
   key: string;
   namespace: string;
+  holderId?: string;
   ownerId: string;
   ownerKey: string;
   threadId: string;
@@ -266,13 +269,41 @@ function attachmentOwnerKey(namespace: string, threadId: string, ownerId: string
   return `${namespace}:${encodeURIComponent(threadId)}:${encodeURIComponent(ownerId)}`;
 }
 
+function attachmentHolderKey(
+  namespace: string,
+  threadId: string,
+  ownerId: string,
+  holderId: string
+): string {
+  return `${attachmentOwnerKey(namespace, threadId, ownerId)}:${encodeURIComponent(holderId)}`;
+}
+
 function attachmentOwnershipKey(
   namespace: string,
   threadId: string,
   attachmentId: string,
-  ownerId: string
+  ownerId: string,
+  holderId: string
 ): string {
-  return `${attachmentKey(namespace, threadId, attachmentId)}:${encodeURIComponent(ownerId)}`;
+  return `${attachmentKey(namespace, threadId, attachmentId)}:${encodeURIComponent(ownerId)}:${encodeURIComponent(holderId)}`;
+}
+
+function createHolderId(): string {
+  return globalThis.crypto?.randomUUID?.() ??
+    `holder-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+function liveOwnerDisposition(
+  ownerIsLive: ((threadId: string, ownerId: string) => boolean | null) | undefined,
+  threadId: string,
+  ownerId: string
+): boolean {
+  if (!ownerIsLive) return false;
+  try {
+    return ownerIsLive(threadId, ownerId) !== false;
+  } catch {
+    return true;
+  }
 }
 
 function descriptorMatches(
@@ -316,7 +347,8 @@ export function getOrCreateThreadComposerTabId(
 export function createIndexedDbThreadComposerAttachmentStore(
   indexedDb: IDBFactory,
   tabId: string,
-  now: () => number = Date.now
+  now: () => number = Date.now,
+  holderId = createHolderId()
 ): ThreadComposerAttachmentStore {
   let databasePromise: Promise<IDBDatabase> | null = null;
   const pending = new Map<string, Promise<void>>();
@@ -336,7 +368,9 @@ export function createIndexedDbThreadComposerAttachmentStore(
     return next;
   };
 
-  const purgeStale = async () => {
+  const purgeStale = async (
+    ownerIsLive?: (threadId: string, ownerId: string) => boolean | null
+  ) => {
     const db = await database();
     const staleBefore = now() - STALE_AFTER_MS;
     const ownerTransaction = db.transaction([ATTACHMENTS_STORE, OWNERS_STORE], "readwrite");
@@ -348,6 +382,11 @@ export function createIndexedDbThreadComposerAttachmentStore(
       if (!cursor) return;
       const record = cursor.value as PersistedAttachmentOwner;
       if (record.updatedAt < staleBefore) {
+        if (liveOwnerDisposition(ownerIsLive, record.threadId, record.ownerId)) {
+          cursor.update({ ...record, updatedAt: now() });
+          cursor.continue();
+          return;
+        }
         const attachment = attachments.get(record.attachmentKey);
         attachment.onsuccess = () => {
           const value = attachment.result as PersistedAttachmentRecord | undefined;
@@ -392,12 +431,19 @@ export function createIndexedDbThreadComposerAttachmentStore(
       const db = await database();
       const transaction = db.transaction(OWNERS_STORE, "readwrite");
       const store = transaction.objectStore(OWNERS_STORE);
-      const ownerKey = attachmentOwnerKey(namespace, threadId, ownerId);
+      const ownerKey = attachmentHolderKey(namespace, threadId, ownerId, holderId);
       for (const attachmentId of attachmentIds) {
         const key = attachmentKey(namespace, threadId, attachmentId);
         store.put({
           attachmentKey: key,
-          key: attachmentOwnershipKey(namespace, threadId, attachmentId, ownerId),
+          holderId,
+          key: attachmentOwnershipKey(
+            namespace,
+            threadId,
+            attachmentId,
+            ownerId,
+            holderId
+          ),
           namespace,
           ownerId,
           ownerKey,
@@ -484,7 +530,9 @@ export function createIndexedDbThreadComposerAttachmentStore(
       const cursorRequest = transaction
         .objectStore(OWNERS_STORE)
         .index("ownerKey")
-        .openKeyCursor(IDBKeyRange.only(attachmentOwnerKey(namespace, threadId, ownerId)));
+        .openKeyCursor(
+          IDBKeyRange.only(attachmentHolderKey(namespace, threadId, ownerId, holderId))
+        );
       cursorRequest.onsuccess = () => {
         const cursor = cursorRequest.result;
         if (!cursor) return;
@@ -496,19 +544,44 @@ export function createIndexedDbThreadComposerAttachmentStore(
   };
 }
 
+interface MemoryThreadComposerAttachmentOwner {
+  ownerId: string;
+  updatedAt: number;
+}
+
+interface MemoryThreadComposerAttachmentState {
+  owners: Map<string, Map<string, MemoryThreadComposerAttachmentOwner>>;
+  records: Map<string, PersistedAttachmentRecord>;
+}
+
+function createMemoryThreadComposerAttachmentState(): MemoryThreadComposerAttachmentState {
+  return { owners: new Map(), records: new Map() };
+}
+
 export function createMemoryThreadComposerAttachmentStore(
   namespace = "memory",
   now: () => number = Date.now,
-  durable = true
+  durable = false,
+  holderId = createHolderId(),
+  state = createMemoryThreadComposerAttachmentState()
 ): ThreadComposerAttachmentStore {
-  const records = new Map<string, PersistedAttachmentRecord>();
-  const owners = new Map<string, Map<string, number>>();
-  const purgeStale = async () => {
+  const { owners, records } = state;
+  const purgeStale = async (
+    ownerIsLive?: (threadId: string, ownerId: string) => boolean | null
+  ) => {
     const staleBefore = now() - STALE_AFTER_MS;
     for (const [key, current] of owners) {
       let ownerExpired = false;
-      for (const [ownerKey, updatedAt] of current) {
-        if (updatedAt < staleBefore) {
+      for (const [ownerKey, owner] of current) {
+        if (owner.updatedAt < staleBefore) {
+          const record = records.get(key);
+          if (
+            record &&
+            liveOwnerDisposition(ownerIsLive, record.threadId, owner.ownerId)
+          ) {
+            current.set(ownerKey, { ...owner, updatedAt: now() });
+            continue;
+          }
           current.delete(ownerKey);
           ownerExpired = true;
         }
@@ -532,8 +605,12 @@ export function createMemoryThreadComposerAttachmentStore(
     async claimOwnership(threadId, attachmentIds, ownerId, targetNamespace = namespace) {
       for (const attachmentId of attachmentIds) {
         const key = attachmentKey(targetNamespace, threadId, attachmentId);
-        const current = owners.get(key) ?? new Map<string, number>();
-        current.set(attachmentOwnerKey(targetNamespace, threadId, ownerId), now());
+        const current = owners.get(key) ??
+          new Map<string, MemoryThreadComposerAttachmentOwner>();
+        current.set(
+          attachmentHolderKey(targetNamespace, threadId, ownerId, holderId),
+          { ownerId, updatedAt: now() }
+        );
         owners.set(key, current);
       }
     },
@@ -578,7 +655,12 @@ export function createMemoryThreadComposerAttachmentStore(
       }
     },
     async releaseOwnership(threadId, ownerId, targetNamespace = namespace) {
-      const targetOwner = attachmentOwnerKey(targetNamespace, threadId, ownerId);
+      const targetOwner = attachmentHolderKey(
+        targetNamespace,
+        threadId,
+        ownerId,
+        holderId
+      );
       for (const [key, current] of owners) {
         current.delete(targetOwner);
         if (current.size === 0) owners.delete(key);
@@ -611,5 +693,6 @@ export const __test = {
   STALE_AFTER_MS,
   TAB_ID_KEY,
   attachmentKey,
+  createMemoryThreadComposerAttachmentState,
   openDatabase
 };

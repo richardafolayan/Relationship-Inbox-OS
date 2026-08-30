@@ -172,6 +172,13 @@ function isEmptyIntent(intent: ThreadComposerIntentDraft): boolean {
   );
 }
 
+export function threadComposerMutationIsBlocked(
+  recoveryThreadId: string | null,
+  targetThreadId: string
+): boolean {
+  return recoveryThreadId === targetThreadId;
+}
+
 export function sameThreadComposerIntent(
   left: ThreadComposerIntentDraft,
   right: ThreadComposerIntentDraft

@@ -169,6 +169,7 @@ import {
   safeSendFailureDisposition,
   sameThreadComposerIntent,
   snapshotThreadComposerSessionAfterAcceptedAction,
+  threadComposerMutationIsBlocked,
   type ThreadComposerAttachmentDescriptor,
   type ThreadComposerIntentDraft,
   type ThreadComposerSession
@@ -1419,11 +1420,49 @@ export default function ThreadPage() {
       return "blocked" as const;
     }
   }, [externalActionAttempts]);
+  const composerAttachmentOwnerIsLive = useCallback((
+    targetThreadId: string,
+    ownerId: string
+  ): boolean | null => {
+    try {
+      const attempt = normalizeThreadComposerSendAttempt(
+        externalActionAttempts.readScopedAttempt(
+          threadComposerSendScope(targetThreadId)
+        )
+      );
+      if (
+        attempt?.intent.threadId === targetThreadId &&
+        attempt.value.sessionRevisionId === ownerId
+      ) {
+        return true;
+      }
+    } catch {
+      return null;
+    }
+    const session = inspectThreadComposerSession(targetThreadId);
+    if (!session.readable) return null;
+    if (!session.session || session.session.revisionId !== ownerId) return false;
+    try {
+      const disposition = composerSessionDisposition(targetThreadId, session.session);
+      return disposition === "active" || disposition === "blocked";
+    } catch {
+      return null;
+    }
+  }, [composerSessionDisposition, externalActionAttempts]);
   const persistComposerSession = useCallback((
     ownerThreadId: string,
     intent: ThreadComposerIntentDraft,
     draftRevision?: ThreadComposerDraftRevision | null
   ) => {
+    if (
+      threadComposerMutationIsBlocked(
+        composerRecoveryInProgressRef.current,
+        ownerThreadId
+      )
+    ) {
+      const current = inspectThreadComposerSession(ownerThreadId);
+      return current.readable ? current.session : null;
+    }
     const acceptedRevisionId = acceptedComposerSessionIdsRef.current.get(ownerThreadId);
     const saved = snapshotThreadComposerSessionAfterAcceptedAction(
       ownerThreadId,
@@ -1591,6 +1630,7 @@ export default function ThreadPage() {
   const activePendingSends = pendingSends.filter((pending) => pending.threadId === threadId);
   const activePendingReconcileKey = pendingSendReconcileKey(activePendingSends);
   const pendingSendsRef = useRef(pendingSends);
+  const durableAttemptReconciliationRef = useRef<Set<string>>(new Set());
   const checkPendingDeliveryRef = useRef<(clientSendId: string) => Promise<void>>(
     async () => undefined
   );
@@ -1832,6 +1872,12 @@ export default function ThreadPage() {
     // an identical message in another conversation cannot erase them.
     setPendingSends((prev) => reconcilePendingSendsAgainstThread(prev, guardedFresh));
     setComposer((prev) => {
+      if (
+        threadComposerMutationIsBlocked(
+          composerRecoveryInProgressRef.current,
+          guardedFresh.id
+        )
+      ) return prev;
       if (prev) return prev; // operator already typed something
       if (composerSessionPresentRef.current) return prev;
       const explicitDraft = guardedFresh.draft;
@@ -2479,7 +2525,7 @@ export default function ThreadPage() {
             value.namespace
           );
         }
-        await composerAttachmentStore.purgeStale();
+        await composerAttachmentStore.purgeStale(composerAttachmentOwnerIsLive);
       })().catch(() => undefined);
     };
     const purgeWhenVisible = () => {
@@ -2497,7 +2543,12 @@ export default function ThreadPage() {
       window.removeEventListener("focus", purgeStaleAttachments);
       document.removeEventListener("visibilitychange", purgeWhenVisible);
     };
-  }, [composerAttachmentStore, composerSessionDisposition, externalActionAttempts]);
+  }, [
+    composerAttachmentOwnerIsLive,
+    composerAttachmentStore,
+    composerSessionDisposition,
+    externalActionAttempts
+  ]);
 
   useEffect(() => {
     const preserveComposer = () => {
@@ -2566,7 +2617,11 @@ export default function ThreadPage() {
       // Sibling-aware routing: accept events for the open thread OR any sibling
       // in its cohort (a split iMessage Person's other handle), so a new inbound
       // / reassess / scan on the other handle refetches the open view.
-      if (!shouldRefetchForThreadEvent(detail.threadId, threadId, siblingIdsRef.current)) return;
+      const eventTargetsOpenThread = shouldRefetchForThreadEvent(
+        detail.threadId,
+        threadId,
+        siblingIdsRef.current
+      );
       if (detail.type === "MESSAGE_SENT" && detail.clientSendId) {
         const pending = pendingSendsRef.current.find(
           (item) => item.clientSendId === detail.clientSendId
@@ -2627,7 +2682,9 @@ export default function ThreadPage() {
               }
             }
           }
-          await refreshThread({ authoritative: true });
+          if (eventTargetsOpenThread) {
+            await refreshThread({ authoritative: true });
+          }
           setPendingSends((prev) =>
             prev.filter((item) => item.clientSendId !== detail.clientSendId)
           );
@@ -2651,7 +2708,11 @@ export default function ThreadPage() {
           () => void checkPendingDeliveryRef.current(detail.clientSendId!),
           0
         );
-      } else if (detail.type === "MESSAGES_PERSISTED" && detail.syncTiming) {
+      } else if (
+        eventTargetsOpenThread &&
+        detail.type === "MESSAGES_PERSISTED" &&
+        detail.syncTiming
+      ) {
         const persistedAt = detail.syncTiming.persistedAt;
         void refreshThread().then(() => {
           afterNextPaint(() => {
@@ -2662,17 +2723,24 @@ export default function ThreadPage() {
             });
           });
         });
-      } else if (detail.type === "SUGGESTED_REPLIES_UPDATED" || detail.type === "THREAD_UPDATED") {
+      } else if (
+        eventTargetsOpenThread &&
+        (detail.type === "SUGGESTED_REPLIES_UPDATED" || detail.type === "THREAD_UPDATED")
+      ) {
         // Thread-only + debounced: a scan burst of THREAD_UPDATED events
         // collapses into one /data/thread refetch instead of N full refreshes.
         scheduleThreadRefresh();
-      } else if (detail.type === "SCAN_THREAD_STARTED") {
+      } else if (eventTargetsOpenThread && detail.type === "SCAN_THREAD_STARTED") {
         setRescanStage("Opening thread");
         if (rescanTimeoutRef.current) clearTimeout(rescanTimeoutRef.current);
         rescanTimeoutRef.current = setTimeout(() => setRescanStage(null), 30_000);
-      } else if (detail.type === "SCAN_THREAD_PROGRESS" && detail.stage) {
+      } else if (
+        eventTargetsOpenThread &&
+        detail.type === "SCAN_THREAD_PROGRESS" &&
+        detail.stage
+      ) {
         setRescanStage(detail.stage);
-      } else if (detail.type === "SCAN_THREAD_FINISHED") {
+      } else if (eventTargetsOpenThread && detail.type === "SCAN_THREAD_FINISHED") {
         setRescanStage(null);
         if (rescanTimeoutRef.current) {
           clearTimeout(rescanTimeoutRef.current);
@@ -2915,6 +2983,7 @@ export default function ThreadPage() {
             );
             return;
           }
+          composerSessionPresentRef.current = true;
           acceptedComposerSessionIdsRef.current.set(
             pending.threadId,
             preparedRecoverySession.revisionId
@@ -2973,6 +3042,9 @@ export default function ThreadPage() {
               );
             }
             acceptedComposerSessionIdsRef.current.delete(pending.threadId);
+            if (routeThreadIdRef.current === pending.threadId) {
+              composerSessionPresentRef.current = false;
+            }
             setPendingSends((current) =>
               current.filter((item) => item.clientSendId !== pending.clientSendId)
             );
@@ -2987,6 +3059,7 @@ export default function ThreadPage() {
                 predecessorSession
               );
               if (rolledBack) {
+                composerSessionPresentRef.current = Boolean(predecessorSession);
                 if (predecessorSession) {
                   acceptedComposerSessionIdsRef.current.set(
                     pending.threadId,
@@ -3047,6 +3120,7 @@ export default function ThreadPage() {
               );
               return;
             }
+            composerSessionPresentRef.current = true;
             acceptedComposerSessionIdsRef.current.set(
               pending.threadId,
               restoredSession.revisionId
@@ -3105,6 +3179,9 @@ export default function ThreadPage() {
         if (composerRecoveryInProgressRef.current === pending.threadId) {
           composerRecoveryInProgressRef.current = null;
           setComposerRecoveryInProgress(false);
+          if (routeThreadIdRef.current === pending.threadId) {
+            window.requestAnimationFrame(() => composerInputRef.current?.focus());
+          }
         }
       }
     },
@@ -3801,6 +3878,133 @@ export default function ThreadPage() {
   checkPendingDeliveryRef.current = checkPendingDelivery;
 
   useEffect(() => {
+    let disposed = false;
+    const reconcileDurableAttempts = () => {
+      let attempts: ThreadComposerSendAttempt[];
+      try {
+        attempts = externalActionAttempts
+          .listScopedAttempts<
+            ThreadComposerSendAttemptIntent,
+            ThreadComposerSendAttemptValue
+          >("composer-send:")
+          .flatMap((record) => {
+            const attempt = normalizeThreadComposerSendAttempt(record);
+            return attempt && record.scope === threadComposerSendScope(attempt.intent.threadId)
+              ? [attempt]
+              : [];
+          });
+      } catch {
+        return;
+      }
+      for (const attempt of attempts) {
+        const clientSendId = attempt.value.clientSendId;
+        if (
+          pendingSendsRef.current.some((pending) => pending.clientSendId === clientSendId) ||
+          durableAttemptReconciliationRef.current.has(clientSendId)
+        ) {
+          continue;
+        }
+        durableAttemptReconciliationRef.current.add(clientSendId);
+        const attachmentNamespace =
+          attempt.value.attachmentNamespace ?? composerAttachmentStore.namespace;
+        void composerAttachmentStore
+          .read(
+            attempt.intent.threadId,
+            attempt.intent.composerIntent.attachments,
+            attachmentNamespace
+          )
+          .then((recovered) => {
+            if (disposed) return;
+            const attachments = recovered.map(({ descriptor, file }) => ({
+              file,
+              id: descriptor.id,
+              kind: descriptor.kind,
+              previewUrl: file.type.startsWith("image/") ? URL.createObjectURL(file) : ""
+            }));
+            const incomplete =
+              attachments.length !== attempt.intent.composerIntent.attachments.length;
+            const pending: PendingSend = {
+              attachmentNamespace,
+              attemptKind: attempt.intent.kind,
+              attachments,
+              clientSendId,
+              composerIntent: attempt.intent.composerIntent,
+              draftRevision: attempt.intent.draftRevision,
+              errorKind: incomplete ? "DELIVERY_UNCERTAIN" : undefined,
+              errorMessage: incomplete
+                ? "The saved attachment set is incomplete. Check delivery before trying again."
+                : undefined,
+              failed: incomplete,
+              notFoundRecovery: attempt.value.notFoundRecovery,
+              scheduledFor: attempt.intent.scheduledFor,
+              sentAt: attempt.value.requestedAt,
+              sessionRevision: attempt.value.sessionRevision,
+              sessionRevisionId: attempt.value.sessionRevisionId,
+              text: attempt.intent.composerIntent.text,
+              threadId: attempt.intent.threadId,
+              uncertain: incomplete
+            };
+            setPendingSends((current) => [
+              ...current.filter((item) => item.clientSendId !== clientSendId),
+              pending
+            ]);
+            window.setTimeout(
+              () => void checkPendingDeliveryRef.current(clientSendId),
+              0
+            );
+          })
+          .catch(() => {
+            if (disposed) return;
+            const pending: PendingSend = {
+              attachmentNamespace,
+              attemptKind: attempt.intent.kind,
+              attachments: [],
+              clientSendId,
+              composerIntent: attempt.intent.composerIntent,
+              draftRevision: attempt.intent.draftRevision,
+              errorKind: "DELIVERY_UNCERTAIN",
+              errorMessage:
+                "The saved attachment set could not be read. Check delivery before trying again.",
+              failed: true,
+              notFoundRecovery: attempt.value.notFoundRecovery,
+              scheduledFor: attempt.intent.scheduledFor,
+              sentAt: attempt.value.requestedAt,
+              sessionRevision: attempt.value.sessionRevision,
+              sessionRevisionId: attempt.value.sessionRevisionId,
+              text: attempt.intent.composerIntent.text,
+              threadId: attempt.intent.threadId,
+              uncertain: true
+            };
+            setPendingSends((current) => [
+              ...current.filter((item) => item.clientSendId !== clientSendId),
+              pending
+            ]);
+            window.setTimeout(
+              () => void checkPendingDeliveryRef.current(clientSendId),
+              0
+            );
+          })
+          .finally(() => {
+            durableAttemptReconciliationRef.current.delete(clientSendId);
+          });
+      }
+    };
+    reconcileDurableAttempts();
+    const reconcileWhenVisible = () => {
+      if (document.visibilityState === "visible") reconcileDurableAttempts();
+    };
+    const interval = window.setInterval(reconcileDurableAttempts, 60_000);
+    window.addEventListener("focus", reconcileDurableAttempts);
+    document.addEventListener("visibilitychange", reconcileWhenVisible);
+    return () => {
+      disposed = true;
+      window.clearInterval(interval);
+      window.removeEventListener("focus", reconcileDurableAttempts);
+      document.removeEventListener("visibilitychange", reconcileWhenVisible);
+    };
+  }, [composerAttachmentStore, externalActionAttempts]);
+
+  useEffect(() => {
     let cancelled = false;
     let attempt: ThreadComposerSendAttempt | null = null;
     try {
@@ -4448,6 +4652,7 @@ export default function ThreadPage() {
 
   const replaceComposerRange = useCallback(
     (build: (selected: string) => { text: string; selectStart: number; selectEnd: number }) => {
+      if (composerRecoveryInProgressRef.current === routeThreadIdRef.current) return;
       const input = composerInputRef.current;
       const start = input?.selectionStart ?? composer.length;
       const end = input?.selectionEnd ?? composer.length;
@@ -4616,6 +4821,7 @@ export default function ThreadPage() {
   }, []);
 
   const startRecording = useCallback(async () => {
+    if (composerRecoveryInProgressRef.current === routeThreadIdRef.current) return;
     if (recording) return;
     if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
       voiceNoteFileInputRef.current?.click();
@@ -4767,6 +4973,7 @@ export default function ThreadPage() {
   // #462: record a short clip and hand it to the runner. No autosend;
   // nothing is persisted server-side.
   const startDictation = useCallback(async () => {
+    if (composerRecoveryInProgressRef.current === routeThreadIdRef.current) return;
     if (dictationStatus !== "idle") return;
     // A fresh recording supersedes any earlier failed clip + retry banner.
     failedDictationAudioRef.current = null;
@@ -4878,6 +5085,7 @@ export default function ThreadPage() {
   }, []);
 
   const keepDictationTranscript = useCallback((reviewedTranscript?: string) => {
+    if (composerRecoveryInProgressRef.current === routeThreadIdRef.current) return;
     const transcript = reviewedTranscript?.trim() || dictationTranscript;
     if (!transcript) return;
     setComposer((current) =>
@@ -5873,6 +6081,7 @@ export default function ThreadPage() {
   };
 
   const useDraft = () => {
+    if (composerRecoveryInProgressRef.current === routeThreadIdRef.current) return;
     if (!composeDraft) return;
     setComposer(composeDraft);
     setComposeDraft("");
@@ -6494,8 +6703,12 @@ export default function ThreadPage() {
             {
               label: repliesGenerating ? "Preparing suggestions" : "Suggested replies",
               description: "Choose one to edit in your own words.",
-              disabled: repliesGenerating,
-              onSelect: () => setMobileSuggestionsOpen(true)
+              disabled: repliesGenerating || composerRecoveryInProgress,
+              onSelect: () => {
+                if (!composerRecoveryInProgressRef.current) {
+                  setMobileSuggestionsOpen(true);
+                }
+              }
             }
           ]
         : []
@@ -6508,8 +6721,13 @@ export default function ThreadPage() {
             {
               label: "Photo or file",
               description: "Attach something to this reply.",
+              disabled: composerRecoveryInProgress,
               preserveUserActivation: true,
-              onSelect: () => document.getElementById("composer-file-input")?.click()
+              onSelect: () => {
+                if (!composerRecoveryInProgressRef.current) {
+                  document.getElementById("composer-file-input")?.click();
+                }
+              }
             },
             {
               label: recording
@@ -6522,6 +6740,7 @@ export default function ThreadPage() {
                 : browserAudioCaptureAvailable
                   ? "Record audio to send as an attachment."
                   : "Choose an audio recording from Files. This never opens the camera.",
+              disabled: composerRecoveryInProgress,
               preserveUserActivation: true,
               onSelect: () => (recording ? stopRecording() : void startRecording())
             }
@@ -6540,8 +6759,15 @@ export default function ThreadPage() {
                   ? "Choose when this reply should be sent."
                   : "Write a reply or add an attachment first.",
               disabled:
-                (!composer.trim() && composerAttachments.length === 0) || sending || scheduling,
-              onSelect: () => setMobileScheduleOpen(true)
+                (!composer.trim() && composerAttachments.length === 0) ||
+                sending ||
+                scheduling ||
+                composerRecoveryInProgress,
+              onSelect: () => {
+                if (!composerRecoveryInProgressRef.current) {
+                  setMobileScheduleOpen(true);
+                }
+              }
             }
           ]
         : []
@@ -6571,7 +6797,9 @@ export default function ThreadPage() {
       items: chips.map((chip) => ({
         label: chip.intent,
         description: chip.text,
+        disabled: composerRecoveryInProgress,
         onSelect: () => {
+          if (composerRecoveryInProgressRef.current) return;
           setComposer(chip.text);
           setComposerSource("user");
           window.requestAnimationFrame(() => composerInputRef.current?.focus());
@@ -6618,6 +6846,11 @@ export default function ThreadPage() {
 
   const saveCurrentDraft = () => {
     const targetThreadId = thread.id;
+    if (composerRecoveryInProgressRef.current === targetThreadId) {
+      return Promise.reject(
+        new Error("Wait for Tovi to finish recovering this reply before saving the draft.")
+      );
+    }
     if (composerActionRef.current?.threadId === targetThreadId) {
       return Promise.reject(
         new Error("Wait for the current send or schedule to finish before saving this draft.")
@@ -6664,6 +6897,11 @@ export default function ThreadPage() {
 
   const deleteCurrentDraft = () => {
     const targetThreadId = thread.id;
+    if (composerRecoveryInProgressRef.current === targetThreadId) {
+      return Promise.reject(
+        new Error("Wait for Tovi to finish recovering this reply before deleting the draft.")
+      );
+    }
     if (composerActionRef.current?.threadId === targetThreadId) {
       return Promise.reject(
         new Error("Wait for the current send or schedule to finish before deleting this draft.")
@@ -6758,7 +6996,7 @@ export default function ThreadPage() {
   // popover Menu. Grouping only applies on phone; desktop stays a flat list.
   const saveDraftAction = {
     label: "Save draft",
-    disabled: sending || scheduling,
+    disabled: sending || scheduling || composerRecoveryInProgress,
     onSelect: () =>
       runActionWithFeedback(
         saveCurrentDraft(),
@@ -6773,7 +7011,7 @@ export default function ThreadPage() {
   const deleteDraftAction = {
     label: "Delete draft",
     danger: true as const,
-    disabled: sending || scheduling,
+    disabled: sending || scheduling || composerRecoveryInProgress,
     onSelect: () =>
       runActionWithFeedback(
         deleteCurrentDraft(),
@@ -8317,6 +8555,15 @@ export default function ThreadPage() {
             {error ? (
               <p className="mb-1.5 rounded-[10px] border border-hairline bg-paper-2 px-2.5 py-1.5 text-[12px] leading-[1.45] text-ink-2">{error}</p>
             ) : null}
+            {composerRecoveryInProgress ? (
+              <p
+                role="status"
+                aria-live="polite"
+                className="mb-1.5 rounded-[10px] border border-hairline bg-paper-2 px-2.5 py-1.5 text-[12px] leading-[1.45] text-ink-2"
+              >
+                Recovering your reply...
+              </p>
+            ) : null}
             {dictationRecovery ? (
               <div
                 data-testid="dictation-recovery"
@@ -8378,6 +8625,8 @@ export default function ThreadPage() {
             <div
               data-thread-composer="true"
               data-demo-target="composer-input"
+              aria-busy={composerRecoveryInProgress}
+              inert={composerRecoveryInProgress ? true : undefined}
               // Predraft state earns a tinted accent border + soft ring
               // (#350): the textarea on its own looks like a passive
               // surface, so operators read the AI predraft as static
@@ -8429,6 +8678,7 @@ export default function ThreadPage() {
                     <button
                       type="button"
                       onClick={() => {
+                        if (composerRecoveryInProgressRef.current) return;
                         predraftDismissedRef.current.add(threadId);
                         setComposer("");
                         setComposerSource("empty");
@@ -8631,6 +8881,12 @@ export default function ThreadPage() {
                 autoCapitalize="sentences"
                 autoCorrect="on"
                 onChange={(event) => {
+                  if (
+                    threadComposerMutationIsBlocked(
+                      composerRecoveryInProgressRef.current,
+                      threadId
+                    )
+                  ) return;
                   const nextValue = event.target.value;
                   const caret = event.target.selectionStart ?? nextValue.length;
                   if (composerSource === "predraft" || composerSource === "empty") {
@@ -8832,6 +9088,7 @@ export default function ThreadPage() {
                             key={chip.intent}
                             type="button"
                             onClick={() => {
+                              if (composerRecoveryInProgressRef.current) return;
                               setComposer(chip.text);
                               setChipsMenuOpen(false);
                             }}
@@ -8943,7 +9200,9 @@ export default function ThreadPage() {
                             <input
                               type="datetime-local"
                               value={customScheduleValue}
+                              disabled={composerRecoveryInProgress}
                               onChange={(e) => {
+                                if (composerRecoveryInProgressRef.current) return;
                                 setCustomScheduleValue(e.target.value);
                                 setRecoveredScheduledFor(null);
                               }}
@@ -9183,7 +9442,9 @@ export default function ThreadPage() {
                         <input
                           type="datetime-local"
                           value={customScheduleValue}
+                          disabled={composerRecoveryInProgress}
                           onChange={(event) => {
+                            if (composerRecoveryInProgressRef.current) return;
                             setCustomScheduleValue(event.target.value);
                             setRecoveredScheduledFor(null);
                           }}

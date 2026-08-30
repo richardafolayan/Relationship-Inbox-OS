@@ -4,7 +4,8 @@ export function externalActionCompletedStorageKey(scope: string): string {
   return `${STORAGE_PREFIX}completed:scoped:${scope}`;
 }
 
-type AttemptStorage = Pick<Storage, "getItem" | "setItem" | "removeItem">;
+type AttemptStorage = Pick<Storage, "getItem" | "setItem" | "removeItem"> &
+  Partial<Pick<Storage, "key" | "length">>;
 
 type AttemptLockManager = {
   request<T>(
@@ -535,12 +536,42 @@ export function createExternalActionAttemptStore(
     return { intent: record.intent, value: record.value };
   }
 
+  function listScopedAttempts<TIntent, TValue>(scopePrefix = ""):
+    Array<{ intent: TIntent; scope: string; value: TValue }> {
+    if (!storage || typeof storage.length !== "number" || typeof storage.key !== "function") {
+      throw new ExternalActionAttemptStorageError();
+    }
+    const keyPrefix = `${STORAGE_PREFIX}value:scoped:${scopePrefix}`;
+    const attempts: Array<{ intent: TIntent; scope: string; value: TValue }> = [];
+    try {
+      for (let index = 0; index < storage.length; index += 1) {
+        const key = storage.key(index);
+        if (!key?.startsWith(keyPrefix)) continue;
+        const scope = key.slice(`${STORAGE_PREFIX}value:scoped:`.length);
+        const record = readRecord<TIntent, TValue>(key);
+        if (
+          !record ||
+          record.completed ||
+          completedValueDominates(record.value, readCompletedScopedValues<TValue>(scope))
+        ) {
+          continue;
+        }
+        attempts.push({ intent: record.intent, scope, value: record.value });
+      }
+      return attempts;
+    } catch (error) {
+      if (error instanceof ExternalActionAttemptStorageError) throw error;
+      throw new ExternalActionAttemptStorageError();
+    }
+  }
+
   return {
     compareAndCompleteScopedValue,
     compareAndReplaceScopedValue,
     getOrCreateScopedValue,
     replaceScopedValue,
     completeScopedValue,
+    listScopedAttempts,
     readScopedAttempt,
     readCompletedScopedState,
     readCompletedScopedValues

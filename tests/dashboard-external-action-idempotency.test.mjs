@@ -120,6 +120,60 @@ test("an unresolved client action id survives a complete component remount", asy
   assert.equal(created, 2);
 });
 
+test("durable attempt inventory finds unresolved composer sends across routes", async () => {
+  const values = new Map();
+  const storage = {
+    get length() {
+      return values.size;
+    },
+    getItem: (key) => values.get(key) ?? null,
+    key: (index) => [...values.keys()][index] ?? null,
+    setItem: (key, value) => values.set(key, value),
+    removeItem: (key) => values.delete(key)
+  };
+  const store = createExternalActionAttemptStore(storage);
+  await store.getOrCreateScopedValue(
+    "composer-send:thread-a",
+    { threadId: "thread-a" },
+    () => ({ clientSendId: "send-a" })
+  );
+  await store.getOrCreateScopedValue(
+    "composer-send:thread-b",
+    { threadId: "thread-b" },
+    () => ({ clientSendId: "send-b" })
+  );
+  await store.getOrCreateScopedValue(
+    "reaction:thread-c",
+    { threadId: "thread-c" },
+    () => ({ clientActionId: "reaction-c" })
+  );
+
+  assert.deepEqual(
+    store
+      .listScopedAttempts("composer-send:")
+      .map(({ scope, value }) => [scope, value.clientSendId])
+      .sort(),
+    [
+      ["composer-send:thread-a", "send-a"],
+      ["composer-send:thread-b", "send-b"]
+    ]
+  );
+});
+
+test("durable attempt inventory fails closed when storage cannot enumerate", () => {
+  const values = new Map();
+  const storage = {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, value),
+    removeItem: (key) => values.delete(key)
+  };
+
+  assert.throws(
+    () => createExternalActionAttemptStore(storage).listScopedAttempts("composer-send:"),
+    ExternalActionAttemptStorageError
+  );
+});
+
 test("a scoped attempt reuses its id only for the same canonical intent", async () => {
   const values = new Map();
   const storage = {

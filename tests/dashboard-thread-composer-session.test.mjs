@@ -15,6 +15,7 @@ const {
   shouldRefreshThreadComposerAttachmentOwnership,
   snapshotThreadComposerSessionAfterAcceptedAction,
   snapshotThreadComposerSession,
+  threadComposerMutationIsBlocked,
   __test
 } = await import("../apps/dashboard/lib/thread-composer-session.ts");
 
@@ -575,6 +576,61 @@ test("a failed recovery write leaves the complete predecessor session intact", (
   storage.setItem = originalSetItem;
   assert.equal(recovered, null);
   assert.deepEqual(readThreadComposerSession("thread-a", storage), predecessor);
+});
+
+test("a held recovery barrier prevents passive persistence from replacing its successor", async () => {
+  const storage = makeStorage();
+  const predecessor = snapshotThreadComposerSession(
+    "thread-a",
+    {
+      attachments: [attachment],
+      customScheduleValue: "2026-12-15T09:30",
+      replyToMessageId: "parent-message",
+      source: "user",
+      text: "Original failed reply"
+    },
+    storage
+  );
+  let finishRelease;
+  const releaseHeld = new Promise((resolve) => {
+    finishRelease = resolve;
+  });
+  let recoveryThreadId = "thread-a";
+  const recovery = (async () => {
+    const successor = compareAndRestoreThreadComposerSession(
+      "thread-a",
+      predecessor,
+      predecessor,
+      "recovered-session",
+      storage,
+      predecessor.draftRevision,
+      "send-attempt"
+    );
+    assert.ok(successor);
+    await releaseHeld;
+    recoveryThreadId = null;
+    return successor;
+  })();
+
+  await Promise.resolve();
+  if (!threadComposerMutationIsBlocked(recoveryThreadId, "thread-a")) {
+    snapshotThreadComposerSession(
+      "thread-a",
+      {
+        attachments: [],
+        customScheduleValue: "",
+        replyToMessageId: null,
+        source: "draft",
+        text: "Late server draft"
+      },
+      storage
+    );
+  }
+  assert.equal(readThreadComposerSession("thread-a", storage)?.revisionId, "recovered-session");
+
+  finishRelease();
+  const successor = await recovery;
+  assert.deepEqual(readThreadComposerSession("thread-a", storage), successor);
 });
 
 test("recovery compare-and-set cannot overwrite a newer composer generation", () => {

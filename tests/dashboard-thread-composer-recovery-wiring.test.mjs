@@ -157,7 +157,10 @@ test("navigation and pagehide preserve durable attachment descriptors while byte
 });
 
 test("attachment quarantine is swept again while a thread stays open", () => {
-  assert.match(source, /composerAttachmentStore\.purgeStale\(\)/);
+  assert.match(
+    source,
+    /composerAttachmentStore\.purgeStale\(composerAttachmentOwnerIsLive\)/
+  );
   assert.match(source, /window\.setInterval\([\s\S]*?purgeStaleAttachments/);
   assert.match(source, /visibilitychange/);
   assert.match(source, /window\.addEventListener\("focus", purgeStaleAttachments\)/);
@@ -240,6 +243,39 @@ test("late failed-send recovery cannot write into another route or newer compose
     /finalDisposition !== "restore_captured"[\s\S]*?return;/
   );
   assert.match(restore, /composerRecoveryInProgressRef\.current = pending\.threadId/);
+});
+
+test("recovery blocks passive persistence and exposes a visible busy state", () => {
+  const persistStart = source.indexOf("const persistComposerSession = useCallback(");
+  const persistEnd = source.indexOf("const awaitComposerAttachmentOwnership", persistStart);
+  const persistence = source.slice(persistStart, persistEnd);
+  const applyStart = source.indexOf("const applyThread = useCallback(");
+  const applyEnd = source.indexOf("const refreshThread", applyStart);
+  const apply = source.slice(applyStart, applyEnd);
+
+  assert.match(persistence, /threadComposerMutationIsBlocked\(/);
+  assert.match(apply, /threadComposerMutationIsBlocked\(/);
+  assert.match(source, /role="status"[\s\S]*?Recovering your reply\.\.\./);
+  assert.match(source, /aria-busy=\{composerRecoveryInProgress\}/);
+  assert.match(source, /inert=\{composerRecoveryInProgress \? true : undefined\}/);
+  assert.match(source, /disabled=\{composerRecoveryInProgress\}[\s\S]*?onChange=\{\(event\) => \{[\s\S]*?threadComposerMutationIsBlocked\(/);
+  assert.match(source, /requestAnimationFrame\(\(\) => composerInputRef\.current\?\.focus\(\)\)/);
+});
+
+test("all durable composer attempts reconcile and terminal SSE cleanup precedes route filtering", () => {
+  assert.match(source, /\.listScopedAttempts<[\s\S]*?>\("composer-send:"\)/);
+  assert.match(source, /window\.setInterval\(reconcileDurableAttempts, 60_000\)/);
+  assert.match(source, /window\.addEventListener\("focus", reconcileDurableAttempts\)/);
+  const sseStart = source.indexOf("// SSE reconciliation for sends.");
+  const sseEnd = source.indexOf("const completePendingComposerSend", sseStart);
+  const sse = source.slice(sseStart, sseEnd);
+  const terminalSend = sse.indexOf('detail.type === "MESSAGE_SENT"');
+  const routeFilteredRefresh = sse.indexOf(
+    'eventTargetsOpenThread &&\n        detail.type === "MESSAGES_PERSISTED"'
+  );
+  assert.notEqual(terminalSend, -1);
+  assert.ok(routeFilteredRefresh > terminalSend);
+  assert.doesNotMatch(sse.slice(0, terminalSend), /if \(!shouldRefetchForThreadEvent/);
 });
 
 test("a newer composer generation does not release an accepted pending attachment owner", () => {
