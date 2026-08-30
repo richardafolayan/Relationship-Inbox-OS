@@ -2201,6 +2201,15 @@ export class LinkedInAdapter implements PlatformAdapter {
    */
   private lastCookieSyncAt: number | null = null;
   private realtimeWatcher: { stop(): void } | null = null;
+  /**
+   * Playwright cannot unexpose a page binding. Track pages that already have
+   * `__relationshipInboxLinkedInChanged` so same-page restarts skip re-expose
+   * and only reinstall the DOM observer / swap the active callback.
+   */
+  private readonly pagesWithRealtimeBinding = new WeakSet<Page>();
+  private realtimeChangeHandler:
+    | ((change: { reason: string; sourceChangedAt: string }) => void)
+    | null = null;
 
   constructor(private readonly deps: LinkedInAdapterDependencies) {}
 
@@ -2214,12 +2223,12 @@ export class LinkedInAdapter implements PlatformAdapter {
     log?: (line: string) => void;
   }): { stop(): void } {
     this.realtimeWatcher?.stop();
+    this.realtimeChangeHandler = input.onChange;
     const log = input.log ?? (() => undefined);
     const bindingName = "__relationshipInboxLinkedInChanged";
     let stopped = false;
     let page: Page | null = null;
     let rearmTimer: ReturnType<typeof setTimeout> | null = null;
-    let bindingExposed = false;
 
     const scheduleArm = (delayMs: number): void => {
       if (stopped || rearmTimer) return;
@@ -2238,11 +2247,9 @@ export class LinkedInAdapter implements PlatformAdapter {
 
         if (page !== nextPage) {
           page = nextPage;
-          bindingExposed = false;
           nextPage.on("close", () => {
             if (stopped) return;
             page = null;
-            bindingExposed = false;
             scheduleArm(5_000);
           });
           nextPage.on("framenavigated", (frame) => {
@@ -2257,13 +2264,15 @@ export class LinkedInAdapter implements PlatformAdapter {
           return;
         }
 
-        if (!bindingExposed) {
+        if (!this.pagesWithRealtimeBinding.has(nextPage)) {
           await nextPage.exposeFunction(bindingName, (payload: unknown) => {
             const change = payload && typeof payload === "object"
               ? (payload as { reason?: unknown; sourceChangedAt?: unknown })
               : {};
             try {
-              input.onChange({
+              const handler = this.realtimeChangeHandler;
+              if (!handler) return;
+              handler({
                 reason: String(change.reason ?? "dom_change"),
                 sourceChangedAt:
                   typeof change.sourceChangedAt === "string"
@@ -2274,7 +2283,7 @@ export class LinkedInAdapter implements PlatformAdapter {
               return;
             }
           });
-          bindingExposed = true;
+          this.pagesWithRealtimeBinding.add(nextPage);
         }
 
         await nextPage.evaluate(
@@ -2379,10 +2388,13 @@ export class LinkedInAdapter implements PlatformAdapter {
     };
 
     const watcher = {
-      stop(): void {
+      stop: (): void => {
         stopped = true;
         if (rearmTimer) clearTimeout(rearmTimer);
         rearmTimer = null;
+        if (this.realtimeWatcher === watcher) {
+          this.realtimeChangeHandler = null;
+        }
         const currentPage = page;
         page = null;
         if (currentPage && !currentPage.isClosed()) {
