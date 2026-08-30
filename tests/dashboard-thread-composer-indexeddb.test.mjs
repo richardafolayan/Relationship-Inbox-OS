@@ -35,7 +35,12 @@ test("real IndexedDB preserves cloned holders, compacts reloads, and quarantines
   const address = server.address();
   assert.ok(address && typeof address === "object");
 
-  const browser = await puppeteer.launch({ headless: true });
+  const browser = await puppeteer.launch({
+    args: process.platform === "linux" && process.env.CI
+      ? ["--no-sandbox", "--disable-setuid-sandbox"]
+      : [],
+    headless: true
+  });
   t.after(() => browser.close());
   const page = await browser.newPage();
   await page.goto(`http://127.0.0.1:${address.port}`);
