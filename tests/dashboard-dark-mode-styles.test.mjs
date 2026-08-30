@@ -43,3 +43,21 @@ test("semantic status surfaces use dark-mode-aware tokens", async () => {
   assert.match(combined, /bg-risk-waiting\/15/);
   assert.match(combined, /bg-transparent/);
 });
+
+test("dark theme overdue token is lighter than oxblood for text contrast", async () => {
+  const css = await readFile(new URL("../apps/dashboard/app/globals.css", import.meta.url), "utf8");
+  const rootMatch = css.match(/:root\s*\{([\s\S]*?)\n\}/);
+  const darkMatch = css.match(/\[data-theme="dark"\]\s*\{([\s\S]*?)\n\}/);
+
+  assert.ok(rootMatch, "expected :root theme block");
+  assert.ok(darkMatch, "expected [data-theme=\"dark\"] theme block");
+
+  const rootBlock = rootMatch[1];
+  const darkBlock = darkMatch[1];
+
+  assert.match(rootBlock, /--risk-overdue:\s*var\(--accent\)/);
+  assert.match(rootBlock, /--accent:\s*#9a2727/);
+  assert.match(darkBlock, /--risk-overdue:\s*#df7676/);
+  assert.doesNotMatch(darkBlock, /--risk-overdue:\s*var\(--accent\)/);
+  assert.doesNotMatch(darkBlock, /--risk-overdue:\s*#9a2727/);
+});
