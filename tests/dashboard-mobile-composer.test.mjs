@@ -69,10 +69,14 @@ test("desktop toolbar remains available at md+ and is not the mobile row", () =>
 
 test("thread switch closes the mobile more sheet", () => {
   const effectBodies = [
-    ...src.matchAll(/useEffect\(\(\)\s*=>\s*\{([\s\S]*?)\},\s*\[threadId\]\)/g)
+    ...src.matchAll(
+      /useLayoutEffect\(\(\)\s*=>\s*\{([\s\S]*?)\},\s*\[composerAttachmentStore, threadId\]\)/g
+    )
   ].map((m) => m[1]);
   const reset = effectBodies.find(
-    (body) => body.includes('setComposer("")') && body.includes("setComposerMoreOpen(false)")
+    (body) =>
+      body.includes("setComposer(restoredIntent.text)") &&
+      body.includes("setComposerMoreOpen(false)")
   );
   assert.ok(reset, "expected threadId reset to close composerMoreOpen");
   assert.match(reset, /setMobileSuggestionsOpen\(false\)/);

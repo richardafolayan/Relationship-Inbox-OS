@@ -141,6 +141,21 @@ import { ThreadBriefBand } from "@/components/thread/ThreadBriefBand";
 import { ViewportDiagnostics } from "@/components/thread/viewport-diagnostics";
 import { chooseDisplayBrief } from "@/lib/reply-brief";
 import { restoreFailedAttachments } from "@/lib/composer-attachments";
+import {
+  assertThreadComposerAttachmentsRecoverable,
+  defaultThreadComposerAttachmentStore,
+  type ThreadComposerAttachmentStore
+} from "@/lib/thread-composer-attachments";
+import {
+  consumeThreadComposerSession,
+  readThreadComposerSession,
+  safeSendFailureDisposition,
+  sameThreadComposerIntent,
+  snapshotThreadComposerSession,
+  type ThreadComposerAttachmentDescriptor,
+  type ThreadComposerIntentDraft
+} from "@/lib/thread-composer-session";
+import { buildScheduledSendRequest } from "@/lib/scheduled-send";
 import { nextMorningSendSlot, shouldOfferLateNightSchedule } from "@/lib/late-night-send";
 import { platformSupportsScheduledSend } from "@/lib/platform-send-capabilities";
 import {
@@ -222,11 +237,43 @@ type ComposerAttachment = {
   kind: "photo" | "voice_note" | "video" | "audio" | "pdf" | "sticker" | "gif" | "unknown";
 };
 
+function composerAttachmentDescriptor(
+  attachment: ComposerAttachment
+): ThreadComposerAttachmentDescriptor {
+  return {
+    id: attachment.id,
+    kind: attachment.kind,
+    lastModified: attachment.file.lastModified,
+    name: attachment.file.name,
+    size: attachment.file.size,
+    type: attachment.file.type
+  };
+}
+
+function composerAttachmentKind(
+  mime: string | undefined,
+  filename: string | undefined
+): ComposerAttachment["kind"] {
+  const normalizedMime = (mime ?? "").toLowerCase();
+  const normalizedName = (filename ?? "").toLowerCase();
+  if (normalizedMime === "image/gif" || normalizedName.endsWith(".gif")) return "gif";
+  if (normalizedMime === "image/webp" && /sticker/i.test(normalizedName)) return "sticker";
+  if (normalizedMime.startsWith("image/")) return "photo";
+  if (normalizedMime.startsWith("video/")) return "video";
+  if (normalizedMime === "application/pdf" || normalizedName.endsWith(".pdf")) return "pdf";
+  if (normalizedMime.startsWith("audio/")) {
+    return /audio.message|voice/i.test(normalizedName) ? "voice_note" : "audio";
+  }
+  return "unknown";
+}
+
 type PendingSend = {
   clientSendId: string;
+  threadId: string;
   text: string;
   sentAt: string;
   attachments: ComposerAttachment[];
+  composerIntent?: ThreadComposerIntentDraft;
   failed?: boolean;
   uncertain?: boolean;
   errorMessage?: string;
@@ -732,6 +779,13 @@ export default function ThreadPage() {
   // send. Each entry holds the actual File for upload + a previewUrl for the
   // chip thumbnail (image previews; a generic icon for everything else).
   const [composerAttachments, setComposerAttachments] = useState<ComposerAttachment[]>([]);
+  const composerAttachmentsRef = useRef(composerAttachments);
+  composerAttachmentsRef.current = composerAttachments;
+  const [missingComposerAttachments, setMissingComposerAttachments] = useState<
+    ThreadComposerAttachmentDescriptor[]
+  >([]);
+  const missingComposerAttachmentsRef = useRef(missingComposerAttachments);
+  missingComposerAttachmentsRef.current = missingComposerAttachments;
   const [dropActive, setDropActive] = useState(false);
   const dragDepthRef = useRef(0);
   const [recording, setRecording] = useState(false);
@@ -1163,6 +1217,35 @@ export default function ThreadPage() {
   const composerMoreTriggerRef = useRef<HTMLButtonElement>(null);
   const [customScheduleValue, setCustomScheduleValue] = useState("");
   const [scheduling, setScheduling] = useState(false);
+  const composerAttachmentStore = useMemo<ThreadComposerAttachmentStore>(
+    () => defaultThreadComposerAttachmentStore(),
+    []
+  );
+  const composerOwnerThreadIdRef = useRef(threadId);
+  const composerSessionPresentRef = useRef(false);
+  const composerRestoreGenerationRef = useRef(0);
+  const composerRestoreRef = useRef<{
+    intent: ThreadComposerIntentDraft;
+    threadId: string;
+  } | null>(null);
+  const composerActionRef = useRef<{ threadId: string } | null>(null);
+  const composerIntentRef = useRef<ThreadComposerIntentDraft>({
+    attachments: [],
+    customScheduleValue: "",
+    replyToMessageId: null,
+    source: "empty",
+    text: ""
+  });
+  composerIntentRef.current = {
+    attachments: [
+      ...missingComposerAttachments,
+      ...composerAttachments.map(composerAttachmentDescriptor)
+    ],
+    customScheduleValue,
+    replyToMessageId: focusedThreadParentId,
+    source: composerSource,
+    text: composer
+  };
   const [cancellingScheduledId, setCancellingScheduledId] = useState<string | null>(null);
   // Inline edit state for the scheduled-send pill. `editingScheduledId`
   // is the clientSendId of the row currently being edited (null = none),
@@ -1190,6 +1273,7 @@ export default function ThreadPage() {
   }, []);
 
   const [pendingSends, setPendingSends] = useState<PendingSend[]>([]);
+  const activePendingSends = pendingSends.filter((pending) => pending.threadId === threadId);
   const pendingSendsRef = useRef(pendingSends);
   useEffect(() => {
     pendingSendsRef.current = pendingSends;
@@ -1316,6 +1400,7 @@ export default function ThreadPage() {
   // revalidate cache hit can paint instantly and then re-apply the network
   // value via this same path.
   const applyThread = useCallback((fresh: ThreadResponse) => {
+    if (!shouldApplyThreadScopedResult(fresh.id, routeThreadIdRef.current)) return;
     // Merge the fresh recent-messages window with any older messages
     // the operator has already paginated in. Without this, every poll
     // (every send, every SSE event, the 3s polling tick) would
@@ -1368,6 +1453,7 @@ export default function ThreadPage() {
     );
     setComposer((prev) => {
       if (prev) return prev; // operator already typed something
+      if (composerSessionPresentRef.current) return prev;
       const explicitDraft = fresh.draft;
       if (explicitDraft) {
         setComposerSource("draft");
@@ -1502,20 +1588,44 @@ export default function ThreadPage() {
     []
   );
 
-  // Thread-local composer + AI state must NOT leak across threads. The page
-  // does not remount when navigating /thread/A -> /thread/B (same App Router
-  // dynamic segment), so without this reset a reply typed for A, staged
-  // attachments, in-flight optimistic sends, and A's AI snooze suggestions
-  // would carry into B — risking A's draft being sent to B. Keyed on the
-  // route param so it clears the instant navigation starts, before B loads.
-  useEffect(() => {
-    // Point the guard ref at the thread we're now on. In-flight thread work
-    // from the previous route will see this changed value and skip its write.
+  // This dynamic route stays mounted while the operator moves between
+  // conversations. Persist the complete previous intent before swapping the
+  // visible composer, then restore only the new thread's own state. The
+  // layout phase prevents a single frame in which A's reply is shown on B.
+  useLayoutEffect(() => {
+    const previousThreadId = composerOwnerThreadIdRef.current;
+    const activeAction = composerActionRef.current;
+    if (
+      previousThreadId !== threadId &&
+      activeAction?.threadId !== previousThreadId
+    ) {
+      snapshotThreadComposerSession(previousThreadId, composerIntentRef.current);
+    }
+
+    const generation = ++composerRestoreGenerationRef.current;
     routeThreadIdRef.current = threadId;
-    // A freshly-opened thread starts with its predraft un-dismissed.
+    composerOwnerThreadIdRef.current = threadId;
     predraftDismissedRef.current.delete(threadId);
-    setComposer("");
-    setComposerSource("empty");
+
+    const storedSession = readThreadComposerSession(threadId);
+    const sessionHiddenBySend = activeAction?.threadId === threadId;
+    const visibleSession = sessionHiddenBySend ? null : storedSession;
+    const restoredIntent: ThreadComposerIntentDraft = visibleSession ?? {
+      attachments: [],
+      customScheduleValue: "",
+      replyToMessageId: null,
+      source: "empty",
+      text: ""
+    };
+    composerSessionPresentRef.current = Boolean(storedSession);
+    composerRestoreRef.current = { intent: restoredIntent, threadId };
+    composerIntentRef.current = restoredIntent;
+
+    setComposer(restoredIntent.text);
+    setComposerSource(restoredIntent.source);
+    setFocusedThreadParentId(restoredIntent.replyToMessageId);
+    preFocusAnchorRef.current = null;
+    setCustomScheduleValue(restoredIntent.customScheduleValue);
     setHasSavedDraft(false);
     setComposeIntent("");
     setComposeDraft("");
@@ -1531,7 +1641,6 @@ export default function ThreadPage() {
     // repliesGenerating false for a still-generating next thread and the
     // spinner is replaced by static fallback chips.
     setSuggestionsTimedOut(false);
-    setPendingSends([]);
     setWhatsAppPollOpen(false);
     setWhatsAppPollQuestion("");
     setWhatsAppPollOptions(["", ""]);
@@ -1545,13 +1654,109 @@ export default function ThreadPage() {
     setScheduleMenuOpen(false);
     setChipsMenuOpen(false);
     setMemoryOpen(false);
+    composerAttachmentsRef.current = [];
+    missingComposerAttachmentsRef.current = [];
+    setMissingComposerAttachments([]);
     setComposerAttachments((prev) => {
       for (const a of prev) {
         if (a.previewUrl) URL.revokeObjectURL(a.previewUrl);
       }
       return [];
     });
-  }, [threadId]);
+
+    if (restoredIntent.attachments.length > 0) {
+      void composerAttachmentStore
+        .read(threadId, restoredIntent.attachments)
+        .then((recovered) => {
+          if (
+            composerRestoreGenerationRef.current !== generation ||
+            routeThreadIdRef.current !== threadId
+          ) {
+            return;
+          }
+          const recoveredAttachments = recovered.map(({ descriptor, file }) => ({
+            id: descriptor.id,
+            file,
+            kind: descriptor.kind,
+            previewUrl: file.type.startsWith("image/") ? URL.createObjectURL(file) : ""
+          }));
+          const recoveredIds = new Set(recoveredAttachments.map((attachment) => attachment.id));
+          const missingAttachments = restoredIntent.attachments.filter(
+            (attachment) => !recoveredIds.has(attachment.id)
+          );
+          const userAttachments = composerAttachmentsRef.current.filter(
+            (attachment) => !recoveredIds.has(attachment.id)
+          );
+          const merged = [...recoveredAttachments, ...userAttachments];
+          const nextIntent = {
+            ...composerIntentRef.current,
+            attachments: [
+              ...missingAttachments,
+              ...merged.map(composerAttachmentDescriptor)
+            ]
+          };
+          composerRestoreRef.current = { intent: nextIntent, threadId };
+          missingComposerAttachmentsRef.current = missingAttachments;
+          setMissingComposerAttachments(missingAttachments);
+          setComposerAttachments(merged);
+          if (missingAttachments.length > 0) {
+            setError(
+              "An attachment could not be restored. Add it again before sending."
+            );
+          }
+        })
+        .catch(() => {
+          if (
+            composerRestoreGenerationRef.current !== generation ||
+            routeThreadIdRef.current !== threadId
+          ) {
+            return;
+          }
+          const missingAttachments = restoredIntent.attachments;
+          const nextIntent = {
+            ...composerIntentRef.current,
+            attachments: [
+              ...missingAttachments,
+              ...composerAttachmentsRef.current.map(composerAttachmentDescriptor)
+            ]
+          };
+          composerRestoreRef.current = { intent: nextIntent, threadId };
+          missingComposerAttachmentsRef.current = missingAttachments;
+          setMissingComposerAttachments(missingAttachments);
+          setError("An attachment could not be restored. Add it again before sending.");
+        });
+    }
+  }, [composerAttachmentStore, threadId]);
+
+  useEffect(() => {
+    if (composerOwnerThreadIdRef.current !== threadId) return;
+    if (composerActionRef.current?.threadId === threadId) return;
+    const restoring = composerRestoreRef.current;
+    if (restoring?.threadId === threadId) {
+      if (!sameThreadComposerIntent(restoring.intent, composerIntentRef.current)) return;
+      composerRestoreRef.current = null;
+    }
+    const saved = snapshotThreadComposerSession(threadId, composerIntentRef.current);
+    composerSessionPresentRef.current = Boolean(saved);
+  }, [
+    composer,
+    composerAttachments,
+    composerSource,
+    customScheduleValue,
+    focusedThreadParentId,
+    missingComposerAttachments,
+    threadId
+  ]);
+
+  useEffect(() => {
+    const preserveComposer = () => {
+      const ownerThreadId = composerOwnerThreadIdRef.current;
+      if (composerActionRef.current?.threadId === ownerThreadId) return;
+      snapshotThreadComposerSession(ownerThreadId, composerIntentRef.current);
+    };
+    window.addEventListener("pagehide", preserveComposer);
+    return () => window.removeEventListener("pagehide", preserveComposer);
+  }, []);
 
   // Load the operator voice profile once. Reloads on a profile-saved
   // event so an AI-help-level change in Settings lands without a reload.
@@ -1657,16 +1862,16 @@ export default function ThreadPage() {
 
   // Send-queue polling fallback for SSE-degraded environments.
   useEffect(() => {
-    if (!threadId || pendingSends.length === 0) return undefined;
+    if (!threadId || activePendingSends.length === 0) return undefined;
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
     const startedAt = Date.now();
     const tick = async () => {
       if (cancelled) return;
-      if (
-        pendingSendsRef.current.length === 0 ||
-        pendingSendsRef.current.every((pending) => pending.failed)
-      ) return;
+      const currentPending = pendingSendsRef.current.filter(
+        (pending) => pending.threadId === threadId
+      );
+      if (currentPending.length === 0 || currentPending.every((pending) => pending.failed)) return;
       try {
         const queue = await apiGet<{
           recent: Array<{
@@ -1714,10 +1919,13 @@ export default function ThreadPage() {
       } catch {
         // Network blip - try again next tick.
       }
+      const remainingCurrent = pendingSendsRef.current.filter(
+        (pending) => pending.threadId === threadId
+      );
       if (
         cancelled ||
-        pendingSendsRef.current.length === 0 ||
-        pendingSendsRef.current.every((pending) => pending.failed)
+        remainingCurrent.length === 0 ||
+        remainingCurrent.every((pending) => pending.failed)
       ) return;
       timer = setTimeout(
         () => void tick(),
@@ -1729,7 +1937,7 @@ export default function ThreadPage() {
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
-  }, [threadId, refresh, pendingSends.length]);
+  }, [threadId, refresh, activePendingSends.length]);
 
   const checkPendingDelivery = useCallback(
     async (clientSendId: string) => {
@@ -1744,21 +1952,25 @@ export default function ThreadPage() {
           for (const attachment of pending.attachments) {
             if (attachment.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
           }
+          if (pending.composerIntent) {
+            await composerAttachmentStore
+              .remove(
+                pending.threadId,
+                pending.composerIntent.attachments.map((attachment) => attachment.id)
+              )
+              .catch(() => undefined);
+          }
           await refresh();
           setPendingSends((prev) => prev.filter((item) => item.clientSendId !== clientSendId));
           setError(null);
           return;
         }
         if (outcome.kind === "waiting") {
-          for (const attachment of pending.attachments) {
-            if (attachment.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
-          }
           setPendingSends((prev) =>
             prev.map((item) =>
               item.clientSendId === clientSendId
                 ? {
                     ...item,
-                    attachments: [],
                     failed: false,
                     uncertain: false,
                     errorMessage: undefined,
@@ -1771,10 +1983,35 @@ export default function ThreadPage() {
           return;
         }
         if (outcome.kind === "not_sent") {
-          setComposer((current) => current || pending.text);
-          setComposerAttachments((current) =>
-            restoreFailedAttachments(pending.attachments, current)
-          );
+          const recoveryIntent = pending.composerIntent;
+          const recoveryThreadId = pending.threadId;
+          if (recoveryIntent && !readThreadComposerSession(recoveryThreadId)) {
+            snapshotThreadComposerSession(recoveryThreadId, recoveryIntent);
+          }
+          const emptyIntent: ThreadComposerIntentDraft = {
+            attachments: [],
+            customScheduleValue: "",
+            replyToMessageId: null,
+            source: "empty",
+            text: ""
+          };
+          if (
+            recoveryIntent &&
+            routeThreadIdRef.current === recoveryThreadId &&
+            sameThreadComposerIntent(composerIntentRef.current, emptyIntent)
+          ) {
+            composerIntentRef.current = recoveryIntent;
+            setComposer(recoveryIntent.text);
+            setComposerSource(recoveryIntent.source);
+            setComposerAttachments(pending.attachments);
+            setFocusedThreadParentId(recoveryIntent.replyToMessageId);
+            setCustomScheduleValue(recoveryIntent.customScheduleValue);
+          } else if (routeThreadIdRef.current === recoveryThreadId) {
+            setComposer((current) => current || pending.text);
+            setComposerAttachments((current) =>
+              restoreFailedAttachments(pending.attachments, current)
+            );
+          }
           setPendingSends((prev) =>
             prev.filter((item) => item.clientSendId !== clientSendId)
           );
@@ -1829,7 +2066,7 @@ export default function ThreadPage() {
         setError(message);
       }
     },
-    [refresh]
+    [composerAttachmentStore, refresh]
   );
 
   // Suggestions-spinner safety timer. When the runner-side status is
@@ -1849,29 +2086,79 @@ export default function ThreadPage() {
     return () => clearTimeout(timer);
   }, [generatingActive]);
 
-  const kindFromMime = (mime: string | undefined, filename: string | undefined): "photo" | "voice_note" | "video" | "audio" | "pdf" | "sticker" | "gif" | "unknown" => {
-    const m = (mime ?? "").toLowerCase();
-    const n = (filename ?? "").toLowerCase();
-    if (m === "image/gif" || n.endsWith(".gif")) return "gif";
-    if (m === "image/webp" && /sticker/i.test(n)) return "sticker";
-    if (m.startsWith("image/")) return "photo";
-    if (m.startsWith("video/")) return "video";
-    if (m === "application/pdf" || n.endsWith(".pdf")) return "pdf";
-    if (m.startsWith("audio/")) return /audio.message|voice/i.test(n) ? "voice_note" : "audio";
-    return "unknown";
-  };
-
   const onSend = useCallback(async () => {
-    if (!thread || sending || sendingRef.current) return;
+    if (!thread || sending || scheduling || sendingRef.current || composerActionRef.current) return;
     if (!composer.trim() && composerAttachments.length === 0) return;
     sendingRef.current = true;
-    const clientSendId = uuid();
-    const text = composer;
+    const startThreadId = thread.id;
+    const capturedIntent: ThreadComposerIntentDraft = {
+      ...composerIntentRef.current,
+      attachments: [
+        ...missingComposerAttachments,
+        ...composerAttachments.map(composerAttachmentDescriptor)
+      ]
+    };
+    const capturedSession = snapshotThreadComposerSession(startThreadId, capturedIntent);
+    const action = { threadId: startThreadId };
+    composerActionRef.current = action;
+    composerSessionPresentRef.current = Boolean(capturedSession);
+    const text = capturedIntent.text;
     const attachmentsToSend = composerAttachments;
+    setSending(true);
+    setError(null);
+    const finishComposerAction = () => {
+      if (composerActionRef.current === action) composerActionRef.current = null;
+      const ownerThreadId = composerOwnerThreadIdRef.current;
+      const saved = snapshotThreadComposerSession(ownerThreadId, composerIntentRef.current);
+      composerSessionPresentRef.current = Boolean(saved);
+      sendingRef.current = false;
+      setSending(false);
+    };
+    if (capturedIntent.attachments.length > 0) {
+      try {
+        await assertThreadComposerAttachmentsRecoverable(
+          composerAttachmentStore,
+          startThreadId,
+          capturedIntent.attachments
+        );
+      } catch (attachmentError) {
+        setError(
+          attachmentError instanceof Error
+            ? attachmentError.message
+            : "This attachment could not be saved for recovery."
+        );
+        finishComposerAction();
+        return;
+      }
+      if (
+        routeThreadIdRef.current !== startThreadId ||
+        !sameThreadComposerIntent(composerIntentRef.current, capturedIntent)
+      ) {
+        if (routeThreadIdRef.current === startThreadId) {
+          setError("Your reply changed while its attachment was being prepared. Review it, then send again.");
+        }
+        finishComposerAction();
+        return;
+      }
+    }
+    const clientSendId = uuid();
+    const clearedIntent: ThreadComposerIntentDraft = {
+      ...capturedIntent,
+      attachments: [],
+      source: composerSourceAfterClear(),
+      text: ""
+    };
     const sentAt = new Date().toISOString();
     setPendingSends((prev) => [
       ...prev,
-      { clientSendId, text, sentAt, attachments: attachmentsToSend }
+      {
+        clientSendId,
+        threadId: startThreadId,
+        text,
+        sentAt,
+        attachments: attachmentsToSend,
+        composerIntent: capturedIntent
+      }
     ]);
     afterNextPaint(() => {
       recordMessageSyncLatency({
@@ -1881,18 +2168,14 @@ export default function ThreadPage() {
       });
     });
     setComposer("");
-    // Reset the source too: an emptied composer must never keep the AI-predraft
-    // accent frame + badge (#350). Without this the badge frames a blank input
-    // after sending a predraft on the same thread until the operator types.
-    setComposerSource(composerSourceAfterClear());
+    setComposerSource(clearedIntent.source);
     setComposerAttachments([]);
-    setSending(true);
-    setError(null);
+    composerIntentRef.current = clearedIntent;
     stickToBottomRef.current = true;
     try {
       // Snapshot the focused-thread parent at send time so the post-send
       // exit-focus doesn't race the network call and drop the linkage.
-      const replyToMessageId = focusedThreadParentId ?? undefined;
+      const replyToMessageId = capturedIntent.replyToMessageId ?? undefined;
       if (attachmentsToSend.length > 0) {
         // Multipart upload - needed for binary file payloads.
         const form = new FormData();
@@ -1903,9 +2186,9 @@ export default function ThreadPage() {
         for (const a of attachmentsToSend) {
           form.append("attachments", a.file, a.file.name);
         }
-        await apiPostForm(`/runner/control/thread/${thread.id}/send`, form);
+        await apiPostForm(`/runner/control/thread/${startThreadId}/send`, form);
       } else {
-        await apiPost(`/runner/control/thread/${thread.id}/send`, {
+        await apiPost(`/runner/control/thread/${startThreadId}/send`, {
           text,
           clientSendId,
           clientRequestedAt: sentAt,
@@ -1918,9 +2201,32 @@ export default function ThreadPage() {
       for (const a of attachmentsToSend) {
         if (a.previewUrl) URL.revokeObjectURL(a.previewUrl);
       }
+      if (capturedSession) {
+        consumeThreadComposerSession(startThreadId, capturedSession.revision);
+      }
+      await composerAttachmentStore
+        .remove(startThreadId, capturedIntent.attachments.map((attachment) => attachment.id))
+        .catch(() => undefined);
+      if (
+        routeThreadIdRef.current === startThreadId &&
+        sameThreadComposerIntent(composerIntentRef.current, clearedIntent)
+      ) {
+        const emptyIntent: ThreadComposerIntentDraft = {
+          attachments: [],
+          customScheduleValue: "",
+          replyToMessageId: null,
+          source: "empty",
+          text: ""
+        };
+        composerIntentRef.current = emptyIntent;
+        missingComposerAttachmentsRef.current = [];
+        setMissingComposerAttachments([]);
+        setFocusedThreadParentId(null);
+        setCustomScheduleValue("");
+      }
     } catch (sendError) {
       const failure = classifyConsumerFailure(sendError, {
-        path: `/runner/control/thread/${thread.id}/send`,
+        path: `/runner/control/thread/${startThreadId}/send`,
         method: "POST"
       });
       if (failure.deliveryUncertain) {
@@ -1938,40 +2244,99 @@ export default function ThreadPage() {
           )
         );
         setError(message);
+        if (capturedSession) {
+          consumeThreadComposerSession(startThreadId, capturedSession.revision);
+        }
+        if (
+          routeThreadIdRef.current === startThreadId &&
+          sameThreadComposerIntent(composerIntentRef.current, clearedIntent)
+        ) {
+          composerIntentRef.current = {
+            attachments: [],
+            customScheduleValue: "",
+            replyToMessageId: null,
+            source: "empty",
+            text: ""
+          };
+          setFocusedThreadParentId(null);
+          setCustomScheduleValue("");
+        }
         window.setTimeout(() => void checkPendingDelivery(clientSendId), 750);
       } else {
-        setPendingSends((prev) => prev.filter((p) => p.clientSendId !== clientSendId));
+        const disposition = safeSendFailureDisposition(
+          startThreadId,
+          routeThreadIdRef.current,
+          composerIntentRef.current,
+          clearedIntent
+        );
+        setPendingSends((prev) =>
+          disposition === "keep_failed_attempt"
+            ? prev.map((pending) =>
+                pending.clientSendId === clientSendId
+                  ? {
+                      ...pending,
+                      failed: true,
+                      uncertain: false,
+                      errorMessage: failure.message
+                    }
+                  : pending
+              )
+            : prev.filter((pending) => pending.clientSendId !== clientSendId)
+        );
         setError(failure.message);
-        setComposer((current) => current || text);
-        setComposerAttachments((prev) => restoreFailedAttachments(attachmentsToSend, prev));
+        if (disposition === "restore_captured") {
+          composerIntentRef.current = capturedIntent;
+          setComposer(capturedIntent.text);
+          setComposerSource(capturedIntent.source);
+          setComposerAttachments(attachmentsToSend);
+          setFocusedThreadParentId(capturedIntent.replyToMessageId);
+          setCustomScheduleValue(capturedIntent.customScheduleValue);
+        }
       }
     } finally {
-      sendingRef.current = false;
-      setSending(false);
+      finishComposerAction();
     }
-  }, [checkPendingDelivery, composer, composerAttachments, sending, thread, focusedThreadParentId]);
+  }, [
+    checkPendingDelivery,
+    composer,
+    composerAttachmentStore,
+    composerAttachments,
+    missingComposerAttachments,
+    scheduling,
+    sending,
+    thread
+  ]);
 
   const addFiles = useCallback((files: FileList | File[]) => {
     const list = Array.from(files);
-    setComposerAttachments((prev) => [
-      ...prev,
-      ...list.map((file) => ({
+    const ownerThreadId = routeThreadIdRef.current;
+    const additions: ComposerAttachment[] = list.map((file) => ({
         id: uuid(),
         file,
         previewUrl: file.type.startsWith("image/") ? URL.createObjectURL(file) : "",
-        kind: kindFromMime(file.type, file.name)
-      }))
-    ]);
-  }, []);
+        kind: composerAttachmentKind(file.type, file.name)
+      }));
+    if (additions.length === 0) return;
+    composerSessionPresentRef.current = true;
+    for (const attachment of additions) {
+      void composerAttachmentStore
+        .put(ownerThreadId, composerAttachmentDescriptor(attachment), attachment.file)
+        .catch(() => setError("This attachment could not be saved for recovery."));
+    }
+    setComposerAttachments((prev) => [...prev, ...additions]);
+  }, [composerAttachmentStore]);
 
   const removeAttachment = useCallback((id: string) => {
+    const ownerThreadId = routeThreadIdRef.current;
+    setMissingComposerAttachments((prev) => prev.filter((attachment) => attachment.id !== id));
     setComposerAttachments((prev) => {
       const next = prev.filter((a) => a.id !== id);
       const removed = prev.find((a) => a.id === id);
       if (removed?.previewUrl) URL.revokeObjectURL(removed.previewUrl);
       return next;
     });
-  }, []);
+    void composerAttachmentStore.remove(ownerThreadId, [id]).catch(() => undefined);
+  }, [composerAttachmentStore]);
 
   const composerAcceptsFiles =
     thread?.platform === "IMESSAGE" ||
@@ -2162,10 +2527,6 @@ export default function ThreadPage() {
 
   // Revoke any outstanding image preview object URLs when the thread view
   // unmounts (e.g. navigating away mid-compose) so they don't leak.
-  const composerAttachmentsRef = useRef(composerAttachments);
-  useEffect(() => {
-    composerAttachmentsRef.current = composerAttachments;
-  }, [composerAttachments]);
   useEffect(
     () => () => {
       for (const a of composerAttachmentsRef.current) {
@@ -2507,7 +2868,10 @@ export default function ThreadPage() {
     );
     const sentAt = new Date().toISOString();
     setError(null);
-    setPendingSends((current) => [...current, { clientSendId, text: trimmed, sentAt, attachments: [] }]);
+    setPendingSends((current) => [
+      ...current,
+      { clientSendId, threadId: thread.id, text: trimmed, sentAt, attachments: [] }
+    ]);
     stickToBottomRef.current = true;
     try {
       const queued = await apiPost<{ clientSendId: string }>(`/runner/control/thread/${thread.id}/send`, {
@@ -2586,40 +2950,99 @@ export default function ThreadPage() {
   // only).
   const scheduleSend = useCallback(
     async (at: Date) => {
-      if (!thread || !composer.trim() || scheduling) return;
-      const text = composer;
+      if (
+        !thread ||
+        (!composer.trim() && composerAttachments.length === 0) ||
+        scheduling ||
+        sending ||
+        sendingRef.current
+      ) {
+        return;
+      }
+      const startThreadId = thread.id;
+      const capturedIntent: ThreadComposerIntentDraft = {
+        ...composerIntentRef.current,
+        attachments: [
+          ...missingComposerAttachments,
+          ...composerAttachments.map(composerAttachmentDescriptor)
+        ]
+      };
+      const capturedSession = snapshotThreadComposerSession(startThreadId, capturedIntent);
+      composerSessionPresentRef.current = Boolean(capturedSession);
+      const text = capturedIntent.text;
       const scheduledFor = at.toISOString();
-      const scope = `schedule-send:${thread.id}`;
+      const scope = `schedule-send:${startThreadId}`;
       const intent = {
-        threadId: thread.id,
+        threadId: startThreadId,
         text,
-        scheduledFor
+        scheduledFor,
+        replyToMessageId: capturedIntent.replyToMessageId,
+        attachments: capturedIntent.attachments
       };
       setScheduling(true);
       setError(null);
       try {
+        await assertThreadComposerAttachmentsRecoverable(
+          composerAttachmentStore,
+          startThreadId,
+          capturedIntent.attachments
+        );
         const { clientSendId } = await externalActionAttempts.getOrCreateScopedValue(
           scope,
           intent,
           () => ({ clientSendId: uuid() }),
           canReplaceExternalActionAttempt
         );
-        await apiPost(`/runner/control/thread/${thread.id}/send`, {
-          text,
+        const request = buildScheduledSendRequest({
+          attachments: composerAttachments,
           clientSendId,
-          scheduledFor
+          replyToMessageId: capturedIntent.replyToMessageId ?? undefined,
+          scheduledFor,
+          text
         });
+        if (request.kind === "multipart") {
+          await apiPostForm(`/runner/control/thread/${startThreadId}/send`, request.body);
+        } else {
+          await apiPost(`/runner/control/thread/${startThreadId}/send`, request.body);
+        }
         await externalActionAttempts.completeScopedValue<{ clientSendId: string }>(
           scope,
           (value) => value.clientSendId === clientSendId
         );
-        setComposer("");
-        // Reset the source too (see onSend): a scheduled predraft empties the
-        // composer, so the predraft badge/frame must not linger over a blank
-        // input.
-        setComposerSource(composerSourceAfterClear());
-        setScheduleMenuOpen(false);
-        setCustomScheduleValue("");
+        const consumed = capturedSession
+          ? consumeThreadComposerSession(startThreadId, capturedSession.revision)
+          : true;
+        const activeMatchesCaptured =
+          routeThreadIdRef.current === startThreadId &&
+          sameThreadComposerIntent(composerIntentRef.current, capturedIntent);
+        if (consumed && (routeThreadIdRef.current !== startThreadId || activeMatchesCaptured)) {
+          await composerAttachmentStore
+            .remove(startThreadId, capturedIntent.attachments.map((attachment) => attachment.id))
+            .catch(() => undefined);
+        }
+        if (consumed && activeMatchesCaptured) {
+          for (const attachment of composerAttachments) {
+            if (attachment.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
+          }
+          const emptyIntent: ThreadComposerIntentDraft = {
+            attachments: [],
+            customScheduleValue: "",
+            replyToMessageId: null,
+            source: "empty",
+            text: ""
+          };
+          composerIntentRef.current = emptyIntent;
+          composerSessionPresentRef.current = false;
+          missingComposerAttachmentsRef.current = [];
+          setComposer("");
+          setComposerSource("empty");
+          setComposerAttachments([]);
+          setMissingComposerAttachments([]);
+          setFocusedThreadParentId(null);
+          setCustomScheduleValue("");
+          setScheduleMenuOpen(false);
+          setMobileScheduleOpen(false);
+        }
         await refresh();
       } catch (sendError) {
         const message = sendError instanceof Error ? sendError.message : "Failed to schedule send";
@@ -2628,7 +3051,17 @@ export default function ThreadPage() {
         setScheduling(false);
       }
     },
-    [composer, externalActionAttempts, refresh, scheduling, thread]
+    [
+      composer,
+      composerAttachmentStore,
+      composerAttachments,
+      externalActionAttempts,
+      missingComposerAttachments,
+      refresh,
+      scheduling,
+      sending,
+      thread
+    ]
   );
 
   const cancelScheduledSend = useCallback(
@@ -2750,7 +3183,7 @@ export default function ThreadPage() {
 
   const retryPendingSend = (clientSendId: string) => {
     const target = pendingSends.find((p) => p.clientSendId === clientSendId);
-    if (!target || !thread || target.uncertain) return;
+    if (!target || target.threadId !== routeThreadIdRef.current || target.uncertain) return;
     // Re-queue the existing failed SendRequest under a fresh clientSendId
     // via the runner's /retry-send endpoint (the runner keeps the failed
     // row for receipts and inserts a new PENDING row with the same text).
@@ -2759,7 +3192,7 @@ export default function ThreadPage() {
         p.clientSendId === clientSendId ? { ...p, failed: false, errorMessage: undefined, errorKind: undefined } : p
       )
     );
-    apiPost<{ clientSendId: string }>(`/runner/control/thread/${thread.id}/retry-send`, {
+    apiPost<{ clientSendId: string }>(`/runner/control/thread/${target.threadId}/retry-send`, {
       clientSendId
     })
       .then((r) => {
@@ -3425,11 +3858,6 @@ export default function ThreadPage() {
     return new Set<string>([focusedThreadParentId, ...childIds]);
   }, [focusedThreadParentId, replyChildIdsByParentId]);
   useEffect(() => {
-    // Clear focused thread when navigating to a different thread so the
-    // user doesn't carry stale focus across conversations.
-    setFocusedThreadParentId(null);
-  }, [thread?.id]);
-  useEffect(() => {
     if (!focusedThreadParentId) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") setFocusedThreadParentId(null);
@@ -3456,7 +3884,8 @@ export default function ThreadPage() {
       const composer = target.closest('[data-thread-composer="true"]');
       const pill = target.closest('[data-focused-pill="true"]');
       const focusSwap = target.closest('button[title^="Focus"]');
-      if (focusedBubble || composer || pill || focusSwap) return;
+      const navigation = target.closest('a[href], [data-preserve-composer-intent="true"]');
+      if (focusedBubble || composer || pill || focusSwap || navigation) return;
       setFocusedThreadParentId(null);
     };
     // Delay listener arming so the focusing click itself doesn't
@@ -3658,7 +4087,7 @@ export default function ThreadPage() {
         stickToBottomRef.current = false;
       }
     }
-  }, [visibleMessages, pendingSends.length, loading, thread]);
+  }, [visibleMessages, activePendingSends.length, loading, thread]);
 
   const onTimelineScroll = (event: React.UIEvent<HTMLDivElement>) => {
     // In focused-thread mode, suppress both the bottom-stickiness
@@ -3873,8 +4302,12 @@ export default function ThreadPage() {
         ? [
             {
               label: "Schedule send",
-              description: composer.trim() ? "Choose when this reply should be sent." : "Write a reply first.",
-              disabled: !composer.trim() || sending || scheduling,
+              description:
+                composer.trim() || composerAttachments.length > 0
+                  ? "Choose when this reply should be sent."
+                  : "Write a reply or add an attachment first.",
+              disabled:
+                (!composer.trim() && composerAttachments.length === 0) || sending || scheduling,
               onSelect: () => setMobileScheduleOpen(true)
             }
           ]
@@ -4381,6 +4814,7 @@ export default function ThreadPage() {
               <button
                 type="button"
                 onClick={() => router.push("/today")}
+                data-preserve-composer-intent="true"
                 aria-label="Back to today"
                 title="Back to today (Esc)"
                 className="grid h-8 w-8 shrink-0 place-items-center rounded-[8px] text-ink-3 transition-colors duration-calm hover:bg-paper-2 hover:text-ink"
@@ -5353,7 +5787,7 @@ export default function ThreadPage() {
               );
             })}
 
-            {pendingSends.map((pending) => (
+            {activePendingSends.map((pending) => (
               <div
                 key={`pending-${pending.clientSendId}`}
                 className="flex max-w-[86%] flex-col items-end self-end sm:max-w-[72%]"
@@ -6046,7 +6480,11 @@ export default function ThreadPage() {
                       <button
                         type="button"
                         onClick={() => setScheduleMenuOpen((v) => !v)}
-                        disabled={!composer.trim() || sending || scheduling}
+                        disabled={
+                          (!composer.trim() && composerAttachments.length === 0) ||
+                          sending ||
+                          scheduling
+                        }
                         title="Schedule send"
                         aria-label="Schedule send"
                         className="inline-flex h-[30px] w-[30px] items-center justify-center rounded-full border border-hairline text-ink-2 transition-colors duration-calm hover:border-hairline-strong hover:bg-paper-2 hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
@@ -6140,7 +6578,11 @@ export default function ThreadPage() {
                   <Button
                     variant="primary"
                     onClick={() => void onSend()}
-                    disabled={sending || (!composer.trim() && composerAttachments.length === 0)}
+                    disabled={
+                      sending ||
+                      scheduling ||
+                      (!composer.trim() && composerAttachments.length === 0)
+                    }
                     className="px-3.5 py-1.5 text-[12px]"
                   >
                     {sending ? (
@@ -6242,7 +6684,11 @@ export default function ThreadPage() {
                 <Button
                   variant="primary"
                   onClick={() => void onSend()}
-                  disabled={sending || (!composer.trim() && composerAttachments.length === 0)}
+                  disabled={
+                    sending ||
+                    scheduling ||
+                    (!composer.trim() && composerAttachments.length === 0)
+                  }
                   className="px-3.5 py-1.5 text-[12px]"
                   data-testid="composer-mobile-send"
                 >
@@ -6341,7 +6787,7 @@ export default function ThreadPage() {
                   </span>
                 </button>
               ) : null}
-              {composerAttachments.length > 0 ? (
+              {composerAttachments.length > 0 || missingComposerAttachments.length > 0 ? (
                 <div className="mt-2 flex flex-wrap gap-2 border-t border-hairline pt-2">
                   {composerAttachments.map((a) => (
                     <span
@@ -6361,6 +6807,24 @@ export default function ThreadPage() {
                         onClick={() => removeAttachment(a.id)}
                         className="text-ink-3 hover:text-risk-overdue"
                         aria-label="Remove attachment"
+                      >
+                        ×
+                      </button>
+                    </span>
+                  ))}
+                  {missingComposerAttachments.map((attachment) => (
+                    <span
+                      key={attachment.id}
+                      className="inline-flex items-center gap-2 rounded-pill border border-risk-waiting/40 bg-risk-waiting/5 px-2 py-1 text-[12px]"
+                    >
+                      <span className="text-ink-3">📎</span>
+                      <span className="max-w-[140px] truncate text-ink">{attachment.name}</span>
+                      <span className="text-[10px] text-risk-waiting">add again</span>
+                      <button
+                        type="button"
+                        onClick={() => removeAttachment(attachment.id)}
+                        className="text-ink-3 hover:text-risk-overdue"
+                        aria-label={`Remove unavailable attachment ${attachment.name}`}
                       >
                         ×
                       </button>
