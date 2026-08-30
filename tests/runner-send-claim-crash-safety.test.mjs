@@ -81,10 +81,11 @@ function makeHarness(initialRows, opts = {}) {
   let userIntentVersion = opts.userIntentVersion ?? 0;
   const rows = initialRows.map((r) => ({
     focusIntentVersion:
-      r.focusIntentVersion ??
-      (r.source === "focus_ack" || r.source === "focus_auto_ack"
-        ? userIntentVersion
-        : null),
+      Object.hasOwn(r, "focusIntentVersion")
+        ? r.focusIntentVersion
+        : r.source === "focus_ack" || r.source === "focus_auto_ack"
+          ? userIntentVersion
+          : null,
     ...r
   }));
   const sends = []; // every physical adapter.sendMessage call
@@ -697,6 +698,35 @@ test("manual focus acknowledgement supersedes an unclaimed automatic row", async
   assert.equal(h.rows.filter((row) => row.status === "PENDING").length, 1);
 });
 
+test("manual focus acknowledgement does not adopt a claimed automatic row", async () => {
+  const automaticId = focusAutoAckClientSendId("focus-1", "p1");
+  const manualId = focusManualAckClientSendId("focus-1", "p1");
+  const h = makeHarness([
+    focusAutoAckRow({
+      id: "claimed-auto",
+      clientSendId: automaticId,
+      requestText: "I am unavailable until 2:00pm.",
+      receiptJson: SEND_CLAIM_MARKER
+    })
+  ]);
+
+  await assert.rejects(
+    h.svc.enqueueSend({
+      threadId: "t1",
+      text: "I am focusing until 2:00pm.",
+      clientSendId: manualId,
+      source: "focus_ack",
+      focusWindowId: "focus-1",
+      focusIntentVersion: 0
+    }),
+    /already being processed/
+  );
+
+  assert.equal(h.rows.length, 1);
+  assert.equal(h.rows[0].clientSendId, automaticId);
+  assert.equal(h.rows[0].status, "PENDING");
+});
+
 test("a cancelled automatic row cannot shadow the manual acknowledgement on replay", async () => {
   const h = makeHarness([]);
   const automaticId = focusAutoAckClientSendId("focus-1", "p1");
@@ -828,6 +858,110 @@ test("replaying an existing auto-ack cannot adopt a newer durable intent version
   assert.equal(h.sends.length, 0);
   assert.equal(h.rows[0].status, "FAILED");
   assert.equal(JSON.parse(h.rows[0].errorJson).reasonCode, "focus_auto_ack_superseded");
+});
+
+test("replaying a legacy manual focus row cannot invent its missing durable baseline", async () => {
+  const clientSendId = focusManualAckClientSendId("focus-1", "p1");
+  const h = makeHarness([
+    pendingRow({
+      clientSendId,
+      source: "focus_ack",
+      requestText: "I am focusing until 2:00pm.",
+      focusIntentVersion: null
+    })
+  ], { userIntentVersion: 3 });
+
+  await assert.rejects(
+    h.svc.enqueueSend({
+      threadId: "t1",
+      text: "I am focusing until 2:00pm.",
+      clientSendId,
+      source: "focus_ack",
+      focusWindowId: "focus-1",
+      focusIntentVersion: 3
+    }),
+    /safety state is unavailable/
+  );
+  assert.equal(h.rows[0].focusIntentVersion, null);
+
+  await h.svc.processSendRequest(h.rows[0].id);
+  assert.equal(h.sends.length, 0);
+  assert.equal(h.rows[0].status, "FAILED");
+  assert.equal(JSON.parse(h.rows[0].errorJson).reasonCode, "focus_ack_superseded");
+});
+
+test("replaying a superseded manual focus row preserves its original durable baseline", async () => {
+  const clientSendId = focusManualAckClientSendId("focus-1", "p1");
+  const h = makeHarness([
+    pendingRow({
+      clientSendId,
+      source: "focus_ack",
+      requestText: "I am focusing until 2:00pm.",
+      focusIntentVersion: 1
+    })
+  ], { userIntentVersion: 3 });
+
+  await assert.rejects(
+    h.svc.enqueueSend({
+      threadId: "t1",
+      text: "I am focusing until 2:00pm.",
+      clientSendId,
+      source: "focus_ack",
+      focusWindowId: "focus-1",
+      focusIntentVersion: 3
+    }),
+    /superseded/
+  );
+  assert.equal(h.rows[0].focusIntentVersion, 1);
+
+  await h.svc.processSendRequest(h.rows[0].id);
+  assert.equal(h.sends.length, 0);
+  assert.equal(h.rows[0].status, "FAILED");
+  assert.equal(JSON.parse(h.rows[0].errorJson).reasonCode, "focus_ack_superseded");
+});
+
+test("a fresh manual action can re-arm a safely policy-blocked focus acknowledgement", async () => {
+  const clientSendId = focusManualAckClientSendId("focus-1", "p1");
+  const h = makeHarness([]);
+  const originalIntent = h.svc.registerDurableUserTriggeredIntent("t1");
+  assert.equal(await originalIntent.ready, 1);
+  await h.svc.enqueueSend({
+    threadId: "t1",
+    text: "I am focusing until 2:00pm.",
+    clientSendId,
+    source: "focus_ack",
+    focusWindowId: "focus-1",
+    focusIntentVersion: 1
+  });
+  originalIntent.release();
+
+  const supersedingIntent = h.svc.registerDurableUserTriggeredIntent("t1");
+  assert.equal(await supersedingIntent.ready, 2);
+  supersedingIntent.release();
+  await h.svc.processSendRequest(h.rows[0].id);
+  assert.equal(h.rows[0].status, "FAILED");
+  assert.equal(JSON.parse(h.rows[0].errorJson).errorKind, "POLICY_BLOCKED");
+
+  const freshIntent = h.svc.registerDurableUserTriggeredIntent("t1");
+  assert.equal(await freshIntent.ready, 3);
+  const rearmed = await h.svc.enqueueSend({
+    threadId: "t1",
+    text: "I am focusing until 3:00pm.",
+    clientSendId,
+    source: "focus_ack",
+    focusWindowId: "focus-1",
+    focusIntentVersion: 3,
+    rearmPolicyBlockedFocusAcknowledgement: true
+  });
+  freshIntent.release();
+
+  assert.equal(rearmed.status, "PENDING");
+  assert.equal(h.rows[0].status, "PENDING");
+  assert.equal(h.rows[0].requestText, "I am focusing until 3:00pm.");
+  assert.equal(h.rows[0].focusIntentVersion, 3);
+  await h.svc.processSendRequest(h.rows[0].id);
+  assert.deepEqual(h.sends, ["I am focusing until 3:00pm."]);
+  assert.equal(h.rows[0].status, "SENT");
 });
 
 test("a later durable intent supersedes an older focus request regardless of enqueue order", async () => {

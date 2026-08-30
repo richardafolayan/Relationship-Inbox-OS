@@ -47,6 +47,7 @@ export interface SendQueueService {
     focusWindowId?: string;
     focusIntentVersion?: number;
     retryFailedFocusAcknowledgement?: boolean;
+    rearmPolicyBlockedFocusAcknowledgement?: boolean;
     attachments?: Array<{
       absolutePath: string;
       displayName: string;
@@ -196,6 +197,7 @@ export function createSendQueue(deps: SendQueueDeps): SendQueueService {
     focusWindowId?: string;
     focusIntentVersion?: number;
     retryFailedFocusAcknowledgement?: boolean;
+    rearmPolicyBlockedFocusAcknowledgement?: boolean;
     // attachments must mirror the public interface above so iMessage
     // voice notes / photos survive the type contract — without this the
     // field is silently dropped by any future refactor that relies on

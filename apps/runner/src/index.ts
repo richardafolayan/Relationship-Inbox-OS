@@ -4201,6 +4201,7 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
       focusWindowId: payload.focusWindowId,
       focusIntentVersion:
         payload.source === "focus_ack" ? requestIntentVersion : undefined,
+      rearmPolicyBlockedFocusAcknowledgement: payload.source === "focus_ack",
       replyToMessageId: payload.replyToMessageId
     });
     if (queueResult.replayed) {

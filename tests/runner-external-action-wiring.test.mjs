@@ -137,6 +137,17 @@ test("retry-safe manual focus acknowledgements reuse the deterministic send id",
   assert.match(block, /focusWindowId: profile\.focusWindow\.windowId/);
 });
 
+test("a fresh manual focus action may re-arm only its policy-blocked acknowledgement", () => {
+  const block = route(
+    "/control/thread/:threadId/send",
+    "/control/thread/:threadId/send-poll"
+  );
+  assert.match(
+    block,
+    /rearmPolicyBlockedFocusAcknowledgement: payload\.source === "focus_ack"/
+  );
+});
+
 test("the queue summary excludes durable non-message action rows", () => {
   const start = source.indexOf('app.get("/data/send-queue"');
   const end = source.indexOf('app.get("/data/send-status/:clientSendId"', start);

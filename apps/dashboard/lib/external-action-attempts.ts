@@ -86,6 +86,7 @@ export function createExternalActionAttemptStore(
     lockOverride ??
     browserLocks() ??
     (typeof window === "undefined" && storageOverride ? testLockManager : undefined);
+  const observedScopedValues = new Map<string, string>();
 
   function valueStorageKey(scope: string): string {
     return `${STORAGE_PREFIX}value:scoped:${scope}`;
@@ -178,9 +179,20 @@ export function createExternalActionAttemptStore(
         removeRecord(key);
         record = undefined;
       }
-      if (record) return record.value;
+      if (
+        record?.completed &&
+        observedScopedValues.get(scope) !== canonicalJson(record.value)
+      ) {
+        removeRecord(key);
+        record = undefined;
+      }
+      if (record) {
+        observedScopedValues.set(scope, canonicalJson(record.value));
+        return record.value;
+      }
       const created = { version: 1 as const, intent, value: create() };
       writeRecord(key, created);
+      observedScopedValues.set(scope, canonicalJson(created.value));
       return created.value;
     });
   }
@@ -195,6 +207,7 @@ export function createExternalActionAttemptStore(
       const record = readRecord<unknown, TValue>(key);
       if (!record || !matches(record.value)) return false;
       writeRecord(key, { ...record, value: nextValue });
+      observedScopedValues.set(scope, canonicalJson(nextValue));
       return true;
     });
   }
@@ -208,6 +221,7 @@ export function createExternalActionAttemptStore(
       const record = readRecord<unknown, TValue>(key);
       if (!record || !matches(record.value)) return false;
       writeRecord(key, { ...record, completed: true });
+      observedScopedValues.delete(scope);
       return true;
     });
   }

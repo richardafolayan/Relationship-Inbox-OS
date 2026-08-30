@@ -107,9 +107,9 @@ test("an unresolved client action id survives a complete component remount", asy
   const afterCompletion = createExternalActionAttemptStore(storage);
   assert.equal(
     (await afterCompletion.getOrCreateScopedValue(scope, intent, createValue)).clientActionId,
-    "attempt-1"
+    "attempt-2"
   );
-  assert.equal(created, 1);
+  assert.equal(created, 2);
 });
 
 test("a scoped attempt reuses its id only for the same canonical intent", async () => {
@@ -244,11 +244,35 @@ test("one tab completing an action leaves the shared id for a stale tab", async 
   const create = () => ({ clientSendId: `attempt-${++created}` });
 
   const original = await first.getOrCreateScopedValue(scope, intent, create);
+  const staleInFlight = await stale.getOrCreateScopedValue(scope, intent, create);
+  assert.deepEqual(staleInFlight, original);
   assert.equal(await first.completeScopedValue(scope, () => true), true);
   const replay = await stale.getOrCreateScopedValue(scope, intent, create);
 
   assert.deepEqual(replay, original);
   assert.equal(created, 1);
+});
+
+test("the completing tab allocates a new id for a later identical operation", async () => {
+  const values = new Map();
+  const storage = {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, value),
+    removeItem: (key) => values.delete(key)
+  };
+  const store = createExternalActionAttemptStore(storage);
+  const scope = "repeat-identical-poll";
+  const intent = { question: "Lunch?", options: ["Yes", "No"] };
+  let created = 0;
+  const create = () => ({ clientSendId: `attempt-${++created}` });
+
+  const original = await store.getOrCreateScopedValue(scope, intent, create);
+  assert.equal(await store.completeScopedValue(scope, () => true), true);
+  const next = await store.getOrCreateScopedValue(scope, intent, create);
+
+  assert.equal(original.clientSendId, "attempt-1");
+  assert.equal(next.clientSendId, "attempt-2");
+  assert.equal(created, 2);
 });
 
 test("a completed reconciled action can release its scope for a changed intent", async () => {

@@ -6,7 +6,11 @@ import { prisma as defaultPrisma } from "../db";
 import type { EventBus, SettingsStore } from "../types/runtime";
 import { AdapterFailure } from "../platforms/utils";
 import { buildDemoSendReceipt } from "./demo-send";
-import { classifySendFailureKind, consumerSendFailure } from "./send-failure";
+import {
+  classifySendFailureKind,
+  consumerSendFailure,
+  parsePersistedSendFailure
+} from "./send-failure";
 import {
   focusAcknowledgementClientSendIds,
   focusAutoAckDispatchEligible,
@@ -264,13 +268,14 @@ function assertExistingSendIntent(
     attachments?: SendAttachment[];
     replyToMessageId?: string;
     scheduledFor?: Date;
-  }
+  },
+  options: { allowRequestTextChange?: boolean } = {}
 ): void {
   const existingScheduledFor = existing.scheduledFor?.getTime() ?? null;
   const expectedScheduledFor = expected.scheduledFor?.getTime() ?? null;
   if (
     existing.threadId !== expected.threadId ||
-    existing.requestText !== expected.text ||
+    (!options.allowRequestTextChange && existing.requestText !== expected.text) ||
     existing.source !== expected.source ||
     normalizePersistedAttachmentsJson(existing.attachmentsJson) !==
       attachmentIntentJson(expected.attachments) ||
@@ -563,6 +568,7 @@ export function createSendService(deps: SendServiceDeps) {
     focusWindowId?: string;
     focusIntentVersion?: number;
     retryFailedFocusAcknowledgement?: boolean;
+    rearmPolicyBlockedFocusAcknowledgement?: boolean;
     /**
      * App-level threading: when set, the resulting Message row links back
      * to the parent (a Message.id cuid in the same thread). The send still
@@ -584,8 +590,21 @@ export function createSendService(deps: SendServiceDeps) {
       const existing = await prisma.sendRequest.findUnique({
         where: { clientSendId: input.clientSendId }
       });
+      const rearmingPolicyBlockedFocusAcknowledgement = Boolean(
+        existing &&
+        source === "focus_ack" &&
+        existing.source === "focus_ack" &&
+        existing.status === "FAILED" &&
+        existing.receiptJson === null &&
+        input.rearmPolicyBlockedFocusAcknowledgement &&
+        parsePersistedSendFailure(existing.errorJson).errorKind === "POLICY_BLOCKED"
+      );
       if (existing) {
-        assertExistingSendIntent(existing, { ...input, source });
+        assertExistingSendIntent(
+          existing,
+          { ...input, source },
+          { allowRequestTextChange: rearmingPolicyBlockedFocusAcknowledgement }
+        );
       }
 
       assertInstagramManualTextSend({
@@ -665,6 +684,18 @@ export function createSendService(deps: SendServiceDeps) {
             winner = existing;
           }
         }
+        if (
+          winner &&
+          winner.clientSendId !== input.clientSendId &&
+          source === "focus_ack" &&
+          winner.source === "focus_auto_ack" &&
+          winner.status === "PENDING"
+        ) {
+          throw new SendPolicyError(
+            "focus_auto_ack_in_progress",
+            "An automatic focus acknowledgement is already being processed"
+          );
+        }
         if (winner && winner.clientSendId !== input.clientSendId) {
           if (winner.status === "SENT" && winner.receiptJson) {
             await reconcileSentProjectionRow(winner).catch(() => false);
@@ -711,18 +742,38 @@ export function createSendService(deps: SendServiceDeps) {
           );
         }
         if (existing && source === "focus_ack" && existing.status === "PENDING") {
-          const refreshed = await prisma.sendRequest.updateMany({
+          if (!Number.isInteger(existing.focusIntentVersion)) {
+            throw new SendPolicyError(
+              "focus_ack_intent_baseline_required",
+              "Focus acknowledgement safety state is unavailable"
+            );
+          }
+          if (existing.focusIntentVersion !== focusIntentVersion) {
+            throw new SendPolicyError(
+              "focus_ack_superseded",
+              "The focus acknowledgement was superseded by a user-triggered action"
+            );
+          }
+        }
+        if (existing && rearmingPolicyBlockedFocusAcknowledgement) {
+          const reset = await prisma.sendRequest.updateMany({
             where: {
               id: existing.id,
-              status: "PENDING",
-              receiptJson: null
+              status: "FAILED",
+              receiptJson: null,
+              errorJson: existing.errorJson
             },
-            data: { focusIntentVersion }
+            data: {
+              status: "PENDING",
+              requestText: input.text,
+              errorJson: null,
+              focusIntentVersion
+            }
           });
-          if (refreshed.count !== 1) {
+          if (reset.count !== 1) {
             throw new SendPolicyError(
-              "focus_ack_replay_state_changed",
-              "The focus acknowledgement changed while it was being replayed"
+              "focus_ack_rearm_state_changed",
+              "The focus acknowledgement changed while it was being re-armed"
             );
           }
           focusAcknowledgementDispatchBaselines.set(input.clientSendId, {
@@ -730,6 +781,11 @@ export function createSendService(deps: SendServiceDeps) {
             focusPolicyIntentEpoch: focusPolicyMutationIntentEpoch,
             selfIntentAllowance: 1
           });
+          return {
+            clientSendId: input.clientSendId,
+            status: "PENDING",
+            replayed: true
+          };
         }
       }
 
