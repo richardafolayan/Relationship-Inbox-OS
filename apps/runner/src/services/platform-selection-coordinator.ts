@@ -23,6 +23,7 @@ export class PlatformSelectionSupersededError extends Error {
 
 export interface ReservedPlatformSelectionMutation {
   run<T>(work: () => Promise<T>): Promise<T>;
+  cancel(): Promise<void>;
 }
 
 export function createPlatformSelectionCoordinator(
@@ -50,10 +51,15 @@ export function createPlatformSelectionCoordinator(
     selectedPlatforms: readonly PlatformName[]
   ): ReservedPlatformSelectionMutation {
     const version = ++latestMutationVersion;
+    let state: "reserved" | "running" | "settled" = "reserved";
     desiredSelection = new Set(selectedPlatforms);
     deps.requestAbort("platform_selection_changed");
     return {
       async run<T>(work: () => Promise<T>): Promise<T> {
+        if (state !== "reserved") {
+          throw new PlatformSelectionSupersededError();
+        }
+        state = "running";
         try {
           return await withAllPlatformLocks(async () => {
             if (version !== latestMutationVersion) {
@@ -66,6 +72,15 @@ export function createPlatformSelectionCoordinator(
             desiredSelection = new Set(await deps.getEnabledPlatforms().catch(() => []));
           }
           throw error;
+        } finally {
+          state = "settled";
+        }
+      },
+      async cancel(): Promise<void> {
+        if (state !== "reserved") return;
+        state = "settled";
+        if (version === latestMutationVersion) {
+          desiredSelection = new Set(await deps.getEnabledPlatforms().catch(() => []));
         }
       }
     };

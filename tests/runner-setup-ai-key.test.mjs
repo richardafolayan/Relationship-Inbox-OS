@@ -422,6 +422,28 @@ test("recovery never rolls back a live uncommitted transaction", async () => {
   }
 });
 
+test("startup refuses to consume a live uncommitted key transaction", async () => {
+  const {
+    recoverEnvFileValueForStartup,
+    stageEnvFileValue
+  } = await import("../apps/runner/dist/services/setup-ai-key.js");
+  const dir = mkdtempSync(join(tmpdir(), "rios-setup-ai-key-startup-active-"));
+  const file = join(dir, ".env");
+  writeFileSync(file, "GEMINI_API_KEY=old\n");
+  try {
+    const active = stageEnvFileValue(file, "GEMINI_API_KEY", "uncommitted");
+    active.commit();
+    assert.throws(
+      () => recoverEnvFileValueForStartup(file, "GEMINI_API_KEY", null),
+      /still being committed by another runner/
+    );
+    assert.equal(readFileSync(file, "utf8"), "GEMINI_API_KEY=uncommitted\n");
+    active.rollback();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("startup reads quoted dotenv values without keeping quotes or comments", async () => {
   const { readEnvFileValue } = await import("../apps/runner/dist/services/setup-ai-key.js");
   const dir = mkdtempSync(join(tmpdir(), "rios-setup-ai-key-read-"));

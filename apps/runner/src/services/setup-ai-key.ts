@@ -237,6 +237,19 @@ export function readEnvFileValue(filePath: string, key: string): string | undefi
   return dotenv.parse(readFileSync(filePath, "utf8"))[key] || undefined;
 }
 
+export function recoverEnvFileValueForStartup(
+  filePath: string,
+  key: string,
+  committedTransactionId: string | null | undefined
+): string | undefined {
+  const recovery = recoverEnvFileValueTransaction(filePath, committedTransactionId);
+  if (recovery === "active") {
+    throw new Error("The setup key is still being committed by another runner.");
+  }
+  discardStaleEnvFileStages(filePath);
+  return readEnvFileValue(filePath, key);
+}
+
 export function discardStaleEnvFileStages(filePath: string): void {
   const parent = dirname(filePath);
   if (!existsSync(parent)) return;

@@ -1,5 +1,9 @@
 import OpenAI from "openai";
 import type {
+  ChatCompletion,
+  ChatCompletionCreateParamsNonStreaming
+} from "openai/resources/chat/completions";
+import type {
   PlatformName,
   SummaryOutput,
   SuggestedRepliesOutput,
@@ -1670,6 +1674,7 @@ export interface CreateAiServiceOptions {
   onProviderCall?: (metric: AiProviderCallMetric) => void;
   now?: () => Date;
   fetchImpl?: typeof fetch;
+  isAiEnabledForNewWork?: () => boolean;
 }
 
 export function createAiService(
@@ -1677,6 +1682,29 @@ export function createAiService(
   options: CreateAiServiceOptions = {}
 ): AiService {
   const now = (): Date => options.now?.() ?? new Date();
+
+  async function isAiDispatchAllowed(
+    shouldContinue: () => boolean = () => true
+  ): Promise<boolean> {
+    if (!shouldContinue() || options.isAiEnabledForNewWork?.() === false) return false;
+    const settings = await settingsStore.getSettings();
+    return (
+      shouldContinue() &&
+      options.isAiEnabledForNewWork?.() !== false &&
+      settings.aiEnabled !== false
+    );
+  }
+
+  async function dispatchChatCompletion(
+    client: OpenAI,
+    request: ChatCompletionCreateParamsNonStreaming,
+    shouldContinue: () => boolean = () => true
+  ): Promise<ChatCompletion> {
+    if (!(await isAiDispatchAllowed(shouldContinue))) {
+      throw new Error("AI processing was disabled before provider dispatch.");
+    }
+    return client.chat.completions.create(request);
+  }
   // Build one client per provider up front, guarded by API key presence.
   // Z.AI and Google's Gemini API both expose OpenAI-compatible chat
   // endpoints, so reusing the OpenAI SDK with a different baseURL + key is
@@ -1774,8 +1802,16 @@ export function createAiService(
     // Settings.aiProvider is the live override; runnerConfig.aiProvider is
     // the cold-start default seeded from the AI_PROVIDER env var. Settings
     // reads are a single SQLite row lookup — cheap enough to do per call.
+    if (options.isAiEnabledForNewWork?.() === false) {
+      return {
+        enabled: false,
+        client: null,
+        model: runnerConfig.openAiModel,
+        provider: runnerConfig.aiProvider
+      };
+    }
     const settings = await settingsStore.getSettings();
-    if (settings.aiEnabled === false) {
+    if (settings.aiEnabled === false || options.isAiEnabledForNewWork?.() === false) {
       return {
         enabled: false,
         client: null,
@@ -1827,10 +1863,12 @@ export function createAiService(
 
     let lastClass: AiErrorClassification | null = null;
     for (let attempt = 1; attempt <= entry.maxAttempts; attempt++) {
-      if (!shouldContinue()) return { ok: false, classification: null };
+      if (!(await isAiDispatchAllowed(shouldContinue))) {
+        return { ok: false, classification: null };
+      }
       const startedAt = performance.now();
       try {
-        const response = await client.chat.completions.create({
+        const response = await dispatchChatCompletion(client, {
           model,
           ...(shouldUseJsonResponseFormat(providerId, model)
             ? { response_format: { type: "json_object" as const } }
@@ -1841,7 +1879,7 @@ export function createAiService(
           ],
           ...providerOptions(providerId, model),
           ...geminiExtraBody(providerId, model)
-        });
+        }, shouldContinue);
         const usage = response.usage as
           | {
               prompt_tokens?: number;
@@ -1871,6 +1909,9 @@ export function createAiService(
           });
           console.warn(`[ai] ${lastClass.message}`);
           if (attempt < entry.maxAttempts) {
+            if (!(await isAiDispatchAllowed(shouldContinue))) {
+              return { ok: false, classification: null };
+            }
             await sleep(entry.baseBackoffMs * attempt + Math.random() * 1500);
             continue;
           }
@@ -1908,6 +1949,9 @@ export function createAiService(
           `[ai] ${providerId} call failed (model=${model}, attempt ${attempt}/${entry.maxAttempts}). Reason: ${lastClass.message}`
         );
         if (lastClass.retriable && attempt < entry.maxAttempts) {
+          if (!(await isAiDispatchAllowed(shouldContinue))) {
+            return { ok: false, classification: null };
+          }
           await sleep(entry.baseBackoffMs * attempt + Math.random() * 1500);
           continue;
         }
@@ -3012,7 +3056,7 @@ ${inboundMessages.map((m, i) => `${i + 1}. ${m}`).join("\n")}`;
       if (!client) return null;
       if (input.shouldContinue?.() === false) return null;
       try {
-        const response = await client.chat.completions.create({
+        const response = await dispatchChatCompletion(client, {
           model,
           ...(shouldUseJsonResponseFormat(providerId, model)
             ? { response_format: { type: "json_object" as const } }
@@ -3023,7 +3067,7 @@ ${inboundMessages.map((m, i) => `${i + 1}. ${m}`).join("\n")}`;
           ],
           ...providerOptions(providerId, model),
           ...geminiExtraBody(providerId, model)
-        });
+        }, () => input.shouldContinue?.() !== false);
         const content = response.choices[0]?.message?.content;
         if (!content) return null;
         const parsed = categorySchema.parse(parseAiJson(content, model));
@@ -3116,7 +3160,7 @@ Return strict JSON: { "summary": "string" }
 Contact profile: ${JSON.stringify(contactPayload)}${operatorBlock}`;
 
     try {
-      const response = await client.chat.completions.create({
+      const response = await dispatchChatCompletion(client, {
         model,
         ...(shouldUseJsonResponseFormat(provider, model)
           ? { response_format: { type: "json_object" as const } }
@@ -3188,7 +3232,7 @@ Contact profile: ${JSON.stringify(contactPayload)}
 Operator profile: ${JSON.stringify(selfPayload)}`;
 
     try {
-      const response = await client.chat.completions.create({
+      const response = await dispatchChatCompletion(client, {
         model,
         ...(shouldUseJsonResponseFormat(provider, model)
           ? { response_format: { type: "json_object" as const } }
@@ -3435,7 +3479,7 @@ Return strict JSON: { "suggestions": [{ "label": "string", "hours": 1-72, "reaso
 If the message has no time hint, return { "suggestions": [] }.`;
 
     try {
-      const response = await client.chat.completions.create({
+      const response = await dispatchChatCompletion(client, {
         model,
         ...(shouldUseJsonResponseFormat(provider, model)
           ? { response_format: { type: "json_object" as const } }
@@ -3548,7 +3592,7 @@ Return strict JSON:
 }`;
 
     try {
-      const response = await client.chat.completions.create({
+      const response = await dispatchChatCompletion(client, {
         model,
         ...(shouldUseJsonResponseFormat(provider, model)
           ? { response_format: { type: "json_object" as const } }
@@ -3889,7 +3933,7 @@ Expected: ${safeTruncate(input.expected, 2000)}
 Safe metadata: ${safeTruncate(JSON.stringify(input.meta), 1200)}`;
 
     try {
-      const response = await client.chat.completions.create({
+      const response = await dispatchChatCompletion(client, {
         model,
         ...(shouldUseJsonResponseFormat(provider, model)
           ? { response_format: { type: "json_object" as const } }
@@ -3992,7 +4036,7 @@ ${recentTurns.map((m, i) => `${i + 1}. [${m.direction}] ${m.text}`).join("\n")}`
 
     try {
       if (input.shouldContinue?.() === false) return null;
-      const response = await client.chat.completions.create({
+      const response = await dispatchChatCompletion(client, {
         model,
         ...(shouldUseJsonResponseFormat(provider, model)
           ? { response_format: { type: "json_object" as const } }
@@ -4074,7 +4118,7 @@ Recent messages (oldest first):
 ${recentTurns.map((m, i) => `${i + 1}. [${m.direction}] ${m.text}`).join("\n")}`;
 
     try {
-      const response = await client.chat.completions.create({
+      const response = await dispatchChatCompletion(client, {
         model,
         ...(shouldUseJsonResponseFormat(provider, model)
           ? { response_format: { type: "json_object" as const } }
@@ -4173,7 +4217,7 @@ DRAFT:
 ${safeTruncate(input.draft, 2000)}`;
 
     try {
-      const response = await client.chat.completions.create({
+      const response = await dispatchChatCompletion(client, {
         model,
         ...(shouldUseJsonResponseFormat(provider, model)
           ? { response_format: { type: "json_object" as const } }

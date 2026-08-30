@@ -66,6 +66,44 @@ test("an older reserved selection cannot overwrite a newer request", async () =>
   assert.deepEqual(enabled, ["IMESSAGE"]);
 });
 
+test("cancelling pre-run work restores the authoritative selection when the reservation is latest", async () => {
+  let enabled = ["LINKEDIN"];
+  const coordinator = createPlatformSelectionCoordinator({
+    platforms: ["LINKEDIN"],
+    getEnabledPlatforms: async () => enabled,
+    requestAbort: () => undefined,
+    withPlatformLocks: async (_platform, work) => work()
+  });
+
+  const reservation = coordinator.reserveMutation([]);
+  assert.equal(coordinator.isPlatformSelectedForNewWork("LINKEDIN"), false);
+  await reservation.cancel();
+
+  assert.equal(coordinator.isPlatformSelectedForNewWork("LINKEDIN"), true);
+  await assert.doesNotReject(
+    coordinator.withSelectedPlatform("LINKEDIN", async () => "allowed")
+  );
+});
+
+test("cancelling an older reservation cannot overwrite a newer desired selection", async () => {
+  let enabled = ["LINKEDIN"];
+  const coordinator = createPlatformSelectionCoordinator({
+    platforms: ["IMESSAGE", "LINKEDIN"],
+    getEnabledPlatforms: async () => enabled,
+    requestAbort: () => undefined,
+    withPlatformLocks: async (_platform, work) => work()
+  });
+
+  const older = coordinator.reserveMutation([]);
+  const newer = coordinator.reserveMutation(["IMESSAGE"]);
+  await older.cancel();
+
+  assert.equal(coordinator.isPlatformSelectedForNewWork("LINKEDIN"), false);
+  assert.equal(coordinator.isPlatformSelectedForNewWork("IMESSAGE"), true);
+  enabled = ["IMESSAGE"];
+  await newer.run(async () => undefined);
+});
+
 test("a connect queued behind a newer deselection cannot reopen or reselect the source", async () => {
   let enabled = ["LINKEDIN"];
   const locked = deferred();

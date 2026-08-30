@@ -167,6 +167,50 @@ test("successful transcription writes a transcribed row", async () => {
   assert.equal(row.model, "gpt-4o-mini-transcribe");
 });
 
+test("selection revocation during audio resolution stops provider dispatch", async () => {
+  const audioPath = makeAudioFile();
+  const prisma = makeFakePrisma();
+  prisma.message._messages.push({
+    id: "m1",
+    platformMessageKey: "k1",
+    attachmentsJson: JSON.stringify([
+      { type: "voice_note", manualReview: false, kind: "voice_note", guid: "g1" }
+    ])
+  });
+  let allowed = true;
+  const provider = makeFakeProvider(() => ({
+    kind: "ok",
+    result: { text: "should not run", model: "gpt-4o-mini-transcribe" }
+  }));
+  const service = createTranscriptionService({
+    prisma,
+    provider: provider.provider,
+    attachmentResolver: {
+      async resolve() {
+        allowed = false;
+        return {
+          absolutePath: audioPath,
+          mimeType: "audio/mp4",
+          filename: "voice.m4a",
+          transferName: "voice.m4a"
+        };
+      }
+    },
+    config: {
+      enabled: true,
+      apiKey: "sk",
+      model: "gpt-4o-mini-transcribe",
+      language: "en",
+      maxBytes: 1024,
+      maxSeconds: 60
+    },
+    warn: () => {}
+  });
+
+  await service.transcribeMessage("m1", { shouldContinue: () => allowed });
+  assert.equal(provider.calls.length, 0);
+});
+
 test("transcription waits for an identity rekey and persists the current message key", async () => {
   const audioPath = makeAudioFile();
   const prisma = makeFakePrisma();

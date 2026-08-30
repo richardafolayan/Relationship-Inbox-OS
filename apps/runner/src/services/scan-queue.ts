@@ -108,7 +108,11 @@ interface ScanQueueDeps {
    * forget; the service dedupes against any prior transcription row.
    * Scans must not block on transcription.
    */
-  onAudioMessage?: (input: { messageId: string }) => void;
+  onAudioMessage?: (input: {
+    messageId: string;
+    platform: PlatformName;
+    shouldContinue: () => boolean;
+  }) => void;
   /**
    * Optional gate consulted by the scheduler tick and the ALL-scan platform
    * expansion. Return false to skip a platform this pass without recording a
@@ -3813,7 +3817,11 @@ export function createScanQueue(deps: ScanQueueDeps) {
             break;
           }
           try {
-            deps.onAudioMessage({ messageId: row.id });
+            deps.onAudioMessage({
+              messageId: row.id,
+              platform,
+              shouldContinue: optionalWorkStillAllowed
+            });
           } catch (error) {
             console.warn(
               `[scan-queue] onAudioMessage hook threw for message ${row.id}: ${

@@ -27,7 +27,7 @@ import {
 import {
   applyGeminiKey,
   discardStaleEnvFileStages,
-  readEnvFileValue,
+  recoverEnvFileValueForStartup,
   recoverEnvFileValueTransaction,
   resolveEnvWritePath,
   stageEnvFileValue,
@@ -60,6 +60,11 @@ import {
   PlatformSelectionSupersededError,
   type ReservedPlatformSelectionMutation
 } from "./services/platform-selection-coordinator";
+import {
+  createAiConsentCoordinator,
+  AiConsentMutationSupersededError,
+  type ReservedAiConsentMutation
+} from "./services/ai-consent-coordinator";
 import { createAuditService } from "./services/audit";
 import { deleteDraftRevision } from "./services/draft";
 import { summarizeControlBody } from "./services/control-audit";
@@ -114,7 +119,8 @@ import {
 } from "./platforms/whatsapp-adapter";
 import {
   connectedPlatformCount,
-  effectivePlatformStatus
+  effectivePlatformStatus,
+  isPlatformEnabled
 } from "./platform-availability";
 import QRCode from "qrcode";
 import { IMessageDb } from "./platforms/imessage-db";
@@ -134,6 +140,7 @@ import {
   imessageVoiceSnapshotPath,
   snapshotImessageVoice
 } from "./services/imessage-voice-store";
+import { createIMessageVoiceSnapshotService } from "./services/imessage-voice-snapshot";
 import { createScanQueue, type ScanTrigger } from "./services/scan-queue";
 import { createInstagramMessageIdentityReconciler } from "./services/instagram-message-key-upgrade";
 import { MESSAGE_IDENTITY_FRESHNESS_ERROR } from "./services/message-identity-reconciliation";
@@ -534,6 +541,9 @@ function kindFromMime(mime: string | undefined, filename: string | undefined): "
 }
 
 const settingsStore = createSettingsStore();
+const aiConsentCoordinator = createAiConsentCoordinator({
+  getEnabled: async () => (await settingsStore.getSettings()).aiEnabled !== false
+});
 
 async function persistSettingRows(
   entries: ReadonlyArray<{ key: string; value: unknown }>
@@ -569,7 +579,9 @@ const overdueDigestStore = createOverdueDigestStore(prisma);
 const auditService = createAuditService();
 const eventBus = createEventBus();
 const messageSyncLatency = createMessageSyncLatencyTracker();
-const aiService = createAiService(settingsStore);
+const aiService = createAiService(settingsStore, {
+  isAiEnabledForNewWork: () => aiConsentCoordinator.isEnabledForNewWork()
+});
 const selectorReports = createSelectorTestStore();
 
 // ---------------------------------------------------------------------------
@@ -918,76 +930,6 @@ const compositeAttachmentResolver: AttachmentResolver | null =
       }
     : null;
 
-// True when a resolved iMessage attachment is a voice note / audio clip
-// worth snapshotting. Mirrors the transcription service's caf/audio
-// detection so we only ever copy audio, never photos or PDFs.
-function isVoiceNoteAttachment(meta: {
-  mimeType: string | null;
-  filename: string | null;
-  transferName: string | null;
-}): boolean {
-  const mime = (meta.mimeType ?? "").toLowerCase();
-  if (mime.includes("audio") || mime.includes("caf") || mime.includes("coreaudio")) return true;
-  const name = (meta.transferName ?? meta.filename ?? "").toLowerCase();
-  return /\.(caf|m4a|amr|aac|wav|mp3)$/.test(name) || name.includes("audio message");
-}
-
-// Snapshot a freshly-scanned voice note's audio bytes into our own store
-// before iMessage's "Audio Messages -> Expire: After 2 Minutes" can delete
-// them. Runs from the scan-time audio hook, synchronously copying the file
-// while it still exists, so the transcript (and replay) survive Apple's
-// expiry window. Gated on the transcription feature flag (the snapshot only
-// matters when we also transcribe). Best-effort; never throws into the scan.
-async function snapshotMessageVoiceNotes(messageId: string): Promise<void> {
-  if (!runnerConfig.imessage.enabled || !runnerConfig.audioTranscription.enabled) return;
-  if (!platformSelectionAllowsNewWork("IMESSAGE")) return;
-  const settings = await settingsStore.getSettings();
-  if (
-    !platformSelectionAllowsNewWork("IMESSAGE") ||
-    !settings.enabledPlatforms.includes("IMESSAGE")
-  ) return;
-  let attachmentsJson: string | null;
-  try {
-    const row = await prisma.message.findUnique({
-      where: { id: messageId },
-      select: { attachmentsJson: true }
-    });
-    attachmentsJson = row?.attachmentsJson ?? null;
-  } catch {
-    return;
-  }
-  if (!attachmentsJson) return;
-  let guids: string[];
-  try {
-    const parsed = JSON.parse(attachmentsJson) as Array<{ guid?: string | null }>;
-    guids = parsed
-      .map((a) => a?.guid)
-      .filter((g): g is string => typeof g === "string" && g.length > 0);
-  } catch {
-    return;
-  }
-  if (guids.length === 0) return;
-  let db: IMessageDb;
-  try {
-    db = new IMessageDb(runnerConfig.imessage.dbPath);
-  } catch {
-    return;
-  }
-  try {
-    for (const guid of guids) {
-      if (imessageVoiceSnapshotPath(guid)) continue; // already captured
-      const meta = db.findAttachmentByGuid(guid);
-      if (!meta?.absolutePath) continue;
-      if (!isVoiceNoteAttachment(meta)) continue;
-      snapshotImessageVoice(guid, meta.absolutePath);
-    }
-  } catch {
-    // best-effort; a snapshot failure must not break the scan
-  } finally {
-    db.close();
-  }
-}
-
 // Provider selection. With audio transcription off, the service stays
 // disabled and no provider is constructed. With it on, we pick exactly
 // one provider per the operator's `AUDIO_TRANSCRIPTION_PROVIDER`:
@@ -1253,6 +1195,22 @@ const transcriptionService = createTranscriptionService({
   }
 });
 
+const imessageVoiceSnapshotService = createIMessageVoiceSnapshotService({
+  enabled: () => runnerConfig.audioTranscription.enabled,
+  loadAttachmentsJson: async (messageId) => {
+    const row = await prisma.message.findUnique({
+      where: { id: messageId },
+      select: { attachmentsJson: true }
+    });
+    return row?.attachmentsJson ?? null;
+  },
+  openDatabase: () => new IMessageDb(runnerConfig.imessage.dbPath),
+  existingSnapshotPath: (guid) => imessageVoiceSnapshotPath(guid),
+  snapshot: (guid, sourcePath) => snapshotImessageVoice(guid, sourcePath),
+  enqueue: (messageId, shouldContinue) =>
+    transcriptionService.enqueueMessage(messageId, shouldContinue)
+});
+
 const transcriptionSetup = createTranscriptionSetupManager({
   modelDir: runnerConfig.audioTranscription.transformers.modelDir,
   downloadScript: resolve(projectRoot, "scripts", "fetch-whisper-model.mjs"),
@@ -1299,12 +1257,24 @@ const scanQueue = createScanQueue({
   isPlatformSelectedForNewWork: (platform) =>
     platformSelectionAllowsNewWork(platform),
   onAudioMessage: (input) => {
-    // Snapshot the audio bytes first (sync copy, while Apple's file still
-    // exists), then enqueue transcription — which reads back from the
-    // snapshot via the resolver, so it can't lose the race to Apple's
-    // 2-minute expiry.
-    void snapshotMessageVoiceNotes(input.messageId).finally(() =>
-      transcriptionService.enqueueMessage(input.messageId)
+    void imessageVoiceSnapshotService.handle(
+      input.messageId,
+      async () => {
+        if (
+          !input.shouldContinue() ||
+          !platformSelectionAllowsNewWork(input.platform)
+        ) return false;
+        const settings = await settingsStore.getSettings();
+        return (
+          input.shouldContinue() &&
+          platformSelectionAllowsNewWork(input.platform) &&
+          settings.enabledPlatforms.includes(input.platform)
+        );
+      },
+      input.platform === "IMESSAGE" && runnerConfig.imessage.enabled,
+      () =>
+        input.shouldContinue() &&
+        platformSelectionAllowsNewWork(input.platform)
     );
   }
 }) as ScanQueueWithSmokeIngest;
@@ -3197,15 +3167,21 @@ app.post("/control/setup/ai-key", asyncRoute(async (req, res) => {
         envWritePath,
         currentSettings.setupGeminiKeyTransactionId
       );
-      if (recovery !== "active") discardStaleEnvFileStages(envWritePath);
+      if (recovery === "active") {
+        throw new Error("The setup key is still being committed by another runner.");
+      }
+      discardStaleEnvFileStages(envWritePath);
       return applyGeminiKey(payload.key, {
         validate: (key) => validateGeminiKey(key, runnerConfig.geminiBaseUrl),
         stage: (key) => stageEnvFileValue(envWritePath, "GEMINI_API_KEY", key),
         commitState: (transactionId) =>
-          setupPreferencesCoordinator.enableAiProvider(
-            "gemini",
-            payload.expectedRevision,
-            transactionId
+          aiConsentCoordinator.mutate(
+            true,
+            () => setupPreferencesCoordinator.enableAiProvider(
+              "gemini",
+              payload.expectedRevision,
+              transactionId
+            )
           ),
         applyRuntime: (key) => {
           process.env.GEMINI_API_KEY = key;
@@ -3274,6 +3250,8 @@ app.get("/data/setup/status", asyncRoute(async (_req, res) => {
 
 app.post("/control/setup/preferences", asyncRoute(async (req, res) => {
   const completeFocusPolicyMutation = beginUserTriggeredIntentOperation(res);
+  let selectionMutation: ReservedPlatformSelectionMutation | null = null;
+  let aiMutation: ReservedAiConsentMutation | null = null;
   try {
     const request = parseSetupPreferencesRequest(req.body);
     if (request.kind === "complete") {
@@ -3281,17 +3259,25 @@ app.post("/control/setup/preferences", asyncRoute(async (req, res) => {
       res.json({ ok: true, ...result });
       return;
     }
-    const selectionMutation = request.payload.selectedPlatforms
+    selectionMutation = request.payload.selectedPlatforms
       ? platformSelectionCoordinator.reserveMutation(request.payload.selectedPlatforms)
       : null;
+    aiMutation = request.payload.aiEnabled !== undefined
+      ? aiConsentCoordinator.reserveMutation(request.payload.aiEnabled)
+      : null;
     const persist = () => setupPreferencesCoordinator.update(request.payload);
-    const preferences = selectionMutation
-      ? await selectionMutation.run(persist)
-      : await persist();
+    const persistWithSelection = () => selectionMutation
+      ? selectionMutation.run(persist)
+      : persist();
+    const preferences = aiMutation
+      ? await aiMutation.run(persistWithSelection)
+      : await persistWithSelection();
     abortCurrentScanIfDeselected((await settingsStore.getSettings()).enabledPlatforms);
     schedulePlatformSelectionReconciliation();
     res.json({ ok: true, preferences });
   } catch (error) {
+    await selectionMutation?.cancel();
+    await aiMutation?.cancel();
     if (error instanceof SetupPreferencesConflictError) {
       res.status(409).json({
         error: "Setup changed in another window. Review the latest choices and try again.",
@@ -3302,6 +3288,13 @@ app.post("/control/setup/preferences", asyncRoute(async (req, res) => {
     if (error instanceof PlatformSelectionSupersededError) {
       res.status(409).json({
         error: "Platform choices changed in another window. Review the latest choices and try again.",
+        preferences: await getSetupPreferences()
+      });
+      return;
+    }
+    if (error instanceof AiConsentMutationSupersededError) {
+      res.status(409).json({
+        error: "AI choices changed in another window. Review the latest choice and try again.",
         preferences: await getSetupPreferences()
       });
       return;
@@ -3576,7 +3569,8 @@ const automaticUpdateScheduler = createAutomaticUpdateScheduler({
 
 async function persistSettingsUpdate(
   update: Partial<AppSettings>,
-  selectionMutation?: ReservedPlatformSelectionMutation
+  selectionMutation?: ReservedPlatformSelectionMutation,
+  aiMutation?: ReservedAiConsentMutation
 ) {
   const persist = async () => {
     if (update.enabledPlatforms !== undefined || update.aiEnabled !== undefined) {
@@ -3585,15 +3579,22 @@ async function persistSettingsUpdate(
     }
     return settingsStore.updateSettings(update);
   };
-  return selectionMutation
+  const persistWithSelection = () => selectionMutation
     ? selectionMutation.run(persist)
     : update.enabledPlatforms !== undefined
       ? platformSelectionCoordinator.mutate(update.enabledPlatforms, persist)
-    : persist();
+      : persist();
+  return aiMutation
+    ? aiMutation.run(persistWithSelection)
+    : update.aiEnabled !== undefined
+      ? aiConsentCoordinator.mutate(update.aiEnabled, persistWithSelection)
+      : persistWithSelection();
 }
 
 app.post("/control/settings", asyncRoute(async (req, res) => {
   const completeFocusPolicyMutation = beginUserTriggeredIntentOperation(res);
+  let selectionMutation: ReservedPlatformSelectionMutation | undefined;
+  let aiMutation: ReservedAiConsentMutation | undefined;
   try {
   const quietHoursWindowSchema = z
     .object({
@@ -3627,8 +3628,11 @@ app.post("/control/settings", asyncRoute(async (req, res) => {
     })
     .parse(req.body);
 
-  const selectionMutation = payload.enabledPlatforms
+  selectionMutation = payload.enabledPlatforms
     ? platformSelectionCoordinator.reserveMutation(payload.enabledPlatforms)
+    : undefined;
+  aiMutation = payload.aiEnabled !== undefined
+    ? aiConsentCoordinator.reserveMutation(payload.aiEnabled)
     : undefined;
 
   const previous = await settingsStore.getSettings();
@@ -3650,14 +3654,14 @@ app.post("/control/settings", asyncRoute(async (req, res) => {
     if (manifest) {
       await cleanupDemoManifest(manifest);
     }
-    next = await persistSettingsUpdate(updatePayload, selectionMutation);
+    next = await persistSettingsUpdate(updatePayload, selectionMutation, aiMutation);
     abortCurrentScanIfDeselected(next.enabledPlatforms);
     schedulePlatformSelectionReconciliation();
     res.json(next);
     return;
   }
 
-  const next = await persistSettingsUpdate(updatePayload, selectionMutation);
+  const next = await persistSettingsUpdate(updatePayload, selectionMutation, aiMutation);
   abortCurrentScanIfDeselected(next.enabledPlatforms);
   schedulePlatformSelectionReconciliation();
 
@@ -3680,9 +3684,17 @@ app.post("/control/settings", asyncRoute(async (req, res) => {
 
   res.json(next);
   } catch (error) {
+    await selectionMutation?.cancel();
+    await aiMutation?.cancel();
     if (error instanceof PlatformSelectionSupersededError) {
       res.status(409).json({
         error: "Platform choices changed in another window. Review the latest choices and try again."
+      });
+      return;
+    }
+    if (error instanceof AiConsentMutationSupersededError) {
+      res.status(409).json({
+        error: "AI choices changed in another window. Review the latest choice and try again."
       });
       return;
     }
@@ -7276,7 +7288,7 @@ app.get("/data/platforms", asyncRoute(async (_req, res) => {
         lastScanAt: row?.lastScanAt?.toISOString() ?? null,
         connectedAt: row?.connectedAt?.toISOString() ?? null,
         lastError: row?.lastError ?? null,
-        enabled: settings.enabledPlatforms.includes(platform),
+        enabled: isPlatformEnabled(settings.enabledPlatforms, platform),
         supported,
         unavailableReason:
           supported ? null : "iMessage is only available on macOS.",
@@ -9634,12 +9646,11 @@ async function start(): Promise<void> {
   await ensureRuntimeDirs();
   const startupSettings = await settingsStore.getSettings();
   const envWritePath = resolveEnvWritePath();
-  const setupKeyRecovery = recoverEnvFileValueTransaction(
+  const recoveredGeminiKey = recoverEnvFileValueForStartup(
     envWritePath,
+    "GEMINI_API_KEY",
     startupSettings.setupGeminiKeyTransactionId
   );
-  if (setupKeyRecovery !== "active") discardStaleEnvFileStages(envWritePath);
-  const recoveredGeminiKey = readEnvFileValue(envWritePath, "GEMINI_API_KEY");
   if (recoveredGeminiKey) process.env.GEMINI_API_KEY = recoveredGeminiKey;
   else delete process.env.GEMINI_API_KEY;
   runnerConfig.geminiApiKey = recoveredGeminiKey;

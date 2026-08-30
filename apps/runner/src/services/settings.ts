@@ -210,9 +210,26 @@ export function mergePersistedAppSettings(value: unknown): {
   settings: AppSettings;
   shouldPersistUpgrade: boolean;
 } {
-  const raw = value && typeof value === "object"
-    ? (value as Partial<AppSettings>)
-    : {};
+  const isObject = value !== null && typeof value === "object" && !Array.isArray(value);
+  const raw = isObject ? (value as Partial<AppSettings>) : {};
+  const isRecognizedSettingsRow =
+    isObject &&
+    typeof raw.scanIntervalSeconds === "number" &&
+    Number.isFinite(raw.scanIntervalSeconds) &&
+    typeof raw.automaticUpdates === "boolean" &&
+    typeof raw.amberHours === "number" &&
+    Number.isFinite(raw.amberHours) &&
+    typeof raw.redHours === "number" &&
+    Number.isFinite(raw.redHours) &&
+    typeof raw.headless === "boolean" &&
+    typeof raw.maxMessagesPerThread === "number" &&
+    Number.isFinite(raw.maxMessagesPerThread);
+  if (!isRecognizedSettingsRow) {
+    return {
+      settings: cloneSettings(defaultSettings),
+      shouldPersistUpgrade: true
+    };
+  }
   const hasEnabledPlatforms = Object.prototype.hasOwnProperty.call(raw, "enabledPlatforms");
   const hasAiEnabled = Object.prototype.hasOwnProperty.call(raw, "aiEnabled");
   const persistedPlatforms = hasEnabledPlatforms && Array.isArray(raw.enabledPlatforms)

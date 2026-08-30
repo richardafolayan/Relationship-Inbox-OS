@@ -157,11 +157,12 @@ export interface TranscribeMessageOptions {
    * dashboard's `Try again` affordance. Auto-scan never sets this.
    */
   force?: boolean;
+  shouldContinue?: () => boolean;
 }
 
 export interface TranscriptionService {
   /** Fire-and-forget; never throws. Used by scan-time enqueue. */
-  enqueueMessage(messageId: string): void;
+  enqueueMessage(messageId: string, shouldContinue?: () => boolean): void;
   /**
    * Synchronous entrypoint used by manual `Transcribe / Try again`.
    * Runs the FULL chain — every configured local tier (fast,
@@ -203,6 +204,7 @@ type LocalTier = "fast" | "standard" | "max";
 interface QueueItem {
   messageId: string;
   tier: LocalTier;
+  shouldContinue: () => boolean;
 }
 
 export function createTranscriptionService(deps: TranscriptionServiceDeps): TranscriptionService {
@@ -317,14 +319,20 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
     });
   }
 
-  function enqueueMessage(messageId: string): void {
-    if (!deps.config.enabled) return;
+  function enqueueMessage(
+    messageId: string,
+    shouldContinue: () => boolean = () => true
+  ): void {
+    if (!deps.config.enabled || !shouldContinue()) return;
     // Single-mode (no `providers` wired): use the legacy fire-and-
     // forget shape — one call runs the one provider and returns.
     if (!progressiveActive) {
       if (!deps.provider) return;
       queueMicrotask(() => {
-        void withSerial(messageId, () => transcribeMessage(messageId)).catch(
+        if (!shouldContinue()) return;
+        void withSerial(messageId, () =>
+          transcribeMessage(messageId, { shouldContinue })
+        ).catch(
           (error) => {
             warn(
               `[transcription] unhandled error for message ${messageId}: ${error instanceof Error ? error.message : String(error)}`
@@ -347,10 +355,10 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
       if (configuredAutoTiers.includes("standard")) {
         trackPending(messageId, "standard");
       }
-      fastQueue.push({ messageId, tier: "fast" });
+      fastQueue.push({ messageId, tier: "fast", shouldContinue });
     } else if (configuredAutoTiers.includes("standard")) {
       trackPending(messageId, "standard");
-      standardQueue.push({ messageId, tier: "standard" });
+      standardQueue.push({ messageId, tier: "standard", shouldContinue });
     }
     scheduleDrain();
   }
@@ -396,12 +404,20 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
   }
 
   async function runOneTierForQueue(item: QueueItem): Promise<void> {
+    if (!item.shouldContinue()) {
+      pendingTiersByMessage.delete(item.messageId);
+      return;
+    }
     const provider = deps.providers?.[item.tier];
     if (!provider) {
       clearPending(item.messageId, item.tier);
       return;
     }
-    const result = await runOneProgressiveTier(item.messageId, item.tier);
+    const result = await runOneProgressiveTier(
+      item.messageId,
+      item.tier,
+      item.shouldContinue
+    );
     clearPending(item.messageId, item.tier);
     // Chain: a successful `fast` queues the `standard` tier so the
     // upgrade actually happens. A failed/skipped `fast` does not
@@ -411,7 +427,11 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
       item.tier === "fast" &&
       configuredAutoTiers.includes("standard")
     ) {
-      standardQueue.push({ messageId: item.messageId, tier: "standard" });
+      standardQueue.push({
+        messageId: item.messageId,
+        tier: "standard",
+        shouldContinue: item.shouldContinue
+      });
       // standard was already marked pending at enqueue time; nothing
       // to add here.
     } else if (
@@ -436,7 +456,9 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
     messageId: string,
     options: TranscribeMessageOptions
   ): Promise<TranscribeMessageOutcome> {
-    if (!deps.config.enabled) return { kind: "disabled" };
+    if (!deps.config.enabled || options.shouldContinue?.() === false) {
+      return { kind: "disabled" };
+    }
     if (!progressiveActive && !deps.provider) return { kind: "disabled" };
     if (!deps.attachmentResolver) return { kind: "disabled" };
 
@@ -500,7 +522,8 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
     }
     return runSingleModel({
       message,
-      attachments: audioAttachments
+      attachments: audioAttachments,
+      shouldContinue: options.shouldContinue
     });
   }
 
@@ -511,12 +534,14 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
   async function runSingleModel(input: {
     message: { id: string; platformMessageKey: string };
     attachments: Array<{ attachment: AttachmentPlaceholder; index: number }>;
+    shouldContinue?: () => boolean;
   }): Promise<TranscribeMessageOutcome> {
     const { message, attachments } = input;
     let ok = 0;
     let failed = 0;
     let skipped = 0;
     for (const { attachment, index } of attachments) {
+      if (input.shouldContinue?.() === false) break;
       const attachmentId = attachment.guid ?? `idx-${index}`;
       const prepared = await prepareRequest(attachment, deps.provider!.modelLabel);
       if (prepared.kind === "skipped") {
@@ -534,6 +559,7 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
         maybeRetentionWarn(prepared.reason);
         break;
       }
+      if (input.shouldContinue?.() === false) break;
       const outcome = await deps.provider!.transcribe(prepared.request);
       if (outcome.kind === "ok") {
         await createTranscriptionForCurrentMessageKey({
@@ -682,8 +708,10 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
   // -------------------------------------------------------------------
   async function runOneProgressiveTier(
     messageId: string,
-    tier: LocalTier
+    tier: LocalTier,
+    shouldContinue: () => boolean = () => true
   ): Promise<"ok" | "failed" | "skipped"> {
+    if (!shouldContinue()) return "skipped";
     const provider = deps.providers?.[tier];
     if (!provider) return "skipped";
     if (!deps.attachmentResolver) return "skipped";
@@ -698,7 +726,7 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
         attachmentsJson: true
       }
     });
-    if (!message) return "skipped";
+    if (!message || !shouldContinue()) return "skipped";
     const audio = collectAudioAttachments(message.attachmentsJson);
     if (audio.length === 0) return "skipped";
     const first = audio[0];
@@ -711,6 +739,7 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
     let parent = await deps.prisma.messageAudioTranscription.findUnique({
       where: { messageId }
     });
+    if (!shouldContinue()) return "skipped";
     const prepared = await prepareRequest(attachment, provider.modelLabel || deps.config.model);
     if (prepared.kind === "skipped") {
       if (!parent) {
@@ -759,6 +788,7 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
       ...prepared.request,
       model: provider.modelLabel || deps.config.model
     };
+    if (!shouldContinue()) return "skipped";
     const startedAt = Date.now();
     const outcome = await provider.transcribe(tierRequest);
     const elapsed = Date.now() - startedAt;

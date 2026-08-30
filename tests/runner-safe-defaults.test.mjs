@@ -53,6 +53,19 @@ test("corrupt explicit safety fields are repaired to safe values", () => {
   assert.equal(upgraded.shouldPersistUpgrade, true);
 });
 
+for (const invalid of [
+  {},
+  { garbage: true },
+  { scanIntervalSeconds: "bad" }
+]) {
+  test(`schema-invalid settings ${JSON.stringify(invalid)} fail closed`, () => {
+    const upgraded = mergePersistedAppSettings(invalid);
+    assert.deepEqual(upgraded.settings.enabledPlatforms, []);
+    assert.equal(upgraded.settings.aiEnabled, false);
+    assert.equal(upgraded.shouldPersistUpgrade, true);
+  });
+}
+
 test("loading a real predecessor row persists its upgraded compatibility fields", async () => {
   const rows = new Map([[APP_SETTINGS_KEY, {
     key: APP_SETTINGS_KEY,

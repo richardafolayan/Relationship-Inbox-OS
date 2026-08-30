@@ -98,6 +98,7 @@ import {
   platformScanEligible,
   resolvePlatformPrimaryAction
 } from "@/lib/platform-setup";
+import { resolvePlatformSelectionControls } from "@/lib/platform-selection-controls";
 import { startSetupWizard } from "@/lib/setup-wizard";
 import { OptionalComponents } from "@/components/settings/OptionalComponents";
 import { formatRelative } from "@/lib/time";
@@ -1313,9 +1314,14 @@ function PlatformSetupCard({
       : status === "ERROR"
         ? "Not scanned yet"
         : null;
-  const secondaryItems = enabled ? (moreItems ?? []) : [];
-  const effectivePrimaryLabel = enabled ? primaryLabel : "Add in setup";
-  const effectivePrimaryAction = enabled ? onPrimary : startSetupWizard;
+  const controls = resolvePlatformSelectionControls({
+    enabled,
+    primaryLabel,
+    primaryAction: onPrimary,
+    setupAction: startSetupWizard,
+    secondaryActions: moreItems ?? []
+  });
+  const secondaryItems = controls.secondaryActions;
 
   return (
     <article className="rounded-[8px] bg-paper-2/45 px-4 py-4">
@@ -1358,9 +1364,9 @@ function PlatformSetupCard({
       ) : null}
       <div className="mt-4 flex flex-wrap items-center gap-2">
         <InlineActionButton
-          onClick={effectivePrimaryAction}
+          onClick={controls.primaryAction}
           disabled={busy || !supported || remoteDisabled}
-          idleLabel={effectivePrimaryLabel}
+          idleLabel={controls.primaryLabel}
           state={actionState ?? (busy ? { phase: "running", label: busyLabel } : null)}
           title={remoteDisabled ? offlineExplanation : undefined}
           className="inline-flex min-h-[40px] items-center rounded-pill bg-ink px-4 py-[8px] text-[12.5px] font-medium text-paper hover:bg-ink-2 disabled:cursor-not-allowed disabled:opacity-50"

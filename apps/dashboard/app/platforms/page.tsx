@@ -19,6 +19,7 @@ import {
   platformScanEligible,
   resolvePlatformPrimaryAction
 } from "@/lib/platform-setup";
+import { resolvePlatformSelectionControls } from "@/lib/platform-selection-controls";
 import { ReceiptsDrawer } from "@/components/common/receipts-drawer";
 import { cn } from "@/lib/utils";
 import { startSetupWizard } from "@/lib/setup-wizard";
@@ -258,10 +259,8 @@ function PlatformCardView({
   const passes = report?.results.filter((r) => r.status === "PASS").length ?? 0;
   const totalSelectors = report?.results.length ?? 0;
 
-  const primaryLabel = !supported
+  const configuredPrimaryLabel = !supported
     ? "Not available"
-    : row.enabled === false
-      ? "Add in setup"
     : primaryAction === "scan"
       ? "Scan now"
       : primaryAction === "reconnect"
@@ -303,12 +302,8 @@ function PlatformCardView({
       `${display} scan failed`
     );
 
-  const runPrimary = () => {
+  const runConfiguredPrimary = () => {
     if (!supported) return;
-    if (row.enabled === false) {
-      startSetupWizard();
-      return;
-    }
     if (primaryAction === "scan") {
       runScan();
       return;
@@ -320,7 +315,7 @@ function PlatformCardView({
     runConnect();
   };
 
-  const moreItems: MenuItem[] = row.enabled === false ? [] : [
+  const moreItems: MenuItem[] = [
     ...(primaryAction === "scan"
       ? [
           {
@@ -385,6 +380,13 @@ function PlatformCardView({
       }
     }
   ];
+  const controls = resolvePlatformSelectionControls({
+    enabled: row.enabled !== false,
+    primaryLabel: configuredPrimaryLabel,
+    primaryAction: runConfiguredPrimary,
+    setupAction: startSetupWizard,
+    secondaryActions: moreItems
+  });
 
   return (
     <article className="rounded-[16px] border border-hairline bg-paper">
@@ -445,17 +447,17 @@ function PlatformCardView({
             <Button
               variant="quiet"
               className="min-h-[40px] px-[14px] py-[8px] text-[12.5px]"
-              onClick={runPrimary}
+              onClick={controls.primaryAction}
               disabled={actionRunning}
             >
-              {actionState?.phase === "running" ? actionState.label : primaryLabel}
+              {actionState?.phase === "running" ? actionState.label : controls.primaryLabel}
             </Button>
           ) : (
             <Button variant="quiet" className="min-h-[40px] px-[14px] py-[8px] text-[12.5px]" disabled>
               Not available
             </Button>
           )}
-          {supported && moreItems.length > 0 ? (
+          {supported && controls.secondaryActions.length > 0 ? (
             <Menu
               trigger={
                 <button
@@ -468,7 +470,7 @@ function PlatformCardView({
                   <MoreVertical className="h-[14px] w-[14px]" strokeWidth={2} />
                 </button>
               }
-              items={moreItems}
+              items={controls.secondaryActions}
             />
           ) : null}
         </div>

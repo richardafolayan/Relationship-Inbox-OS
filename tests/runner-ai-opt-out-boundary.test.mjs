@@ -101,3 +101,30 @@ test("a revoked selection epoch stops summary disclosure at the provider boundar
     assert.equal(transportCalls, 0);
   });
 });
+
+test("durable AI opt-out stops retry and fallback transport after the first failed attempt", async () => {
+  await withConfiguredGemini(async () => {
+    const settings = { aiEnabled: true, aiProvider: "gemini" };
+    let transportCalls = 0;
+    const ai = createAiService({
+      getSettings: async () => settings,
+      getOperatorProfile: async () => ({ displayName: "Richard" })
+    }, {
+      fetchImpl: async () => {
+        transportCalls += 1;
+        settings.aiEnabled = false;
+        return new Response(JSON.stringify({
+          error: { message: "temporary failure", type: "server_error" }
+        }), {
+          status: 500,
+          headers: { "content-type": "application/json" }
+        });
+      }
+    });
+
+    await ai.updateThreadSummary(summaryInput());
+
+    assert.equal(settings.aiEnabled, false);
+    assert.equal(transportCalls, 1);
+  });
+});
