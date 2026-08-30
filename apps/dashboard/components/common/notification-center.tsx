@@ -10,11 +10,13 @@ import {
   markAllCenterNotificationsSeen,
   markCenterNotificationsSeen,
   onCenterNotificationsChange,
+  planToastRehydration,
   readCenterNotifications,
   unseenNotificationCount,
   type CenterNotification
 } from "@/lib/notification-center";
 import { UPDATE_NOTICE_ID } from "@/lib/update-notice";
+import { showToast } from "@/lib/feedback";
 import { resolveCenterRowGesture } from "@/lib/toast-gesture";
 import { formatRelative } from "@/lib/time";
 
@@ -40,6 +42,60 @@ export function NotificationBell() {
   useEffect(() => {
     setItems(readCenterNotifications());
     return onCenterNotificationsChange(() => setItems(readCenterNotifications()));
+  }, []);
+
+  // Re-show the toasts a full page load wiped. Toasts are React memory, so
+  // a reload or route-tree remount (e.g. the full document navigation right
+  // after an app update replaces the build) used to clear every active card
+  // at once - "I clicked one notification and they all disappeared". Any
+  // notice still unseen and inside its 30s window comes back for the
+  // REMAINING time. The bell never remounts on client-side navigation, so
+  // this cannot re-fire toasts while the operator moves around the app.
+  // Hidden tabs skip it for the same reason the live matrix routes them to
+  // desktop notifications: nobody is looking, and the entries stay in the
+  // center either way.
+  useEffect(() => {
+    if (typeof document === "undefined" || document.visibilityState !== "visible") return;
+    // Deferred one tick: the bell mounts earlier in the shell tree than the
+    // ToastHost, so this effect runs before the host's subscription effect.
+    // A toast event dispatched now would be lost unheard - every mount
+    // effect has flushed by the time a 0ms timer fires.
+    const handle = window.setTimeout(() => {
+      const plan = planToastRehydration(readCenterNotifications(), Date.now());
+      if (plan.kind === "singles") {
+        for (const { entry, remainingMs } of plan.notices) {
+          const threadId = entry.id;
+          showToast({
+            id: `new-message:${threadId}`,
+            kind: "info",
+            title: entry.title,
+            description: entry.body,
+            href: entry.href,
+            durationMs: remainingMs,
+            // Same interplay as the live toast (app-shell maybeNotify):
+            // waving it away keeps the entry listed but seen; opening the
+            // thread completes it.
+            onManualDismiss: () => markCenterNotificationsSeen([threadId]),
+            onActivate: () => dismissCenterNotification(threadId)
+          });
+        }
+      } else if (plan.kind === "digest") {
+        // 4+ notices roll up exactly like the live path: one calm digest
+        // card, never a storm of per-thread toasts after a reload.
+        const { threadIds } = plan;
+        showToast({
+          id: "new-message:digest",
+          kind: "info",
+          title: `${plan.count} new messages`,
+          description: "Several conversations are waiting on a reply.",
+          href: "/today",
+          durationMs: plan.remainingMs,
+          onManualDismiss: () => markCenterNotificationsSeen(threadIds),
+          onActivate: () => markCenterNotificationsSeen(threadIds)
+        });
+      }
+    }, 0);
+    return () => window.clearTimeout(handle);
   }, []);
 
   const openPanel = useCallback(() => {
