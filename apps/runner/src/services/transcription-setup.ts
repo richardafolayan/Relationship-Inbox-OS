@@ -7,7 +7,8 @@ import {
   readdirSync,
   renameSync,
   rmSync,
-  statSync
+  statSync,
+  writeFileSync
 } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
@@ -25,11 +26,49 @@ export const TRANSCRIPTION_MODELS = {
 } as const;
 
 const MARKER_FILE = ".tovi-transcription-model.json";
+const DOWNLOAD_LEASE_FILE = ".tovi-transcription-download-lease.json";
 
 interface ModelMarker {
   modelId: string;
   downloadedAt: string;
   bytes: number;
+}
+
+interface DownloadLease {
+  pid: number;
+  startedAt: string;
+}
+
+function processIsAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function sweepTranscriptionDownloadOrphans(modelDir: string): number {
+  const target = resolve(modelDir);
+  const parent = dirname(target);
+  if (!existsSync(parent)) return 0;
+  const prefix = `.${basename(target)}-download-`;
+  let removed = 0;
+  for (const entry of readdirSync(parent, { withFileTypes: true })) {
+    if (!entry.isDirectory() || !entry.name.startsWith(prefix)) continue;
+    const stageDir = join(parent, entry.name);
+    let lease: DownloadLease | null = null;
+    try {
+      lease = JSON.parse(readFileSync(join(stageDir, DOWNLOAD_LEASE_FILE), "utf8")) as DownloadLease;
+    } catch {
+      lease = null;
+    }
+    if (lease && processIsAlive(lease.pid)) continue;
+    rmSync(stageDir, { recursive: true, force: true });
+    removed += 1;
+  }
+  return removed;
 }
 
 export interface TranscriptionSetupStatus {
@@ -91,6 +130,7 @@ export function createTranscriptionSetupManager(deps: TranscriptionSetupManagerD
   let phase: TranscriptionSetupStatus["phase"] = "idle";
   let targetMode: SetupTranscriptionMode | null = null;
   let lastError: string | null = null;
+  let activePreparation: symbol | null = null;
 
   const download =
     deps.download ??
@@ -107,7 +147,13 @@ export function createTranscriptionSetupManager(deps: TranscriptionSetupManagerD
       const target = resolve(modelDir);
       const parent = dirname(target);
       mkdirSync(parent, { recursive: true });
-      return mkdtempSync(join(parent, `.${basename(target)}-download-`));
+      const stagedDir = mkdtempSync(join(parent, `.${basename(target)}-download-`));
+      writeFileSync(
+        join(stagedDir, DOWNLOAD_LEASE_FILE),
+        JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }),
+        { encoding: "utf8", mode: 0o600 }
+      );
+      return stagedDir;
     });
 
   const activateDownloadedModel =
@@ -166,7 +212,7 @@ export function createTranscriptionSetupManager(deps: TranscriptionSetupManagerD
   }
 
   function prepare(mode: SetupTranscriptionMode, removeDownloadedModels = false) {
-    if (phase === "downloading") {
+    if (activePreparation || phase === "downloading") {
       throw new TranscriptionSetupBusyError(status());
     }
 
@@ -174,16 +220,22 @@ export function createTranscriptionSetupManager(deps: TranscriptionSetupManagerD
     const stagedDir = model && installedMode() !== mode
       ? prepareDownloadDirectory(deps.modelDir)
       : null;
+    const preparation = Symbol("transcription-setup");
+    activePreparation = preparation;
     let settled = false;
 
     const discard = (): void => {
       if (settled) return;
       settled = true;
+      if (activePreparation === preparation) activePreparation = null;
       if (stagedDir) rmSync(stagedDir, { recursive: true, force: true });
     };
 
     const commit = (): TranscriptionSetupStatus => {
       if (settled) throw new Error("Prepared transcription change already settled.");
+      if (activePreparation !== preparation) {
+        throw new TranscriptionSetupBusyError(status());
+      }
       settled = true;
       lastError = null;
       targetMode = mode;
@@ -198,6 +250,7 @@ export function createTranscriptionSetupManager(deps: TranscriptionSetupManagerD
           lastError = error instanceof Error ? error.message : "The local model could not be removed.";
         }
         targetMode = null;
+        activePreparation = null;
         return status();
       }
       const selectedModel = TRANSCRIPTION_MODELS[mode];
@@ -211,6 +264,7 @@ export function createTranscriptionSetupManager(deps: TranscriptionSetupManagerD
           phase = "error";
           lastError = error instanceof Error ? error.message : "Transcription could not be enabled.";
         }
+        activePreparation = null;
         return status();
       }
 
@@ -220,13 +274,16 @@ export function createTranscriptionSetupManager(deps: TranscriptionSetupManagerD
         rmSync(stagedDir, { recursive: true, force: true });
         phase = "error";
         lastError = error instanceof Error ? error.message : "Transcription could not be prepared.";
+        activePreparation = null;
         return status();
       }
 
       phase = "downloading";
+      activePreparation = null;
       void Promise.resolve()
         .then(() => download(selectedModel.modelId, stagedDir))
         .then(() => {
+          rmSync(join(stagedDir, DOWNLOAD_LEASE_FILE), { force: true });
           activateDownloadedModel(stagedDir, deps.modelDir);
           deps.applyRuntime(mode, true, selectedModel.modelId);
           phase = "idle";

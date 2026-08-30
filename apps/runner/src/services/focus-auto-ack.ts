@@ -134,6 +134,14 @@ export function focusAutoAckClientSendId(
   return uuidv5(`${windowId}:${personId}`, uuidv5.URL);
 }
 
+export function focusAutoAckPlatformSelected(
+  source: string,
+  platform: PlatformName,
+  enabledPlatforms: readonly PlatformName[]
+): boolean {
+  return source !== "focus_auto_ack" || enabledPlatforms.includes(platform);
+}
+
 export function focusManualAckClientSendId(
   windowId: string,
   personId: string

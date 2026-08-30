@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -11,10 +11,17 @@ const {
 const {
   applyPreparedTranscriptionSetup,
   createTranscriptionSetupManager,
+  sweepTranscriptionDownloadOrphans,
   TranscriptionSetupBusyError,
   transcriptionModeForModel,
   TRANSCRIPTION_MODELS
 } = await import("../apps/runner/dist/services/transcription-setup.js");
+
+function deferred() {
+  let resolve;
+  const promise = new Promise((nextResolve) => { resolve = nextResolve; });
+  return { promise, resolve };
+}
 
 test("setup preferences accept only supported pilot sources and explicit options", () => {
   assert.deepEqual(normalizeSetupPreferences({
@@ -157,6 +164,69 @@ test("a second-tab mode change is rejected before preferences advance during dow
   } finally {
     finishDownload();
     rmSync(modelDir, { recursive: true, force: true });
+  }
+});
+
+test("transcription preparation owns the full persistence boundary", async () => {
+  const modelDir = mkdtempSync(join(tmpdir(), "tovi-transcription-"));
+  const holdPersistence = deferred();
+  let firstWrites = 0;
+  let secondWrites = 0;
+  const manager = createTranscriptionSetupManager({
+    modelDir,
+    downloadScript: "/unused",
+    initialEnabled: () => false,
+    initialModelId: () => TRANSCRIPTION_MODELS.standard.modelId,
+    applyRuntime: () => undefined,
+    download: async () => undefined
+  });
+  try {
+    const first = applyPreparedTranscriptionSetup({
+      manager,
+      mode: "standard",
+      persistPreferences: async () => {
+        firstWrites += 1;
+        await holdPersistence.promise;
+        return { revision: 1, transcriptionMode: "standard" };
+      }
+    });
+    await Promise.resolve();
+
+    await assert.rejects(
+      applyPreparedTranscriptionSetup({
+        manager,
+        mode: "enhanced",
+        persistPreferences: async () => {
+          secondWrites += 1;
+          return { revision: 2, transcriptionMode: "enhanced" };
+        }
+      }),
+      (error) => error instanceof TranscriptionSetupBusyError
+    );
+    assert.equal(firstWrites, 1);
+    assert.equal(secondWrites, 0);
+    holdPersistence.resolve();
+    await first;
+  } finally {
+    holdPersistence.resolve();
+    rmSync(modelDir, { recursive: true, force: true });
+  }
+});
+
+test("startup removes only orphaned transcription download stages", () => {
+  const root = mkdtempSync(join(tmpdir(), "tovi-transcription-orphans-"));
+  const modelDir = join(root, "models");
+  const orphan = join(root, ".models-download-orphan");
+  const active = join(root, ".models-download-active");
+  mkdirSync(orphan);
+  mkdirSync(active);
+  writeFileSync(join(orphan, ".tovi-transcription-download-lease.json"), JSON.stringify({ pid: 999999, startedAt: new Date(0).toISOString() }));
+  writeFileSync(join(active, ".tovi-transcription-download-lease.json"), JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }));
+  try {
+    assert.equal(sweepTranscriptionDownloadOrphans(modelDir), 1);
+    assert.deepEqual(readdirSync(root).sort(), [".models-download-active"]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });
 

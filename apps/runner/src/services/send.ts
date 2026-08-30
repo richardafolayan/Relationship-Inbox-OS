@@ -16,6 +16,7 @@ import {
   focusAcknowledgementClientSendIds,
   focusAutoAckDispatchEligible,
   focusAutoAckClientSendId,
+  focusAutoAckPlatformSelected,
   focusManualAckClientSendId,
   focusManualAckDispatchEligible,
   type FocusAutoAckThread
@@ -1318,7 +1319,8 @@ export function createSendService(deps: SendServiceDeps) {
                 supersedingUserRequest,
                 unresolvedSentProjection,
                 authoritativeThread,
-                profile
+                profile,
+                settings
               ] = await Promise.all([
                 prisma.sendRequest.findFirst({
                   where: {
@@ -1360,7 +1362,8 @@ export function createSendService(deps: SendServiceDeps) {
                     }
                   }
                 }),
-                deps.settingsStore.getOperatorProfile()
+                deps.settingsStore.getOperatorProfile(),
+                deps.settingsStore.getSettings()
               ]);
               const autoAckThread: FocusAutoAckThread | null = authoritativeThread
                 ? {
@@ -1379,6 +1382,11 @@ export function createSendService(deps: SendServiceDeps) {
                 : null;
               if (
                 !autoAckThread ||
+                !focusAutoAckPlatformSelected(
+                  source,
+                  autoAckThread.platform,
+                  settings.enabledPlatforms
+                ) ||
                 !(source === "focus_auto_ack"
                   ? focusAutoAckDispatchEligible(
                       autoAckThread,

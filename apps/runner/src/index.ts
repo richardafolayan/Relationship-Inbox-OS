@@ -45,8 +45,13 @@ import {
 import {
   applyPreparedTranscriptionSetup,
   createTranscriptionSetupManager,
+  sweepTranscriptionDownloadOrphans,
   TranscriptionSetupBusyError
 } from "./services/transcription-setup";
+import {
+  reconcileSelectedPlatformLifecycle,
+  shouldStartLinkedInRealtimeWatcher
+} from "./services/platform-selection-reconciler";
 import { createAuditService } from "./services/audit";
 import { deleteDraftRevision } from "./services/draft";
 import { summarizeControlBody } from "./services/control-audit";
@@ -691,7 +696,7 @@ const {
           enqueueWhatsAppInitialScan?.();
           return;
         }
-        return reconcileWhatsAppSelection(settings.enabledPlatforms);
+        return reconcilePlatformSelection();
       }).catch((error) => {
         console.warn(
           `[whatsapp] selection reconciliation failed: ${
@@ -1784,29 +1789,47 @@ async function withWhatsAppSessionLocks<T>(
   );
 }
 
-async function reconcileWhatsAppSelection(
-  selectedPlatforms: readonly PlatformName[]
-): Promise<void> {
-  if (selectedPlatforms.includes("WHATSAPP")) return;
-  if (scanQueue.getCurrentScanPlatform() === "WHATSAPP") {
-    scanQueue.requestAbort("platform_deselected");
-  }
-  if (whatsappConnect.state === "disconnected") return;
-  await withWhatsAppSessionLocks(async () => {
-    await adapters.WHATSAPP?.closeSession("disabled_by_settings");
+const managedSessionPlatforms: PlatformName[] = [
+  "LINKEDIN",
+  "INSTAGRAM",
+  "TIKTOK",
+  "GOOGLE_MESSAGES",
+  "WHATSAPP"
+];
+
+async function reconcilePlatformSelection(): Promise<void> {
+  await reconcileSelectedPlatformLifecycle({
+    getEnabledPlatforms: async () => (await settingsStore.getSettings()).enabledPlatforms,
+    getCurrentScanPlatform: () => scanQueue.getCurrentScanPlatform(),
+    requestAbort: (reason) => scanQueue.requestAbort(reason),
+    managedPlatforms: managedSessionPlatforms.filter((platform) => Boolean(adapters[platform])),
+    withPlatformLocks: (platform, work) =>
+      withExternalActionLock(platform, () => withPlatformControlLock(platform, work)),
+    closeSession: async (platform) => {
+      await adapters[platform]?.closeSession("disabled_by_settings");
+      if (platform === "WHATSAPP") {
+        whatsappConnect.state = "disconnected";
+        whatsappConnect.updatedAt = new Date().toISOString();
+      }
+    }
   });
 }
 
-function scheduleWhatsAppSelectionReconciliation(
-  selectedPlatforms: readonly PlatformName[]
-): void {
-  void reconcileWhatsAppSelection(selectedPlatforms).catch((error) => {
+function schedulePlatformSelectionReconciliation(): void {
+  void reconcilePlatformSelection().catch((error) => {
     console.warn(
-      `[whatsapp] could not apply platform selection: ${
+      `[platform-selection] could not apply platform selection: ${
         error instanceof Error ? error.message : String(error)
       }`
     );
   });
+}
+
+function abortCurrentScanIfDeselected(selectedPlatforms: readonly PlatformName[]): void {
+  const activePlatform = scanQueue.getCurrentScanPlatform();
+  if (activePlatform && !selectedPlatforms.includes(activePlatform)) {
+    scanQueue.requestAbort("platform_deselected");
+  }
 }
 
 const demoCleanupCoordinator = createDemoCleanupCoordinator({
@@ -3016,17 +3039,34 @@ app.get("/data/ai-status", asyncRoute(async (_req, res) => {
 // comments preserved), then applies it to the live process so AI calls use
 // it immediately — no restart. The key value is never logged.
 app.post("/control/setup/ai-key", asyncRoute(async (req, res) => {
-  const result = await operationMutex.runExclusive("setup:gemini-key", () =>
-    applyGeminiKey(req.body?.key, {
-      validate: (key) => validateGeminiKey(key, runnerConfig.geminiBaseUrl),
-      stage: (key) => stageEnvFileValue(resolveEnvWritePath(), "GEMINI_API_KEY", key),
-      commitState: () => setupPreferencesCoordinator.enableAiProvider("gemini"),
-      applyRuntime: (key) => {
-        process.env.GEMINI_API_KEY = key;
-        runnerConfig.geminiApiKey = key;
-      }
-    })
-  );
+  const payload = z.object({
+    key: z.unknown(),
+    expectedRevision: z.number().int().nonnegative()
+  }).parse(req.body);
+  let result;
+  try {
+    result = await operationMutex.runExclusive("setup:gemini-key", () =>
+      applyGeminiKey(payload.key, {
+        validate: (key) => validateGeminiKey(key, runnerConfig.geminiBaseUrl),
+        stage: (key) => stageEnvFileValue(resolveEnvWritePath(), "GEMINI_API_KEY", key),
+        commitState: () =>
+          setupPreferencesCoordinator.enableAiProvider("gemini", payload.expectedRevision),
+        applyRuntime: (key) => {
+          process.env.GEMINI_API_KEY = key;
+          runnerConfig.geminiApiKey = key;
+        }
+      })
+    );
+  } catch (error) {
+    if (error instanceof SetupPreferencesConflictError) {
+      res.status(409).json({
+        error: "Setup changed in another window. Review the latest choices and try again.",
+        preferences: error.current
+      });
+      return;
+    }
+    throw error;
+  }
   if (!result.ok) {
     res.status(result.status).json({
       error: result.message,
@@ -3084,7 +3124,8 @@ app.post("/control/setup/preferences", asyncRoute(async (req, res) => {
       return;
     }
     const preferences = await setupPreferencesCoordinator.update(request.payload);
-    scheduleWhatsAppSelectionReconciliation(preferences.selectedPlatforms);
+    abortCurrentScanIfDeselected((await settingsStore.getSettings()).enabledPlatforms);
+    schedulePlatformSelectionReconciliation();
     res.json({ ok: true, preferences });
   } catch (error) {
     if (error instanceof SetupPreferencesConflictError) {
@@ -3142,9 +3183,11 @@ app.post("/control/setup/transcription", asyncRoute(async (req, res) => {
     });
   } catch (error) {
     if (error instanceof TranscriptionSetupBusyError) {
+      const preferences = await getSetupPreferences();
       res.status(409).json({
         ...error.status,
-        error: error.message
+        error: error.message,
+        preferences
       });
       return;
     }
@@ -3414,13 +3457,15 @@ app.post("/control/settings", asyncRoute(async (req, res) => {
     } else {
       next = await settingsStore.updateSettings(updatePayload);
     }
-    scheduleWhatsAppSelectionReconciliation(next.enabledPlatforms);
+    abortCurrentScanIfDeselected(next.enabledPlatforms);
+    schedulePlatformSelectionReconciliation();
     res.json(next);
     return;
   }
 
   const next = await settingsStore.updateSettings(updatePayload);
-  scheduleWhatsAppSelectionReconciliation(next.enabledPlatforms);
+  abortCurrentScanIfDeselected(next.enabledPlatforms);
+  schedulePlatformSelectionReconciliation();
 
   const isEnteringDemo = !previous.demoMode && next.demoMode;
   const seedMode = next.presenterDemoMode === "sandbox" ? "full-presenter-demo" : "generic";
@@ -4004,6 +4049,7 @@ app.post("/control/platform/connect", asyncRoute(async (req, res) => {
   const connectTimeoutMs = connectTimeoutMsForCurrentProfile(platform);
 
   await withPlatformControlLock(platform, async () => {
+    await ensurePlatformEnabledInSettings(platform);
     const platformSession = resolvePlatformSession(platform);
     const browserProfileDetails = platformBrowserProfileDetails(
       platform,
@@ -4089,8 +4135,6 @@ app.post("/control/platform/connect", asyncRoute(async (req, res) => {
         }
       });
 
-      await ensurePlatformEnabledInSettings(platform);
-
       eventBus.emit({
         type: "PLATFORM_STATUS_CHANGED",
         jobId: uuid(),
@@ -4098,7 +4142,10 @@ app.post("/control/platform/connect", asyncRoute(async (req, res) => {
         status: "CONNECTED"
       });
       if (platform === "LINKEDIN") {
-        startLinkedInRealtimeWatcher();
+        const settings = await settingsStore.getSettings();
+        if (settings.enabledPlatforms.includes("LINKEDIN")) {
+          startLinkedInRealtimeWatcher();
+        }
       }
 
       await auditService.log({
@@ -9294,13 +9341,14 @@ process.on("uncaughtException", (error) => {
 async function start(): Promise<void> {
   await ensureRuntimeDirs();
   discardStaleEnvFileStages(resolveEnvWritePath());
+  sweepTranscriptionDownloadOrphans(runnerConfig.audioTranscription.transformers.modelDir);
   await sweepOutgoingAttachmentOrphansOnce();
   const outgoingAttachmentSweepTimer = setInterval(
     () => void sweepOutgoingAttachmentOrphansOnce(),
     OUTGOING_ATTACHMENT_ORPHAN_GRACE_MS
   );
   outgoingAttachmentSweepTimer.unref();
-  const [, startupSetupPreferences] = await Promise.all([
+  const [startupSettings, startupSetupPreferences] = await Promise.all([
     settingsStore.getSettings(),
     getSetupPreferences()
   ]);
@@ -9365,7 +9413,11 @@ async function start(): Promise<void> {
   }
 
   const linkedInPlatform = await prisma.platform.findUnique({ where: { name: "LINKEDIN" } });
-  if (runnerConfig.platformAvailability.LINKEDIN && linkedInPlatform?.connectedAt) {
+  if (shouldStartLinkedInRealtimeWatcher({
+    available: runnerConfig.platformAvailability.LINKEDIN,
+    selected: startupSettings.enabledPlatforms.includes("LINKEDIN"),
+    connectedAt: linkedInPlatform?.connectedAt
+  })) {
     startLinkedInRealtimeWatcher();
   }
 

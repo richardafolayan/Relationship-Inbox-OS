@@ -60,6 +60,16 @@ test("server setup validation and interactive connection include Instagram", () 
   assert.match(factorySource, /connectTimeoutMs: resolveConnectTimeoutMs\("personal"\)/);
 });
 
+test("connection completion cannot resurrect a source removed while login was open", () => {
+  const route = runnerSource.slice(
+    runnerSource.indexOf('app.post("/control/platform/connect"'),
+    runnerSource.indexOf('app.post("/control/platform/test-selectors"')
+  );
+  assert.ok(route.indexOf("ensurePlatformEnabledInSettings(platform)") < route.indexOf("connectPromise"));
+  assert.equal(route.match(/ensurePlatformEnabledInSettings\(platform\)/g)?.length, 1);
+  assert.match(route, /settings\.enabledPlatforms\.includes\("LINKEDIN"\)/);
+});
+
 test("session reset uses the isolated-platform reset plan", () => {
   assert.match(
     resetCoordinatorSource,

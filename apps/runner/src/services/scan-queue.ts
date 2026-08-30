@@ -754,6 +754,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
   const queue: ScanJob[] = [];
   let processing = false;
   let currentJob: ScanJob | null = null;
+  let currentScanPlatform: PlatformName | null = null;
   let currentScanProgress:
     | {
         platform: PlatformName;
@@ -1514,6 +1515,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
           return;
         }
         const linkedInAdapter = platform === "LINKEDIN" ? (adapter as LinkedInScanAdapter) : null;
+        currentScanPlatform = platform;
         const traceAwareAdapter = toTraceAwareAdapter(adapter);
         traceAwareAdapter.setRunLogger?.(runLogger);
 
@@ -2562,7 +2564,8 @@ export function createScanQueue(deps: ScanQueueDeps) {
                 candidateToSync.messages,
                 markedFullBackfill,
                 false,
-                job.trigger
+                job.trigger,
+                () => !shouldAbort()
               );
               updatedThreads += syncResult.updatedThreads;
               platformUpdatedThreads += syncResult.updatedThreads;
@@ -2995,6 +2998,9 @@ export function createScanQueue(deps: ScanQueueDeps) {
           if (currentScanProgress?.platform === platform) {
             currentScanProgress = null;
           }
+          if (currentScanPlatform === platform) {
+            currentScanPlatform = null;
+          }
           runLogger.mergeCounters({
             threadsScannedCount,
             candidatesToOpenCount: candidatesCount,
@@ -3161,7 +3167,8 @@ export function createScanQueue(deps: ScanQueueDeps) {
     // dormant backfill threads just rate-limits the AI provider and is not
     // what the backfill is for.
     skipAi = false,
-    trigger?: ScanTrigger
+    trigger?: ScanTrigger,
+    shouldContinue?: () => boolean
   ): Promise<{
     updatedThreads: number;
     parsedMessages: number;
@@ -3203,6 +3210,9 @@ export function createScanQueue(deps: ScanQueueDeps) {
     });
 
     const messages = preParsedMessages ?? (await adapter.fetchThreadMessages(candidate, maxMessages));
+    if (shouldContinue && !shouldContinue()) {
+      return { updatedThreads: 0, parsedMessages: 0, persistedMessages: 0, quarantinedMessages: 0 };
+    }
     const canonicalPlatformThreadId = resolvePlatformThreadId(platform, candidate);
 
     if (platform === "LINKEDIN" && !canonicalPlatformThreadId) {
@@ -3245,6 +3255,9 @@ export function createScanQueue(deps: ScanQueueDeps) {
 
     const candidateAvatarUrl = candidate.avatarUrl?.trim() || null;
     const candidateProfileUrl = candidate.profileUrl?.trim() || null;
+    if (shouldContinue && !shouldContinue()) {
+      return { updatedThreads: 0, parsedMessages: 0, persistedMessages: 0, quarantinedMessages: 0 };
+    }
     // Person identity priority: profileUrl > displayName. profileUrl is a
     // stable per-person identifier on LinkedIn; displayName-only lookups
     // can false-positive across two LinkedIn contacts who share a name,
@@ -3745,19 +3758,8 @@ export function createScanQueue(deps: ScanQueueDeps) {
           trigger: trigger.kind
         }
       : undefined;
-    if (syncTiming && persistedMessages > 0) {
-      deps.recordLatency?.({
-        metric: "source_change_to_persisted_message",
-        durationMs: Date.parse(syncTiming.persistedAt) - Date.parse(syncTiming.sourceChangedAt),
-        platform
-      });
-      deps.eventBus.emit({
-        type: "MESSAGES_PERSISTED",
-        jobId,
-        threadId: thread.id,
-        platform,
-        syncTiming
-      });
+    if (shouldContinue && !shouldContinue()) {
+      return { updatedThreads: 0, parsedMessages: 0, persistedMessages: 0, quarantinedMessages: 0 };
     }
 
     // Transcription enqueue. We resolve the persisted Message ids in a
@@ -4194,6 +4196,23 @@ export function createScanQueue(deps: ScanQueueDeps) {
       }
     }
 
+    if (shouldContinue && !shouldContinue()) {
+      return { updatedThreads: 0, parsedMessages: 0, persistedMessages: 0, quarantinedMessages: 0 };
+    }
+    if (syncTiming && persistedMessages > 0) {
+      deps.recordLatency?.({
+        metric: "source_change_to_persisted_message",
+        durationMs: Date.parse(syncTiming.persistedAt) - Date.parse(syncTiming.sourceChangedAt),
+        platform
+      });
+      deps.eventBus.emit({
+        type: "MESSAGES_PERSISTED",
+        jobId,
+        threadId: thread.id,
+        platform,
+        syncTiming
+      });
+    }
     deps.eventBus.emit({
       type: "THREAD_UPDATED",
       jobId,
@@ -4264,7 +4283,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
     processNext,
     getQueueDepth,
     isScanning: () => processing,
-    getCurrentScanPlatform: () => currentJob?.platform,
+    getCurrentScanPlatform: () => currentScanPlatform ?? currentJob?.platform,
     /**
      * Live snapshot of the LinkedIn streaming scan in flight, or `null` when
      * no scan is running. Drives the system status bar's determinate progress
@@ -4309,7 +4328,8 @@ export function createScanQueue(deps: ScanQueueDeps) {
         input.messages,
         false,
         input.skipAi ?? false,
-        input.trigger
+        input.trigger,
+        undefined
       ),
     clearAbort
   };

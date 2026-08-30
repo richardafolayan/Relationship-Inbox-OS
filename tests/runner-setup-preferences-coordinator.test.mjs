@@ -150,15 +150,54 @@ test("first setup mutation inherits existing pilot settings only before setup ha
   assert.equal(second.aiEnabled, false);
 });
 
+test("parsed partial setup requests do not erase an earlier startedAt", async () => {
+  const harness = createHarness();
+  const startedRequest = parseSetupPreferencesRequest({
+    startedAt: "start",
+    expectedRevision: 0
+  });
+  assert.equal(startedRequest.kind, "update");
+  const started = await harness.coordinator.update(startedRequest.payload);
+
+  const sourcesRequest = parseSetupPreferencesRequest({
+    selectedPlatforms: ["INSTAGRAM"],
+    expectedRevision: started.revision
+  });
+  assert.equal(sourcesRequest.kind, "update");
+  const sources = await harness.coordinator.update(sourcesRequest.payload);
+
+  assert.equal(sources.startedAt, "start");
+  assert.equal(harness.getStored().startedAt, "start");
+});
+
 test("AI provider activation is one coherent setup revision", async () => {
   const harness = createHarness();
-  const preferences = await harness.coordinator.enableAiProvider("gemini");
+  const preferences = await harness.coordinator.enableAiProvider("gemini", 0);
 
   assert.equal(preferences.aiEnabled, true);
   assert.equal(preferences.revision, 1);
   assert.equal(harness.getSettings().aiEnabled, true);
   assert.equal(harness.getSettings().aiProvider, "gemini");
   assert.deepEqual(harness.events, ["setup-transaction", "settings-cache"]);
+});
+
+test("an older Gemini activation cannot override a later AI opt-out", async () => {
+  const harness = createHarness();
+  const started = await harness.coordinator.update({ expectedRevision: 0, startedAt: "start" });
+  const disabled = await harness.coordinator.update({
+    expectedRevision: started.revision,
+    aiEnabled: false
+  });
+
+  await assert.rejects(
+    harness.coordinator.enableAiProvider("gemini", started.revision),
+    (error) => {
+      assert.ok(error instanceof SetupPreferencesConflictError);
+      assert.equal(error.current.revision, disabled.revision);
+      return true;
+    }
+  );
+  assert.equal(harness.getSettings().aiEnabled, false);
 });
 
 test("side endpoints preserve platforms connected after setup started", async () => {
@@ -174,7 +213,7 @@ test("side endpoints preserve platforms connected after setup started", async ()
     expectedRevision: started.revision,
     transcriptionMode: "standard"
   });
-  const ai = await harness.coordinator.enableAiProvider("gemini");
+  const ai = await harness.coordinator.enableAiProvider("gemini", transcription.revision);
 
   assert.equal(transcription.transcriptionMode, "standard");
   assert.equal(ai.aiEnabled, true);

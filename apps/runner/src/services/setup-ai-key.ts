@@ -74,6 +74,8 @@ export function upsertEnvFile(filePath: string, key: string, value: string): voi
 
 export interface StagedEnvFileValue {
   commit(): void;
+  rollback(): void;
+  finalize(): void;
   discard(): void;
 }
 
@@ -86,18 +88,34 @@ export function stageEnvFileValue(
   const next = upsertEnvContent(current, key, value);
   const tempPath = `${filePath}.${randomUUID()}.pending`;
   writeFileSync(tempPath, next, { encoding: "utf8", mode: 0o600 });
-  let settled = false;
+  const existed = existsSync(filePath);
+  let state: "pending" | "promoted" | "settled" = "pending";
 
   return {
     commit: () => {
-      if (settled) throw new Error("Staged environment value already settled.");
+      if (state !== "pending") throw new Error("Staged environment value already settled.");
       renameSync(tempPath, filePath);
-      settled = true;
+      state = "promoted";
+    },
+    rollback: () => {
+      if (state !== "promoted") return;
+      if (existed) {
+        const rollbackPath = `${filePath}.${randomUUID()}.rollback`;
+        writeFileSync(rollbackPath, current, { encoding: "utf8", mode: 0o600 });
+        renameSync(rollbackPath, filePath);
+      } else {
+        rmSync(filePath, { force: true });
+      }
+      state = "settled";
+    },
+    finalize: () => {
+      if (state !== "promoted") throw new Error("Staged environment value was not promoted.");
+      state = "settled";
     },
     discard: () => {
-      if (settled) return;
+      if (state !== "pending") return;
       rmSync(tempPath, { force: true });
-      settled = true;
+      state = "settled";
     }
   };
 }
@@ -193,14 +211,6 @@ export async function applyGeminiKey<TState>(
     };
   }
 
-  let state: TState;
-  try {
-    state = await deps.commitState();
-  } catch (error) {
-    staged.discard();
-    throw error;
-  }
-
   try {
     staged.commit();
   } catch {
@@ -208,11 +218,19 @@ export async function applyGeminiKey<TState>(
     return {
       ok: false,
       status: 502,
-      message: "The key checked out but couldn't be saved. Quit and reopen Tovi, then run the setup assistant again. If it still fails, tell the person running the pilot.",
-      state
+      message: "The key checked out but couldn't be saved. Quit and reopen Tovi, then run the setup assistant again. If it still fails, tell the person running the pilot."
     };
   }
 
+  let state: TState;
+  try {
+    state = await deps.commitState();
+  } catch (error) {
+    staged.rollback();
+    throw error;
+  }
+
+  staged.finalize();
   deps.applyRuntime(key);
   return { ok: true, state };
 }

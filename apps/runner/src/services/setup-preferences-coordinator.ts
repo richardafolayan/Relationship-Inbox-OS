@@ -116,9 +116,13 @@ export function createSetupPreferencesCoordinator(deps: SetupPreferencesCoordina
           }
 
           return {
-            ...payload,
             selectedPlatforms,
-            aiEnabled
+            aiEnabled,
+            ...(payload.transcriptionMode !== undefined
+              ? { transcriptionMode: payload.transcriptionMode }
+              : {}),
+            ...(payload.startedAt !== undefined ? { startedAt: payload.startedAt } : {}),
+            ...(payload.completedAt !== undefined ? { completedAt: payload.completedAt } : {})
           };
         },
         async (preferences) => {
@@ -135,8 +139,11 @@ export function createSetupPreferencesCoordinator(deps: SetupPreferencesCoordina
     return updateState(payload);
   }
 
-  async function enableAiProvider(provider: "gemini"): Promise<SetupPreferences> {
-    return updateState({ aiEnabled: true }, { aiProvider: provider });
+  async function enableAiProvider(
+    provider: "gemini",
+    expectedRevision: number
+  ): Promise<SetupPreferences> {
+    return updateState({ aiEnabled: true, expectedRevision }, { aiProvider: provider });
   }
 
   async function complete(payload: CompleteSetupPayload): Promise<{

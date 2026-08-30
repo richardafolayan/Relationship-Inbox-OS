@@ -4,9 +4,16 @@ import {
   bindFocusAutoAckEvents,
   createFocusAutoAckService,
   focusAutoAckCoverage,
+  focusAutoAckPlatformSelected,
   focusAutoAckText,
   focusManualAckClientSendId
 } from "../apps/runner/src/services/focus-auto-ack.ts";
+
+test("automatic focus acknowledgements fail closed for a deselected platform", () => {
+  assert.equal(focusAutoAckPlatformSelected("focus_auto_ack", "LINKEDIN", ["IMESSAGE"]), false);
+  assert.equal(focusAutoAckPlatformSelected("focus_auto_ack", "IMESSAGE", ["IMESSAGE"]), true);
+  assert.equal(focusAutoAckPlatformSelected("manual", "LINKEDIN", ["IMESSAGE"]), true);
+});
 import { createEventBus } from "../apps/runner/src/services/event-bus.ts";
 import { mergeFocusWindowUpdate } from "../apps/runner/src/services/settings.ts";
 

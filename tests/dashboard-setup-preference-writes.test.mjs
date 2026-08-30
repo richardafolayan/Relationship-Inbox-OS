@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 
 import {
   completedPreferencesFromConflict,
@@ -7,6 +8,27 @@ import {
   setupNavigationDisabled,
   persistCompletedSetup
 } from "../apps/dashboard/lib/setup-preference-writes.ts";
+
+const setupWizardSource = readFileSync(
+  new URL("../apps/dashboard/components/common/SetupWizard.tsx", import.meta.url),
+  "utf8"
+);
+
+test("connection navigation stays disabled until the active connection request settles", () => {
+  assert.match(setupWizardSource, /onBusyChange\(true\)/);
+  assert.match(setupWizardSource, /<Back disabled=\{busy !== null\}/);
+  assert.match(setupWizardSource, /<Primary disabled=\{busy !== null\} onClick=\{onNext\}>Continue/);
+  assert.match(setupWizardSource, /finishing \|\| savingPreferences \|\| connectingSource/);
+});
+
+test("a lost transcription response refreshes authoritative download status", () => {
+  assert.match(setupWizardSource, /try \{\s*await refresh\(\);/);
+  assert.match(setupWizardSource, /phase: "downloading"/);
+});
+
+test("Gemini key activation carries the current setup revision", () => {
+  assert.match(setupWizardSource, /expectedRevision: preferenceWriter\.latestRevision\(\)/);
+});
 
 function deferred() {
   let resolve;
@@ -108,6 +130,13 @@ test("setup completion is marked locally only after the atomic server write succ
   });
   assert.deepEqual(events, ["server", "local"]);
   assert.equal(preferences.revision, 8);
+});
+
+test("the review action persists completion before the ready screen is shown", () => {
+  assert.match(setupWizardSource, /onFinish=\{async \(\) => \{ if \(await finish\(false\)\) next\(\); \}\}/);
+  assert.match(setupWizardSource, /function ReviewStep\([^)]*onFinish/);
+  assert.match(setupWizardSource, /onClick=\{\(\) => void onFinish\(\)\}/);
+  assert.doesNotMatch(setupWizardSource, /step === "done"[\s\S]*?void finish\(\)/);
 });
 
 test("a failed atomic completion leaves local setup incomplete", async () => {

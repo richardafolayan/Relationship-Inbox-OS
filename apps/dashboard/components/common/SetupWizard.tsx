@@ -110,6 +110,7 @@ export function SetupWizard() {
   const [aiEnabled, setAiEnabled] = useState(false);
   const [savingPreferences, setSavingPreferences] = useState(false);
   const [finishing, setFinishing] = useState(false);
+  const [connectingSource, setConnectingSource] = useState(false);
   const [persistenceError, setPersistenceError] = useState("");
   const pendingPreferenceWrites = useRef(0);
   const preferenceWriter = useMemo(
@@ -276,10 +277,13 @@ export function SetupWizard() {
 
   const saveAiKey = useCallback(async (key: string) => {
     await runSetupRequest(() =>
-      apiPost<{ preferences: SetupPreferences }>("/runner/control/setup/ai-key", { key })
+      apiPost<{ preferences: SetupPreferences }>("/runner/control/setup/ai-key", {
+        key,
+        expectedRevision: preferenceWriter.latestRevision()
+      })
     );
     setAiConfigured(true);
-  }, [runSetupRequest]);
+  }, [preferenceWriter, runSetupRequest]);
 
   const configureTranscription = useCallback(
     (mode: TranscriptionMode, removeDownloadedModels = false) =>
@@ -292,7 +296,7 @@ export function SetupWizard() {
     [runSetupRequest]
   );
 
-  const finish = useCallback(async () => {
+  const finish = useCallback(async (closeAfter = true) => {
     const now = new Date().toISOString();
     setFinishing(true);
     setPersistenceError("");
@@ -312,7 +316,7 @@ export function SetupWizard() {
         },
         markComplete: () => markSetupComplete(window.localStorage)
       });
-      setOpen(false);
+      if (closeAfter) setOpen(false);
       return true;
     } catch (error) {
       if (!(error instanceof ApiRequestError && error.status === 409)) {
@@ -336,7 +340,7 @@ export function SetupWizard() {
             ))}
           </div>
           {step !== "done" ? (
-            <button type="button" disabled={finishing || savingPreferences} onClick={() => void finish()} className="font-mono text-[11px] text-ink-3 underline underline-offset-2 hover:text-ink disabled:opacity-50">
+            <button type="button" disabled={finishing || savingPreferences || connectingSource} onClick={() => void finish()} className="font-mono text-[11px] text-ink-3 underline underline-offset-2 hover:text-ink disabled:opacity-50">
               {finishing ? "Saving..." : "Finish later"}
             </button>
           ) : null}
@@ -367,7 +371,7 @@ export function SetupWizard() {
           />
         ) : null}
 
-        {step === "connect" ? <ConnectStep selected={selected} onBack={back} onNext={next} /> : null}
+        {step === "connect" ? <ConnectStep selected={selected} onBusyChange={setConnectingSource} onBack={back} onNext={next} /> : null}
 
         {step === "contacts" ? <ContactsStep health={status?.contacts ?? null} onBack={back} onNext={next} /> : null}
 
@@ -378,14 +382,14 @@ export function SetupWizard() {
         {step === "transcription" ? <TranscriptionStep initial={status?.transcription} onConfigure={configureTranscription} onBack={back} onNext={next} /> : null}
 
         {step === "review" ? (
-          <ReviewStep selected={selected} aiEnabled={aiEnabled} aiConfigured={aiConfigured} automaticUpdates={status?.settings.automaticUpdates !== false} version={status?.version ?? ""} onBack={back} onRefresh={load} onNext={next} />
+          <ReviewStep selected={selected} aiEnabled={aiEnabled} aiConfigured={aiConfigured} automaticUpdates={status?.settings.automaticUpdates !== false} version={status?.version ?? ""} finishing={finishing || savingPreferences} onBack={back} onRefresh={load} onFinish={async () => { if (await finish(false)) next(); }} />
         ) : null}
 
         {step === "done" ? (
           <Card icon={<Check />} eyebrow="Ready" title={`${APP_NAME} is ready when you are.`} body="New conversations appear after their first scan. You can rerun this assistant or manage optional parts from Settings at any time.">
             <Actions>
-              <Primary disabled={finishing || savingPreferences} onClick={() => { void finish().then((finished) => { if (finished) router.push("/today"); }); }}>{finishing ? "Saving..." : "Go to Today"}</Primary>
-              <Quiet disabled={finishing || savingPreferences} onClick={() => { void finish().then((finished) => { if (finished) { router.push("/today"); window.setTimeout(() => startPilotTour(), 350); } }); }}>Show me with safe demo messages</Quiet>
+              <Primary onClick={() => { setOpen(false); router.push("/today"); }}>Go to Today</Primary>
+              <Quiet onClick={() => { setOpen(false); router.push("/today"); window.setTimeout(() => startPilotTour(), 350); }}>Show me with safe demo messages</Quiet>
             </Actions>
           </Card>
         ) : null}
@@ -436,7 +440,7 @@ function SourcesStep({ selected, available, onChange, onBack, onNext }: { select
   </Card>;
 }
 
-function ConnectStep({ selected, onBack, onNext }: { selected: SetupPlatform[]; onBack: () => void; onNext: () => void }) {
+function ConnectStep({ selected, onBusyChange, onBack, onNext }: { selected: SetupPlatform[]; onBusyChange: (busy: boolean) => void; onBack: () => void; onNext: () => void }) {
   const [rows, setRows] = useState<PlatformCard[]>([]);
   const [busy, setBusy] = useState<SetupPlatform | null>(null);
   const [notice, setNotice] = useState("");
@@ -457,6 +461,7 @@ function ConnectStep({ selected, onBack, onNext }: { selected: SetupPlatform[]; 
     const scanning = path.endsWith("/scan");
     const openingPermission = path.endsWith("/full-disk-access");
     setBusy(platform);
+    onBusyChange(true);
     try {
       const outcome = await runActionWithInlineFeedback(
         apiPost<{ message?: string }>(path, body),
@@ -482,6 +487,7 @@ function ConnectStep({ selected, onBack, onNext }: { selected: SetupPlatform[]; 
       }
     } finally {
       setBusy(null);
+      onBusyChange(false);
     }
   };
   if (selected.length === 0) return <Card icon={<MessageSquareText />} eyebrow="Messages" title="No message sources selected." body="That is fine. You can add iMessage, Google Messages, LinkedIn, Instagram, or WhatsApp later in Settings."><Actions><Back onClick={onBack} /><Primary onClick={onNext}>Continue</Primary></Actions></Card>;
@@ -493,13 +499,13 @@ function ConnectStep({ selected, onBack, onNext }: { selected: SetupPlatform[]; 
   return <Card icon={<MessageSquareText />} eyebrow="Connect messages" title="Connect each source you chose." body={`Complete one card at a time. ${APP_NAME} reads conversations into your inbox. Replies only send when you choose. A focus note can send automatically only when you turn it on for that focus window.`}>
     {notice ? <Notice>{notice}</Notice> : null}
     <div className="mt-5 grid gap-3">
-      {selected.includes("IMESSAGE") ? <Platform title="iMessage" connected={imessage?.status === "CONNECTED"} body={needsAccess ? `Press Open Mac permission. In Full Disk Access, turn on ${APP_NAME} or ${LEGACY_APP_NAME}. Then quit and reopen ${APP_NAME}.` : "Press Scan iMessage. macOS may ask for permission the first time."} action={needsAccess ? "Open Mac permission" : "Scan iMessage"} busy={busy === "IMESSAGE"} state={actionState?.platform === "IMESSAGE" ? actionState.state : null} onClick={() => void act("IMESSAGE", needsAccess ? "/runner/control/imessage/full-disk-access" : "/runner/control/scan", needsAccess ? {} : { platform: "IMESSAGE" })} /> : null}
-      {selected.includes("GOOGLE_MESSAGES") ? <Platform title="Google Messages" connected={googleMessages?.status === "CONNECTED"} body={`Press Pair Android phone. Sign in to Google Messages in the window, then confirm the matching emoji on your phone if asked. Keep the window open until ${APP_NAME} says connected.`} action="Pair Android phone" busy={busy === "GOOGLE_MESSAGES"} state={actionState?.platform === "GOOGLE_MESSAGES" ? actionState.state : null} onClick={() => void act("GOOGLE_MESSAGES", "/runner/control/platform/connect", { platform: "GOOGLE_MESSAGES" })} /> : null}
-      {selected.includes("LINKEDIN") ? <Platform title="LinkedIn" connected={linkedin?.status === "CONNECTED"} body={`Press Connect LinkedIn. A Chrome window opens. Sign in yourself if asked, then leave the window open until ${APP_NAME} says connected.`} action="Connect LinkedIn" busy={busy === "LINKEDIN"} state={actionState?.platform === "LINKEDIN" ? actionState.state : null} onClick={() => void act("LINKEDIN", "/runner/control/platform/connect", { platform: "LINKEDIN" })} /> : null}
-      {selected.includes("INSTAGRAM") ? <Platform title="Instagram" connected={instagram?.status === "CONNECTED"} body={`Press Connect Instagram. A dedicated standard Chrome window opens. Sign in yourself and complete any security check, then leave it open until ${APP_NAME} says connected.`} action="Connect Instagram" busy={busy === "INSTAGRAM"} state={actionState?.platform === "INSTAGRAM" ? actionState.state : null} onClick={() => void act("INSTAGRAM", "/runner/control/platform/connect", { platform: "INSTAGRAM" })} /> : null}
+      {selected.includes("IMESSAGE") ? <Platform title="iMessage" connected={imessage?.status === "CONNECTED"} body={needsAccess ? `Press Open Mac permission. In Full Disk Access, turn on ${APP_NAME} or ${LEGACY_APP_NAME}. Then quit and reopen ${APP_NAME}.` : "Press Scan iMessage. macOS may ask for permission the first time."} action={needsAccess ? "Open Mac permission" : "Scan iMessage"} busy={busy === "IMESSAGE"} disabled={busy !== null} state={actionState?.platform === "IMESSAGE" ? actionState.state : null} onClick={() => void act("IMESSAGE", needsAccess ? "/runner/control/imessage/full-disk-access" : "/runner/control/scan", needsAccess ? {} : { platform: "IMESSAGE" })} /> : null}
+      {selected.includes("GOOGLE_MESSAGES") ? <Platform title="Google Messages" connected={googleMessages?.status === "CONNECTED"} body={`Press Pair Android phone. Sign in to Google Messages in the window, then confirm the matching emoji on your phone if asked. Keep the window open until ${APP_NAME} says connected.`} action="Pair Android phone" busy={busy === "GOOGLE_MESSAGES"} disabled={busy !== null} state={actionState?.platform === "GOOGLE_MESSAGES" ? actionState.state : null} onClick={() => void act("GOOGLE_MESSAGES", "/runner/control/platform/connect", { platform: "GOOGLE_MESSAGES" })} /> : null}
+      {selected.includes("LINKEDIN") ? <Platform title="LinkedIn" connected={linkedin?.status === "CONNECTED"} body={`Press Connect LinkedIn. A Chrome window opens. Sign in yourself if asked, then leave the window open until ${APP_NAME} says connected.`} action="Connect LinkedIn" busy={busy === "LINKEDIN"} disabled={busy !== null} state={actionState?.platform === "LINKEDIN" ? actionState.state : null} onClick={() => void act("LINKEDIN", "/runner/control/platform/connect", { platform: "LINKEDIN" })} /> : null}
+      {selected.includes("INSTAGRAM") ? <Platform title="Instagram" connected={instagram?.status === "CONNECTED"} body={`Press Connect Instagram. A dedicated standard Chrome window opens. Sign in yourself and complete any security check, then leave it open until ${APP_NAME} says connected.`} action="Connect Instagram" busy={busy === "INSTAGRAM"} disabled={busy !== null} state={actionState?.platform === "INSTAGRAM" ? actionState.state : null} onClick={() => void act("INSTAGRAM", "/runner/control/platform/connect", { platform: "INSTAGRAM" })} /> : null}
       {selected.includes("WHATSAPP") ? <div className="rounded-[10px] border border-hairline bg-paper-2/45 p-4"><WhatsAppConnect /><ol className="mb-0 mt-3 pl-5 text-[12.5px] leading-6 text-ink-2"><li>Open WhatsApp on your phone.</li><li>Open Settings, then Linked Devices.</li><li>Press Link a Device and scan the code shown here.</li></ol></div> : null}
     </div>
-    <Actions><Back onClick={onBack} /><Primary onClick={onNext}>Continue</Primary><Quiet onClick={onNext}>Finish connections later</Quiet></Actions>
+    <Actions><Back disabled={busy !== null} onClick={onBack} /><Primary disabled={busy !== null} onClick={onNext}>Continue</Primary><Quiet disabled={busy !== null} onClick={onNext}>Finish connections later</Quiet></Actions>
   </Card>;
 }
 
@@ -531,9 +537,34 @@ function AiStep({ enabled, configured, onEnabled, onSaveKey, onBack, onNext }: {
 function TranscriptionStep({ initial, onConfigure, onBack, onNext }: { initial?: TranscriptionStatus; onConfigure: (mode: TranscriptionMode, removeDownloadedModels?: boolean) => Promise<TranscriptionSetupResponse>; onBack: () => void; onNext: () => void }) {
   const [status, setStatus] = useState<TranscriptionStatus | undefined>(initial);
   const [busy, setBusy] = useState(false);
-  const refresh = useCallback(() => apiGetRaw<TranscriptionStatus>("/runner/data/setup/transcription").then(setStatus).catch(() => undefined), []);
+  const refresh = useCallback(async () => {
+    const next = await apiGetRaw<TranscriptionStatus>("/runner/data/setup/transcription");
+    setStatus(next);
+    return next;
+  }, []);
   useEffect(() => { if (status?.phase !== "downloading") return; const timer = window.setInterval(() => void refresh(), 1500); return () => window.clearInterval(timer); }, [status?.phase, refresh]);
-  const choose = async (mode: TranscriptionMode, removeDownloadedModels = false) => { setBusy(true); const nextStatus = await onConfigure(mode, removeDownloadedModels).catch(() => null); if (nextStatus) setStatus(nextStatus); setBusy(false); };
+  const choose = async (mode: TranscriptionMode, removeDownloadedModels = false) => {
+    setBusy(true);
+    try {
+      setStatus(await onConfigure(mode, removeDownloadedModels));
+    } catch {
+      try {
+        await refresh();
+      } catch {
+        setStatus((current) => ({
+          mode,
+          phase: "downloading",
+          installedMode: current?.installedMode ?? "off",
+          modelId: current?.modelId ?? null,
+          downloadedBytes: current?.downloadedBytes ?? 0,
+          approximateDownloadBytes: current?.approximateDownloadBytes ?? 0,
+          error: null
+        }));
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
   const downloading = status?.phase === "downloading";
   const navigationDisabled = setupNavigationDisabled(busy, status?.phase);
   return <Card icon={<Mic2 />} eyebrow="Optional voice notes" title="Choose voice transcription." body="Transcription runs on this Mac. Audio does not need to go to an AI company. Models download only when you choose one.">
@@ -545,7 +576,7 @@ function TranscriptionStep({ initial, onConfigure, onBack, onNext }: { initial?:
   </Card>;
 }
 
-function ReviewStep({ selected, aiEnabled, aiConfigured, automaticUpdates, version, onBack, onRefresh, onNext }: { selected: SetupPlatform[]; aiEnabled: boolean; aiConfigured: boolean; automaticUpdates: boolean; version: string; onBack: () => void; onRefresh: () => Promise<unknown>; onNext: () => void }) {
+function ReviewStep({ selected, aiEnabled, aiConfigured, automaticUpdates, version, finishing, onBack, onRefresh, onFinish }: { selected: SetupPlatform[]; aiEnabled: boolean; aiConfigured: boolean; automaticUpdates: boolean; version: string; finishing: boolean; onBack: () => void; onRefresh: () => Promise<unknown>; onFinish: () => Promise<void> }) {
   const [setup, setSetup] = useState<SetupStatus | null>(null);
   const [busy, setBusy] = useState(false);
   const refresh = async () => { setBusy(true); const value = await onRefresh().catch(() => null) as { setup?: SetupStatus } | null; if (value?.setup) setSetup(value.setup); setBusy(false); };
@@ -561,7 +592,7 @@ function ReviewStep({ selected, aiEnabled, aiConfigured, automaticUpdates, versi
       <Summary label="Installed version" value={version || "Current install"} ok />
     </div>
     <p className="mt-4 text-[12.5px] leading-5 text-ink-3">When an update is ready, {APP_NAME} checks automatically. Keep automatic updates on in Settings. If {APP_NAME} asks you to replace the app, download the new installer, open it, and drag {APP_NAME} into Applications again. Your data and choices stay in place.</p>
-    <Actions><Back onClick={onBack} /><Primary onClick={onNext}>Finish setup</Primary><Quiet onClick={() => void refresh()}>{busy ? "Checking..." : "Check again"}</Quiet></Actions>
+        <Actions><Back disabled={finishing} onClick={onBack} /><Primary disabled={finishing} onClick={() => void onFinish()}>{finishing ? "Saving..." : "Finish setup"}</Primary><Quiet disabled={finishing} onClick={() => void refresh()}>{busy ? "Checking..." : "Check again"}</Quiet></Actions>
   </Card>;
 }
 
@@ -573,5 +604,5 @@ function Back({ onClick, disabled }: { onClick: () => void; disabled?: boolean }
 function Notice({ children }: { children: React.ReactNode }) { return <p className="m-0 mt-4 rounded-[8px] border border-hairline bg-paper-2/55 px-3 py-2.5 text-[12.5px] leading-5 text-ink-2" aria-live="polite">{children}</p>; }
 function InfoRows({ rows }: { rows: Array<[string, string]> }) { return <div className="mt-5 divide-y divide-hairline rounded-[10px] border border-hairline bg-paper-2/35">{rows.map(([label, body]) => <div key={label} className="px-4 py-3"><p className="m-0 text-[13.5px] font-medium text-ink">{label}</p><p className="m-0 mt-0.5 text-[12.5px] text-ink-3">{body}</p></div>)}</div>; }
 function Choice({ selected, title, body, onClick, disabled }: { selected: boolean; title: string; body: string; onClick: () => void; disabled?: boolean }) { return <button type="button" aria-pressed={selected} onClick={onClick} disabled={disabled} className={cn("rounded-[10px] border px-4 py-3 text-left disabled:opacity-50", selected ? "border-accent bg-accent/5" : "border-hairline bg-paper-2/35")}><span className="flex items-center gap-2 text-[14px] font-medium text-ink">{selected ? <Check className="h-4 w-4 text-accent" /> : <span className="h-4 w-4 rounded-full border border-hairline-strong" />}{title}</span><span className="mt-1 block pl-6 text-[12.5px] leading-5 text-ink-3">{body}</span></button>; }
-function Platform({ title, body, connected, action, busy, state, onClick }: { title: string; body: string; connected: boolean; action: string; busy: boolean; state?: InlineActionState | null; onClick: () => void }) { return <div className="flex flex-col items-stretch gap-3 rounded-[10px] border border-hairline bg-paper-2/40 p-4 sm:flex-row sm:items-center"><div className="min-w-0 flex-1"><p className="m-0 flex items-center gap-2 text-[15px] font-medium text-ink">{title}{connected ? <span className="rounded-pill bg-risk-fresh/15 px-2 py-0.5 font-mono text-[10px] text-risk-fresh">Connected</span> : null}</p><p className="m-0 mt-1 text-[12.5px] leading-5 text-ink-3">{body}</p></div>{!connected ? <div className="self-start sm:self-auto"><InlineActionButton idleLabel={action} state={state ?? (busy ? { phase: "running", label: "Working..." } : null)} disabled={busy} onClick={onClick} className="inline-flex items-center gap-1.5 rounded-pill bg-ink px-4 py-[9px] text-[13.5px] font-medium text-paper hover:bg-ink-2 disabled:opacity-50" /></div> : null}</div>; }
+function Platform({ title, body, connected, action, busy, disabled, state, onClick }: { title: string; body: string; connected: boolean; action: string; busy: boolean; disabled: boolean; state?: InlineActionState | null; onClick: () => void }) { return <div className="flex flex-col items-stretch gap-3 rounded-[10px] border border-hairline bg-paper-2/40 p-4 sm:flex-row sm:items-center"><div className="min-w-0 flex-1"><p className="m-0 flex items-center gap-2 text-[15px] font-medium text-ink">{title}{connected ? <span className="rounded-pill bg-risk-fresh/15 px-2 py-0.5 font-mono text-[10px] text-risk-fresh">Connected</span> : null}</p><p className="m-0 mt-1 text-[12.5px] leading-5 text-ink-3">{body}</p></div>{!connected ? <div className="self-start sm:self-auto"><InlineActionButton idleLabel={action} state={state ?? (busy ? { phase: "running", label: "Working..." } : null)} disabled={disabled} onClick={onClick} className="inline-flex items-center gap-1.5 rounded-pill bg-ink px-4 py-[9px] text-[13.5px] font-medium text-paper hover:bg-ink-2 disabled:opacity-50" /></div> : null}</div>; }
 function Summary({ label, value, ok }: { label: string; value: string; ok: boolean }) { return <div className="flex items-center justify-between gap-3 px-4 py-3"><span className="text-[13px] text-ink-2">{label}</span><span className={cn("flex items-center gap-1.5 font-mono text-[11px]", ok ? "text-risk-fresh" : "text-ink-3")}>{ok ? <Check className="h-3.5 w-3.5" /> : null}{value}</span></div>; }

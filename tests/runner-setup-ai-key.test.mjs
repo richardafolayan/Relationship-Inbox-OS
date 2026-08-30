@@ -180,7 +180,7 @@ test("applyGeminiKey stops before staging when live validation fails", async () 
   assert.deepEqual(calls, []);
 });
 
-test("applyGeminiKey stages the trimmed key, commits setup, then promotes and applies it", async () => {
+test("applyGeminiKey promotes the staged key before enabling setup and then applies it", async () => {
   const calls = [];
   const result = await applyGeminiKey(`  ${"k".repeat(30)}  `, {
     validate: async (key) => {
@@ -191,6 +191,8 @@ test("applyGeminiKey stages the trimmed key, commits setup, then promotes and ap
       calls.push(["stage", key]);
       return {
         commit: () => calls.push(["commit-key", key]),
+        rollback: () => calls.push(["rollback-key", key]),
+        finalize: () => calls.push(["finalize-key", key]),
         discard: () => calls.push(["discard", key])
       };
     },
@@ -204,8 +206,9 @@ test("applyGeminiKey stages the trimmed key, commits setup, then promotes and ap
   assert.deepEqual(calls, [
     ["validate", "k".repeat(30)],
     ["stage", "k".repeat(30)],
-    ["commit-state"],
     ["commit-key", "k".repeat(30)],
+    ["commit-state"],
+    ["finalize-key", "k".repeat(30)],
     ["apply", "k".repeat(30)]
   ]);
 });
@@ -217,6 +220,8 @@ test("a failed setup transaction discards the staged key without changing env or
       validate: async () => ({ ok: true }),
       stage: () => ({
         commit: () => calls.push("commit-key"),
+        rollback: () => calls.push("rollback-key"),
+        finalize: () => calls.push("finalize-key"),
         discard: () => calls.push("discard")
       }),
       commitState: async () => {
@@ -227,10 +232,10 @@ test("a failed setup transaction discards the staged key without changing env or
     }),
     /setup transaction failed/
   );
-  assert.deepEqual(calls, ["commit-state", "discard"]);
+  assert.deepEqual(calls, ["commit-key", "commit-state", "rollback-key"]);
 });
 
-test("a staged-file promotion failure reports authoritative state without applying runtime", async () => {
+test("a staged-file promotion failure cannot advance setup state or apply runtime", async () => {
   const calls = [];
   const result = await applyGeminiKey("k".repeat(30), {
     validate: async () => ({ ok: true }),
@@ -238,14 +243,19 @@ test("a staged-file promotion failure reports authoritative state without applyi
       commit: () => {
         throw new Error("EACCES");
       },
+      rollback: () => calls.push("rollback"),
+      finalize: () => calls.push("finalize"),
       discard: () => calls.push("discard")
     }),
-    commitState: async () => ({ revision: 9 }),
+    commitState: async () => {
+      calls.push("commit-state");
+      return { revision: 9 };
+    },
     applyRuntime: () => calls.push("apply")
   });
   assert.equal(result.ok, false);
   assert.equal(result.status, 502);
-  assert.deepEqual(result.state, { revision: 9 });
+  assert.equal("state" in result, false);
   assert.deepEqual(calls, ["discard"]);
 });
 
@@ -267,6 +277,8 @@ test("upsertEnvFile staging remains invisible until commit and can be discarded"
     assert.equal(readFileSync(file, "utf8"), "GEMINI_API_KEY=old\n");
     committed.commit();
     assert.equal(readFileSync(file, "utf8"), "GEMINI_API_KEY=new\n");
+    committed.rollback();
+    assert.equal(readFileSync(file, "utf8"), "GEMINI_API_KEY=old\n");
 
     writeFileSync(`${file}.crashed.pending`, "GEMINI_API_KEY=stale\n");
     discardStaleEnvFileStages(file);
