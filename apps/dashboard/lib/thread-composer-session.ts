@@ -22,6 +22,7 @@ export interface ThreadComposerAttachmentDescriptor {
 export interface ThreadComposerIntentDraft {
   attachments: ThreadComposerAttachmentDescriptor[];
   customScheduleValue: string;
+  recoveredScheduledFor?: string;
   replyToMessageId: string | null;
   source: ThreadComposerSource;
   text: string;
@@ -33,7 +34,9 @@ export interface ThreadComposerDraftRevision {
 }
 
 export interface ThreadComposerSession extends ThreadComposerIntentDraft {
+  createdAt?: number;
   draftRevision?: ThreadComposerDraftRevision | null;
+  recoveryClientSendId?: string;
   revision: number;
   revisionId: string;
 }
@@ -131,6 +134,11 @@ export function normalizeThreadComposerIntent(value: unknown): ThreadComposerInt
     typeof raw.text !== "string" ||
     !validSource(raw.source) ||
     typeof raw.customScheduleValue !== "string" ||
+    !(
+      raw.recoveredScheduledFor === undefined ||
+      (typeof raw.recoveredScheduledFor === "string" &&
+        Number.isFinite(Date.parse(raw.recoveredScheduledFor)))
+    ) ||
     !(raw.replyToMessageId === null || typeof raw.replyToMessageId === "string") ||
     !Array.isArray(raw.attachments)
   ) {
@@ -141,6 +149,9 @@ export function normalizeThreadComposerIntent(value: unknown): ThreadComposerInt
   return {
     attachments: attachments as ThreadComposerAttachmentDescriptor[],
     customScheduleValue: raw.customScheduleValue,
+    ...(typeof raw.recoveredScheduledFor === "string"
+      ? { recoveredScheduledFor: raw.recoveredScheduledFor }
+      : {}),
     replyToMessageId: raw.replyToMessageId,
     source: raw.source,
     text: raw.text
@@ -200,9 +211,21 @@ export function readThreadComposerSession(
     if (!revisionId) return null;
     const draftRevision = normalizeDraftRevision(parsed.draftRevision);
     if (parsed.draftRevision !== undefined && draftRevision === undefined) return null;
+    if (
+      parsed.recoveryClientSendId !== undefined &&
+      (typeof parsed.recoveryClientSendId !== "string" || !parsed.recoveryClientSendId)
+    ) return null;
+    if (
+      parsed.createdAt !== undefined &&
+      (typeof parsed.createdAt !== "number" || !Number.isFinite(parsed.createdAt))
+    ) return null;
     const session: ThreadComposerSession = {
       ...intent,
       ...(parsed.draftRevision !== undefined ? { draftRevision: draftRevision ?? null } : {}),
+      ...(typeof parsed.recoveryClientSendId === "string"
+        ? { recoveryClientSendId: parsed.recoveryClientSendId }
+        : {}),
+      ...(typeof parsed.createdAt === "number" ? { createdAt: parsed.createdAt } : {}),
       revision: parsed.revision as number,
       revisionId
     };
@@ -240,6 +263,10 @@ export function snapshotThreadComposerSession(
         : current && "draftRevision" in current
           ? { draftRevision: current.draftRevision ?? null }
           : {}),
+      ...(unchanged && current.recoveryClientSendId
+        ? { recoveryClientSendId: current.recoveryClientSendId }
+        : {}),
+      createdAt: unchanged ? current.createdAt ?? Date.now() : Date.now(),
       revision: unchanged ? current.revision : (current?.revision ?? 0) + 1,
       revisionId
     };
@@ -270,6 +297,7 @@ export function rotateThreadComposerSession(
         : current && "draftRevision" in current
           ? { draftRevision: current.draftRevision ?? null }
           : {}),
+      createdAt: Date.now(),
       revision: (current?.revision ?? 0) + 1,
       revisionId
     };
@@ -285,7 +313,8 @@ export function restoreThreadComposerSession(
   draft: ThreadComposerIntentDraft,
   revisionId: string,
   storage: StorageLike | null = defaultStorage(),
-  draftRevision?: ThreadComposerDraftRevision | null
+  draftRevision?: ThreadComposerDraftRevision | null,
+  recoveryClientSendId?: string
 ): ThreadComposerSession | null {
   if (!storage || !threadId || !revisionId) return null;
   const intent = normalizeThreadComposerIntent(draft);
@@ -293,6 +322,9 @@ export function restoreThreadComposerSession(
   try {
     const current = readThreadComposerSession(threadId, storage);
     const unchangedRecovery = current?.revisionId === revisionId;
+    const retainedRecoveryClientSendId =
+      recoveryClientSendId ??
+      (unchangedRecovery ? current?.recoveryClientSendId : undefined);
     const next: ThreadComposerSession = {
       ...intent,
       ...(draftRevision !== undefined
@@ -300,7 +332,11 @@ export function restoreThreadComposerSession(
         : current && "draftRevision" in current
           ? { draftRevision: current.draftRevision ?? null }
           : {}),
-      revision: unchangedRecovery ? current.revision : (current?.revision ?? 0) + 1,
+      ...(retainedRecoveryClientSendId
+        ? { recoveryClientSendId: retainedRecoveryClientSendId }
+        : {}),
+      createdAt: unchangedRecovery ? current?.createdAt ?? Date.now() : Date.now(),
+      revision: unchangedRecovery ? current!.revision : (current?.revision ?? 0) + 1,
       revisionId
     };
     storage.setItem(keyFor(threadId), JSON.stringify(next));

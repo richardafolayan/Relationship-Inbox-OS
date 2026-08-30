@@ -75,3 +75,16 @@ test("a newer request for the same key supersedes the earlier request", () => {
   assert.equal(gate.isLatest("thread-b", firstThreadB), false);
   assert.equal(gate.isLatest("thread-b", secondThreadB), true);
 });
+
+test("re-entering a route invalidates its previous visit before the new fetch starts", () => {
+  const gate = createLatestKeyedRequestGate();
+  const firstVisitA = gate.next("thread-a");
+  gate.next("thread-b");
+
+  const enteringA = gate.next("thread-a");
+  assert.equal(gate.isLatest("thread-a", firstVisitA), false);
+
+  const secondVisitA = gate.next("thread-a");
+  assert.equal(gate.isLatest("thread-a", enteringA), false);
+  assert.equal(gate.isLatest("thread-a", secondVisitA), true);
+});

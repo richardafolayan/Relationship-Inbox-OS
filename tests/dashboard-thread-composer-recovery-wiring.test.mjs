@@ -10,7 +10,7 @@ const source = readFileSync(
 
 test("thread navigation snapshots the previous full intent and restores only the new thread", () => {
   const start = source.indexOf("useLayoutEffect(() => {");
-  const end = source.indexOf("}, [composerAttachmentStore, externalActionAttempts, persistComposerSession, threadId]);", start);
+  const end = source.indexOf("useEffect(() => {", start);
   assert.notEqual(start, -1);
   assert.notEqual(end, -1);
   const lifecycle = source.slice(start, end);
@@ -96,7 +96,14 @@ test("completed composer generations suppress copied-tab duplicate sends", () =>
   assert.match(source, /sessionRevisionId: capturedSession\.revisionId,[\s\S]*?kind: "scheduled"/);
   assert.match(source, /readCompletedScopedValues<ThreadComposerSendAttemptValue>/);
   assert.match(source, /const restoredPredecessor = completedValues\.find/);
-  assert.match(source, /composerRecoveryResolution\(\s*restoredPredecessor/);
+  assert.match(source, /const recoveryClientSendId =/);
+  assert.match(source, /composerRecoveryResolution\(\s*\{ clientSendId: recoveryClientSendId \}/);
+  assert.match(source, /externalActionCompletedStorageKey/);
+  assert.match(source, /composerSessionDisposition\(startThreadId, capturedSession\)/);
+  assert.match(
+    source,
+    /const reconcileCompletedSession = \(\) => \{[\s\S]*?reconcileCompletedSession\(\);[\s\S]*?window\.addEventListener\("storage", onStorage\)/
+  );
   assert.match(source, /restoreThreadComposerSession\(/);
   assert.match(source, /value\.sessionRevisionId === storedSession\?\.revisionId/);
   assert.match(source, /value\.sessionRevisionId === capturedSession\.revisionId/);
@@ -127,10 +134,22 @@ test("a blocked NOT_FOUND recovery observes release, restoration, and successor 
   const blocked = status.slice(blockedStart, blockedEnd === -1 ? undefined : blockedEnd);
   assert.match(status.slice(blockedStart), /externalActionAttempts\.readScopedAttempt\(scope\)/);
   assert.match(status.slice(blockedStart), /composerRecoveryResolution\(/);
-  assert.match(source, /completeReleasedScopedValue/);
+  assert.doesNotMatch(source, /completeReleasedScopedValue/);
   assert.match(status.slice(blockedStart), /recordAlreadyReleased: true/);
   assert.notEqual(blockedStart, -1);
   assert.notEqual(blocked, "");
+});
+
+test("route entry invalidates an earlier visit before publishing the active route", () => {
+  const lifecycleStart = source.indexOf("// This dynamic route stays mounted");
+  const lifecycleEnd = source.indexOf("useEffect(() => {", lifecycleStart);
+  const lifecycle = source.slice(lifecycleStart, lifecycleEnd);
+  const invalidation = lifecycle.indexOf("threadRequestGate.next(threadId)");
+  const routePublication = lifecycle.indexOf("routeThreadIdRef.current = threadId");
+
+  assert.notEqual(invalidation, -1);
+  assert.notEqual(routePublication, -1);
+  assert.ok(invalidation < routePublication);
 });
 
 test("authoritative thread refreshes apply only the latest started request", () => {
@@ -303,6 +322,7 @@ test("terminal cleanup preserves attachment ids owned by a newer composer genera
   );
   assert.match(source, /composerIntentRef\.current\.attachments/);
   assert.match(source, /activeAttachmentIds\.has\(attachment\.id\)/);
+  assert.match(source, /removeUnowned/);
 });
 
 test("partial attachment recovery stays visible and blocks an incomplete send", () => {
@@ -321,6 +341,8 @@ test("cross-tab attachment recovery migrates ownership before removing the old p
   const migration = source.slice(start, end);
   assert.match(migration, /composerAttachmentStore\.put/);
   assert.match(migration, /externalActionAttempts\.compareAndReplaceScopedValue/);
-  assert.match(migration, /composerAttachmentStore\s*\.remove/);
-  assert.ok(migration.indexOf("compareAndReplaceScopedValue") < migration.indexOf(".remove("));
+  assert.match(migration, /composerAttachmentStore\s*\.removeUnowned/);
+  assert.ok(
+    migration.indexOf("compareAndReplaceScopedValue") < migration.indexOf(".removeUnowned(")
+  );
 });

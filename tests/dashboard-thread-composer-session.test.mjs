@@ -49,6 +49,7 @@ test("composer sessions preserve the complete per-thread send intent", () => {
   assert.deepEqual(readThreadComposerSession("thread-a", storage), saved);
   assert.deepEqual(saved, {
     attachments: [attachment],
+    createdAt: saved.createdAt,
     customScheduleValue: "2026-09-01T09:00",
     replyToMessageId: "message-parent",
     revision: 1,
@@ -56,6 +57,7 @@ test("composer sessions preserve the complete per-thread send intent", () => {
     source: "user",
     text: "Reply for A"
   });
+  assert.equal(Number.isFinite(saved.createdAt), true);
   assert.match(saved.revisionId, /^[0-9a-f-]{36}$/i);
 });
 
@@ -391,6 +393,36 @@ test("separate tabs restore a failed send under the same shared successor genera
   assert.equal(second.revisionId, "shared-successor-session");
   assert.deepEqual(readThreadComposerSession("thread-a", firstTab), first);
   assert.deepEqual(readThreadComposerSession("thread-a", secondTab), second);
+});
+
+test("a recovered session keeps its predecessor identity until the user changes intent", () => {
+  const storage = makeStorage();
+  const intent = {
+    attachments: [],
+    customScheduleValue: "",
+    replyToMessageId: null,
+    source: "user",
+    text: "Recovered reply"
+  };
+  const restored = restoreThreadComposerSession(
+    "thread-a",
+    intent,
+    "session-y",
+    storage,
+    null,
+    "send-x"
+  );
+
+  assert.equal(restored?.recoveryClientSendId, "send-x");
+  assert.equal(readThreadComposerSession("thread-a", storage)?.recoveryClientSendId, "send-x");
+
+  const edited = snapshotThreadComposerSession(
+    "thread-a",
+    { ...intent, text: "A meaningfully edited reply" },
+    storage
+  );
+  assert.notEqual(edited?.revisionId, restored?.revisionId);
+  assert.equal(edited?.recoveryClientSendId, undefined);
 });
 
 test("a definite failed send keeps only the draft revision captured by that attempt", () => {

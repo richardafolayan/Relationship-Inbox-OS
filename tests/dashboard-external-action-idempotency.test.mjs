@@ -380,7 +380,7 @@ test("a completed successor suppresses its restored predecessor after a stale-ta
   assert.equal(remounted.readScopedAttempt(scope), undefined);
 });
 
-test("privacy-safe restoration lineage survives finite sent-completion retention", async () => {
+test("restoration lineage is bounded and an expired predecessor fails closed", async () => {
   const values = new Map();
   const storage = {
     getItem: (key) => values.get(key) ?? null,
@@ -403,48 +403,43 @@ test("privacy-safe restoration lineage survives finite sent-completion retention
     await store.completeScopedValue(scope, () => true, true, sent);
   }
 
-  assert.equal(
-    store.readCompletedScopedValues(scope).some(
-      (value) => value.clientSendId === restored.clientSendId
-    ),
-    true
-  );
+  const completed = store.readCompletedScopedValues(scope);
+  assert.equal(completed.length, 100);
+  assert.equal(completed.some((value) => value.clientSendId === restored.clientSendId), false);
+  assert.equal(composerRecoveryResolution(restored, completed), null);
+  assert.equal(typeof store.readCompletedScopedState(scope).prunedBefore, "number");
 });
 
-test("only one stale tab can claim restoration after a legacy release without a tombstone", async () => {
+test("a torn completion record dominates the surviving active record", async () => {
   const values = new Map();
+  let rejectActiveRemoval = true;
   const storage = {
     getItem: (key) => values.get(key) ?? null,
     setItem: (key, value) => values.set(key, value),
-    removeItem: (key) => values.delete(key)
+    removeItem: (key) => {
+      if (rejectActiveRemoval && key.includes(":value:scoped:")) {
+        rejectActiveRemoval = false;
+        throw new Error("simulated crash before active cleanup");
+      }
+      values.delete(key);
+    }
   };
-  const scope = "legacy-released-composer";
-  const first = createExternalActionAttemptStore(storage);
-  const second = createExternalActionAttemptStore(storage);
-  const released = { clientSendId: "send-x" };
-  await first.getOrCreateScopedValue(scope, { generation: "x" }, () => released);
-  await first.completeScopedValue(scope, () => true);
+  const scope = "torn-composer-completion";
+  const store = createExternalActionAttemptStore(storage);
+  const active = { clientSendId: "send-x", notFoundRecovery: "blocked" };
   const tombstone = {
-    ...released,
+    ...active,
     resolution: "restored",
     restoredSessionRevisionId: "session-y"
   };
 
-  const results = await Promise.all([
-    first.completeReleasedScopedValue(
-      scope,
-      (value) => value.clientSendId === released.clientSendId,
-      tombstone
-    ),
-    second.completeReleasedScopedValue(
-      scope,
-      (value) => value.clientSendId === released.clientSendId,
-      tombstone
-    )
-  ]);
+  await store.getOrCreateScopedValue(scope, { generation: "x" }, () => active);
+  await assert.rejects(
+    store.compareAndCompleteScopedValue(scope, () => true, true, tombstone)
+  );
 
-  assert.deepEqual(results.sort(), [false, true]);
-  assert.deepEqual(first.readCompletedScopedValues(scope), [tombstone]);
+  assert.deepEqual(store.readCompletedScopedValues(scope), [tombstone]);
+  assert.equal(store.readScopedAttempt(scope), undefined);
 });
 
 test("a recovery claim must compare against shared state rather than a stale tab pin", async () => {

@@ -112,6 +112,25 @@ test("a shared attempt can recover attachment bytes from its originating namespa
   );
 });
 
+test("one tab cannot delete attachment bytes still owned by another tab", async () => {
+  const store = createMemoryThreadComposerAttachmentStore("shared-namespace");
+  const file = new File(["pilot attachment"], descriptor.name, {
+    lastModified: descriptor.lastModified,
+    type: descriptor.type
+  });
+  await store.put("thread-a", descriptor, file);
+  await store.claimOwnership("thread-a", [descriptor.id], "tab-a:session-x");
+  await store.claimOwnership("thread-a", [descriptor.id], "tab-b:session-y");
+
+  await store.releaseOwnership("thread-a", "tab-a:session-x");
+  await store.removeUnowned("thread-a", [descriptor.id]);
+  assert.equal((await store.read("thread-a", [descriptor])).length, 1);
+
+  await store.releaseOwnership("thread-a", "tab-b:session-y");
+  await store.removeUnowned("thread-a", [descriptor.id]);
+  assert.deepEqual(await store.read("thread-a", [descriptor]), []);
+});
+
 test("a tab keeps its recovery namespace without sharing a generated id", () => {
   const data = new Map();
   const storage = {

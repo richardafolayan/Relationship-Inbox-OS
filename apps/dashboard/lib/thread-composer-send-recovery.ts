@@ -203,39 +203,105 @@ export function composerIntentForRecovery(
   ) {
     return intent;
   }
-  return { ...intent, customScheduleValue: toLocalScheduleValue(scheduledFor) };
+  return {
+    ...intent,
+    customScheduleValue: toLocalScheduleValue(scheduledFor),
+    recoveredScheduledFor: scheduledFor
+  };
+}
+
+export function resolvedComposerScheduleInstant(
+  customScheduleValue: string,
+  recoveredScheduledFor?: string
+): Date {
+  if (
+    recoveredScheduledFor &&
+    validIsoDate(recoveredScheduledFor) &&
+    toLocalScheduleValue(recoveredScheduledFor) === customScheduleValue
+  ) {
+    return new Date(recoveredScheduledFor);
+  }
+  return new Date(customScheduleValue);
 }
 
 export function composerRecoveryResolution(
-  pending: ThreadComposerSendAttemptValue,
+  pending: Pick<ThreadComposerSendAttemptValue, "clientSendId">,
   completed: ThreadComposerSendAttemptValue[]
 ):
   | { kind: "restore"; sessionRevisionId: string }
   | { kind: "sent"; sessionRevisionId?: string }
   | null {
-  const directValues = completed.filter(
+  let candidates = completed.filter(
     (value) => value.clientSendId === pending.clientSendId
   );
-  const directSent = directValues.find((value) => value.resolution !== "restored");
-  if (directSent) {
-    return {
-      kind: "sent",
-      ...(directSent.sessionRevisionId
-        ? { sessionRevisionId: directSent.sessionRevisionId }
-        : {})
-    };
+  const visited = new Set<string>();
+  while (candidates.length > 0) {
+    const sent = candidates.filter((value) => value.resolution !== "restored");
+    const restored = candidates.filter((value) => value.resolution === "restored");
+    if (sent.length > 1 || restored.length > 1) {
+      return null;
+    }
+    const sentValue = sent[0];
+    if (sentValue) {
+      return {
+        kind: "sent",
+        ...(sentValue.sessionRevisionId
+          ? { sessionRevisionId: sentValue.sessionRevisionId }
+          : {})
+      };
+    }
+    const edge = restored[0];
+    if (!edge?.restoredSessionRevisionId) return null;
+    const successorSessionId = edge.restoredSessionRevisionId;
+    if (visited.has(successorSessionId)) return null;
+    visited.add(successorSessionId);
+    const successor = completed.filter(
+      (value) => value.sessionRevisionId === successorSessionId
+    );
+    if (successor.length === 0) {
+      return { kind: "restore", sessionRevisionId: successorSessionId };
+    }
+    candidates = successor;
   }
-  const direct = directValues.find((value) => value.resolution === "restored");
-  if (!direct) return null;
-  if (!direct.restoredSessionRevisionId) return null;
-  const successorSent = completed.some(
+  return null;
+}
+
+export function recoveredComposerSessionDisposition(
+  session: ThreadComposerSession,
+  completed: ThreadComposerSendAttemptValue[],
+  prunedBefore?: number
+): "active" | "blocked" | "sent" | "superseded" {
+  const terminal = completed.find(
     (value) =>
       value.resolution !== "restored" &&
-      value.sessionRevisionId === direct.restoredSessionRevisionId
+      value.sessionRevisionId === session.revisionId
   );
-  return successorSent
-    ? { kind: "sent", sessionRevisionId: direct.restoredSessionRevisionId }
-    : { kind: "restore", sessionRevisionId: direct.restoredSessionRevisionId };
+  if (terminal) return "sent";
+  const predecessor = session.recoveryClientSendId
+    ? { clientSendId: session.recoveryClientSendId }
+    : completed.find(
+        (value) =>
+          value.resolution === "restored" &&
+          value.sessionRevisionId === session.revisionId
+      );
+  if (!predecessor) {
+    if (
+      prunedBefore !== undefined &&
+      (session.createdAt === undefined || session.createdAt <= prunedBefore)
+    ) {
+      return "blocked";
+    }
+    return "active";
+  }
+  const resolution = composerRecoveryResolution(
+    predecessor,
+    completed
+  );
+  if (!resolution) return "blocked";
+  if (resolution.kind === "sent") return "sent";
+  return resolution.sessionRevisionId === session.revisionId
+    ? "active"
+    : "superseded";
 }
 
 export function composerClientSendId(

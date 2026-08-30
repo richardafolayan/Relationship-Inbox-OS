@@ -7,6 +7,12 @@ export interface RecoveredThreadComposerAttachment {
 
 export interface ThreadComposerAttachmentStore {
   readonly namespace: string;
+  claimOwnership(
+    threadId: string,
+    attachmentIds: string[],
+    ownerId: string,
+    namespace?: string
+  ): Promise<void>;
   put(
     threadId: string,
     descriptor: ThreadComposerAttachmentDescriptor,
@@ -19,6 +25,8 @@ export interface ThreadComposerAttachmentStore {
     namespace?: string
   ): Promise<RecoveredThreadComposerAttachment[]>;
   remove(threadId: string, attachmentIds: string[], namespace?: string): Promise<void>;
+  removeUnowned(threadId: string, attachmentIds: string[], namespace?: string): Promise<void>;
+  releaseOwnership(threadId: string, ownerId: string, namespace?: string): Promise<void>;
 }
 
 export async function assertThreadComposerAttachmentsRecoverable(
@@ -54,14 +62,25 @@ interface PersistedAttachmentRecord extends ThreadComposerAttachmentDescriptor {
   updatedAt: number;
 }
 
+interface PersistedAttachmentOwner {
+  attachmentKey: string;
+  key: string;
+  namespace: string;
+  ownerId: string;
+  ownerKey: string;
+  threadId: string;
+  updatedAt: number;
+}
+
 interface StorageLike {
   getItem(key: string): string | null;
   setItem(key: string, value: string): void;
 }
 
 const DATABASE_NAME = "tovi-composer-recovery";
-const DATABASE_VERSION = 1;
+const DATABASE_VERSION = 2;
 const ATTACHMENTS_STORE = "attachments";
+const OWNERS_STORE = "owners";
 const TAB_ID_KEY = "thread:composer-attachment-tab:v1";
 const STALE_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -90,6 +109,11 @@ function openDatabase(indexedDb: IDBFactory): Promise<IDBDatabase> {
       if (!database.objectStoreNames.contains(ATTACHMENTS_STORE)) {
         database.createObjectStore(ATTACHMENTS_STORE, { keyPath: "key" });
       }
+      if (!database.objectStoreNames.contains(OWNERS_STORE)) {
+        const owners = database.createObjectStore(OWNERS_STORE, { keyPath: "key" });
+        owners.createIndex("attachmentKey", "attachmentKey", { unique: false });
+        owners.createIndex("ownerKey", "ownerKey", { unique: false });
+      }
     };
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error ?? new Error("IndexedDB could not open."));
@@ -98,6 +122,19 @@ function openDatabase(indexedDb: IDBFactory): Promise<IDBDatabase> {
 
 function attachmentKey(tabId: string, threadId: string, attachmentId: string): string {
   return `${tabId}:${encodeURIComponent(threadId)}:${attachmentId}`;
+}
+
+function attachmentOwnerKey(namespace: string, threadId: string, ownerId: string): string {
+  return `${namespace}:${encodeURIComponent(threadId)}:${encodeURIComponent(ownerId)}`;
+}
+
+function attachmentOwnershipKey(
+  namespace: string,
+  threadId: string,
+  attachmentId: string,
+  ownerId: string
+): string {
+  return `${attachmentKey(namespace, threadId, attachmentId)}:${encodeURIComponent(ownerId)}`;
 }
 
 function descriptorMatches(
@@ -163,15 +200,33 @@ export function createIndexedDbThreadComposerAttachmentStore(
 
   const purgeStale = async () => {
     const db = await database();
-    const transaction = db.transaction(ATTACHMENTS_STORE, "readwrite");
+    const transaction = db.transaction([ATTACHMENTS_STORE, OWNERS_STORE], "readwrite");
+    const owners = transaction.objectStore(OWNERS_STORE);
+    const staleBefore = now() - STALE_AFTER_MS;
+    const ownerCursor = owners.openCursor();
+    ownerCursor.onsuccess = () => {
+      const cursor = ownerCursor.result;
+      if (!cursor) return;
+      const record = cursor.value as PersistedAttachmentOwner;
+      if (record.updatedAt < staleBefore) cursor.delete();
+      cursor.continue();
+    };
     const store = transaction.objectStore(ATTACHMENTS_STORE);
     const cursorRequest = store.openCursor();
     cursorRequest.onsuccess = () => {
       const cursor = cursorRequest.result;
       if (!cursor) return;
       const record = cursor.value as PersistedAttachmentRecord;
-      if (record.updatedAt < now() - STALE_AFTER_MS) cursor.delete();
-      cursor.continue();
+      if (record.updatedAt >= staleBefore) {
+        cursor.continue();
+        return;
+      }
+      const count = owners.index("attachmentKey").count(record.key);
+      count.onsuccess = () => {
+        if (count.result === 0) cursor.delete();
+        cursor.continue();
+      };
+      count.onerror = () => cursor.continue();
     };
     await transactionComplete(transaction);
   };
@@ -179,6 +234,26 @@ export function createIndexedDbThreadComposerAttachmentStore(
 
   return {
     namespace: tabId,
+    async claimOwnership(threadId, attachmentIds, ownerId, namespace = tabId) {
+      if (attachmentIds.length === 0) return;
+      const db = await database();
+      const transaction = db.transaction(OWNERS_STORE, "readwrite");
+      const store = transaction.objectStore(OWNERS_STORE);
+      const ownerKey = attachmentOwnerKey(namespace, threadId, ownerId);
+      for (const attachmentId of attachmentIds) {
+        const key = attachmentKey(namespace, threadId, attachmentId);
+        store.put({
+          attachmentKey: key,
+          key: attachmentOwnershipKey(namespace, threadId, attachmentId, ownerId),
+          namespace,
+          ownerId,
+          ownerKey,
+          threadId,
+          updatedAt: now()
+        } satisfies PersistedAttachmentOwner);
+      }
+      await transactionComplete(transaction);
+    },
     async put(threadId, descriptor, file, namespace = tabId) {
       const key = attachmentKey(namespace, threadId, descriptor.id);
       await runPending(key, async () => {
@@ -228,6 +303,35 @@ export function createIndexedDbThreadComposerAttachmentStore(
           })
         )
       );
+    },
+    async removeUnowned(threadId, attachmentIds, namespace = tabId) {
+      const db = await database();
+      const transaction = db.transaction([ATTACHMENTS_STORE, OWNERS_STORE], "readwrite");
+      const attachments = transaction.objectStore(ATTACHMENTS_STORE);
+      const owners = transaction.objectStore(OWNERS_STORE).index("attachmentKey");
+      for (const attachmentId of attachmentIds) {
+        const key = attachmentKey(namespace, threadId, attachmentId);
+        const count = owners.count(key);
+        count.onsuccess = () => {
+          if (count.result === 0) attachments.delete(key);
+        };
+      }
+      await transactionComplete(transaction);
+    },
+    async releaseOwnership(threadId, ownerId, namespace = tabId) {
+      const db = await database();
+      const transaction = db.transaction(OWNERS_STORE, "readwrite");
+      const cursorRequest = transaction
+        .objectStore(OWNERS_STORE)
+        .index("ownerKey")
+        .openKeyCursor(IDBKeyRange.only(attachmentOwnerKey(namespace, threadId, ownerId)));
+      cursorRequest.onsuccess = () => {
+        const cursor = cursorRequest.result;
+        if (!cursor) return;
+        transaction.objectStore(OWNERS_STORE).delete(cursor.primaryKey);
+        cursor.continue();
+      };
+      await transactionComplete(transaction);
     }
   };
 }
@@ -236,8 +340,17 @@ export function createMemoryThreadComposerAttachmentStore(
   namespace = "memory"
 ): ThreadComposerAttachmentStore {
   const records = new Map<string, PersistedAttachmentRecord>();
+  const owners = new Map<string, Set<string>>();
   return {
     namespace,
+    async claimOwnership(threadId, attachmentIds, ownerId, targetNamespace = namespace) {
+      for (const attachmentId of attachmentIds) {
+        const key = attachmentKey(targetNamespace, threadId, attachmentId);
+        const current = owners.get(key) ?? new Set<string>();
+        current.add(attachmentOwnerKey(targetNamespace, threadId, ownerId));
+        owners.set(key, current);
+      }
+    },
     async put(threadId, descriptor, file, targetNamespace = namespace) {
       records.set(attachmentKey(targetNamespace, threadId, descriptor.id), {
         ...descriptor,
@@ -260,7 +373,22 @@ export function createMemoryThreadComposerAttachmentStore(
     },
     async remove(threadId, attachmentIds, targetNamespace = namespace) {
       for (const attachmentId of attachmentIds) {
-        records.delete(attachmentKey(targetNamespace, threadId, attachmentId));
+        const key = attachmentKey(targetNamespace, threadId, attachmentId);
+        records.delete(key);
+        owners.delete(key);
+      }
+    },
+    async removeUnowned(threadId, attachmentIds, targetNamespace = namespace) {
+      for (const attachmentId of attachmentIds) {
+        const key = attachmentKey(targetNamespace, threadId, attachmentId);
+        if ((owners.get(key)?.size ?? 0) === 0) records.delete(key);
+      }
+    },
+    async releaseOwnership(threadId, ownerId, targetNamespace = namespace) {
+      const targetOwner = attachmentOwnerKey(targetNamespace, threadId, ownerId);
+      for (const [key, current] of owners) {
+        current.delete(targetOwner);
+        if (current.size === 0) owners.delete(key);
       }
     }
   };
@@ -286,6 +414,7 @@ export function defaultThreadComposerAttachmentStore(): ThreadComposerAttachment
 export const __test = {
   ATTACHMENTS_STORE,
   DATABASE_NAME,
+  OWNERS_STORE,
   STALE_AFTER_MS,
   TAB_ID_KEY,
   attachmentKey

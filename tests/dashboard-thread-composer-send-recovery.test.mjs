@@ -10,6 +10,8 @@ import {
   composerRecoveryResolution,
   composerReplayPreflight,
   composerSendRecoveryDisposition,
+  resolvedComposerScheduleInstant,
+  recoveredComposerSessionDisposition,
   missingThreadComposerAttachments,
   normalizeThreadComposerSendAttempt,
   shouldHideComposerSessionForAttempt,
@@ -142,6 +144,25 @@ test("a future quick-preset schedule restores its exact visible local time", () 
   const expected = `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
 
   assert.equal(recovered.customScheduleValue, expected);
+  assert.equal(recovered.recoveredScheduledFor, scheduledFor);
+});
+
+test("a recovered schedule preserves the exact instant across a DST overlap", () => {
+  const scheduledFor = "2026-10-25T01:30:00.000Z";
+  const recovered = composerIntentForRecovery(
+    { ...composerIntent, customScheduleValue: "" },
+    "scheduled",
+    scheduledFor,
+    Date.parse("2026-10-25T00:00:00.000Z")
+  );
+
+  assert.equal(
+    resolvedComposerScheduleInstant(
+      recovered.customScheduleValue,
+      recovered.recoveredScheduledFor
+    ).toISOString(),
+    scheduledFor
+  );
 });
 
 test("a restored predecessor shares one successor generation and is suppressed after it sends", () => {
@@ -173,6 +194,112 @@ test("a restored predecessor shares one successor generation and is suppressed a
     ]),
     { kind: "sent", sessionRevisionId: attempt.value.sessionRevisionId }
   );
+});
+
+test("restoration resolution follows every successor before deciding it was sent", () => {
+  const restoredY = {
+    ...attempt.value,
+    resolution: "restored",
+    restoredSessionRevisionId: "session-y"
+  };
+  const restoredZ = {
+    ...attempt.value,
+    clientSendId: "send-y",
+    resolution: "restored",
+    restoredSessionRevisionId: "session-z",
+    sessionRevisionId: "session-y"
+  };
+  const sentZ = {
+    ...attempt.value,
+    clientSendId: "send-z",
+    resolution: "sent",
+    sessionRevisionId: "session-z"
+  };
+
+  assert.deepEqual(
+    composerRecoveryResolution(attempt.value, [restoredY, restoredZ, sentZ]),
+    { kind: "sent", sessionRevisionId: "session-z" }
+  );
+});
+
+test("malformed or ambiguous restoration lineage fails closed", () => {
+  const restoredY = {
+    ...attempt.value,
+    resolution: "restored",
+    restoredSessionRevisionId: "session-y"
+  };
+  const conflictingY = {
+    ...restoredY,
+    restoredSessionRevisionId: "session-other"
+  };
+
+  assert.equal(
+    composerRecoveryResolution(attempt.value, [restoredY, conflictingY]),
+    null
+  );
+});
+
+test("another tab suppresses the exact restored session after immediate or scheduled acceptance", () => {
+  const session = {
+    ...composerIntent,
+    recoveryClientSendId: attempt.value.clientSendId,
+    revision: 4,
+    revisionId: "session-y"
+  };
+  const restored = {
+    ...attempt.value,
+    resolution: "restored",
+    restoredSessionRevisionId: "session-y"
+  };
+
+  for (const attemptKind of ["immediate", "scheduled"]) {
+    const accepted = {
+      ...attempt.value,
+      attemptKind,
+      clientSendId: `accepted-${attemptKind}`,
+      resolution: "sent",
+      sessionRevisionId: "session-y"
+    };
+    assert.equal(
+      recoveredComposerSessionDisposition(session, [restored, accepted]),
+      "sent"
+    );
+  }
+});
+
+test("an edited successor stays active and expired restoration proof fails closed", () => {
+  const recovered = {
+    ...composerIntent,
+    recoveryClientSendId: attempt.value.clientSendId,
+    revision: 4,
+    revisionId: "session-y"
+  };
+  const edited = {
+    ...composerIntent,
+    text: "Edited successor",
+    revision: 5,
+    revisionId: "session-z"
+  };
+
+  assert.equal(recoveredComposerSessionDisposition(recovered, []), "blocked");
+  assert.equal(recoveredComposerSessionDisposition(edited, []), "active");
+});
+
+test("a session older than truncated completion evidence fails closed", () => {
+  const oldSession = {
+    ...composerIntent,
+    createdAt: 100,
+    revision: 1,
+    revisionId: "old-session"
+  };
+  const newSession = {
+    ...oldSession,
+    createdAt: 300,
+    revisionId: "new-session"
+  };
+
+  assert.equal(recoveredComposerSessionDisposition(oldSession, [], 200), "blocked");
+  assert.equal(recoveredComposerSessionDisposition(newSession, [], 200), "active");
 });
 
 test("dispatch failures stay unresolved when the response can follow durable insertion", () => {
