@@ -124,6 +124,17 @@ test("completed composer generations suppress copied-tab duplicate sends", () =>
   assert.match(source, /value\.scheduledFor === attemptIntent\.scheduledFor/);
   assert.match(source, /composerNotFoundRecoveryOnResume/);
   assert.match(source, /pending\.notFoundRecovery !== "replay"/);
+  assert.match(
+    source,
+    /const replayIntent:[\s\S]*?pending\.recoveryPredecessorClientSendId[\s\S]*?recoveryPredecessorClientSendId:[\s\S]*?pending\.recoveryPredecessorClientSendId/
+  );
+  assert.equal(
+    source.match(
+      /recoveryPredecessorClientSendId:\s*attempt!?\.intent\.recoveryPredecessorClientSendId/g
+    )?.length,
+    4,
+    "every durable PendingSend reconstruction must retain its predecessor"
+  );
 });
 
 test("attachment restoration blocks send and schedule until every intended file is resolved", () => {

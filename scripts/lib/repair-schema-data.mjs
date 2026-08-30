@@ -9,6 +9,8 @@ const DRAFT_THREAD_INDEX = "drafts_threadId_key";
 const SEND_SOURCE_COLUMN = "source";
 const SEND_DRAFT_CONSUMED_COLUMN = "draftConsumed";
 const SEND_RECOVERY_PREDECESSOR_COLUMN = "recoveryPredecessorClientSendId";
+const SEND_RECOVERY_PREDECESSOR_INDEX =
+  "send_requests_recoveryPredecessorClientSendId_key";
 const SEND_SOURCE_REPAIR_MARKER_ID = "data_repair_send_request_source_v2";
 const SEND_SOURCE_REPAIR_MARKER_KEY = "data_repair_send_request_source_v2";
 const SEND_SOURCE_REPAIR_MARKER_VALUE = '{"version":2}';
@@ -139,28 +141,125 @@ export function hasSendRequestRecoveryPredecessorColumn(database) {
   );
 }
 
+export function hasSendRequestRecoveryPredecessorIndex(database) {
+  const index = database
+    .prepare('PRAGMA index_list("send_requests")')
+    .all()
+    .find((candidate) => candidate.name === SEND_RECOVERY_PREDECESSOR_INDEX);
+  if (!index || Number(index.unique) !== 1 || Number(index.partial) !== 0) {
+    return false;
+  }
+  const columns = database
+    .prepare(`PRAGMA index_info("${SEND_RECOVERY_PREDECESSOR_INDEX}")`)
+    .all()
+    .map((column) => column.name);
+  return columns.length === 1 && columns[0] === SEND_RECOVERY_PREDECESSOR_COLUMN;
+}
+
 export function repairSendRequestRecoveryPredecessorColumn(database) {
   const sendRequestsTable = database
     .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'send_requests'")
     .get();
   if (!sendRequestsTable) return { columnAdded: false };
-  if (hasSendRequestRecoveryPredecessorColumn(database)) {
-    return { columnAdded: false };
-  }
   const existingColumn = database
     .prepare('PRAGMA table_info("send_requests")')
     .all()
     .find((candidate) => candidate.name === SEND_RECOVERY_PREDECESSOR_COLUMN);
-  if (existingColumn) {
+  if (existingColumn && !hasSendRequestRecoveryPredecessorColumn(database)) {
     throw new Error("Existing send recovery predecessor column is incompatible");
   }
-  database.exec(
-    'ALTER TABLE "send_requests" ADD COLUMN "recoveryPredecessorClientSendId" TEXT'
-  );
-  if (!hasSendRequestRecoveryPredecessorColumn(database)) {
-    throw new Error("Send recovery predecessor column could not be validated");
-  }
-  return { columnAdded: true };
+  return database.transaction(() => {
+    const columnAdded = !existingColumn;
+    if (columnAdded) {
+      database.exec(
+        'ALTER TABLE "send_requests" ADD COLUMN "recoveryPredecessorClientSendId" TEXT'
+      );
+    }
+    if (!hasSendRequestRecoveryPredecessorColumn(database)) {
+      throw new Error("Send recovery predecessor column could not be validated");
+    }
+
+    const duplicatePredecessors = database
+      .prepare(`
+        SELECT "${SEND_RECOVERY_PREDECESSOR_COLUMN}" AS "predecessorId"
+        FROM "send_requests"
+        WHERE "${SEND_RECOVERY_PREDECESSOR_COLUMN}" IS NOT NULL
+        GROUP BY "${SEND_RECOVERY_PREDECESSOR_COLUMN}"
+        HAVING COUNT(*) > 1
+      `)
+      .all();
+    let duplicateSuccessorsBlocked = 0;
+    if (duplicatePredecessors.length > 0) {
+      const columns = new Set(
+        database
+          .prepare('PRAGMA table_info("send_requests")')
+          .all()
+          .map((column) => column.name)
+      );
+      for (const required of ["id", "status", "errorJson"]) {
+        if (!columns.has(required)) {
+          throw new Error(
+            `Send request recovery lineage repair requires ${required}`
+          );
+        }
+      }
+      const clearTerminalDuplicate = database.prepare(`
+        UPDATE "send_requests"
+        SET "${SEND_RECOVERY_PREDECESSOR_COLUMN}" = NULL
+        WHERE "id" = ?
+      `);
+      const blockUnresolvedDuplicate = database.prepare(`
+        UPDATE "send_requests"
+        SET
+          "status" = 'FAILED',
+          "errorJson" = ?,
+          "${SEND_RECOVERY_PREDECESSOR_COLUMN}" = NULL
+        WHERE "id" = ?
+      `);
+      for (const { predecessorId } of duplicatePredecessors) {
+        const successors = database
+          .prepare(`
+            SELECT "id", "status"
+            FROM "send_requests"
+            WHERE "${SEND_RECOVERY_PREDECESSOR_COLUMN}" = ?
+            ORDER BY CASE WHEN "status" = 'SENT' THEN 0 ELSE 1 END, "id" ASC
+          `)
+          .all(predecessorId);
+        for (const successor of successors.slice(1)) {
+          if (successor.status === "SENT") {
+            clearTerminalDuplicate.run(successor.id);
+          } else {
+            blockUnresolvedDuplicate.run(
+              JSON.stringify({
+                errorKind: "DELIVERY_UNCERTAIN",
+                message:
+                  "Another recovered send already claimed this predecessor",
+                reasonCode: "recovery_predecessor_already_claimed"
+              }),
+              successor.id
+            );
+          }
+          duplicateSuccessorsBlocked += 1;
+        }
+      }
+    }
+
+    const hadCorrectIndex = hasSendRequestRecoveryPredecessorIndex(database);
+    if (!hadCorrectIndex) {
+      database.exec(`DROP INDEX IF EXISTS "${SEND_RECOVERY_PREDECESSOR_INDEX}"`);
+      database.exec(
+        `CREATE UNIQUE INDEX "${SEND_RECOVERY_PREDECESSOR_INDEX}" ON "send_requests"("${SEND_RECOVERY_PREDECESSOR_COLUMN}")`
+      );
+    }
+    if (!hasSendRequestRecoveryPredecessorIndex(database)) {
+      throw new Error("Send recovery predecessor uniqueness could not be validated");
+    }
+    return {
+      columnAdded,
+      duplicateSuccessorsBlocked,
+      indexCreated: !hadCorrectIndex
+    };
+  }).immediate();
 }
 
 function sendRequestSourceRepairMarker(database) {
@@ -285,7 +384,8 @@ function runCli() {
         !hasCorrectDraftThreadIndex(database) ||
         sendRequestSourceRequiresRepair(database) ||
         !hasSendRequestDraftConsumedColumn(database) ||
-        !hasSendRequestRecoveryPredecessorColumn(database)
+        !hasSendRequestRecoveryPredecessorColumn(database) ||
+        !hasSendRequestRecoveryPredecessorIndex(database)
       ) {
         process.exitCode = 2;
       }

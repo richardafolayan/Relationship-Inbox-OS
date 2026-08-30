@@ -330,10 +330,10 @@ export function recoveryPredecessorIsDefinitelyUnsent(
   status: string,
   errorJson?: string | null
 ): boolean {
-  return (
-    status === "CANCELLED" ||
-    persistedSendRetryEligibility(status, errorJson).allowed
-  );
+  if (status === "CANCELLED") {
+    return parsePersistedSendFailure(errorJson).errorKind !== "POLICY_BLOCKED";
+  }
+  return persistedSendRetryEligibility(status, errorJson).allowed;
 }
 
 export function createSendService(deps: SendServiceDeps) {
@@ -360,29 +360,33 @@ export function createSendService(deps: SendServiceDeps) {
       threadId: string;
     }
   ): Promise<void> {
-    const predecessorId = input.recoveryPredecessorClientSendId;
-    if (!predecessorId) return;
-    if (predecessorId === input.clientSendId) {
-      throw new SendPolicyError(
-        "recovery_predecessor_identity_reused",
-        "Recovered sends require a distinct successor identity"
-      );
-    }
-    const predecessor = await database.sendRequest.findUnique({
-      where: { clientSendId: predecessorId }
-    });
-    if (
-      !predecessor ||
-      predecessor.threadId !== input.threadId ||
-      !recoveryPredecessorIsDefinitelyUnsent(
-        predecessor.status,
-        predecessor.errorJson
-      )
-    ) {
-      throw new SendPolicyError(
-        "recovery_predecessor_not_retryable",
-        "The earlier send is no longer definitely unsent"
-      );
+    let predecessorId = input.recoveryPredecessorClientSendId;
+    const visited = new Set([input.clientSendId]);
+    while (predecessorId) {
+      if (visited.has(predecessorId)) {
+        throw new SendPolicyError(
+          "recovery_predecessor_cycle",
+          "Recovered send lineage is cyclic"
+        );
+      }
+      visited.add(predecessorId);
+      const predecessor = await database.sendRequest.findUnique({
+        where: { clientSendId: predecessorId }
+      });
+      if (
+        !predecessor ||
+        predecessor.threadId !== input.threadId ||
+        !recoveryPredecessorIsDefinitelyUnsent(
+          predecessor.status,
+          predecessor.errorJson
+        )
+      ) {
+        throw new SendPolicyError(
+          "recovery_predecessor_not_retryable",
+          "The earlier send is no longer definitely unsent"
+        );
+      }
+      predecessorId = predecessor.recoveryPredecessorClientSendId ?? undefined;
     }
   }
 
@@ -1123,19 +1127,15 @@ export function createSendService(deps: SendServiceDeps) {
     // concurrent workers and crash recovery idempotent.
     const claim = await prisma.$transaction(async (transaction) => {
       if (sendRequest.recoveryPredecessorClientSendId) {
-        const predecessor = await transaction.sendRequest.findUnique({
-          where: {
-            clientSendId: sendRequest.recoveryPredecessorClientSendId
-          }
-        });
-        if (
-          !predecessor ||
-          predecessor.threadId !== sendRequest.threadId ||
-          !recoveryPredecessorIsDefinitelyUnsent(
-            predecessor.status,
-            predecessor.errorJson
-          )
-        ) {
+        try {
+          await assertRecoveryPredecessorEligible(transaction, {
+            clientSendId: sendRequest.clientSendId,
+            recoveryPredecessorClientSendId:
+              sendRequest.recoveryPredecessorClientSendId,
+            threadId: sendRequest.threadId
+          });
+        } catch (error) {
+          if (!(error instanceof SendPolicyError)) throw error;
           await transaction.sendRequest.updateMany({
             where: {
               id: sendRequestId,
@@ -1146,8 +1146,8 @@ export function createSendService(deps: SendServiceDeps) {
               status: "CANCELLED",
               errorJson: JSON.stringify({
                 errorKind: "POLICY_BLOCKED",
-                message:
-                  "The earlier send is no longer definitely unsent"
+                message: error.message,
+                reasonCode: error.reasonCode
               })
             }
           });
@@ -1207,24 +1207,14 @@ export function createSendService(deps: SendServiceDeps) {
     }
 
     async function assertRecoveryPredecessorDispatchEligible(): Promise<void> {
-      const predecessorId = claimedSendRequest.recoveryPredecessorClientSendId;
-      if (!predecessorId) return;
-      const predecessor = await prisma.sendRequest.findUnique({
-        where: { clientSendId: predecessorId }
-      });
-      if (
-        !predecessor ||
-        predecessor.threadId !== claimedSendRequest.threadId ||
-        !recoveryPredecessorIsDefinitelyUnsent(
-          predecessor.status,
-          predecessor.errorJson
-        )
-      ) {
-        throw new SendPolicyError(
-          "recovery_predecessor_not_retryable",
-          "The earlier send is no longer definitely unsent"
-        );
-      }
+      await prisma.$transaction((transaction) =>
+        assertRecoveryPredecessorEligible(transaction, {
+          clientSendId: claimedSendRequest.clientSendId,
+          recoveryPredecessorClientSendId:
+            claimedSendRequest.recoveryPredecessorClientSendId ?? undefined,
+          threadId: claimedSendRequest.threadId
+        })
+      );
     }
 
     async function persistDeliveredReceipt(receipt: SendReceipt): Promise<void> {

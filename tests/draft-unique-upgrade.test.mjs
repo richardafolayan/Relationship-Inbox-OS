@@ -109,6 +109,27 @@ function assertUniqueDraftIndex(database) {
   );
 }
 
+function assertUniqueRecoveryPredecessorIndex(database) {
+  const index = database
+    .prepare('PRAGMA index_list("send_requests")')
+    .all()
+    .find(
+      (candidate) =>
+        candidate.name ===
+        "send_requests_recoveryPredecessorClientSendId_key"
+    );
+  assert.equal(index?.unique, 1);
+  assert.deepEqual(
+    database
+      .prepare(
+        'PRAGMA index_info("send_requests_recoveryPredecessorClientSendId_key")'
+      )
+      .all()
+      .map((column) => column.name),
+    ["recoveryPredecessorClientSendId"]
+  );
+}
+
 function currentSchemaHash() {
   const schemaPath = join(appDir, "packages/core/prisma/schema.prisma");
   return createHash("sha256")
@@ -663,6 +684,122 @@ test("a current-stamp predecessor database gains send safety columns without los
       .find((column) => column.name === "recoveryPredecessorClientSendId");
     assert.equal(predecessorColumn?.type, "TEXT");
     assert.equal(predecessorColumn?.notnull, 0);
+    assertUniqueRecoveryPredecessorIndex(database);
+    database.close();
+  } finally {
+    cleanup();
+  }
+});
+
+test("repair deterministically arbitrates duplicate recovery successors before adding uniqueness", () => {
+  const { databasePath, cleanup } = fixture();
+  try {
+    writeFileSync(databasePath, "", { mode: 0o600 });
+    const pushed = runCurrentSchemaPush(databasePath);
+    assert.equal(pushed.status, 0, `${pushed.stdout}\n${pushed.stderr}`);
+    let database = new Database(databasePath);
+    database.pragma("foreign_keys = OFF");
+    database.exec(
+      'DROP INDEX IF EXISTS "send_requests_recoveryPredecessorClientSendId_key"'
+    );
+    const insert = database.prepare(`
+      INSERT INTO "send_requests" (
+        "id", "clientSendId", "threadId", "status", "requestText",
+        "draftConsumed", "source", "receiptJson", "errorJson",
+        "recoveryPredecessorClientSendId", "createdAt", "updatedAt"
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    const now = Date.now();
+    insert.run(
+      "a-pending",
+      "pending-successor",
+      "thread-1",
+      "PENDING",
+      "same intent",
+      0,
+      "manual",
+      null,
+      null,
+      "failed-predecessor",
+      now,
+      now
+    );
+    insert.run(
+      "z-sent",
+      "sent-successor",
+      "thread-1",
+      "SENT",
+      "same intent",
+      0,
+      "manual",
+      JSON.stringify({ sentAt: "2026-08-30T09:00:00.000Z" }),
+      null,
+      "failed-predecessor",
+      now + 1,
+      now + 1
+    );
+    database.close();
+
+    runRepair(databasePath);
+    runRepair(databasePath);
+
+    database = new Database(databasePath);
+    assertUniqueRecoveryPredecessorIndex(database);
+    assert.deepEqual(
+      database
+        .prepare(`
+          SELECT "id", "status", "recoveryPredecessorClientSendId", "errorJson"
+          FROM "send_requests"
+          ORDER BY "id"
+        `)
+        .all()
+        .map((row) => ({
+          ...row,
+          errorJson: row.errorJson ? JSON.parse(row.errorJson) : null
+        })),
+      [
+        {
+          id: "a-pending",
+          status: "FAILED",
+          recoveryPredecessorClientSendId: null,
+          errorJson: {
+            errorKind: "DELIVERY_UNCERTAIN",
+            message: "Another recovered send already claimed this predecessor",
+            reasonCode: "recovery_predecessor_already_claimed"
+          }
+        },
+        {
+          id: "z-sent",
+          status: "SENT",
+          recoveryPredecessorClientSendId: "failed-predecessor",
+          errorJson: null
+        }
+      ]
+    );
+    const insertAfterRepair = database.prepare(`
+      INSERT INTO "send_requests" (
+        "id", "clientSendId", "threadId", "status", "requestText",
+        "draftConsumed", "source", "receiptJson", "errorJson",
+        "recoveryPredecessorClientSendId", "createdAt", "updatedAt"
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    assert.throws(
+      () => insertAfterRepair.run(
+        "third",
+        "third-successor",
+        "thread-1",
+        "PENDING",
+        "same intent",
+        0,
+        "manual",
+        null,
+        null,
+        "failed-predecessor",
+        now + 2,
+        now + 2
+      ),
+      /UNIQUE constraint failed/
+    );
     database.close();
   } finally {
     cleanup();

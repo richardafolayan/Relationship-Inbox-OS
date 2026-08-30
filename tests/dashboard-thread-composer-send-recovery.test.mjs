@@ -314,6 +314,13 @@ test("recovered replies require an authoritative definite failure before another
   assert.equal(recoveredComposerAuthoritativeDisposition({ status: "SCHEDULED" }), "sent");
   assert.equal(recoveredComposerAuthoritativeDisposition({ status: "FAILED" }), "retryable");
   assert.equal(recoveredComposerAuthoritativeDisposition({ status: "CANCELLED" }), "retryable");
+  assert.equal(
+    recoveredComposerAuthoritativeDisposition({
+      status: "CANCELLED",
+      errorKind: "POLICY_BLOCKED"
+    }),
+    "blocked"
+  );
   assert.equal(recoveredComposerAuthoritativeDisposition({ status: "NOT_FOUND" }), "blocked");
   assert.equal(recoveredComposerAuthoritativeDisposition({ status: "PENDING" }), "blocked");
   assert.equal(
@@ -403,17 +410,13 @@ test("serialized recovery drains a skipped queued item before restoring the next
 
   const a = runSerializedComposerRecovery({ key: "A", run, state, value: "A" });
   await Promise.resolve();
-  assert.equal(
-    await runSerializedComposerRecovery({ key: "B", run, state, value: "B" }),
-    "queued"
-  );
-  assert.equal(
-    await runSerializedComposerRecovery({ key: "C", run, state, value: "C" }),
-    "queued"
-  );
+  const b = runSerializedComposerRecovery({ key: "B", run, state, value: "B" });
+  const c = runSerializedComposerRecovery({ key: "C", run, state, value: "C" });
   releaseA();
 
   assert.equal(await a, "processed");
+  assert.equal(await b, "queued");
+  assert.equal(await c, "queued");
   assert.deepEqual(events, [
     "start:A:false",
     "restore:A",
@@ -439,10 +442,17 @@ test("serialized recovery cannot let a duplicate active key strand a later item"
 
   const a = runSerializedComposerRecovery({ key: "A", run, state, value: "A-first" });
   await Promise.resolve();
-  await runSerializedComposerRecovery({ key: "A", run, state, value: "A-duplicate" });
-  await runSerializedComposerRecovery({ key: "C", run, state, value: "C" });
+  const duplicate = runSerializedComposerRecovery({
+    key: "A",
+    run,
+    state,
+    value: "A-duplicate"
+  });
+  const c = runSerializedComposerRecovery({ key: "C", run, state, value: "C" });
   releaseA();
   await a;
+  assert.equal(await duplicate, "queued");
+  assert.equal(await c, "queued");
 
   assert.deepEqual(events, ["A-first:false", "A-duplicate:true", "C:true"]);
   assert.equal(state.active, false);
@@ -464,11 +474,13 @@ test("serialized recovery drains later work after a queued recovery throws", asy
 
   const a = runSerializedComposerRecovery({ key: "A", run, state, value: "A" });
   await Promise.resolve();
-  await runSerializedComposerRecovery({ key: "B", run, state, value: "B" });
-  await runSerializedComposerRecovery({ key: "C", run, state, value: "C" });
+  const b = runSerializedComposerRecovery({ key: "B", run, state, value: "B" });
+  const c = runSerializedComposerRecovery({ key: "C", run, state, value: "C" });
   releaseA();
 
-  await assert.rejects(a, /B failed/);
+  assert.equal(await a, "processed");
+  await assert.rejects(b, /B failed/);
+  assert.equal(await c, "queued");
   assert.deepEqual(events, ["A", "B", "C"]);
   assert.equal(state.active, false);
   assert.equal(state.queued.size, 0);
@@ -624,4 +636,11 @@ test("delivery recovery retains ambiguity, replays missing status with the same 
   );
   assert.equal(composerSendRecoveryDisposition({ status: "FAILED" }), "restore");
   assert.equal(composerSendRecoveryDisposition({ status: "CANCELLED" }), "restore");
+  assert.equal(
+    composerSendRecoveryDisposition({
+      status: "CANCELLED",
+      errorKind: "POLICY_BLOCKED"
+    }),
+    "retain_uncertain"
+  );
 });

@@ -436,6 +436,12 @@ export function composerSendRecoveryDisposition(status: {
   if (status.status === "PENDING") return "retain";
   if (status.status === "NOT_FOUND") return "replay_same_id";
   if (
+    status.status === "CANCELLED" &&
+    status.errorKind === "POLICY_BLOCKED"
+  ) {
+    return "retain_uncertain";
+  }
+  if (
     status.status === "FAILED" &&
     (status.deliveryUncertain || status.errorKind === "DELIVERY_UNCERTAIN")
   ) {
@@ -497,9 +503,17 @@ export async function runComposerReplayRouteFence<TClaim>({
   return { claimed, kind: "dispatched" };
 }
 
+interface SerializedComposerRecoveryQueueItem<T> {
+  value: T;
+  waiters: Array<{
+    reject: (reason?: unknown) => void;
+    resolve: (result: "queued") => void;
+  }>;
+}
+
 export interface SerializedComposerRecoveryState<T> {
   active: boolean;
-  queued: Map<string, T>;
+  queued: Map<string, SerializedComposerRecoveryQueueItem<T>>;
 }
 
 export function createSerializedComposerRecoveryState<T>(): SerializedComposerRecoveryState<T> {
@@ -518,35 +532,46 @@ export async function runSerializedComposerRecovery<T>({
   value: T;
 }): Promise<"processed" | "queued"> {
   if (state.active) {
-    state.queued.set(key, value);
-    return "queued";
+    return new Promise((resolve, reject) => {
+      const existing = state.queued.get(key);
+      if (existing) {
+        existing.value = value;
+        existing.waiters.push({ reject, resolve });
+      } else {
+        state.queued.set(key, {
+          value,
+          waiters: [{ reject, resolve }]
+        });
+      }
+    });
   }
 
   state.active = true;
-  let current: { value: T; wasQueued: boolean } | undefined = {
-    value,
-    wasQueued: false
-  };
-  let firstError: unknown;
+  let activeError: unknown;
   try {
-    while (current) {
-      try {
-        await run(current.value, current.wasQueued);
-      } catch (error) {
-        firstError ??= error;
-      }
-      const next = state.queued.entries().next().value as [string, T] | undefined;
-      if (!next) {
-        current = undefined;
-        continue;
-      }
+    try {
+      await run(value, false);
+    } catch (error) {
+      activeError = error;
+    }
+    let next = state.queued.entries().next().value as
+      | [string, SerializedComposerRecoveryQueueItem<T>]
+      | undefined;
+    while (next) {
       state.queued.delete(next[0]);
-      current = { value: next[1], wasQueued: true };
+      const queued = next[1];
+      try {
+        await run(queued.value, true);
+        for (const waiter of queued.waiters) waiter.resolve("queued");
+      } catch (error) {
+        for (const waiter of queued.waiters) waiter.reject(error);
+      }
+      next = state.queued.entries().next().value as typeof next;
     }
   } finally {
     state.active = false;
   }
-  if (firstError) throw firstError;
+  if (activeError) throw activeError;
   return "processed";
 }
 

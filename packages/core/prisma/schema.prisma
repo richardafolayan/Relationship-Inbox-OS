@@ -620,7 +620,7 @@ model SendRequest {
   replyToMessageId String?
   // A recovered successor may dispatch only while this earlier request is
   // still authoritatively and definitely unsent.
-  recoveryPredecessorClientSendId String?
+  recoveryPredecessorClientSendId String? @unique
   createdAt    DateTime          @default(now())
   updatedAt    DateTime          @updatedAt
 

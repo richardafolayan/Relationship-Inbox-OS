@@ -336,6 +336,7 @@ type PendingSend = {
   composerIntent?: ThreadComposerIntentDraft;
   attemptKind?: "immediate" | "scheduled";
   draftRevision?: ThreadComposerDraftRevision | null;
+  recoveryPredecessorClientSendId?: string;
   notFoundRecovery?: "blocked" | "replay" | "restore";
   scheduledFor?: string | null;
   sessionRevision?: number;
@@ -3987,6 +3988,12 @@ export default function ThreadPage() {
           const replayIntent: ThreadComposerSendAttemptIntent = {
             composerIntent: pending.composerIntent,
             draftRevision: pending.draftRevision ?? null,
+            ...(pending.recoveryPredecessorClientSendId
+              ? {
+                  recoveryPredecessorClientSendId:
+                    pending.recoveryPredecessorClientSendId
+                }
+              : {}),
             ...(pending.sessionRevisionId
               ? { sessionRevisionId: pending.sessionRevisionId }
               : {}),
@@ -4337,6 +4344,8 @@ export default function ThreadPage() {
                 : undefined,
               failed: incomplete,
               notFoundRecovery: attempt.value.notFoundRecovery,
+              recoveryPredecessorClientSendId:
+                attempt.intent.recoveryPredecessorClientSendId,
               scheduledFor: attempt.intent.scheduledFor,
               sentAt: attempt.value.requestedAt,
               sessionRevision: attempt.value.sessionRevision,
@@ -4363,6 +4372,8 @@ export default function ThreadPage() {
                 "The saved attachment set could not be read. Check delivery before trying again.",
               failed: true,
               notFoundRecovery: attempt.value.notFoundRecovery,
+              recoveryPredecessorClientSendId:
+                attempt.intent.recoveryPredecessorClientSendId,
               scheduledFor: attempt.intent.scheduledFor,
               sentAt: attempt.value.requestedAt,
               sessionRevision: attempt.value.sessionRevision,
@@ -4517,6 +4528,8 @@ export default function ThreadPage() {
             : undefined,
           failed: incomplete,
           notFoundRecovery: attempt!.value.notFoundRecovery,
+          recoveryPredecessorClientSendId:
+            attempt!.intent.recoveryPredecessorClientSendId,
           scheduledFor: attempt!.intent.scheduledFor,
           sentAt: attempt!.value.requestedAt,
           sessionRevision: attempt!.value.sessionRevision,
@@ -4551,6 +4564,8 @@ export default function ThreadPage() {
           errorMessage: "The saved attachment set could not be read. Check delivery before trying again.",
           failed: true,
           notFoundRecovery: attempt!.value.notFoundRecovery,
+          recoveryPredecessorClientSendId:
+            attempt!.intent.recoveryPredecessorClientSendId,
           scheduledFor: attempt!.intent.scheduledFor,
           sentAt: attempt!.value.requestedAt,
           sessionRevision: attempt!.value.sessionRevision,
@@ -4869,6 +4884,8 @@ export default function ThreadPage() {
       composerIntent: capturedIntent,
       draftRevision,
       notFoundRecovery: attemptValue.notFoundRecovery,
+      recoveryPredecessorClientSendId:
+        attemptIntent.recoveryPredecessorClientSendId,
       scheduledFor: null,
       sentAt: attemptValue.requestedAt,
       sessionRevision: attemptValue.sessionRevision,
@@ -5854,6 +5871,8 @@ export default function ThreadPage() {
           composerIntent: capturedIntent,
           draftRevision,
           notFoundRecovery: attemptValue.notFoundRecovery,
+          recoveryPredecessorClientSendId:
+            attemptIntent.recoveryPredecessorClientSendId,
           scheduledFor,
           sentAt: attemptValue.requestedAt,
           sessionRevision: attemptValue.sessionRevision,

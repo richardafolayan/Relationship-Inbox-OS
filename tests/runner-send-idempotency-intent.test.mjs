@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Prisma } from "@prisma/client";
-import { createSendService } from "../apps/runner/dist/services/send.js";
+import {
+  createSendService,
+  recoveryPredecessorIsDefinitelyUnsent
+} from "../apps/runner/dist/services/send.js";
 
 const noopEventBus = { emit: () => {}, nextEventId: () => 1, subscribe: () => () => {} };
 
@@ -50,6 +53,16 @@ function harness({ createRaceWinner } = {}) {
         createCalls += 1;
         if (createRaceWinner) {
           rows.push({ id: "winner", receiptJson: null, errorJson: null, ...createRaceWinner(data) });
+          throw uniqueError();
+        }
+        if (
+          data.recoveryPredecessorClientSendId &&
+          rows.some(
+            (candidate) =>
+              candidate.recoveryPredecessorClientSendId ===
+              data.recoveryPredecessorClientSendId
+          )
+        ) {
           throw uniqueError();
         }
         const row = {
@@ -157,6 +170,140 @@ test("a recovered immediate send requires a definitely unsent predecessor", asyn
   assert.equal(allowed.rows[1].recoveryPredecessorClientSendId, predecessorId);
 });
 
+test("a policy-cancelled recovered successor cannot become a new retry predecessor", async () => {
+  const blockedCancellation = JSON.stringify({
+    errorKind: "POLICY_BLOCKED",
+    message: "The earlier send is no longer definitely unsent",
+    reasonCode: "recovery_predecessor_not_retryable"
+  });
+  assert.equal(
+    recoveryPredecessorIsDefinitelyUnsent("CANCELLED", blockedCancellation),
+    false
+  );
+
+  const h = harness();
+  const cancelledId = "44444444-4444-4444-8444-444444444444";
+  h.rows.push({
+    id: "cancelled-successor",
+    clientSendId: cancelledId,
+    threadId: "thread-1",
+    requestText: "Original text",
+    status: "CANCELLED",
+    source: "manual",
+    scheduledFor: null,
+    receiptJson: null,
+    errorJson: blockedCancellation,
+    attachmentsJson: null,
+    replyToMessageId: null,
+    recoveryPredecessorClientSendId: "33333333-3333-4333-8333-333333333333",
+    draftConsumed: false
+  });
+
+  await assert.rejects(
+    () => h.service.enqueueSend(immediateInput({
+      clientSendId: "55555555-5555-4555-8555-555555555555",
+      recoveryPredecessorClientSendId: cancelledId
+    })),
+    /no longer definitely unsent/i
+  );
+  assert.equal(h.rows.length, 1);
+});
+
+test("only one successor can claim a retry-safe predecessor", async () => {
+  const h = harness();
+  const predecessorId = "11111111-1111-4111-8111-111111111111";
+  h.rows.push({
+    id: "failed-predecessor",
+    clientSendId: predecessorId,
+    threadId: "thread-1",
+    requestText: "Original text",
+    status: "FAILED",
+    source: "manual",
+    scheduledFor: null,
+    receiptJson: null,
+    errorJson: JSON.stringify({ errorKind: "TRANSIENT", message: "timeout" }),
+    attachmentsJson: null,
+    replyToMessageId: null,
+    recoveryPredecessorClientSendId: null,
+    draftConsumed: false
+  });
+
+  const firstSuccessorId = "22222222-2222-4222-8222-222222222222";
+  await h.service.enqueueSend(immediateInput({
+    clientSendId: firstSuccessorId,
+    recoveryPredecessorClientSendId: predecessorId
+  }));
+  await assert.rejects(
+    () => h.service.enqueueSend(immediateInput({
+      clientSendId: "33333333-3333-4333-8333-333333333333",
+      recoveryPredecessorClientSendId: predecessorId
+    })),
+    /unique|conflict|already claimed|predecessor/i
+  );
+  assert.equal(h.rows.length, 2);
+
+  h.rows[1].status = "FAILED";
+  h.rows[1].errorJson = JSON.stringify({
+    errorKind: "TRANSIENT",
+    message: "timeout"
+  });
+  const chained = await h.service.enqueueSend(immediateInput({
+    clientSendId: "66666666-6666-4666-8666-666666666666",
+    recoveryPredecessorClientSendId: firstSuccessorId
+  }));
+  assert.equal(chained.status, "PENDING");
+  assert.equal(h.rows.length, 3);
+});
+
+test("recovered send lineage fails closed on missing, cross-thread, and cyclic ancestors", async () => {
+  const successorId = "77777777-7777-4777-8777-777777777777";
+  const missing = harness();
+  await assert.rejects(
+    () => missing.service.enqueueSend(immediateInput({
+      clientSendId: successorId,
+      recoveryPredecessorClientSendId:
+        "88888888-8888-4888-8888-888888888888"
+    })),
+    /no longer definitely unsent/i
+  );
+
+  const crossThread = harness();
+  crossThread.rows.push({
+    id: "cross-thread",
+    clientSendId: "88888888-8888-4888-8888-888888888888",
+    threadId: "thread-2",
+    status: "FAILED",
+    errorJson: JSON.stringify({ errorKind: "TRANSIENT", message: "timeout" }),
+    recoveryPredecessorClientSendId: null
+  });
+  await assert.rejects(
+    () => crossThread.service.enqueueSend(immediateInput({
+      clientSendId: successorId,
+      recoveryPredecessorClientSendId:
+        "88888888-8888-4888-8888-888888888888"
+    })),
+    /no longer definitely unsent/i
+  );
+
+  const cyclic = harness();
+  cyclic.rows.push({
+    id: "cyclic-predecessor",
+    clientSendId: "88888888-8888-4888-8888-888888888888",
+    threadId: "thread-1",
+    status: "FAILED",
+    errorJson: JSON.stringify({ errorKind: "TRANSIENT", message: "timeout" }),
+    recoveryPredecessorClientSendId: successorId
+  });
+  await assert.rejects(
+    () => cyclic.service.enqueueSend(immediateInput({
+      clientSendId: successorId,
+      recoveryPredecessorClientSendId:
+        "88888888-8888-4888-8888-888888888888"
+    })),
+    /cyclic/i
+  );
+});
+
 test("creating a send consumes only the exact saved draft revision in the same transaction", async () => {
   const h = harness();
   const expectedUpdatedAt = new Date("2026-08-30T09:00:00.000Z");
@@ -244,6 +391,14 @@ test("route cleanup discards newly uploaded files after an attachment replay", a
   assert.match(
     indexSource,
     /if \(scheduleResult\.replayed\) \{\s*await discardStagedAttachments\(stagedAttachments\);/s
+  );
+  assert.match(
+    indexSource,
+    /!stagedAttachmentsHandled[\s\S]*?sendRequestOwnsStagedAttachments\([\s\S]*?discardStagedAttachments\(stagedAttachments\)/
+  );
+  assert.match(
+    indexSource,
+    /row\.status === "FAILED" \|\| row\.status === "CANCELLED"[\s\S]*?parsePersistedSendFailure\(row\.errorJson\)/
   );
 });
 

@@ -392,6 +392,53 @@ test("worker cancels a recovered successor when its predecessor is no longer uns
     rows.find((row) => row.id === successor.id)?.status,
     "CANCELLED"
   );
+  assert.equal(
+    JSON.parse(rows.find((row) => row.id === successor.id)?.errorJson).reasonCode,
+    "recovery_predecessor_not_retryable"
+  );
+});
+
+test("a policy-cancelled successor cannot dispatch another descendant", async () => {
+  const terminalAncestor = pendingRow({
+    id: "ancestor",
+    clientSendId: "ancestor-client",
+    status: "SENT",
+    receiptJson: JSON.stringify({
+      sentAt: "2026-08-24T12:00:00.000Z",
+      verifiedBy: "best_effort"
+    })
+  });
+  const cancelledSuccessor = pendingRow({
+    id: "cancelled-successor",
+    clientSendId: "cancelled-successor-client",
+    status: "CANCELLED",
+    errorJson: JSON.stringify({
+      errorKind: "POLICY_BLOCKED",
+      message: "The earlier send is no longer definitely unsent",
+      reasonCode: "recovery_predecessor_not_retryable"
+    }),
+    recoveryPredecessorClientSendId: terminalAncestor.clientSendId
+  });
+  const descendant = pendingRow({
+    id: "descendant",
+    clientSendId: "descendant-client",
+    recoveryPredecessorClientSendId: cancelledSuccessor.clientSendId
+  });
+  const { svc, rows, sends } = makeHarness([
+    terminalAncestor,
+    cancelledSuccessor,
+    descendant
+  ]);
+
+  await svc.processSendRequest(descendant.id);
+
+  assert.equal(sends.length, 0);
+  const persistedDescendant = rows.find((row) => row.id === descendant.id);
+  assert.equal(persistedDescendant?.status, "CANCELLED");
+  assert.equal(
+    JSON.parse(persistedDescendant?.errorJson).reasonCode,
+    "recovery_predecessor_not_retryable"
+  );
 });
 
 test("worker rechecks a recovered predecessor at the physical dispatch boundary", async () => {
@@ -427,6 +474,48 @@ test("worker rechecks a recovered predecessor at the physical dispatch boundary"
   );
   assert.equal(
     JSON.parse(h.rows.find((row) => row.id === successor.id)?.errorJson).reasonCode,
+    "recovery_predecessor_not_retryable"
+  );
+});
+
+test("worker rechecks the full recovered lineage at the physical dispatch boundary", async () => {
+  const ancestor = pendingRow({
+    id: "ancestor",
+    clientSendId: "ancestor-client",
+    status: "FAILED",
+    errorJson: JSON.stringify({ errorKind: "TRANSIENT", message: "timeout" })
+  });
+  const predecessor = pendingRow({
+    id: "predecessor",
+    clientSendId: "predecessor-client",
+    status: "FAILED",
+    errorJson: JSON.stringify({ errorKind: "TRANSIENT", message: "timeout" }),
+    recoveryPredecessorClientSendId: ancestor.clientSendId
+  });
+  const successor = pendingRow({
+    id: "successor",
+    clientSendId: "successor-client",
+    recoveryPredecessorClientSendId: predecessor.clientSendId
+  });
+  const h = makeHarness([ancestor, predecessor, successor], {
+    beforeAdapterDispatch() {
+      const liveAncestor = h.rows.find((row) => row.id === ancestor.id);
+      liveAncestor.status = "SENT";
+      liveAncestor.errorJson = null;
+      liveAncestor.receiptJson = JSON.stringify({
+        sentAt: "2026-08-24T12:00:00.000Z",
+        verifiedBy: "best_effort"
+      });
+    }
+  });
+
+  await h.svc.processSendRequest(successor.id);
+
+  assert.equal(h.sends.length, 0);
+  const persistedSuccessor = h.rows.find((row) => row.id === successor.id);
+  assert.equal(persistedSuccessor?.status, "FAILED");
+  assert.equal(
+    JSON.parse(persistedSuccessor?.errorJson).reasonCode,
     "recovery_predecessor_not_retryable"
   );
 });
