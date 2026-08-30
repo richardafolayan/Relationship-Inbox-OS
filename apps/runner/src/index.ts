@@ -28,9 +28,12 @@ import {
 } from "./services/setup-ai-key";
 import {
   getSetupPreferences,
+  mutateSetupPreferences,
+  SetupPreferencesConflictError,
   updateSetupPreferences,
   type SetupTranscriptionMode
 } from "./services/setup-preferences";
+import { createSetupPreferencesCoordinator } from "./services/setup-preferences-coordinator";
 import { createTranscriptionSetupManager } from "./services/transcription-setup";
 import { createAuditService } from "./services/audit";
 import { deleteDraftRevision } from "./services/draft";
@@ -505,6 +508,18 @@ function kindFromMime(mime: string | undefined, filename: string | undefined): "
 }
 
 const settingsStore = createSettingsStore();
+const setupPreferencesCoordinator = createSetupPreferencesCoordinator({
+  availablePlatforms: runnerConfig.availablePlatforms,
+  getSettings: settingsStore.getSettings,
+  updateSettings: settingsStore.updateSettings,
+  mutatePreferences: mutateSetupPreferences,
+  persistWhatsAppEnabled: (enabled) =>
+    upsertEnvFile(resolveEnvWritePath(), "WHATSAPP_ENABLED", String(enabled)),
+  applyWhatsAppEnabled: (enabled) => {
+    runnerConfig.whatsapp.enabled = enabled;
+    process.env.WHATSAPP_ENABLED = String(enabled);
+  }
+});
 const overdueDigestStore = createOverdueDigestStore(prisma);
 const auditService = createAuditService();
 const eventBus = createEventBus();
@@ -2998,42 +3013,22 @@ app.post("/control/setup/preferences", asyncRoute(async (req, res) => {
       .optional(),
     aiEnabled: z.boolean().optional(),
     startedAt: z.string().max(100).optional(),
-    completedAt: z.string().max(100).optional()
+    completedAt: z.string().max(100).optional(),
+    expectedRevision: z.number().int().nonnegative().optional()
   }).parse(req.body);
-  const [current, currentSettings] = await Promise.all([
-    getSetupPreferences(),
-    settingsStore.getSettings()
-  ]);
-  const existingPilotPlatforms = currentSettings.enabledPlatforms.filter(
-    (
-      platform
-    ): platform is "IMESSAGE" | "LINKEDIN" | "INSTAGRAM" | "WHATSAPP" | "GOOGLE_MESSAGES" =>
-      runnerConfig.availablePlatforms.includes(platform) &&
-      (platform === "IMESSAGE" ||
-        platform === "LINKEDIN" ||
-        platform === "INSTAGRAM" ||
-        platform === "WHATSAPP" ||
-        platform === "GOOGLE_MESSAGES")
-  );
-  const selectedPlatforms = (payload.selectedPlatforms ??
-    (current.startedAt || current.selectedPlatforms.length > 0
-      ? current.selectedPlatforms
-      : existingPilotPlatforms)
-  ).filter((platform) => runnerConfig.availablePlatforms.includes(platform));
-  const aiEnabled = payload.aiEnabled ??
-    (current.startedAt ? current.aiEnabled : currentSettings.aiEnabled !== false);
-  const preferences = await updateSetupPreferences({
-    ...payload,
-    selectedPlatforms,
-    aiEnabled
-  });
-  await settingsStore.updateSettings({ enabledPlatforms: selectedPlatforms, aiEnabled });
-
-  const whatsappEnabled = selectedPlatforms.includes("WHATSAPP");
-  runnerConfig.whatsapp.enabled = whatsappEnabled;
-  process.env.WHATSAPP_ENABLED = String(whatsappEnabled);
-  upsertEnvFile(resolveEnvWritePath(), "WHATSAPP_ENABLED", String(whatsappEnabled));
-  res.json({ ok: true, preferences });
+  try {
+    const preferences = await setupPreferencesCoordinator.update(payload);
+    res.json({ ok: true, preferences });
+  } catch (error) {
+    if (error instanceof SetupPreferencesConflictError) {
+      res.status(409).json({
+        error: "Setup changed in another window. Review the latest choices and try again.",
+        preferences: error.current
+      });
+      return;
+    }
+    throw error;
+  }
 }));
 
 app.get("/data/setup/transcription", asyncRoute(async (_req, res) => {

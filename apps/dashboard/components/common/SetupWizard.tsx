@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   ArrowLeft,
@@ -32,6 +32,10 @@ import {
   type InlineActionState
 } from "@/lib/feedback";
 import { InlineActionButton } from "@/components/common/inline-action-button";
+import {
+  createSetupPreferenceWriteQueue,
+  persistCompletedSetup
+} from "@/lib/setup-preference-writes";
 
 type SetupPlatform =
   | "IMESSAGE"
@@ -48,7 +52,12 @@ interface SetupPreferences {
   transcriptionMode: TranscriptionMode;
   startedAt: string;
   completedAt: string;
+  revision: number;
 }
+
+type SetupPreferencesUpdate = Partial<
+  Pick<SetupPreferences, "selectedPlatforms" | "aiEnabled" | "startedAt" | "completedAt">
+>;
 
 interface TranscriptionStatus {
   mode: TranscriptionMode;
@@ -93,21 +102,52 @@ export function SetupWizard() {
   const [aiConfigured, setAiConfigured] = useState(false);
   const [selected, setSelected] = useState<SetupPlatform[]>([]);
   const [aiEnabled, setAiEnabled] = useState(false);
+  const [savingPreferences, setSavingPreferences] = useState(false);
+  const [finishing, setFinishing] = useState(false);
+  const [persistenceError, setPersistenceError] = useState("");
+  const pendingPreferenceWrites = useRef(0);
+  const preferenceWriter = useMemo(
+    () =>
+      createSetupPreferenceWriteQueue<SetupPreferences, SetupPreferencesUpdate>(
+        0,
+        async (payload) => {
+          const result = await apiPost<{ preferences: SetupPreferences }>(
+            "/runner/control/setup/preferences",
+            payload
+          );
+          return result.preferences;
+        }
+      ),
+    []
+  );
+
+  const applyPreferences = useCallback((preferences: SetupPreferences) => {
+    setSelected(preferences.selectedPlatforms);
+    setAiEnabled(preferences.aiEnabled);
+    setStatus((current) => current ? { ...current, preferences } : current);
+  }, []);
 
   const load = useCallback(async () => {
     const [setup, ai] = await Promise.all([
       apiGetRaw<SetupStatus>("/runner/data/setup/status"),
       apiGetRaw<AiStatus>("/runner/data/ai-status")
     ]);
-    setStatus(setup);
     const availablePlatforms = new Set(setup.platforms.map((platform) => platform.name));
-    setSelected(
-      setup.preferences.selectedPlatforms.filter((platform) => availablePlatforms.has(platform))
-    );
-    setAiEnabled(setup.preferences.aiEnabled);
+    const preferences = {
+      ...setup.preferences,
+      selectedPlatforms: setup.preferences.selectedPlatforms.filter((platform) =>
+        availablePlatforms.has(platform)
+      )
+    };
+    if (preferenceWriter.acceptSnapshot(preferences)) {
+      setStatus({ ...setup, preferences });
+      applyPreferences(preferences);
+    } else {
+      setStatus((current) => current ? { ...setup, preferences: current.preferences } : current);
+    }
     setAiConfigured(ai.configuredProviders.length > 0);
-    return { setup, ai };
-  }, []);
+    return { setup: { ...setup, preferences }, ai };
+  }, [applyPreferences, preferenceWriter]);
 
   useEffect(() => {
     if (isSetupComplete(window.localStorage)) return;
@@ -144,20 +184,59 @@ export function SetupWizard() {
   const next = () => setStep(steps[Math.min(index + 1, steps.length - 1)]!);
   const back = () => setStep(steps[Math.max(index - 1, 0)]!);
 
-  const savePreferences = useCallback(async (partial: Partial<Pick<SetupPreferences, "selectedPlatforms" | "aiEnabled" | "startedAt" | "completedAt">>) => {
-    const result = await apiPost<{ preferences: SetupPreferences }>("/runner/control/setup/preferences", partial);
-    setSelected(result.preferences.selectedPlatforms);
-    setAiEnabled(result.preferences.aiEnabled);
-    setStatus((current) => current ? { ...current, preferences: result.preferences } : current);
-    return result.preferences;
-  }, []);
+  const savePreferences = useCallback(async (partial: SetupPreferencesUpdate) => {
+    pendingPreferenceWrites.current += 1;
+    setSavingPreferences(true);
+    setPersistenceError("");
+    try {
+      const result = await preferenceWriter.save(partial);
+      if (result.applied) {
+        applyPreferences(result.preferences);
+      }
+      return result.preferences;
+    } catch (error) {
+      const conflict =
+        error instanceof ApiRequestError && error.status === 409 &&
+        error.payload && typeof error.payload === "object"
+          ? (error.payload as { preferences?: SetupPreferences }).preferences
+          : undefined;
+      if (conflict && preferenceWriter.acceptSnapshot(conflict)) {
+        applyPreferences(conflict);
+      }
+      setPersistenceError(
+        conflict
+          ? "Setup changed in another window. The latest choices are shown. Review them and try again."
+          : `That setup change was not saved. Check that ${APP_NAME} is running and try again.`
+      );
+      throw error;
+    } finally {
+      pendingPreferenceWrites.current -= 1;
+      if (pendingPreferenceWrites.current === 0) {
+        setSavingPreferences(false);
+      }
+    }
+  }, [applyPreferences, preferenceWriter]);
 
   const finish = useCallback(async () => {
     const now = new Date().toISOString();
-    await savePreferences({ completedAt: now }).catch(() => undefined);
-    await apiPost("/runner/control/operator-profile", { setupCompletedAt: now }).catch(() => undefined);
-    markSetupComplete(window.localStorage);
-    setOpen(false);
+    setFinishing(true);
+    setPersistenceError("");
+    try {
+      await persistCompletedSetup({
+        completedAt: now,
+        persistOperatorProfile: (completedAt) =>
+          apiPost("/runner/control/operator-profile", { setupCompletedAt: completedAt }),
+        persistPreferences: (completedAt) => savePreferences({ completedAt }),
+        markComplete: () => markSetupComplete(window.localStorage)
+      });
+      setOpen(false);
+      return true;
+    } catch {
+      setPersistenceError("Setup is still open because the final changes were not saved. Try again.");
+      return false;
+    } finally {
+      setFinishing(false);
+    }
   }, [savePreferences]);
 
   if (!open) return null;
@@ -172,11 +251,13 @@ export function SetupWizard() {
             ))}
           </div>
           {step !== "done" ? (
-            <button type="button" onClick={() => void finish()} className="font-mono text-[11px] text-ink-3 underline underline-offset-2 hover:text-ink">
-              Finish later
+            <button type="button" disabled={finishing || savingPreferences} onClick={() => void finish()} className="font-mono text-[11px] text-ink-3 underline underline-offset-2 hover:text-ink disabled:opacity-50">
+              {finishing ? "Saving..." : "Finish later"}
             </button>
           ) : null}
         </div>
+
+        {persistenceError ? <p role="alert" className="mb-4 rounded-[8px] border border-risk-high/30 bg-risk-high/5 px-3 py-2.5 text-[12.5px] leading-5 text-risk-high">{persistenceError}</p> : null}
 
         {step === "welcome" ? (
           <Card icon={<Sparkles />} eyebrow="Welcome" title={`Make ${APP_NAME} yours.`} body={`Choose what you want ${APP_NAME} to help with. You can add, change, or remove anything later in Settings.`}>
@@ -185,7 +266,7 @@ export function SetupWizard() {
               ["AI help", `Optional. ${APP_NAME} still works as a calm reply inbox without it.`],
               ["Voice notes", "Off by default. A local model downloads only if you choose one."]
             ]} />
-            <Actions><Primary onClick={() => { void savePreferences({ startedAt: status?.preferences.startedAt || new Date().toISOString() }); next(); }}>Start setup <ArrowRight /></Primary></Actions>
+            <Actions><Primary disabled={savingPreferences} onClick={() => { void savePreferences({ startedAt: status?.preferences.startedAt || new Date().toISOString() }).then(next).catch(() => undefined); }}>{savingPreferences ? "Saving..." : <>Start setup <ArrowRight /></>}</Primary></Actions>
           </Card>
         ) : null}
 
@@ -206,7 +287,7 @@ export function SetupWizard() {
         {step === "contacts" ? <ContactsStep health={status?.contacts ?? null} onBack={back} onNext={next} /> : null}
 
         {step === "ai" ? (
-          <AiStep enabled={aiEnabled} configured={aiConfigured} onEnabled={async (value) => { setAiEnabled(value); await savePreferences({ aiEnabled: value }); }} onConfigured={() => setAiConfigured(true)} onBack={back} onNext={next} />
+          <AiStep enabled={aiEnabled} configured={aiConfigured} onEnabled={async (value) => { await savePreferences({ aiEnabled: value }); }} onConfigured={() => setAiConfigured(true)} onBack={back} onNext={next} />
         ) : null}
 
         {step === "transcription" ? <TranscriptionStep initial={status?.transcription} onBack={back} onNext={next} /> : null}
@@ -218,8 +299,8 @@ export function SetupWizard() {
         {step === "done" ? (
           <Card icon={<Check />} eyebrow="Ready" title={`${APP_NAME} is ready when you are.`} body="New conversations appear after their first scan. You can rerun this assistant or manage optional parts from Settings at any time.">
             <Actions>
-              <Primary onClick={() => { void finish().then(() => router.push("/today")); }}>Go to Today</Primary>
-              <Quiet onClick={() => { void finish().then(() => { router.push("/today"); window.setTimeout(() => startPilotTour(), 350); }); }}>Show me with safe demo messages</Quiet>
+              <Primary disabled={finishing || savingPreferences} onClick={() => { void finish().then((finished) => { if (finished) router.push("/today"); }); }}>{finishing ? "Saving..." : "Go to Today"}</Primary>
+              <Quiet disabled={finishing || savingPreferences} onClick={() => { void finish().then((finished) => { if (finished) { router.push("/today"); window.setTimeout(() => startPilotTour(), 350); } }); }}>Show me with safe demo messages</Quiet>
             </Actions>
           </Card>
         ) : null}
@@ -231,16 +312,24 @@ export function SetupWizard() {
 function ProfileStep({ initial, onBack, onNext }: { initial?: OperatorProfile; onBack: () => void; onNext: () => void }) {
   const [name, setName] = useState(initial?.displayName ?? "");
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
   const save = async () => {
     if (!name.trim()) { onNext(); return; }
     setBusy(true);
-    await apiPost("/runner/control/operator-profile", { displayName: name.trim() }).catch(() => undefined);
-    window.dispatchEvent(new CustomEvent("operator-profile-saved"));
-    setBusy(false);
-    onNext();
+    setError("");
+    try {
+      await apiPost("/runner/control/operator-profile", { displayName: name.trim() });
+      window.dispatchEvent(new CustomEvent("operator-profile-saved"));
+      onNext();
+    } catch {
+      setError(`Your name was not saved. Check that ${APP_NAME} is running and try again.`);
+    } finally {
+      setBusy(false);
+    }
   };
   return <Card icon={<UserRound />} eyebrow="About you" title={`What should ${APP_NAME} call you?`} body="This name stays in your app and makes the welcome screen feel like yours.">
     <label className="mt-5 block text-[13px] text-ink-2">Your first name<input value={name} onChange={(event) => setName(event.target.value)} autoFocus className="mt-2 block w-full rounded-[8px] border border-hairline bg-paper px-3 py-[10px] text-[14px] text-ink focus:border-hairline-strong focus:outline-none" placeholder="For example, Maya" /></label>
+    {error ? <Notice>{error}</Notice> : null}
     <Actions><Back onClick={onBack} /><Primary disabled={busy} onClick={() => void save()}>{busy ? "Saving..." : name.trim() ? "Save and continue" : "Skip for now"}</Primary></Actions>
   </Card>;
 }
@@ -258,7 +347,7 @@ function SourcesStep({ selected, available, onChange, onBack, onNext }: { select
   const toggle = (platform: SetupPlatform) => onChange(selected.includes(platform) ? selected.filter((item) => item !== platform) : [...selected, platform]);
   return <Card icon={<MessageSquareText />} eyebrow="Message sources" title="Where do you get messages?" body="Select only what you use. Unselected services stay inactive and do not need to be connected.">
     <div className="mt-5 grid gap-3">{choices.map(([value, label, body]) => <button key={value} type="button" aria-pressed={selected.includes(value)} onClick={() => toggle(value)} className={cn("flex items-center gap-3 rounded-[10px] border px-4 py-4 text-left", selected.includes(value) ? "border-accent bg-accent/5" : "border-hairline bg-paper-2/40")}><span className={cn("grid h-5 w-5 place-items-center rounded-[5px] border", selected.includes(value) ? "border-accent bg-accent text-white" : "border-hairline-strong")}>{selected.includes(value) ? <Check className="h-3.5 w-3.5" /> : null}</span><span><span className="block text-[15px] font-medium text-ink">{label}</span><span className="mt-0.5 block text-[12.5px] text-ink-3">{body}</span></span></button>)}</div>
-    <Actions><Back onClick={onBack} /><Primary disabled={busy} onClick={() => { setBusy(true); void onNext().finally(() => setBusy(false)); }}>{busy ? "Saving..." : selected.length ? "Set up these sources" : "Continue without messages"}</Primary></Actions>
+    <Actions><Back onClick={onBack} /><Primary disabled={busy} onClick={() => { setBusy(true); void onNext().catch(() => undefined).finally(() => setBusy(false)); }}>{busy ? "Saving..." : selected.length ? "Set up these sources" : "Continue without messages"}</Primary></Actions>
   </Card>;
 }
 
@@ -345,9 +434,10 @@ function AiStep({ enabled, configured, onEnabled, onConfigured, onBack, onNext }
   const [key, setKey] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const chooseEnabled = async (value: boolean) => { setBusy(true); setError(""); try { await onEnabled(value); } catch { setError(`That AI setting was not saved. Check that ${APP_NAME} is running and try again.`); } finally { setBusy(false); } };
   const saveKey = async () => { setBusy(true); setError(""); try { await apiPost("/runner/control/setup/ai-key", { key: key.trim() }); await onEnabled(true); onConfigured(); } catch (err) { const payload = err instanceof ApiRequestError ? err.payload as { error?: string } : undefined; setError(payload?.error ?? "The key could not be checked. Try copying it again."); } finally { setBusy(false); } };
   return <Card icon={<KeyRound />} eyebrow="Optional AI help" title="Would you like summaries and writing help?" body="AI is optional. When it is on, the relevant conversation text is sent to Google Gemini for summaries or help you request. AI suggestions never send on their own.">
-    <div className="mt-5 grid gap-3"><Choice selected={!enabled} title="No AI help" body="Keep message organisation and reply tracking. No conversation text is sent to an AI service." onClick={() => void onEnabled(false)} /><Choice selected={enabled} title="Use optional AI help" body="Add a free Gemini key. You can turn this off later." onClick={() => void onEnabled(true)} /></div>
+    <div className="mt-5 grid gap-3"><Choice disabled={busy} selected={!enabled} title="No AI help" body="Keep message organisation and reply tracking. No conversation text is sent to an AI service." onClick={() => void chooseEnabled(false)} /><Choice disabled={busy} selected={enabled} title="Use optional AI help" body="Add a free Gemini key. You can turn this off later." onClick={() => void chooseEnabled(true)} /></div>
     {enabled ? configured ? <Notice>AI is ready. Your saved Gemini key will be used.</Notice> : <div className="mt-4 rounded-[10px] border border-hairline bg-paper-2/40 p-4"><ol className="m-0 pl-5 text-[13px] leading-6 text-ink-2"><li>Open <a className="underline" target="_blank" rel="noreferrer" href="https://aistudio.google.com/apikey">Google AI Studio</a> and sign in.</li><li>Press Create API key, then Copy.</li><li>Paste the key below. {APP_NAME} checks it and keeps it on this Mac.</li></ol><div className="mt-3 flex gap-2"><input type="password" value={key} onChange={(event) => setKey(event.target.value)} className="min-w-0 flex-1 rounded-[8px] border border-hairline bg-paper px-3 py-2 font-mono text-[13px]" placeholder="Paste Gemini API key" /><Primary disabled={busy || !key.trim()} onClick={() => void saveKey()}>{busy ? "Checking..." : "Check and save"}</Primary></div>{error ? <Notice>{error}</Notice> : null}</div> : null}
     <Actions><Back onClick={onBack} /><Primary onClick={onNext}>{enabled && !configured ? "Set up later" : "Continue"}</Primary></Actions>
   </Card>;
@@ -392,10 +482,10 @@ function ReviewStep({ selected, aiEnabled, aiConfigured, automaticUpdates, versi
 function Card({ icon, eyebrow, title, body, children }: { icon: React.ReactNode; eyebrow: string; title: string; body: string; children?: React.ReactNode }) { return <section className="relative overflow-hidden rounded-card border border-hairline bg-paper p-6 shadow-card sm:p-8"><div className="relative"><p className="m-0 flex items-center gap-2 font-mono text-[10px] uppercase tracking-[0.1em] text-accent-ink"><span className="[&>svg]:h-[18px] [&>svg]:w-[18px]">{icon}</span>{eyebrow}</p><h1 className="m-0 mt-3 max-w-[28ch] font-display text-[27px] font-semibold leading-[1.15] tracking-[-0.02em] text-ink">{title}</h1><p className="m-0 mt-3 max-w-[62ch] text-[14px] leading-[1.6] text-ink-2">{body}</p>{children}</div></section>; }
 function Actions({ children }: { children: React.ReactNode }) { return <div className="mt-6 flex flex-wrap items-center gap-3">{children}</div>; }
 function Primary({ onClick, disabled, children }: { onClick: () => void; disabled?: boolean; children: React.ReactNode }) { return <button type="button" onClick={onClick} disabled={disabled} className="inline-flex items-center gap-1.5 rounded-pill bg-ink px-4 py-[9px] text-[13.5px] font-medium text-paper hover:bg-ink-2 disabled:opacity-50 [&>svg]:h-3.5 [&>svg]:w-3.5">{children}</button>; }
-function Quiet({ onClick, children }: { onClick: () => void; children: React.ReactNode }) { return <button type="button" onClick={onClick} className="inline-flex items-center rounded-pill border border-hairline px-4 py-[9px] text-[13.5px] font-medium text-ink-2 hover:bg-paper-2">{children}</button>; }
+function Quiet({ onClick, disabled, children }: { onClick: () => void; disabled?: boolean; children: React.ReactNode }) { return <button type="button" onClick={onClick} disabled={disabled} className="inline-flex items-center rounded-pill border border-hairline px-4 py-[9px] text-[13.5px] font-medium text-ink-2 hover:bg-paper-2 disabled:opacity-50">{children}</button>; }
 function Back({ onClick }: { onClick: () => void }) { return <Quiet onClick={onClick}><ArrowLeft className="mr-1.5 h-3.5 w-3.5" />Back</Quiet>; }
 function Notice({ children }: { children: React.ReactNode }) { return <p className="m-0 mt-4 rounded-[8px] border border-hairline bg-paper-2/55 px-3 py-2.5 text-[12.5px] leading-5 text-ink-2" aria-live="polite">{children}</p>; }
 function InfoRows({ rows }: { rows: Array<[string, string]> }) { return <div className="mt-5 divide-y divide-hairline rounded-[10px] border border-hairline bg-paper-2/35">{rows.map(([label, body]) => <div key={label} className="px-4 py-3"><p className="m-0 text-[13.5px] font-medium text-ink">{label}</p><p className="m-0 mt-0.5 text-[12.5px] text-ink-3">{body}</p></div>)}</div>; }
-function Choice({ selected, title, body, onClick }: { selected: boolean; title: string; body: string; onClick: () => void }) { return <button type="button" aria-pressed={selected} onClick={onClick} className={cn("rounded-[10px] border px-4 py-3 text-left", selected ? "border-accent bg-accent/5" : "border-hairline bg-paper-2/35")}><span className="flex items-center gap-2 text-[14px] font-medium text-ink">{selected ? <Check className="h-4 w-4 text-accent" /> : <span className="h-4 w-4 rounded-full border border-hairline-strong" />}{title}</span><span className="mt-1 block pl-6 text-[12.5px] leading-5 text-ink-3">{body}</span></button>; }
+function Choice({ selected, title, body, onClick, disabled }: { selected: boolean; title: string; body: string; onClick: () => void; disabled?: boolean }) { return <button type="button" aria-pressed={selected} onClick={onClick} disabled={disabled} className={cn("rounded-[10px] border px-4 py-3 text-left disabled:opacity-50", selected ? "border-accent bg-accent/5" : "border-hairline bg-paper-2/35")}><span className="flex items-center gap-2 text-[14px] font-medium text-ink">{selected ? <Check className="h-4 w-4 text-accent" /> : <span className="h-4 w-4 rounded-full border border-hairline-strong" />}{title}</span><span className="mt-1 block pl-6 text-[12.5px] leading-5 text-ink-3">{body}</span></button>; }
 function Platform({ title, body, connected, action, busy, state, onClick }: { title: string; body: string; connected: boolean; action: string; busy: boolean; state?: InlineActionState | null; onClick: () => void }) { return <div className="flex flex-col items-stretch gap-3 rounded-[10px] border border-hairline bg-paper-2/40 p-4 sm:flex-row sm:items-center"><div className="min-w-0 flex-1"><p className="m-0 flex items-center gap-2 text-[15px] font-medium text-ink">{title}{connected ? <span className="rounded-pill bg-risk-fresh/15 px-2 py-0.5 font-mono text-[10px] text-risk-fresh">Connected</span> : null}</p><p className="m-0 mt-1 text-[12.5px] leading-5 text-ink-3">{body}</p></div>{!connected ? <div className="self-start sm:self-auto"><InlineActionButton idleLabel={action} state={state ?? (busy ? { phase: "running", label: "Working..." } : null)} disabled={busy} onClick={onClick} className="inline-flex items-center gap-1.5 rounded-pill bg-ink px-4 py-[9px] text-[13.5px] font-medium text-paper hover:bg-ink-2 disabled:opacity-50" /></div> : null}</div>; }
 function Summary({ label, value, ok }: { label: string; value: string; ok: boolean }) { return <div className="flex items-center justify-between gap-3 px-4 py-3"><span className="text-[13px] text-ink-2">{label}</span><span className={cn("flex items-center gap-1.5 font-mono text-[11px]", ok ? "text-risk-fresh" : "text-ink-3")}>{ok ? <Check className="h-3.5 w-3.5" /> : null}{value}</span></div>; }

@@ -26,7 +26,8 @@ test("setup preferences accept only supported pilot sources and explicit options
     aiEnabled: true,
     transcriptionMode: "enhanced",
     startedAt: "start",
-    completedAt: "done"
+    completedAt: "done",
+    revision: 0
   });
 });
 

@@ -254,25 +254,23 @@ export function createSettingsStore(): SettingsStore {
   }
 
   async function updateSettings(partial: Partial<AppSettings>): Promise<AppSettings> {
-    const current = await getSettings();
-    const next: AppSettings = {
-      ...current,
-      ...partial
-    };
+    return writeMutex.runExclusive(APP_SETTINGS_KEY, async () => {
+      const current = await getSettings();
+      const next: AppSettings = {
+        ...current,
+        ...partial
+      };
 
-    await prisma.setting.upsert({
-      where: { key: APP_SETTINGS_KEY },
-      update: { valueJson: JSON.stringify(next) },
-      create: { key: APP_SETTINGS_KEY, valueJson: JSON.stringify(next) }
+      await prisma.setting.upsert({
+        where: { key: APP_SETTINGS_KEY },
+        update: { valueJson: JSON.stringify(next) },
+        create: { key: APP_SETTINGS_KEY, valueJson: JSON.stringify(next) }
+      });
+
+      settingsCache = cloneSettings(next);
+      settingsLoadPromise = null;
+      return cloneSettings(settingsCache);
     });
-
-    // Set cache *and* drop any in-flight load promise so a concurrent
-    // load-in-progress doesn't seal a stale value over ours via the
-    // load promise's tail assignment (which now uses `??=`, but
-    // dropping the promise is belt-and-braces).
-    settingsCache = cloneSettings(next);
-    settingsLoadPromise = null;
-    return cloneSettings(settingsCache);
   }
 
   async function getSelectorOverrides(): Promise<SelectorOverrideStore> {
