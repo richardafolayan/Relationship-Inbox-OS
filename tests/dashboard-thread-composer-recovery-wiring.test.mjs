@@ -187,11 +187,17 @@ test("failed-send recovery claims the successor lease before publishing its tomb
   const start = source.indexOf("const restorePendingComposerSend = useCallback(");
   const end = source.indexOf("const clearCapturedComposerAfterAcceptedAction", start);
   const restore = source.slice(start, end);
+  const persist = restore.indexOf("preparedRecoverySession = restoreThreadComposerSession(");
   const prepare = restore.indexOf("prepareThreadComposerAttachmentOwnershipHandoff(");
   const publish = restore.indexOf("compareAndCompleteScopedValue<ThreadComposerSendAttemptValue>");
   const commit = restore.indexOf("ownershipHandoff.commit()");
-  assert.ok(prepare !== -1 && prepare < publish);
+  assert.ok(persist !== -1 && persist < prepare);
+  assert.ok(prepare < publish);
   assert.ok(commit > publish);
+  assert.match(
+    restore.slice(persist, publish),
+    /if \(!preparedRecoverySession\) \{[\s\S]*?return;/
+  );
   assert.doesNotMatch(restore, /compareAndCompleteScopedValue<[\s\S]*?\.catch\(\(\) => false\)/);
   assert.match(restore, /if \(!releaseStateUnknown && !resolutionStateUnknown\)/);
 });

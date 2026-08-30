@@ -2342,23 +2342,6 @@ export default function ThreadPage() {
     ) {
       return;
     }
-    const acceptedRevisionId = acceptedComposerSessionIdsRef.current.get(threadId);
-    const acceptedSession = acceptedRevisionId
-      ? readThreadComposerSession(threadId)
-      : null;
-    const emptyIntent: ThreadComposerIntentDraft = {
-      attachments: [],
-      customScheduleValue: "",
-      replyToMessageId: null,
-      source: "empty",
-      text: ""
-    };
-    if (
-      acceptedSession?.revisionId === acceptedRevisionId &&
-      sameThreadComposerIntent(composerIntentRef.current, emptyIntent)
-    ) {
-      return;
-    }
     const restoring = composerRestoreRef.current;
     if (
       restoring?.threadId === threadId &&
@@ -2739,6 +2722,12 @@ export default function ThreadPage() {
         showPendingError("Tovi could not safely reconstruct the failed send. Reload before trying again.");
         return;
       }
+      const recoveryIntent = composerIntentForRecovery(
+        pending.composerIntent,
+        pending.attemptKind ?? "immediate",
+        pending.scheduledFor
+      );
+      const predecessorSession = readThreadComposerSession(pending.threadId);
       const scope = threadComposerSendScope(pending.threadId);
       const proposedRevisionId = uuid();
       const restoredTombstone: ThreadComposerSendAttemptValue = {
@@ -2761,9 +2750,29 @@ export default function ThreadPage() {
       let ownershipHandoff: Awaited<ReturnType<
         typeof prepareThreadComposerAttachmentOwnershipHandoff
       >> | null = null;
+      let preparedRecoverySession: ThreadComposerSession | null = null;
+      let restoredSession: ThreadComposerSession | null = null;
       let recoverySessionRevisionId: string | null = null;
       let releaseStateUnknown = false;
       if (!options.recordAlreadyReleased) {
+        preparedRecoverySession = restoreThreadComposerSession(
+          pending.threadId,
+          recoveryIntent,
+          proposedRevisionId,
+          undefined,
+          pending.draftRevision ?? null,
+          pending.clientSendId
+        );
+        if (!preparedRecoverySession) {
+          showPendingError(
+            "Tovi could not safely preserve this failed reply before releasing it. Reload before trying again."
+          );
+          return;
+        }
+        acceptedComposerSessionIdsRef.current.set(
+          pending.threadId,
+          preparedRecoverySession.revisionId
+        );
         try {
           ownershipHandoff = await prepareThreadComposerAttachmentOwnershipHandoff(
             composerAttachmentStore,
@@ -2794,6 +2803,7 @@ export default function ThreadPage() {
         }
         if (released) {
           recoverySessionRevisionId = proposedRevisionId;
+          restoredSession = preparedRecoverySession;
           await ownershipHandoff.commit().catch(() => undefined);
         }
       }
@@ -2814,6 +2824,13 @@ export default function ThreadPage() {
         if (recoverySessionRevisionId) {
           resolution = null;
         } else if (resolution?.kind === "sent") {
+          if (preparedRecoverySession) {
+            consumeThreadComposerSession(
+              pending.threadId,
+              preparedRecoverySession.revision,
+              preparedRecoverySession.revisionId
+            );
+          }
           await ownershipHandoff?.rollback().catch(() => undefined);
           const storedSession = readThreadComposerSession(pending.threadId);
           if (
@@ -2827,6 +2844,14 @@ export default function ThreadPage() {
               storedSession.revisionId
             );
           }
+          if (
+            acceptedComposerSessionIdsRef.current.get(pending.threadId) ===
+              pending.sessionRevisionId ||
+            acceptedComposerSessionIdsRef.current.get(pending.threadId) ===
+              preparedRecoverySession?.revisionId
+          ) {
+            acceptedComposerSessionIdsRef.current.delete(pending.threadId);
+          }
           setPendingSends((current) =>
             current.filter((item) => item.clientSendId !== pending.clientSendId)
           );
@@ -2834,9 +2859,32 @@ export default function ThreadPage() {
           return;
         } else if (resolution?.kind === "restore") {
           recoverySessionRevisionId = resolution.sessionRevisionId;
-          if (recoverySessionRevisionId === proposedRevisionId && ownershipHandoff) {
+          if (
+            recoverySessionRevisionId === proposedRevisionId &&
+            ownershipHandoff &&
+            preparedRecoverySession
+          ) {
+            restoredSession = preparedRecoverySession;
             await ownershipHandoff.commit().catch(() => undefined);
           } else {
+            restoredSession = restoreThreadComposerSession(
+              pending.threadId,
+              recoveryIntent,
+              recoverySessionRevisionId,
+              undefined,
+              pending.draftRevision ?? null,
+              pending.clientSendId
+            );
+            if (!restoredSession) {
+              showPendingError(
+                "Tovi could not safely restore this failed reply for another attempt. Reload before trying again."
+              );
+              return;
+            }
+            acceptedComposerSessionIdsRef.current.set(
+              pending.threadId,
+              restoredSession.revisionId
+            );
             let resolvedHandoff: Awaited<ReturnType<
               typeof prepareThreadComposerAttachmentOwnershipHandoff
             >>;
@@ -2861,29 +2909,57 @@ export default function ThreadPage() {
           }
         } else {
           if (!releaseStateUnknown && !resolutionStateUnknown) {
-            await ownershipHandoff?.rollback().catch(() => undefined);
+            let retainPreparedRecovery = false;
+            if (preparedRecoverySession) {
+              const currentSession = inspectThreadComposerSession(pending.threadId);
+              if (!currentSession.readable) {
+                retainPreparedRecovery = true;
+              } else if (
+                currentSession.session?.revision === preparedRecoverySession.revision &&
+                currentSession.session.revisionId === preparedRecoverySession.revisionId
+              ) {
+                const exactPredecessor =
+                  predecessorSession?.revisionId === pending.sessionRevisionId
+                    ? predecessorSession
+                    : null;
+                if (exactPredecessor) {
+                  const rolledBackSession = restoreThreadComposerSession(
+                    pending.threadId,
+                    exactPredecessor,
+                    exactPredecessor.revisionId,
+                    undefined,
+                    exactPredecessor.draftRevision,
+                    exactPredecessor.recoveryClientSendId
+                  );
+                  retainPreparedRecovery = !rolledBackSession;
+                  if (
+                    rolledBackSession &&
+                    acceptedComposerSessionIdsRef.current.get(pending.threadId) ===
+                      preparedRecoverySession.revisionId
+                  ) {
+                    acceptedComposerSessionIdsRef.current.set(
+                      pending.threadId,
+                      rolledBackSession.revisionId
+                    );
+                  }
+                } else {
+                  retainPreparedRecovery = true;
+                }
+              }
+            }
+            if (!retainPreparedRecovery) {
+              await ownershipHandoff?.rollback().catch(() => undefined);
+            }
           }
           showPendingError("Tovi could not safely release the failed send because it changed in another window. Reload before trying again.");
           return;
         }
       }
-      const recoveryIntent = composerIntentForRecovery(
-        pending.composerIntent,
-        pending.attemptKind ?? "immediate",
-        pending.scheduledFor
-      );
-      const restoredSession = restoreThreadComposerSession(
-        pending.threadId,
-        recoveryIntent,
-        recoverySessionRevisionId,
-        undefined,
-        pending.draftRevision ?? null,
-        pending.clientSendId
-      );
       if (!restoredSession) {
         showPendingError("Tovi could not safely restore this failed reply for another attempt. Reload before trying again.");
         return;
       }
+      acceptedComposerSessionIdsRef.current.delete(pending.threadId);
       composerSessionPresentRef.current = true;
       composerDraftRevisionRef.current = pending.draftRevision ?? null;
       const missingAttachments = missingThreadComposerAttachments(

@@ -396,9 +396,14 @@ export function snapshotThreadComposerSessionAfterAcceptedAction(
     return snapshotThreadComposerSession(threadId, draft, storage, draftRevision);
   }
   const current = readThreadComposerSession(threadId, storage);
-  return current?.revisionId === acceptedRevisionId
-    ? rotateThreadComposerSession(threadId, draft, storage, draftRevision)
-    : snapshotThreadComposerSession(threadId, draft, storage, draftRevision);
+  if (current?.revisionId !== acceptedRevisionId) {
+    return snapshotThreadComposerSession(threadId, draft, storage, draftRevision);
+  }
+  const intent = normalizeThreadComposerIntent(draft);
+  if (!intent) return null;
+  return isEmptyIntent(intent)
+    ? current
+    : rotateThreadComposerSession(threadId, intent, storage, draftRevision);
 }
 
 export function attachDraftRevisionToThreadComposerSession(

@@ -156,7 +156,7 @@ test("the stale sweep revisits a released blob after its quarantine expires", as
   assert.deepEqual(await store.read("thread-a", [descriptor]), []);
 });
 
-test("the memory store expires stale owners with IndexedDB parity", async () => {
+test("stale ownership requires authoritative release before bytes are purged", async () => {
   let now = 1_000;
   const store = createMemoryThreadComposerAttachmentStore("tab-a", () => now);
   const file = new File(["pilot attachment"], descriptor.name, {
@@ -168,7 +168,10 @@ test("the memory store expires stale owners with IndexedDB parity", async () => 
 
   now += __test.STALE_AFTER_MS + 1;
   await store.purgeStale();
+  assert.equal((await store.read("thread-a", [descriptor])).length, 1);
 
+  await store.releaseOwnership("thread-a", "session-x");
+  await store.purgeStale();
   assert.deepEqual(await store.read("thread-a", [descriptor]), []);
 });
 

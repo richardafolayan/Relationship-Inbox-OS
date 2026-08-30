@@ -266,6 +266,35 @@ test("re-entering identical text after acceptance creates a new generation", () 
   assert.deepEqual(readThreadComposerSession("thread-a", storage), second);
 });
 
+test("an accepted hidden composer survives empty navigation and pagehide snapshots", () => {
+  const storage = makeStorage();
+  const intent = {
+    attachments: [attachment],
+    customScheduleValue: "",
+    replyToMessageId: "message-1",
+    source: "user",
+    text: "Pending reply"
+  };
+  const accepted = snapshotThreadComposerSession("thread-a", intent, storage);
+  const emptyIntent = {
+    attachments: [],
+    customScheduleValue: "",
+    replyToMessageId: null,
+    source: "empty",
+    text: ""
+  };
+
+  const retained = snapshotThreadComposerSessionAfterAcceptedAction(
+    "thread-a",
+    emptyIntent,
+    accepted.revisionId,
+    storage
+  );
+
+  assert.deepEqual(retained, accepted);
+  assert.deepEqual(readThreadComposerSession("thread-a", storage), accepted);
+});
+
 test("unchanged snapshots keep their revision while any intent change advances it", () => {
   const storage = makeStorage();
   const intent = {
@@ -511,6 +540,39 @@ test("separate tabs restore a failed send under the same shared successor genera
   assert.equal(second.revisionId, "shared-successor-session");
   assert.deepEqual(readThreadComposerSession("thread-a", firstTab), first);
   assert.deepEqual(readThreadComposerSession("thread-a", secondTab), second);
+});
+
+test("a failed recovery write leaves the complete predecessor session intact", () => {
+  const storage = makeStorage();
+  const predecessorIntent = {
+    attachments: [attachment],
+    customScheduleValue: "2026-12-15T09:30",
+    replyToMessageId: "parent-message",
+    source: "user",
+    text: "Keep every part of this reply"
+  };
+  const predecessor = snapshotThreadComposerSession(
+    "thread-a",
+    predecessorIntent,
+    storage
+  );
+  const originalSetItem = storage.setItem;
+  storage.setItem = () => {
+    throw new Error("storage unavailable");
+  };
+
+  const recovered = restoreThreadComposerSession(
+    "thread-a",
+    { ...predecessorIntent, text: "Recovered reply" },
+    "successor-session",
+    storage,
+    { text: predecessorIntent.text, updatedAt: "2026-08-30T09:30:00.000Z" },
+    "send-attempt"
+  );
+
+  storage.setItem = originalSetItem;
+  assert.equal(recovered, null);
+  assert.deepEqual(readThreadComposerSession("thread-a", storage), predecessor);
 });
 
 test("a recovered session keeps its predecessor identity until the user changes intent", () => {

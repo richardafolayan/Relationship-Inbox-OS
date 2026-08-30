@@ -309,14 +309,6 @@ export function createIndexedDbThreadComposerAttachmentStore(
     const transaction = db.transaction([ATTACHMENTS_STORE, OWNERS_STORE], "readwrite");
     const owners = transaction.objectStore(OWNERS_STORE);
     const staleBefore = now() - STALE_AFTER_MS;
-    const ownerCursor = owners.openCursor();
-    ownerCursor.onsuccess = () => {
-      const cursor = ownerCursor.result;
-      if (!cursor) return;
-      const record = cursor.value as PersistedAttachmentOwner;
-      if (record.updatedAt < staleBefore) cursor.delete();
-      cursor.continue();
-    };
     const store = transaction.objectStore(ATTACHMENTS_STORE);
     const cursorRequest = store.openCursor();
     cursorRequest.onsuccess = () => {
@@ -453,15 +445,9 @@ export function createMemoryThreadComposerAttachmentStore(
   now: () => number = Date.now
 ): ThreadComposerAttachmentStore {
   const records = new Map<string, PersistedAttachmentRecord>();
-  const owners = new Map<string, Map<string, number>>();
+  const owners = new Map<string, Set<string>>();
   const purgeStale = async () => {
     const staleBefore = now() - STALE_AFTER_MS;
-    for (const [key, current] of owners) {
-      for (const [ownerKey, updatedAt] of current) {
-        if (updatedAt < staleBefore) current.delete(ownerKey);
-      }
-      if (current.size === 0) owners.delete(key);
-    }
     for (const [key, record] of records) {
       if (record.updatedAt < staleBefore && (owners.get(key)?.size ?? 0) === 0) {
         records.delete(key);
@@ -474,8 +460,8 @@ export function createMemoryThreadComposerAttachmentStore(
     async claimOwnership(threadId, attachmentIds, ownerId, targetNamespace = namespace) {
       for (const attachmentId of attachmentIds) {
         const key = attachmentKey(targetNamespace, threadId, attachmentId);
-        const current = owners.get(key) ?? new Map<string, number>();
-        current.set(attachmentOwnerKey(targetNamespace, threadId, ownerId), now());
+        const current = owners.get(key) ?? new Set<string>();
+        current.add(attachmentOwnerKey(targetNamespace, threadId, ownerId));
         owners.set(key, current);
       }
     },
