@@ -3,6 +3,93 @@ import { isAbsolute, relative, resolve, sep } from "node:path";
 
 export const OUTGOING_ATTACHMENT_ORPHAN_GRACE_MS = 60 * 60 * 1000;
 
+export interface OutgoingAttachmentActivityTracker {
+  activate: (directory: string) => () => void;
+  completeRemoval: (directory: string, removed: boolean) => void;
+  prune: (snapshotVersion: number) => void;
+  snapshotVersion: () => number;
+  tryClaimRemoval: (directory: string, snapshotVersion: number) => boolean;
+}
+
+export function createOutgoingAttachmentActivityTracker(): OutgoingAttachmentActivityTracker {
+  let version = 0;
+  const entries = new Map<string, {
+    activeCount: number;
+    lastChangedVersion: number;
+    removing: boolean;
+  }>();
+  return {
+    activate: (directory) => {
+      const key = resolve(directory);
+      const existing = entries.get(key);
+      if (existing?.removing) {
+        throw new Error("attachment directory is being cleaned");
+      }
+      version += 1;
+      const entry = existing ?? {
+        activeCount: 0,
+        lastChangedVersion: version,
+        removing: false
+      };
+      entry.activeCount += 1;
+      entry.lastChangedVersion = version;
+      entries.set(key, entry);
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        const current = entries.get(key);
+        if (!current) return;
+        version += 1;
+        current.activeCount = Math.max(0, current.activeCount - 1);
+        current.lastChangedVersion = version;
+      };
+    },
+    completeRemoval: (directory, removed) => {
+      const key = resolve(directory);
+      const entry = entries.get(key);
+      if (!entry?.removing) return;
+      if (removed) {
+        entries.delete(key);
+        return;
+      }
+      version += 1;
+      entry.removing = false;
+      entry.lastChangedVersion = version;
+    },
+    prune: (snapshotVersion) => {
+      for (const [key, entry] of entries) {
+        if (
+          entry.activeCount === 0 &&
+          !entry.removing &&
+          entry.lastChangedVersion <= snapshotVersion
+        ) {
+          entries.delete(key);
+        }
+      }
+    },
+    snapshotVersion: () => version,
+    tryClaimRemoval: (directory, snapshotVersion) => {
+      const key = resolve(directory);
+      const entry = entries.get(key);
+      if (
+        entry &&
+        (entry.activeCount > 0 ||
+          entry.removing ||
+          entry.lastChangedVersion > snapshotVersion)
+      ) {
+        return false;
+      }
+      entries.set(key, {
+        activeCount: 0,
+        lastChangedVersion: entry?.lastChangedVersion ?? snapshotVersion,
+        removing: true
+      });
+      return true;
+    }
+  };
+}
+
 function collectAbsolutePaths(value: unknown, paths: Set<string>): void {
   if (Array.isArray(value)) {
     for (const item of value) collectAbsolutePaths(item, paths);
@@ -22,6 +109,7 @@ function collectAbsolutePaths(value: unknown, paths: Set<string>): void {
 }
 
 export async function sweepOutgoingAttachmentOrphans(input: {
+  activity?: OutgoingAttachmentActivityTracker;
   loadRows: () => Promise<Array<{ attachmentsJson: string | null }>>;
   now?: number;
   outgoingAttachmentsRoot: string;
@@ -30,6 +118,7 @@ export async function sweepOutgoingAttachmentOrphans(input: {
   | { status: "aborted"; removed: 0 }
   | { status: "completed"; removed: number }
 > {
+  const activitySnapshotVersion = input.activity?.snapshotVersion() ?? 0;
   const referencedPaths = new Set<string>();
   try {
     const rows = await input.loadRows();
@@ -83,12 +172,23 @@ export async function sweepOutgoingAttachmentOrphans(input: {
 
   let removed = 0;
   for (const directory of removable) {
+    if (
+      input.activity &&
+      !input.activity.tryClaimRemoval(directory, activitySnapshotVersion)
+    ) {
+      continue;
+    }
+    let directoryRemoved = false;
     try {
       await rm(directory, { recursive: true, force: true });
+      directoryRemoved = true;
       removed += 1;
     } catch {
       continue;
+    } finally {
+      input.activity?.completeRemoval(directory, directoryRemoved);
     }
   }
+  input.activity?.prune(activitySnapshotVersion);
   return { status: "completed", removed };
 }

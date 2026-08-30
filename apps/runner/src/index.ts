@@ -42,6 +42,7 @@ import {
   multipartOnly
 } from "./services/staged-attachment-request";
 import {
+  createOutgoingAttachmentActivityTracker,
   OUTGOING_ATTACHMENT_ORPHAN_GRACE_MS,
   sweepOutgoingAttachmentOrphans
 } from "./services/outgoing-attachment-orphan-sweep";
@@ -313,6 +314,49 @@ app.use((req, res, next) => {
 // can reference them by absolute path when shelling out to osascript.
 const outgoingAttachmentsRoot = resolve(dataDir, "outgoing-attachments");
 mkdirSync(outgoingAttachmentsRoot, { recursive: true });
+const outgoingAttachmentActivity = createOutgoingAttachmentActivityTracker();
+const outgoingAttachmentRequestActivity = new WeakMap<
+  express.Request,
+  Array<{ directory: string; release: () => void }>
+>();
+function registerOutgoingAttachmentRequestDirectory(
+  req: express.Request,
+  directory: string
+): () => void {
+  const releaseActivity = outgoingAttachmentActivity.activate(directory);
+  const records = outgoingAttachmentRequestActivity.get(req) ?? [];
+  const record = { directory, release: releaseActivity };
+  records.push(record);
+  outgoingAttachmentRequestActivity.set(req, records);
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    releaseActivity();
+    const current = outgoingAttachmentRequestActivity.get(req);
+    if (!current) return;
+    const next = current.filter((item) => item !== record);
+    if (next.length > 0) outgoingAttachmentRequestActivity.set(req, next);
+    else outgoingAttachmentRequestActivity.delete(req);
+  };
+}
+function releaseOutgoingAttachmentRequestActivity(req: express.Request): void {
+  const records = outgoingAttachmentRequestActivity.get(req) ?? [];
+  for (const record of records) record.release();
+  outgoingAttachmentRequestActivity.delete(req);
+}
+async function discardFailedAttachmentUpload(req: express.Request): Promise<void> {
+  const records = [...(outgoingAttachmentRequestActivity.get(req) ?? [])];
+  try {
+    await Promise.all(
+      records.map((record) =>
+        rm(record.directory, { recursive: true, force: true })
+      )
+    );
+  } finally {
+    releaseOutgoingAttachmentRequestActivity(req);
+  }
+}
 async function discardStagedAttachments(
   attachments: Array<{ absolutePath: string }>
 ): Promise<void> {
@@ -360,6 +404,7 @@ async function sweepOutgoingAttachmentOrphansOnce(): Promise<void> {
   outgoingAttachmentSweepRunning = true;
   try {
     await sweepOutgoingAttachmentOrphans({
+      activity: outgoingAttachmentActivity,
       outgoingAttachmentsRoot,
       graceMs: OUTGOING_ATTACHMENT_ORPHAN_GRACE_MS,
       loadRows: () => prisma.sendRequest.findMany({
@@ -372,10 +417,17 @@ async function sweepOutgoingAttachmentOrphansOnce(): Promise<void> {
 }
 const uploadAttachments = multer({
   storage: multer.diskStorage({
-    destination: (_req, _file, cb) => {
+    destination: (req, _file, cb) => {
       const dir = resolve(outgoingAttachmentsRoot, uuid());
-      mkdirSync(dir, { recursive: true });
-      cb(null, dir);
+      let releaseActivity: (() => void) | undefined;
+      try {
+        releaseActivity = registerOutgoingAttachmentRequestDirectory(req, dir);
+        mkdirSync(dir, { recursive: true });
+        cb(null, dir);
+      } catch (error) {
+        releaseActivity?.();
+        cb(error instanceof Error ? error : new Error(String(error)), dir);
+      }
     },
     filename: (_req, file, cb) => {
       // Keep extension so Messages.app can sniff the right file type, but never
@@ -388,7 +440,9 @@ const uploadAttachments = multer({
   limits: { fileSize: 50 * 1024 * 1024 } // 50MB per file
 }).array("attachments", 10);
 
-const maybeMultipart = multipartOnly(uploadAttachments);
+const maybeMultipart = multipartOnly(uploadAttachments, {
+  onUploadError: discardFailedAttachmentUpload
+});
 
 async function sha256File(path: string): Promise<string> {
   return new Promise((resolveHash, rejectHash) => {
@@ -4131,6 +4185,7 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
   const requestIntentVersion = userTriggeredIntentVersion(res);
   const stagedAttachmentRequest = createStagedAttachmentRequestLifecycle(req, {
     discard: discardStagedAttachments,
+    releaseActivity: () => releaseOutgoingAttachmentRequestActivity(req),
     resolveOwnership: sendRequestOwnsStagedAttachments
   });
   let stagedAttachments: Array<{

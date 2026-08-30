@@ -7,6 +7,7 @@ import { spawn } from "node:child_process";
 import test from "node:test";
 
 import {
+  createOutgoingAttachmentActivityTracker,
   sweepOutgoingAttachmentOrphans
 } from "../apps/runner/dist/services/outgoing-attachment-orphan-sweep.js";
 
@@ -123,6 +124,54 @@ test("database and JSON uncertainty abort before deleting any orphan", async (t)
   assert.equal(await readFile(candidate.path, "utf8"), "candidate");
 });
 
+test("activity after the database snapshot blocks stale deletion until a later sweep", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "tovi-outgoing-sweep-race-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const candidate = await writeReferenced(root, "candidate");
+  const old = new Date(Date.now() - 2 * 60 * 60 * 1000);
+  await utimes(candidate.directory, old, old);
+  const activity = createOutgoingAttachmentActivityTracker();
+  let continueSnapshot;
+  let snapshotLoaded;
+  const snapshotLoadedPromise = new Promise((resolve) => {
+    snapshotLoaded = resolve;
+  });
+  const continueSnapshotPromise = new Promise((resolve) => {
+    continueSnapshot = resolve;
+  });
+
+  const staleSweep = sweepOutgoingAttachmentOrphans({
+    activity,
+    outgoingAttachmentsRoot: root,
+    graceMs: 60 * 60 * 1000,
+    loadRows: async () => {
+      snapshotLoaded();
+      await continueSnapshotPromise;
+      return [];
+    }
+  });
+  await snapshotLoadedPromise;
+  const release = activity.activate(candidate.directory);
+  release();
+  continueSnapshot();
+
+  assert.deepEqual(
+    await staleSweep,
+    { status: "completed", removed: 0 }
+  );
+  assert.equal(await readFile(candidate.path, "utf8"), "candidate");
+  assert.deepEqual(
+    await sweepOutgoingAttachmentOrphans({
+      activity,
+      outgoingAttachmentsRoot: root,
+      graceMs: 60 * 60 * 1000,
+      loadRows: async () => []
+    }),
+    { status: "completed", removed: 1 }
+  );
+  await assert.rejects(() => stat(candidate.directory), { code: "ENOENT" });
+});
+
 test("runner startup sweeps before accepting work", async () => {
   const source = await readFile(
     new URL("../apps/runner/src/index.ts", import.meta.url),
@@ -140,5 +189,14 @@ test("runner startup sweeps before accepting work", async () => {
   assert.match(
     start,
     /setInterval\([\s\S]*?sweepOutgoingAttachmentOrphansOnce\(\)[\s\S]*?OUTGOING_ATTACHMENT_ORPHAN_GRACE_MS[\s\S]*?\.unref\(\)/
+  );
+  assert.match(source, /activity: outgoingAttachmentActivity/);
+  assert.match(
+    source,
+    /registerOutgoingAttachmentRequestDirectory\(req, dir\)[\s\S]*?mkdirSync\(dir/
+  );
+  assert.match(
+    source,
+    /releaseActivity: \(\) => releaseOutgoingAttachmentRequestActivity\(req\)/
   );
 });

@@ -4,11 +4,22 @@ import {
   type StagedAttachmentOwnership
 } from "./staged-attachment-cleanup";
 
-export function multipartOnly(upload: RequestHandler): RequestHandler {
+export function multipartOnly(
+  upload: RequestHandler,
+  options?: { onUploadError?: (req: Request) => Promise<void> | void }
+): RequestHandler {
   return (req: Request, res: Response, next: NextFunction) => {
     const contentType = (req.headers["content-type"] ?? "").toLowerCase();
     if (contentType.startsWith("multipart/form-data")) {
-      upload(req, res, next);
+      upload(req, res, (error) => {
+        if (!error) {
+          next();
+          return;
+        }
+        void Promise.resolve(options?.onUploadError?.(req))
+          .catch(() => undefined)
+          .finally(() => next(error));
+      });
       return;
     }
     next();
@@ -19,6 +30,7 @@ export function createStagedAttachmentRequestLifecycle(
   req: Request,
   deps: {
     discard: (attachments: Array<{ absolutePath: string }>) => Promise<void>;
+    releaseActivity?: () => void;
     resolveOwnership: (
       clientSendId: string | undefined,
       attachments: Array<{ absolutePath: string }>
@@ -45,20 +57,24 @@ export function createStagedAttachmentRequestLifecycle(
       persistenceAttempted = true;
     },
     finalize: async () => {
-      if (handled) return;
-      const ownership: StagedAttachmentOwnership = persistenceAttempted
-        ? await deps
-            .resolveOwnership(clientSendId, uploadedAttachmentPaths)
-            .catch(() => "unknown")
-        : "unowned";
-      if (
-        shouldDiscardStagedAttachments({
-          handled,
-          ownership,
-          persistenceAttempted
-        })
-      ) {
-        await deps.discard(uploadedAttachmentPaths).catch(() => undefined);
+      try {
+        if (handled) return;
+        const ownership: StagedAttachmentOwnership = persistenceAttempted
+          ? await deps
+              .resolveOwnership(clientSendId, uploadedAttachmentPaths)
+              .catch(() => "unknown")
+          : "unowned";
+        if (
+          shouldDiscardStagedAttachments({
+            handled,
+            ownership,
+            persistenceAttempted
+          })
+        ) {
+          await deps.discard(uploadedAttachmentPaths).catch(() => undefined);
+        }
+      } finally {
+        deps.releaseActivity?.();
       }
     }
   };
