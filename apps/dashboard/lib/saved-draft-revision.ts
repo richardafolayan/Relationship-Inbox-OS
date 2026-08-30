@@ -36,10 +36,10 @@ export function mergeDeletedDraftRevision<
 }
 
 export function draftRevisionForComposerSend(
-  revision: SavedDraftRevision | null,
-  composerText: string
+  _currentRevision: SavedDraftRevision | null,
+  originatingRevision: SavedDraftRevision | null
 ): SavedDraftRevision | null {
-  return revision?.text === composerText ? revision : null;
+  return originatingRevision;
 }
 
 export function shouldClearComposerAfterDraftDelete(

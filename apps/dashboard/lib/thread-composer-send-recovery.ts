@@ -221,6 +221,12 @@ export function composerNotFoundRecoveryAfterDispatchFailure(
     : "replay";
 }
 
+export function composerNotFoundRecoveryOnResume(
+  recovery: ThreadComposerSendAttemptValue["notFoundRecovery"]
+): "replay" | "restore" {
+  return recovery === "restore" ? "restore" : "replay";
+}
+
 export function composerSendRecoveryDisposition(status: {
   status: "NOT_FOUND" | "PENDING" | "SCHEDULED" | "SENT" | "FAILED" | "CANCELLED";
   deliveryUncertain?: boolean;

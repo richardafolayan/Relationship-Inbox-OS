@@ -27,7 +27,13 @@ export interface ThreadComposerIntentDraft {
   text: string;
 }
 
+export interface ThreadComposerDraftRevision {
+  text: string;
+  updatedAt: string;
+}
+
 export interface ThreadComposerSession extends ThreadComposerIntentDraft {
+  draftRevision?: ThreadComposerDraftRevision | null;
   revision: number;
   revisionId: string;
 }
@@ -73,6 +79,21 @@ function createRevisionId(): string | null {
 
 function validSource(value: unknown): value is ThreadComposerSource {
   return value === "empty" || value === "draft" || value === "predraft" || value === "user";
+}
+
+function normalizeDraftRevision(value: unknown): ThreadComposerDraftRevision | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  if (!value || typeof value !== "object") return undefined;
+  const raw = value as Record<string, unknown>;
+  if (
+    typeof raw.text !== "string" ||
+    typeof raw.updatedAt !== "string" ||
+    !Number.isFinite(Date.parse(raw.updatedAt))
+  ) {
+    return undefined;
+  }
+  return { text: raw.text, updatedAt: raw.updatedAt };
 }
 
 function normalizeAttachment(value: unknown): ThreadComposerAttachmentDescriptor | null {
@@ -177,7 +198,14 @@ export function readThreadComposerSession(
         ? parsed.revisionId
         : createRevisionId();
     if (!revisionId) return null;
-    const session = { ...intent, revision: parsed.revision as number, revisionId };
+    const draftRevision = normalizeDraftRevision(parsed.draftRevision);
+    if (parsed.draftRevision !== undefined && draftRevision === undefined) return null;
+    const session: ThreadComposerSession = {
+      ...intent,
+      ...(parsed.draftRevision !== undefined ? { draftRevision: draftRevision ?? null } : {}),
+      revision: parsed.revision as number,
+      revisionId
+    };
     if (parsed.revisionId !== revisionId) {
       storage.setItem(keyFor(threadId), JSON.stringify(session));
     }
@@ -190,7 +218,8 @@ export function readThreadComposerSession(
 export function snapshotThreadComposerSession(
   threadId: string,
   draft: ThreadComposerIntentDraft,
-  storage: StorageLike | null = defaultStorage()
+  storage: StorageLike | null = defaultStorage(),
+  draftRevision?: ThreadComposerDraftRevision | null
 ): ThreadComposerSession | null {
   if (!storage || !threadId) return null;
   const intent = normalizeThreadComposerIntent(draft);
@@ -206,6 +235,11 @@ export function snapshotThreadComposerSession(
     if (!revisionId) return null;
     const next: ThreadComposerSession = {
       ...intent,
+      ...(draftRevision !== undefined
+        ? { draftRevision }
+        : current && "draftRevision" in current
+          ? { draftRevision: current.draftRevision ?? null }
+          : {}),
       revision: unchanged ? current.revision : (current?.revision ?? 0) + 1,
       revisionId
     };
@@ -219,7 +253,8 @@ export function snapshotThreadComposerSession(
 export function rotateThreadComposerSession(
   threadId: string,
   draft: ThreadComposerIntentDraft,
-  storage: StorageLike | null = defaultStorage()
+  storage: StorageLike | null = defaultStorage(),
+  draftRevision?: ThreadComposerDraftRevision | null
 ): ThreadComposerSession | null {
   if (!storage || !threadId) return null;
   const intent = normalizeThreadComposerIntent(draft);
@@ -230,6 +265,11 @@ export function rotateThreadComposerSession(
     if (!revisionId) return null;
     const next: ThreadComposerSession = {
       ...intent,
+      ...(draftRevision !== undefined
+        ? { draftRevision }
+        : current && "draftRevision" in current
+          ? { draftRevision: current.draftRevision ?? null }
+          : {}),
       revision: (current?.revision ?? 0) + 1,
       revisionId
     };

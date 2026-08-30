@@ -270,6 +270,7 @@ export type RunnerEvent =
       // UI match this event to a specific pending bubble in the timeline so
       // the right one gets cleared when the runner confirms delivery.
       clientSendId?: string;
+      draftConsumed?: boolean;
       verifiedBy?: VerificationMethod;
       acknowledgedAt?: string;
       platformResultAt?: string;

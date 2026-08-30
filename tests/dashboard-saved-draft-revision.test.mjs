@@ -116,14 +116,24 @@ test("a delete response clears only its target thread's authoritative draft meta
   assert.equal(mergeDeletedDraftRevision(threadB, "thread-a"), threadB);
 });
 
-test("send consumes only the saved draft whose text it actually supersedes", () => {
-  const saved = {
-    text: "Newer reply B",
+test("send consumes the exact draft revision from which the composer originated", () => {
+  const current = {
+    text: "Newer cross-tab reply B",
     updatedAt: "2026-08-30T09:05:00.000Z"
   };
-  assert.deepEqual(draftRevisionForComposerSend(saved, "Newer reply B"), saved);
-  assert.equal(draftRevisionForComposerSend(saved, "Recovered failed reply A"), null);
-  assert.equal(draftRevisionForComposerSend(null, "Anything"), null);
+  const originatedFrom = {
+    text: "Saved reply A",
+    updatedAt: "2026-08-30T09:00:00.000Z"
+  };
+  assert.deepEqual(
+    draftRevisionForComposerSend(current, originatedFrom),
+    originatedFrom
+  );
+  assert.deepEqual(
+    draftRevisionForComposerSend(originatedFrom, originatedFrom),
+    originatedFrom
+  );
+  assert.equal(draftRevisionForComposerSend(current, null), null);
 });
 
 test("the draft endpoint returns the exact persisted revision used by send consumption", () => {

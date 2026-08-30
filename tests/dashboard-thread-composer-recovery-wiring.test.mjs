@@ -16,7 +16,7 @@ test("thread navigation snapshots the previous full intent and restores only the
   const lifecycle = source.slice(start, end);
   assert.match(
     lifecycle,
-    /snapshotThreadComposerSession\(previousThreadId, currentIntent\)/
+    /snapshotThreadComposerSession\([\s\S]*?previousThreadId,[\s\S]*?currentIntent,[\s\S]*?composerDraftRevisionRef\.current/
   );
   assert.match(lifecycle, /readThreadComposerSession\(threadId\)/);
   assert.match(lifecycle, /setComposer\(restoredIntent\.text\)/);
@@ -31,7 +31,10 @@ test("a scheduled reply carries complete intent under the shared durable compose
   assert.notEqual(start, -1);
   assert.notEqual(end, -1);
   const schedule = source.slice(start, end);
-  assert.match(schedule, /snapshotThreadComposerSession\(startThreadId, capturedIntent\)/);
+  assert.match(
+    schedule,
+    /snapshotThreadComposerSession\([\s\S]*?startThreadId,[\s\S]*?capturedIntent,[\s\S]*?capturedDraftRevision/
+  );
   assert.match(schedule, /kind: "scheduled"/);
   assert.match(schedule, /threadComposerSendScope\(startThreadId\)/);
   assert.match(
@@ -64,7 +67,10 @@ test("an immediate send preserves its full intent until the exact attempt is res
   );
   assert.doesNotMatch(send, /completeScopedValue/);
   assert.match(send, /checkPendingDelivery\(clientSendId\)/);
-  assert.match(send, /snapshotThreadComposerSession\(ownerThreadId, composerIntentRef\.current\)/);
+  assert.match(
+    send,
+    /snapshotThreadComposerSession\([\s\S]*?ownerThreadId,[\s\S]*?composerIntentRef\.current,[\s\S]*?composerDraftRevisionRef\.current/
+  );
 });
 
 test("a failed captured reply stays separate when the operator has typed newer text", () => {
@@ -77,7 +83,7 @@ test("a failed captured reply stays separate when the operator has typed newer t
   assert.match(restore, /item\.clientSendId === pending\.clientSendId/);
   assert.match(
     restore,
-    /rotateThreadComposerSession\(\s*pending\.threadId,\s*recoveryIntent\s*\)/
+    /rotateThreadComposerSession\([\s\S]*?pending\.threadId,[\s\S]*?recoveryIntent,[\s\S]*?pending\.draftRevision/
   );
 });
 
@@ -88,8 +94,51 @@ test("completed composer generations suppress copied-tab duplicate sends", () =>
   assert.match(source, /readCompletedScopedValues<ThreadComposerSendAttemptValue>/);
   assert.match(source, /value\.sessionRevisionId === storedSession\?\.revisionId/);
   assert.match(source, /value\.sessionRevisionId === capturedSession\.revisionId/);
-  assert.match(source, /notFoundRecovery: "blocked"/);
+  assert.match(source, /notFoundRecovery: "replay"/);
+  assert.match(source, /composerNotFoundRecoveryOnResume/);
   assert.match(source, /pending\.notFoundRecovery !== "replay"/);
+});
+
+test("send status and terminal events apply durable draft consumption before authoritative refresh", () => {
+  assert.match(
+    source,
+    /if \(response\.draftConsumed\) consumePendingDraftRevision\(pending\)/
+  );
+  assert.match(
+    source,
+    /detail\.draftConsumed[\s\S]*?consumePendingDraftRevision\(pending\)/
+  );
+  assert.match(source, /refreshThread\(\{ authoritative: true \}\)/);
+});
+
+test("scheduled acceptance clears only its captured composer and status failures keep reconciling", () => {
+  const scheduleStart = source.indexOf("const scheduleSend = useCallback(");
+  const scheduleEnd = source.indexOf("const cancelScheduledSend", scheduleStart);
+  const schedule = source.slice(scheduleStart, scheduleEnd);
+  const statusStart = source.indexOf("const checkPendingDelivery = useCallback(");
+  const statusEnd = source.indexOf("checkPendingDeliveryRef.current = checkPendingDelivery", statusStart);
+  const status = source.slice(statusStart, statusEnd);
+
+  assert.match(schedule, /clearCapturedComposerAfterAcceptedAction\(pending\)/);
+  assert.match(
+    status,
+    /catch \{[\s\S]*?setTimeout\([\s\S]*?checkPendingDeliveryRef\.current\(pending\.clientSendId\)/
+  );
+});
+
+test("late delivery reconciliation cannot write thread A errors into thread B", () => {
+  const restoreStart = source.indexOf("const restorePendingComposerSend = useCallback(");
+  const restoreEnd = source.indexOf("const clearCapturedComposerAfterAcceptedAction", restoreStart);
+  const statusStart = source.indexOf("const checkPendingDelivery = useCallback(");
+  const statusEnd = source.indexOf("checkPendingDeliveryRef.current = checkPendingDelivery", statusStart);
+  assert.match(
+    source.slice(restoreStart, restoreEnd),
+    /routeThreadIdRef\.current === pending\.threadId/
+  );
+  assert.match(
+    source.slice(statusStart, statusEnd),
+    /routeThreadIdRef\.current === pending\.threadId/
+  );
 });
 
 test("draft mutations are ordered with sends, schedules, and both delete controls", () => {
@@ -106,13 +155,13 @@ test("draft mutations are ordered with sends, schedules, and both delete control
   assert.match(source, /draftMutations\.reconcileFetchedRevision/);
 });
 
-test("delivery events and status cleanup never infer saved-draft consumption", () => {
+test("delivery events and status cleanup consume drafts only from authoritative flags", () => {
   const eventStart = source.indexOf("// SSE reconciliation for sends.");
   const completionStart = source.indexOf("const completePendingComposerSend", eventStart);
   const restoreStart = source.indexOf("const restorePendingComposerSend", completionStart);
-  assert.doesNotMatch(
+  assert.match(
     source.slice(eventStart, completionStart),
-    /consumePendingDraftRevision/
+    /if \(detail\.draftConsumed\) consumePendingDraftRevision\(pending\)/
   );
   assert.doesNotMatch(
     source.slice(completionStart, restoreStart),

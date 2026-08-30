@@ -56,6 +56,37 @@ test("composer sessions preserve the complete per-thread send intent", () => {
   assert.match(saved.revisionId, /^[0-9a-f-]{36}$/i);
 });
 
+test("composer sessions preserve the exact saved draft revision they originated from", () => {
+  const storage = makeStorage();
+  const draftRevision = {
+    text: "Saved draft A",
+    updatedAt: "2026-08-30T09:00:00.000Z"
+  };
+  const intent = {
+    attachments: [],
+    customScheduleValue: "",
+    replyToMessageId: null,
+    source: "draft",
+    text: "Edited reply B"
+  };
+
+  const saved = snapshotThreadComposerSession(
+    "thread-a",
+    intent,
+    storage,
+    draftRevision
+  );
+  assert.deepEqual(saved.draftRevision, draftRevision);
+  assert.deepEqual(readThreadComposerSession("thread-a", storage)?.draftRevision, draftRevision);
+
+  const editedAgain = snapshotThreadComposerSession(
+    "thread-a",
+    { ...intent, text: "Edited reply C" },
+    storage
+  );
+  assert.deepEqual(editedAgain.draftRevision, draftRevision);
+});
+
 test("unchanged snapshots keep their revision while any intent change advances it", () => {
   const storage = makeStorage();
   const intent = {
@@ -251,4 +282,27 @@ test("a definite failed send rotates the recovered intent to a new delivery gene
   assert.equal(recovered.text, failed.text);
   assert.equal(recovered.revision, failed.revision + 1);
   assert.notEqual(recovered.revisionId, failed.revisionId);
+});
+
+test("a definite failed send keeps only the draft revision captured by that attempt", () => {
+  const storage = makeStorage();
+  const intent = {
+    attachments: [],
+    customScheduleValue: "",
+    replyToMessageId: null,
+    source: "draft",
+    text: "Recovered reply A"
+  };
+  const capturedDraft = {
+    text: "Saved A",
+    updatedAt: "2026-08-30T09:00:00.000Z"
+  };
+
+  const recovered = rotateThreadComposerSession(
+    "thread-a",
+    intent,
+    storage,
+    capturedDraft
+  );
+  assert.deepEqual(recovered.draftRevision, capturedDraft);
 });

@@ -33,6 +33,7 @@ import {
 } from "./services/setup-preferences";
 import { createTranscriptionSetupManager } from "./services/transcription-setup";
 import { createAuditService } from "./services/audit";
+import { deleteDraftRevision } from "./services/draft";
 import { summarizeControlBody } from "./services/control-audit";
 import { createEventBus } from "./services/event-bus";
 import {
@@ -6954,6 +6955,7 @@ app.get("/data/send-queue", asyncRoute(async (_req, res) => {
         personName: row.thread.person.displayName,
         platform: row.thread.platform,
         status: row.status,
+        draftConsumed: row.draftConsumed,
         completedAt: row.updatedAt.toISOString(),
         errorMessage: failure?.message,
         errorKind: failure?.errorKind,
@@ -6999,6 +7001,7 @@ app.get("/data/send-status/:clientSendId", asyncRoute(async (req, res) => {
       clientSendId: true,
       threadId: true,
       status: true,
+      draftConsumed: true,
       errorJson: true,
       updatedAt: true
     }
@@ -7017,6 +7020,7 @@ app.get("/data/send-status/:clientSendId", asyncRoute(async (req, res) => {
     clientSendId: row.clientSendId,
     threadId: row.threadId,
     status: row.status,
+    draftConsumed: row.draftConsumed,
     updatedAt: row.updatedAt.toISOString(),
     errorMessage: failure?.message,
     errorKind: failure?.errorKind,
@@ -8621,10 +8625,16 @@ app.post("/control/thread/:threadId/draft", asyncRoute(async (req, res) => {
 app.post("/control/thread/:threadId/delete-draft", asyncRoute(async (req, res) => {
   const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
   if (await checkPresenterGuard(res, settingsStore, { threadId, action: "delete a draft", kind: "thread-mutation" })) return;
+  const payload = z.object({
+    draft: z.object({
+      text: z.string().max(5000),
+      updatedAt: z.string().datetime()
+    })
+  }).parse(req.body);
 
-  await prisma.draft.deleteMany({ where: { threadId } });
+  const deleted = await deleteDraftRevision(prisma, threadId, payload.draft);
 
-  res.json({ status: "ok" });
+  res.json({ status: "ok", deleted });
 }));
 
 app.post("/control/thread/:threadId/mark-done", asyncRoute(async (req, res) => {

@@ -590,6 +590,7 @@ model SendRequest {
   threadId     String
   status       SendRequestStatus @default(PENDING)
   requestText  String
+  draftConsumed Boolean          @default(false)
   // Durable dispatch provenance. The worker rechecks this at the final safety
   // boundary so an automated row cannot become manual merely by restarting.
   source       String

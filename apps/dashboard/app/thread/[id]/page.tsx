@@ -163,6 +163,7 @@ import {
   composerClientSendId,
   composerDispatchFailureIsAmbiguous,
   composerNotFoundRecoveryAfterDispatchFailure,
+  composerNotFoundRecoveryOnResume,
   composerReplayPreflight,
   composerSendRecoveryDisposition,
   missingThreadComposerAttachments,
@@ -1280,6 +1281,7 @@ export default function ThreadPage() {
   );
   const composerOwnerThreadIdRef = useRef(threadId);
   const composerSessionPresentRef = useRef(false);
+  const composerDraftRevisionRef = useRef<SavedDraftRevision | null>(null);
   const composerRestoreGenerationRef = useRef(0);
   const composerRestoreRef = useRef<{
     intent: ThreadComposerIntentDraft;
@@ -1578,9 +1580,11 @@ export default function ThreadPage() {
       if (composerSessionPresentRef.current) return prev;
       const explicitDraft = guardedFresh.draft;
       if (explicitDraft) {
+        composerDraftRevisionRef.current = draftRevision;
         setComposerSource("draft");
         return explicitDraft;
       }
+      composerDraftRevisionRef.current = null;
       // No explicit draft - fall back to AI predraft (first suggested
       // reply) so the operator opens an already-filled composer when
       // /today has pre-warmed the cache. Only when the operator has
@@ -1613,19 +1617,23 @@ export default function ThreadPage() {
   // round-trip instead of max(thread, full-inbox, platforms, 150-row-logs).
   // Uses the SWR cache so a hover-prefetched or previously-seen thread paints
   // instantly and revalidates in the background.
-  const refreshThread = useCallback(async () => {
+  const refreshThread = useCallback(async (options?: { authoritative?: boolean }) => {
     const requestDraftGeneration = draftMutations.generation(threadId);
+    const path = `/runner/data/thread/${threadId}`;
     try {
-      const fresh = await apiGet<ThreadResponse>(`/runner/data/thread/${threadId}`, {
-        swr: true,
-        onFresh: (data) => applyThread(data as ThreadResponse, requestDraftGeneration)
-      });
+      if (options?.authoritative) invalidateCache(path);
+      const fresh = options?.authoritative
+        ? await apiGetRaw<ThreadResponse>(path)
+        : await apiGet<ThreadResponse>(path, {
+            swr: true,
+            onFresh: (data) => applyThread(data as ThreadResponse, requestDraftGeneration)
+          });
       applyThread(fresh, requestDraftGeneration);
     } catch (err) {
       const message = err instanceof Error ? err.message : "Failed to load thread";
-      setError(message);
+      if (routeThreadIdRef.current === threadId) setError(message);
     } finally {
-      setLoading(false);
+      if (routeThreadIdRef.current === threadId) setLoading(false);
     }
   }, [threadId, applyThread, draftMutations]);
 
@@ -1716,11 +1724,38 @@ export default function ThreadPage() {
       !pending.draftRevision ||
       !draftMutations.consumeRevision(pending.threadId, pending.draftRevision)
     ) {
-      return;
+      return false;
     }
     setThread((current) => mergeDeletedDraftRevision(current, pending.threadId));
     cacheThreadDraftRevision(pending.threadId, null);
-    if (routeThreadIdRef.current === pending.threadId) setHasSavedDraft(false);
+    if (routeThreadIdRef.current === pending.threadId) {
+      setHasSavedDraft(false);
+      const intent = composerIntentRef.current;
+      const origin = composerDraftRevisionRef.current;
+      if (
+        origin?.text === pending.draftRevision.text &&
+        origin.updatedAt === pending.draftRevision.updatedAt &&
+        intent.text === pending.draftRevision.text &&
+        intent.attachments.length === 0 &&
+        intent.replyToMessageId === null &&
+        !intent.customScheduleValue
+      ) {
+        const emptyIntent: ThreadComposerIntentDraft = {
+          attachments: [],
+          customScheduleValue: "",
+          replyToMessageId: null,
+          source: "empty",
+          text: ""
+        };
+        composerDraftRevisionRef.current = null;
+        composerIntentRef.current = emptyIntent;
+        composerSessionPresentRef.current = false;
+        snapshotThreadComposerSession(pending.threadId, emptyIntent, undefined, null);
+        setComposer("");
+        setComposerSource("empty");
+      }
+    }
+    return true;
   }, [draftMutations]);
 
   // This dynamic route stays mounted while the operator moves between
@@ -1740,7 +1775,12 @@ export default function ThreadPage() {
         (sameThreadComposerIntent(currentIntent, activeAction.capturedIntent) ||
           sameThreadComposerIntent(currentIntent, activeAction.clearedIntent));
       if (!actionOwnsUnchangedIntent) {
-        snapshotThreadComposerSession(previousThreadId, currentIntent);
+        snapshotThreadComposerSession(
+          previousThreadId,
+          currentIntent,
+          undefined,
+          composerDraftRevisionRef.current
+        );
       }
     }
 
@@ -1800,6 +1840,7 @@ export default function ThreadPage() {
       shouldHideComposerSessionForAttempt(storedSession, pendingAttempt) ||
       sessionHiddenByCompletedSend;
     const visibleSession = sessionHiddenBySend ? null : storedSession;
+    composerDraftRevisionRef.current = visibleSession?.draftRevision ?? null;
     const restoredIntent: ThreadComposerIntentDraft = visibleSession ?? {
       attachments: [],
       customScheduleValue: "",
@@ -1935,7 +1976,12 @@ export default function ThreadPage() {
       if (!sameThreadComposerIntent(restoring.intent, composerIntentRef.current)) return;
       composerRestoreRef.current = null;
     }
-    const saved = snapshotThreadComposerSession(threadId, composerIntentRef.current);
+    const saved = snapshotThreadComposerSession(
+      threadId,
+      composerIntentRef.current,
+      undefined,
+      composerDraftRevisionRef.current
+    );
     composerSessionPresentRef.current = Boolean(saved);
   }, [
     composer,
@@ -1958,7 +2004,12 @@ export default function ThreadPage() {
       ) {
         return;
       }
-      snapshotThreadComposerSession(ownerThreadId, composerIntentRef.current);
+      snapshotThreadComposerSession(
+        ownerThreadId,
+        composerIntentRef.current,
+        undefined,
+        composerDraftRevisionRef.current
+      );
     };
     window.addEventListener("pagehide", preserveComposer);
     return () => window.removeEventListener("pagehide", preserveComposer);
@@ -1995,6 +2046,7 @@ export default function ThreadPage() {
         type?: string;
         threadId?: string;
         clientSendId?: string;
+        draftConsumed?: boolean;
         errorMessage?: string;
         errorKind?: "AUTH_REQUIRED" | "SELECTOR_FAIL" | "PROFILE_LOCKED" | "TRANSIENT" | "POLICY_BLOCKED" | "DELIVERY_UNCERTAIN" | "UNKNOWN";
         stage?: string;
@@ -2016,6 +2068,8 @@ export default function ThreadPage() {
         );
         void (async () => {
           if (pending) {
+            if (detail.draftConsumed) consumePendingDraftRevision(pending);
+            clearCapturedComposerAfterAcceptedAction(pending);
             if (pending.sessionRevision && pending.sessionRevisionId) {
               consumeThreadComposerSession(
                 pending.threadId,
@@ -2050,7 +2104,7 @@ export default function ThreadPage() {
               if (attachment.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
             }
           }
-          await refreshThread();
+          await refreshThread({ authoritative: true });
           setPendingSends((prev) =>
             prev.filter((item) => item.clientSendId !== detail.clientSendId)
           );
@@ -2163,6 +2217,9 @@ export default function ThreadPage() {
 
   const restorePendingComposerSend = useCallback(
     async (pending: PendingSend, message: string) => {
+      const showPendingError = (value: string) => {
+        if (routeThreadIdRef.current === pending.threadId) setError(value);
+      };
       if (!pending.composerIntent || !pending.sessionRevision) {
         setPendingSends((current) =>
           current.map((item) =>
@@ -2176,7 +2233,7 @@ export default function ThreadPage() {
               : item
           )
         );
-        setError(message);
+        showPendingError(message);
         return;
       }
       const emptyIntent: ThreadComposerIntentDraft = {
@@ -2207,17 +2264,19 @@ export default function ThreadPage() {
               : item
           )
         );
-        setError(retainedMessage);
+        showPendingError(retainedMessage);
         return;
       }
       const recoveryIntent = pending.composerIntent;
       if (recoveryIntent) {
         const rotatedSession = rotateThreadComposerSession(
           pending.threadId,
-          recoveryIntent
+          recoveryIntent,
+          undefined,
+          pending.draftRevision ?? null
         );
         if (!rotatedSession) {
-          setError("Tovi could not safely rotate this failed reply for another attempt. Reload before trying again.");
+          showPendingError("Tovi could not safely rotate this failed reply for another attempt. Reload before trying again.");
           return;
         }
         const released = await externalActionAttempts
@@ -2227,10 +2286,11 @@ export default function ThreadPage() {
           )
           .catch(() => false);
         if (!released) {
-          setError("Tovi could not safely release the failed send. Reload before trying again.");
+          showPendingError("Tovi could not safely release the failed send. Reload before trying again.");
           return;
         }
         composerSessionPresentRef.current = true;
+        composerDraftRevisionRef.current = pending.draftRevision ?? null;
         const missingAttachments = missingThreadComposerAttachments(
           recoveryIntent,
           pending.attachments.map((attachment) => attachment.id)
@@ -2248,7 +2308,7 @@ export default function ThreadPage() {
       setPendingSends((current) =>
         current.filter((item) => item.clientSendId !== pending.clientSendId)
       );
-      setError(message);
+      showPendingError(message);
     },
     [externalActionAttempts]
   );
@@ -2270,6 +2330,7 @@ export default function ThreadPage() {
     };
     composerIntentRef.current = emptyIntent;
     composerSessionPresentRef.current = false;
+    composerDraftRevisionRef.current = null;
     composerAttachmentsRef.current = [];
     missingComposerAttachmentsRef.current = [];
     setComposer("");
@@ -2304,6 +2365,7 @@ export default function ThreadPage() {
             errorKind?: PendingSend["errorKind"];
             retrySafe?: boolean;
             deliveryUncertain?: boolean;
+            draftConsumed?: boolean;
           }>;
         }>("/runner/data/send-queue");
         if (cancelled) return;
@@ -2338,12 +2400,16 @@ export default function ThreadPage() {
           return pending;
         });
         if (sawSent) {
-          await Promise.all(
-            pendingSendsRef.current
-              .filter((pending) => sentIds.has(pending.clientSendId))
-              .map((pending) => completePendingComposerSend(pending))
+          const sentPending = pendingSendsRef.current.filter((pending) =>
+            sentIds.has(pending.clientSendId)
           );
-          await refresh();
+          for (const pending of sentPending) {
+            const match = recentByClientId.get(pending.clientSendId);
+            if (match?.draftConsumed) consumePendingDraftRevision(pending);
+            clearCapturedComposerAfterAcceptedAction(pending);
+          }
+          await Promise.all(sentPending.map((pending) => completePendingComposerSend(pending)));
+          await refreshThread({ authoritative: true });
           if (cancelled) return;
           setPendingSends((prev) => prev.filter((p) => !sentIds.has(p.clientSendId)));
         }
@@ -2377,8 +2443,10 @@ export default function ThreadPage() {
     };
   }, [
     activePendingReconcileKey,
+    clearCapturedComposerAfterAcceptedAction,
     completePendingComposerSend,
-    refresh,
+    consumePendingDraftRevision,
+    refreshThread,
     restorePendingComposerSend,
     threadId
   ]);
@@ -2391,6 +2459,7 @@ export default function ThreadPage() {
         const response = await apiGet<SendStatusResponse>(
           `/runner/data/send-status/${encodeURIComponent(clientSendId)}`
         );
+        if (response.draftConsumed) consumePendingDraftRevision(pending);
         const disposition = composerSendRecoveryDisposition(response);
         const outcome = resolveSendRecovery(response);
         if (
@@ -2399,9 +2468,9 @@ export default function ThreadPage() {
         ) {
           await completePendingComposerSend(pending);
           clearCapturedComposerAfterAcceptedAction(pending);
-          await refresh();
+          await refreshThread({ authoritative: true });
           setPendingSends((prev) => prev.filter((item) => item.clientSendId !== clientSendId));
-          setError(null);
+          if (routeThreadIdRef.current === pending.threadId) setError(null);
           return;
         }
         if (disposition === "retain" || disposition === "scheduled") {
@@ -2419,9 +2488,9 @@ export default function ThreadPage() {
               )
           );
           if (pending.draftRevision) {
-            await refreshThread().catch(() => undefined);
+            await refreshThread({ authoritative: true }).catch(() => undefined);
           }
-          setError(null);
+          if (routeThreadIdRef.current === pending.threadId) setError(null);
           return;
         }
         if (disposition === "replay_same_id") {
@@ -2446,7 +2515,7 @@ export default function ThreadPage() {
                   : item
               )
             );
-            setError(message);
+            if (routeThreadIdRef.current === pending.threadId) setError(message);
             window.setTimeout(
               () => void checkPendingDeliveryRef.current(pending.clientSendId),
               1500
@@ -2485,38 +2554,24 @@ export default function ThreadPage() {
               pending.composerIntent.attachments,
               pending.attachmentNamespace
             );
-            const blockedValue: ThreadComposerSendAttemptValue = {
+            const replayValue: ThreadComposerSendAttemptValue = {
               ...(pending.attachmentNamespace
                 ? { attachmentNamespace: pending.attachmentNamespace }
                 : {}),
               clientSendId: pending.clientSendId,
-              notFoundRecovery: "blocked",
+              notFoundRecovery: "replay",
               requestedAt: pending.sentAt,
               sessionRevision: pending.sessionRevision,
               ...(pending.sessionRevisionId
                 ? { sessionRevisionId: pending.sessionRevisionId }
                 : {})
             };
-            const armed = await externalActionAttempts.replaceScopedValue<ThreadComposerSendAttemptValue>(
-              threadComposerSendScope(pending.threadId),
-              (value) => value.clientSendId === pending.clientSendId,
-              blockedValue
-            );
-            if (!armed) {
-              throw new Error("This send changed in another window. Check it before trying again.");
-            }
-            setPendingSends((current) =>
-              current.map((item) =>
-                item.clientSendId === pending.clientSendId
-                  ? { ...item, notFoundRecovery: "blocked" }
-                  : item
-              )
-            );
-            await dispatchComposerSendAttempt(
+            const replayResponse = await dispatchComposerSendAttempt(
               replayIntent,
-              blockedValue,
+              replayValue,
               pending.attachments
             );
+            if (replayResponse.draftConsumed) consumePendingDraftRevision(pending);
           } catch (replayError) {
             const failure = classifyConsumerFailure(replayError, {
               path: `/runner/control/thread/${pending.threadId}/send`,
@@ -2547,7 +2602,7 @@ export default function ThreadPage() {
                 .catch(() => false);
               const durableNotFoundRecovery = transitioned
                 ? notFoundRecovery
-                : "blocked";
+                : pending.notFoundRecovery ?? "replay";
                 setPendingSends((current) =>
                   current.map((item) =>
                     item.clientSendId === pending.clientSendId
@@ -2604,7 +2659,7 @@ export default function ThreadPage() {
                 : item
             )
           );
-          setError(message);
+          if (routeThreadIdRef.current === pending.threadId) setError(message);
           return;
         }
         const message =
@@ -2626,15 +2681,19 @@ export default function ThreadPage() {
               : item
           )
         );
-        setError(message);
+        if (routeThreadIdRef.current === pending.threadId) setError(message);
+        window.setTimeout(
+          () => void checkPendingDeliveryRef.current(pending.clientSendId),
+          1500
+        );
       }
     },
     [
       completePendingComposerSend,
       clearCapturedComposerAfterAcceptedAction,
       composerAttachmentStore,
+      consumePendingDraftRevision,
       dispatchComposerSendAttempt,
-      refresh,
       refreshThread,
       restorePendingComposerSend
     ]
@@ -2653,6 +2712,23 @@ export default function ThreadPage() {
       return undefined;
     }
     if (!attempt || attempt.intent.threadId !== threadId) return undefined;
+    const resumedNotFoundRecovery = composerNotFoundRecoveryOnResume(
+      attempt.value.notFoundRecovery
+    );
+    if (attempt.value.notFoundRecovery !== resumedNotFoundRecovery) {
+      const resumedValue: ThreadComposerSendAttemptValue = {
+        ...attempt.value,
+        notFoundRecovery: resumedNotFoundRecovery
+      };
+      void externalActionAttempts
+        .replaceScopedValue<ThreadComposerSendAttemptValue>(
+          threadComposerSendScope(threadId),
+          (value) => value.clientSendId === attempt!.value.clientSendId,
+          resumedValue
+        )
+        .catch(() => false);
+      attempt.value = resumedValue;
+    }
     if (
       pendingSendsRef.current.some(
         (pending) => pending.clientSendId === attempt?.value.clientSendId
@@ -2816,7 +2892,13 @@ export default function ThreadPage() {
         ...composerAttachments.map(composerAttachmentDescriptor)
       ]
     };
-    const capturedSession = snapshotThreadComposerSession(startThreadId, capturedIntent);
+    const capturedDraftRevision = composerDraftRevisionRef.current;
+    const capturedSession = snapshotThreadComposerSession(
+      startThreadId,
+      capturedIntent,
+      undefined,
+      capturedDraftRevision
+    );
     if (!capturedSession) {
       setError("Tovi could not safely preserve this reply. Reload before trying again.");
       sendingRef.current = false;
@@ -2844,7 +2926,12 @@ export default function ThreadPage() {
       if (composerActionRef.current === action) composerActionRef.current = null;
       const ownerThreadId = composerOwnerThreadIdRef.current;
       if (!sameThreadComposerIntent(composerIntentRef.current, clearedIntent)) {
-        const saved = snapshotThreadComposerSession(ownerThreadId, composerIntentRef.current);
+        const saved = snapshotThreadComposerSession(
+          ownerThreadId,
+          composerIntentRef.current,
+          undefined,
+          composerDraftRevisionRef.current
+        );
         composerSessionPresentRef.current = Boolean(saved);
       }
       sendingRef.current = false;
@@ -2908,7 +2995,7 @@ export default function ThreadPage() {
     }
     const draftRevision = draftRevisionForComposerSend(
       currentDraftRevision,
-      capturedIntent.text
+      capturedDraftRevision
     );
     const attemptIntent: ThreadComposerSendAttemptIntent = {
       composerIntent: capturedIntent,
@@ -2927,7 +3014,7 @@ export default function ThreadPage() {
         () => ({
           attachmentNamespace: composerAttachmentStore.namespace,
           clientSendId: composerClientSendId(capturedSession.revisionId),
-          notFoundRecovery: "blocked",
+          notFoundRecovery: "replay",
           requestedAt: sentAt,
           sessionRevision: capturedSession.revision,
           sessionRevisionId: capturedSession.revisionId
@@ -2978,12 +3065,13 @@ export default function ThreadPage() {
         attachmentsToSend
       );
       if (response.draftConsumed) consumePendingDraftRevision(pending);
+      invalidateCache(`/runner/data/thread/${startThreadId}`);
       if (pending.draftRevision) void refreshThread();
       window.setTimeout(() => void checkPendingDelivery(clientSendId), 250);
     } catch (sendError) {
       const notFoundRecovery = composerNotFoundRecoveryAfterDispatchFailure(sendError);
       const nextValue = { ...attemptValue, notFoundRecovery };
-      let durableNotFoundRecovery = attemptValue.notFoundRecovery ?? "blocked";
+      let durableNotFoundRecovery = attemptValue.notFoundRecovery ?? "replay";
       if (notFoundRecovery !== durableNotFoundRecovery) {
         const replaced = await externalActionAttempts
           .replaceScopedValue<ThreadComposerSendAttemptValue>(
@@ -3008,7 +3096,7 @@ export default function ThreadPage() {
             : p
         )
       );
-      setError(message);
+      if (routeThreadIdRef.current === startThreadId) setError(message);
       window.setTimeout(() => void checkPendingDelivery(clientSendId), 750);
     } finally {
       finishComposerAction();
@@ -3693,7 +3781,13 @@ export default function ThreadPage() {
           ...composerAttachments.map(composerAttachmentDescriptor)
         ]
       };
-      const capturedSession = snapshotThreadComposerSession(startThreadId, capturedIntent);
+      const capturedDraftRevision = composerDraftRevisionRef.current;
+      const capturedSession = snapshotThreadComposerSession(
+        startThreadId,
+        capturedIntent,
+        undefined,
+        capturedDraftRevision
+      );
       if (!capturedSession) {
         setError("Tovi could not safely preserve this scheduled reply. Reload before trying again.");
         return;
@@ -3751,7 +3845,7 @@ export default function ThreadPage() {
         }
         const draftRevision = draftRevisionForComposerSend(
           currentDraftRevision,
-          capturedIntent.text
+          capturedDraftRevision
         );
         const attemptIntent: ThreadComposerSendAttemptIntent = {
           composerIntent: capturedIntent,
@@ -3771,7 +3865,7 @@ export default function ThreadPage() {
           () => ({
             attachmentNamespace: composerAttachmentStore.namespace,
             clientSendId: composerClientSendId(capturedSession.revisionId),
-            notFoundRecovery: "blocked",
+            notFoundRecovery: "replay",
             requestedAt,
             sessionRevision: capturedSession.revision,
             sessionRevisionId: capturedSession.revisionId
@@ -3808,6 +3902,8 @@ export default function ThreadPage() {
           composerAttachments
         );
         if (response.draftConsumed) consumePendingDraftRevision(pending);
+        clearCapturedComposerAfterAcceptedAction(pending);
+        invalidateCache(`/runner/data/thread/${startThreadId}`);
         if (pending.draftRevision) void refreshThread();
         window.setTimeout(
           () => void checkPendingDeliveryRef.current(attemptValue.clientSendId),
@@ -3818,10 +3914,10 @@ export default function ThreadPage() {
           path: `/runner/control/thread/${startThreadId}/send`,
           method: "POST"
         });
-        setError(failure.message);
+        if (routeThreadIdRef.current === startThreadId) setError(failure.message);
         if (attemptClientSendId) {
           const notFoundRecovery = composerNotFoundRecoveryAfterDispatchFailure(sendError);
-          let durableNotFoundRecovery = attemptValueForRecovery?.notFoundRecovery ?? "blocked";
+          let durableNotFoundRecovery = attemptValueForRecovery?.notFoundRecovery ?? "replay";
           if (attemptValueForRecovery) {
             if (notFoundRecovery !== durableNotFoundRecovery) {
               const replaced = await externalActionAttempts
@@ -3866,7 +3962,7 @@ export default function ThreadPage() {
                 : pending
             )
           );
-          setError(message);
+          if (routeThreadIdRef.current === startThreadId) setError(message);
           window.setTimeout(
             () => void checkPendingDeliveryRef.current(attemptClientSendId!),
             750
@@ -3877,7 +3973,9 @@ export default function ThreadPage() {
         if (!sameThreadComposerIntent(composerIntentRef.current, capturedIntent)) {
           const saved = snapshotThreadComposerSession(
             composerOwnerThreadIdRef.current,
-            composerIntentRef.current
+            composerIntentRef.current,
+            undefined,
+            composerDraftRevisionRef.current
           );
           composerSessionPresentRef.current = Boolean(saved);
         }
@@ -5235,6 +5333,7 @@ export default function ThreadPage() {
       );
       cacheThreadDraftRevision(targetThreadId, saved);
       if (routeThreadIdRef.current === targetThreadId) {
+        composerDraftRevisionRef.current = saved;
         setHasSavedDraft(saved.text.trim().length > 0);
       }
     });
@@ -5253,11 +5352,32 @@ export default function ThreadPage() {
     return draftMutations.enqueueDelete(
       targetThreadId,
       fallbackDraftRevision,
-      () => apiPost(`/runner/control/thread/${targetThreadId}/delete-draft`, {})
-    ).then(({ deletedRevision }) => {
+      (revision) => apiPost<{ status: "ok"; deleted: boolean }>(
+        `/runner/control/thread/${targetThreadId}/delete-draft`,
+        { draft: revision }
+      )
+    ).then(async ({ deletedRevision, result }) => {
+      if (!result.deleted) {
+        await refreshThread({ authoritative: true });
+        if (routeThreadIdRef.current === targetThreadId) {
+          setError("This draft changed in another window, so Tovi kept the newer saved version.");
+        }
+        return;
+      }
       setThread((current) => mergeDeletedDraftRevision(current, targetThreadId));
       cacheThreadDraftRevision(targetThreadId, null);
-      if (routeThreadIdRef.current === targetThreadId) setHasSavedDraft(false);
+      if (routeThreadIdRef.current === targetThreadId) {
+        const currentDraftRevision = composerDraftRevisionRef.current;
+        if (
+          currentDraftRevision &&
+          deletedRevision &&
+          currentDraftRevision.text === deletedRevision.text &&
+          currentDraftRevision.updatedAt === deletedRevision.updatedAt
+        ) {
+          composerDraftRevisionRef.current = null;
+        }
+        setHasSavedDraft(false);
+      }
       if (
         !shouldClearComposerAfterDraftDelete(
           routeThreadIdRef.current,
@@ -5279,7 +5399,8 @@ export default function ThreadPage() {
       predraftDismissedRef.current.add(targetThreadId);
       composerIntentRef.current = emptyIntent;
       composerSessionPresentRef.current = false;
-      snapshotThreadComposerSession(targetThreadId, emptyIntent);
+      composerDraftRevisionRef.current = null;
+      snapshotThreadComposerSession(targetThreadId, emptyIntent, undefined, null);
       setComposer("");
       setComposerSource("empty");
       setFocusedThreadParentId(null);

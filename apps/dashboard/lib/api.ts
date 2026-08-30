@@ -119,9 +119,31 @@ interface CacheEntry {
   data?: unknown;
   ts: number;
   inflight?: Promise<unknown>;
+  inflightEpoch?: CacheEpoch;
 }
 
 const responseCache = new Map<string, CacheEntry>();
+type CacheEpoch = { global: number; path: number };
+let globalCacheEpoch = 0;
+const pathCacheEpochs = new Map<string, number>();
+
+function cacheEpoch(path: string): CacheEpoch {
+  return {
+    global: globalCacheEpoch,
+    path: pathCacheEpochs.get(path) ?? 0
+  };
+}
+
+function cacheEpochIsCurrent(path: string, epoch: CacheEpoch): boolean {
+  return (
+    epoch.global === globalCacheEpoch &&
+    epoch.path === (pathCacheEpochs.get(path) ?? 0)
+  );
+}
+
+function invalidatePathEpoch(path: string): void {
+  pathCacheEpochs.set(path, (pathCacheEpochs.get(path) ?? 0) + 1);
+}
 
 // ---------------------------------------------------------------------------
 // Persistent snapshot layer (localStorage) under the in-memory cache.
@@ -260,22 +282,33 @@ export function peekCache<T>(path: string): T | undefined {
 /** Drop a cached path (or everything) so the next read re-fetches. */
 export function invalidateCache(path?: string): void {
   if (path === undefined) {
+    globalCacheEpoch += 1;
     responseCache.clear();
     const storage = snapshotStorage();
     if (storage) {
-      for (let index = storage.length - 1; index >= 0; index -= 1) {
-        const key = storage.key(index);
-        if (key?.startsWith(SNAPSHOT_PREFIX_BASE)) storage.removeItem(key);
+      try {
+        for (let index = storage.length - 1; index >= 0; index -= 1) {
+          const key = storage.key(index);
+          if (key?.startsWith(SNAPSHOT_PREFIX_BASE)) storage.removeItem(key);
+        }
+      } catch {
+        /* persistence is best-effort */
       }
     }
   } else {
+    invalidatePathEpoch(path);
     responseCache.delete(path);
-    snapshotStorage()?.removeItem(SNAPSHOT_PREFIX + path);
+    try {
+      snapshotStorage()?.removeItem(SNAPSHOT_PREFIX + path);
+    } catch {
+      /* persistence is best-effort */
+    }
   }
 }
 
 /** Write a value into the cache directly (e.g. optimistic update / SSE delta). */
 export function mutateCache<T>(path: string, data: T): void {
+  invalidatePathEpoch(path);
   responseCache.set(path, { data, ts: Date.now() });
   writeSnapshot(path, data);
 }
@@ -316,10 +349,16 @@ export async function apiGet<T>(path: string, opts?: ApiGetOptions): Promise<T> 
 
   // Ensure exactly one in-flight request per path (de-dupe concurrent callers).
   let inflight = entry?.inflight as Promise<T> | undefined;
+  let inflightEpoch = entry?.inflightEpoch;
   if (!inflight) {
+    inflightEpoch = cacheEpoch(path);
     inflight = apiGetRaw<T>(path, init)
       .then((data) => {
-        if (responseCache.get(path)?.inflight === inflight) {
+        if (
+          responseCache.get(path)?.inflight === inflight &&
+          inflightEpoch &&
+          cacheEpochIsCurrent(path, inflightEpoch)
+        ) {
           responseCache.set(path, { data, ts: Date.now() });
           writeSnapshot(path, data);
         }
@@ -334,14 +373,21 @@ export async function apiGet<T>(path: string, opts?: ApiGetOptions): Promise<T> 
         }
         throw err;
       });
-    responseCache.set(path, { data: entry?.data, ts: entry?.ts ?? 0, inflight });
+    responseCache.set(path, {
+      data: entry?.data,
+      ts: entry?.ts ?? 0,
+      inflight,
+      inflightEpoch
+    });
   }
 
   // Stale-while-revalidate: paint the cached value now, update via onFresh.
   if (hasData && swr) {
     inflight
       .then((fresh) => {
-        onFresh?.(fresh);
+        if (inflightEpoch && cacheEpochIsCurrent(path, inflightEpoch)) {
+          onFresh?.(fresh);
+        }
       })
       .catch(() => {
         /* revalidation failure: keep the stale value already returned */
@@ -350,7 +396,13 @@ export async function apiGet<T>(path: string, opts?: ApiGetOptions): Promise<T> 
   }
 
   // No cached value (or caching not requested): await the network.
-  return inflight;
+  const resolved = await inflight;
+  if (inflightEpoch && !cacheEpochIsCurrent(path, inflightEpoch)) {
+    const current = responseCache.get(path);
+    if (current?.data !== undefined) return current.data as T;
+    return apiGet<T>(path, { ...init, swr: false });
+  }
+  return resolved;
 }
 
 /**

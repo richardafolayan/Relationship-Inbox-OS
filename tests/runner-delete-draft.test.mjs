@@ -24,13 +24,22 @@ test("runner exposes POST /control/thread/:threadId/delete-draft", () => {
   assert.ok(routeMatch, "/control/thread/:threadId/delete-draft route not found");
   const routeBody = routeMatch[0];
 
-  // Idempotent removal of the persisted draft row(s) for the thread —
-  // deleteMany so a thread with no draft is a no-op (not a 404) and any
-  // stray duplicate rows are cleared (the save path uses findFirst).
+  // Delete only the exact revision the operator saw. A newer cross-window
+  // save must survive and the response tells the dashboard to refresh it.
   assert.match(
     routeBody,
-    /prisma\.draft\.deleteMany\(\s*\{\s*where:\s*\{\s*threadId\s*\}\s*\}\s*\)/,
-    "delete-draft route must call prisma.draft.deleteMany({ where: { threadId } })"
+    /z\.object\(\{\s*draft:\s*z\.object\(\{[\s\S]*?text:\s*z\.string\(\)\.max\(5000\)[\s\S]*?updatedAt:\s*z\.string\(\)\.datetime\(\)[\s\S]*?\}\)[\s\S]*?\}\)\.parse\(req\.body\)/,
+    "delete-draft route must require the exact saved draft revision"
+  );
+  assert.match(
+    routeBody,
+    /deleteDraftRevision\(prisma,\s*threadId,\s*payload\.draft\)/,
+    "delete-draft route must compare and delete through deleteDraftRevision"
+  );
+  assert.match(
+    routeBody,
+    /res\.json\(\{\s*status:\s*"ok",\s*deleted\s*\}\)/,
+    "delete-draft route must report whether the exact revision was deleted"
   );
 
   // Same presenter guard as every other thread mutation, with its own verb.

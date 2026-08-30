@@ -52,8 +52,20 @@ function harness({ createRaceWinner } = {}) {
           rows.push({ id: "winner", receiptJson: null, errorJson: null, ...createRaceWinner(data) });
           throw uniqueError();
         }
-        const row = { id: `row-${rows.length + 1}`, receiptJson: null, errorJson: null, ...data };
+        const row = {
+          id: `row-${rows.length + 1}`,
+          receiptJson: null,
+          errorJson: null,
+          draftConsumed: false,
+          ...data
+        };
         rows.push(row);
+        return { ...row };
+      },
+      async update({ where, data }) {
+        const row = rows.find((candidate) => candidate.id === where.id);
+        if (!row) throw new Error("missing send request");
+        Object.assign(row, data);
         return { ...row };
       }
     }
@@ -120,6 +132,15 @@ test("creating a send consumes only the exact saved draft revision in the same t
   ]);
   assert.equal(h.rows.length, 1);
   assert.equal(result.draftConsumed, true);
+  assert.equal(h.rows[0].draftConsumed, true);
+
+  const replay = await h.service.enqueueSend(
+    immediateInput({
+      consumeDraft: { text: "Original text", updatedAt: expectedUpdatedAt }
+    })
+  );
+  assert.equal(replay.replayed, true);
+  assert.equal(replay.draftConsumed, true);
 });
 
 test("a newer saved draft survives an older send's guarded consume", async () => {
@@ -265,6 +286,17 @@ test("creating a scheduled send atomically consumes only its captured draft revi
   assert.deepEqual(h.drafts, []);
   assert.equal(h.rows[0].status, "SCHEDULED");
   assert.equal(result.draftConsumed, true);
+  assert.equal(h.rows[0].draftConsumed, true);
+
+  const replay = await h.service.enqueueScheduledSend({
+    threadId: "thread-1",
+    text: "Scheduled text",
+    clientSendId: "7d7eed73-6437-42e3-9e51-769522640b2a",
+    scheduledFor: new Date(result.scheduledFor),
+    consumeDraft: { text: "Scheduled text", updatedAt }
+  });
+  assert.equal(replay.replayed, true);
+  assert.equal(replay.draftConsumed, true);
 });
 
 test("a scheduled send reports when a newer draft survived its guarded consume", async () => {

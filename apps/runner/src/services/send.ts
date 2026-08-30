@@ -799,7 +799,8 @@ export function createSendService(deps: SendServiceDeps) {
           return {
             clientSendId: input.clientSendId,
             status: "PENDING",
-            replayed: true
+            replayed: true,
+            draftConsumed: existing.draftConsumed
           };
         }
       }
@@ -811,6 +812,7 @@ export function createSendService(deps: SendServiceDeps) {
             clientSendId: input.clientSendId,
             status: "SENT",
             replayed: true,
+            draftConsumed: existing.draftConsumed,
             result: { ...parseReceipt(existing.receiptJson), replayed: true }
           };
         }
@@ -846,18 +848,25 @@ export function createSendService(deps: SendServiceDeps) {
             return {
               clientSendId: input.clientSendId,
               status: "PENDING",
-              replayed: true
+              replayed: true,
+              draftConsumed: existing.draftConsumed
             };
           }
           return {
             clientSendId: input.clientSendId,
             status: "FAILED",
             replayed: true,
+            draftConsumed: existing.draftConsumed,
             errorMessage: parseFailedSendMessage(existing.errorJson)
           };
         }
         if (existing.status === "PENDING") {
-          return { clientSendId: input.clientSendId, status: "PENDING", replayed: true };
+          return {
+            clientSendId: input.clientSendId,
+            status: "PENDING",
+            replayed: true,
+            draftConsumed: existing.draftConsumed
+          };
         }
         // SCHEDULED / CANCELLED: the immediate-send path can't replay these. A
         // SCHEDULED row is drained by the scheduled-send promoter, not the
@@ -882,7 +891,7 @@ export function createSendService(deps: SendServiceDeps) {
         };
         if (input.consumeDraft) {
           draftConsumed = await prisma.$transaction(async (transaction) => {
-            await transaction.sendRequest.create({ data });
+            const created = await transaction.sendRequest.create({ data });
             const deletion = await transaction.draft.deleteMany({
               where: {
                 threadId: input.threadId,
@@ -890,7 +899,14 @@ export function createSendService(deps: SendServiceDeps) {
                 updatedAt: input.consumeDraft!.updatedAt
               }
             });
-            return deletion.count === 1;
+            const consumed = deletion.count === 1;
+            if (consumed) {
+              await transaction.sendRequest.update({
+                where: { id: created.id },
+                data: { draftConsumed: true }
+              });
+            }
+            return consumed;
           });
         } else {
           await prisma.sendRequest.create({ data });
@@ -910,6 +926,7 @@ export function createSendService(deps: SendServiceDeps) {
             clientSendId: input.clientSendId,
             status: "SENT",
             replayed: true,
+            draftConsumed: winner.draftConsumed,
             result: { ...parseReceipt(winner.receiptJson), replayed: true }
           };
         }
@@ -918,6 +935,7 @@ export function createSendService(deps: SendServiceDeps) {
             clientSendId: input.clientSendId,
             status: "FAILED",
             replayed: true,
+            draftConsumed: winner.draftConsumed,
             errorMessage: parseFailedSendMessage(winner.errorJson)
           };
         }
@@ -926,7 +944,12 @@ export function createSendService(deps: SendServiceDeps) {
             `Send request ${input.clientSendId} already exists in status ${winner.status}`
           );
         }
-        return { clientSendId: input.clientSendId, status: "PENDING", replayed: true };
+        return {
+          clientSendId: input.clientSendId,
+          status: "PENDING",
+          replayed: true,
+          draftConsumed: winner.draftConsumed
+        };
       }
 
       if (source === "focus_ack" || source === "focus_auto_ack") {
@@ -1330,6 +1353,7 @@ export function createSendService(deps: SendServiceDeps) {
           threadId: thread.id,
           platform: thread.platform as PlatformName,
           clientSendId: input.clientSendId,
+          draftConsumed: sendRequest.draftConsumed,
           verifiedBy: receipt.verifiedBy,
           acknowledgedAt: receipt.acknowledgedAt,
           platformResultAt
@@ -1376,6 +1400,7 @@ export function createSendService(deps: SendServiceDeps) {
             threadId: thread.id,
             platform: thread.platform as PlatformName,
             clientSendId: input.clientSendId,
+            draftConsumed: sendRequest.draftConsumed,
             verifiedBy: reconciledReceipt.verifiedBy,
             acknowledgedAt: reconciledReceipt.acknowledgedAt,
             platformResultAt
@@ -1548,7 +1573,8 @@ export function createSendService(deps: SendServiceDeps) {
           clientSendId: input.clientSendId,
           status: "SCHEDULED",
           scheduledFor: existing.scheduledFor.toISOString(),
-          replayed: true
+          replayed: true,
+          draftConsumed: existing.draftConsumed
         };
       }
       throw new Error(`Send request ${input.clientSendId} already exists in status ${existing.status}`);
@@ -1568,7 +1594,7 @@ export function createSendService(deps: SendServiceDeps) {
       };
       if (input.consumeDraft) {
         draftConsumed = await prisma.$transaction(async (transaction) => {
-          await transaction.sendRequest.create({ data });
+          const created = await transaction.sendRequest.create({ data });
           const deletion = await transaction.draft.deleteMany({
             where: {
               threadId: input.threadId,
@@ -1576,7 +1602,14 @@ export function createSendService(deps: SendServiceDeps) {
               updatedAt: input.consumeDraft!.updatedAt
             }
           });
-          return deletion.count === 1;
+          const consumed = deletion.count === 1;
+          if (consumed) {
+            await transaction.sendRequest.update({
+              where: { id: created.id },
+              data: { draftConsumed: true }
+            });
+          }
+          return consumed;
         });
       } else {
         await prisma.sendRequest.create({ data });
@@ -1602,7 +1635,8 @@ export function createSendService(deps: SendServiceDeps) {
         clientSendId: input.clientSendId,
         status: "SCHEDULED",
         scheduledFor: winner.scheduledFor.toISOString(),
-        replayed: true
+        replayed: true,
+        draftConsumed: winner.draftConsumed
       };
     }
 

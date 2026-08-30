@@ -5,6 +5,7 @@ import {
   composerClientSendId,
   composerDispatchFailureIsAmbiguous,
   composerNotFoundRecoveryAfterDispatchFailure,
+  composerNotFoundRecoveryOnResume,
   composerReplayPreflight,
   composerSendRecoveryDisposition,
   missingThreadComposerAttachments,
@@ -143,6 +144,13 @@ test("dispatch failures stay unresolved when the response can follow durable ins
   assert.equal(composerNotFoundRecoveryAfterDispatchFailure({ status: 400 }), "restore");
   assert.equal(composerNotFoundRecoveryAfterDispatchFailure({ status: 0 }), "replay");
   assert.equal(composerNotFoundRecoveryAfterDispatchFailure(new Error("network")), "replay");
+});
+
+test("a persisted pre-dispatch attempt resumes with the same replay-safe id", () => {
+  assert.equal(composerNotFoundRecoveryOnResume("replay"), "replay");
+  assert.equal(composerNotFoundRecoveryOnResume("restore"), "restore");
+  assert.equal(composerNotFoundRecoveryOnResume("blocked"), "replay");
+  assert.equal(composerNotFoundRecoveryOnResume(undefined), "replay");
 });
 
 test("a composer revision has one durable send id even after finite completion history expires", () => {

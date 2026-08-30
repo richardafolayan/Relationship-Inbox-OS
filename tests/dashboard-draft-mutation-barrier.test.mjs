@@ -66,9 +66,10 @@ test("delete runs after an in-flight save and leaves no draft revision", async (
   const deletion = barrier.enqueueDelete(
     "thread-a",
     oldRevision,
-    async () => {
+    async (expectedRevision) => {
       events.push("delete-started");
-      return "deleted";
+      assert.deepEqual(expectedRevision, savedRevision);
+      return { deleted: true };
     }
   );
 
@@ -78,7 +79,7 @@ test("delete runs after an in-flight save and leaves no draft revision", async (
 
   assert.deepEqual(await deletion, {
     deletedRevision: savedRevision,
-    result: "deleted"
+    result: { deleted: true }
   });
   assert.equal(await barrier.waitForRevision("thread-a", oldRevision), null);
   assert.deepEqual(events, ["save-started", "delete-started"]);
@@ -101,9 +102,9 @@ test("an uncertain save blocks send until an explicit delete resolves the draft 
   const deletion = await barrier.enqueueDelete(
     "thread-a",
     oldRevision,
-    async () => "deleted"
+    async () => ({ deleted: true })
   );
-  assert.deepEqual(deletion, { deletedRevision: oldRevision, result: "deleted" });
+  assert.deepEqual(deletion, { deletedRevision: oldRevision, result: { deleted: true } });
   assert.equal(await barrier.waitForRevision("thread-a", oldRevision), null);
 });
 
@@ -165,9 +166,53 @@ test("a newer cross-tab draft wins even when it arrives during a confirmed delet
     updatedAt: "2026-08-30T09:06:00.000Z"
   };
 
-  await barrier.enqueueDelete("thread-a", savedRevision, async () => "deleted");
+  await barrier.enqueueDelete("thread-a", savedRevision, async () => ({ deleted: true }));
   assert.deepEqual(
     barrier.reconcileFetchedRevision("thread-a", requestGeneration, newerRevision),
     newerRevision
+  );
+});
+
+test("a failed compare-and-delete keeps the barrier open for the authoritative newer draft", async () => {
+  const barrier = createDraftMutationBarrier();
+  await barrier.enqueueSave("thread-a", async () => savedRevision);
+  const requestGeneration = barrier.generation("thread-a");
+  const newerRevision = {
+    text: "Written in another tab",
+    updatedAt: "2026-08-30T09:06:00.000Z"
+  };
+
+  const deletion = await barrier.enqueueDelete(
+    "thread-a",
+    oldRevision,
+    async (expectedRevision) => {
+      assert.deepEqual(expectedRevision, savedRevision);
+      return { deleted: false };
+    }
+  );
+
+  assert.equal(deletion.result.deleted, false);
+  assert.deepEqual(
+    barrier.reconcileFetchedRevision("thread-a", requestGeneration, newerRevision),
+    newerRevision
+  );
+});
+
+test("an equal-timestamp different server draft is treated as an authoritative conflict", async () => {
+  const barrier = createDraftMutationBarrier();
+  await barrier.enqueueSave("thread-a", async () => savedRevision);
+  const requestGeneration = barrier.generation("thread-a");
+  const equalTimestampRevision = {
+    text: "Different text saved in another tab",
+    updatedAt: savedRevision.updatedAt
+  };
+
+  assert.deepEqual(
+    barrier.reconcileFetchedRevision(
+      "thread-a",
+      requestGeneration,
+      equalTimestampRevision
+    ),
+    equalTimestampRevision
   );
 });

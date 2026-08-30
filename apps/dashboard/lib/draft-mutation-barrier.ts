@@ -79,21 +79,29 @@ export function createDraftMutationBarrier() {
     });
   }
 
-  function enqueueDelete<T>(
+  function enqueueDelete<T extends { deleted: boolean }>(
     threadId: string,
     fallback: DraftRevision,
-    remove: () => Promise<T>
+    remove: (revision: SavedDraftRevision) => Promise<T>
   ): Promise<{ deletedRevision: DraftRevision; result: T }> {
     const state = stateFor(threadId);
     const operation = state.tail.then(async () => {
       const deletedRevision = state.hasLatest ? state.latest : fallback;
-      const result = await remove();
+      const result = deletedRevision
+        ? await remove(deletedRevision)
+        : ({ deleted: false } as T);
       return { deletedRevision, result };
     });
-    return settle(state, operation, ({ deletedRevision }) => {
-      state.clearedAt = deletedRevision ? Date.parse(deletedRevision.updatedAt) : 0;
-      state.hasLatest = true;
-      state.latest = null;
+    return settle(state, operation, ({ deletedRevision, result }) => {
+      if (result.deleted) {
+        state.clearedAt = deletedRevision ? Date.parse(deletedRevision.updatedAt) : 0;
+        state.hasLatest = true;
+        state.latest = null;
+      } else {
+        state.clearedAt = null;
+        state.hasLatest = false;
+        state.latest = null;
+      }
     });
   }
 
@@ -125,7 +133,8 @@ export function createDraftMutationBarrier() {
       state.hasLatest &&
       state.latest &&
       fetched &&
-      Date.parse(fetched.updatedAt) <= Date.parse(state.latest.updatedAt)
+      (Date.parse(fetched.updatedAt) < Date.parse(state.latest.updatedAt) ||
+        (fetched.updatedAt === state.latest.updatedAt && fetched.text === state.latest.text))
     ) {
       return state.latest;
     }
