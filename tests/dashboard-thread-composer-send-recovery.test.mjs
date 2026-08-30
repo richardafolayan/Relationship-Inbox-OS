@@ -7,6 +7,7 @@ import {
   composerNotFoundRecoveryAfterDispatchFailure,
   composerNotFoundRecoveryOnResume,
   composerIntentForRecovery,
+  composerRecoveryLineageConflict,
   composerRecoveryResolution,
   composerReplayPreflight,
   composerSendRecoveryDisposition,
@@ -55,6 +56,7 @@ const attempt = {
   value: {
     attachmentNamespace: "tab-a",
     clientSendId: "44c44306-517c-484b-9076-9915fa21163e",
+    lineageWinnerClientSendId: "550c8686-984a-4ddf-99ab-d2cdd7678c62",
     notFoundRecovery: "blocked",
     requestedAt: "2026-08-30T09:01:00.000Z",
     sessionRevision: 3,
@@ -73,6 +75,28 @@ test("malformed or cross-thread attempt state fails closed", () => {
     normalizeThreadComposerSendAttempt({
       ...attempt,
       intent: { ...attempt.intent, kind: "unknown" }
+    }),
+    null
+  );
+});
+
+test("a predecessor uniqueness conflict exposes its authoritative winner", () => {
+  assert.deepEqual(
+    composerRecoveryLineageConflict({
+      payload: {
+        reasonCode: "recovery_predecessor_already_claimed",
+        winningClientSendId: "550c8686-984a-4ddf-99ab-d2cdd7678c62",
+        winningStatus: "PENDING"
+      }
+    }),
+    {
+      winningClientSendId: "550c8686-984a-4ddf-99ab-d2cdd7678c62",
+      winningStatus: "PENDING"
+    }
+  );
+  assert.equal(
+    composerRecoveryLineageConflict({
+      payload: { reasonCode: "another_policy" }
     }),
     null
   );
@@ -317,6 +341,13 @@ test("recovered replies require an authoritative definite failure before another
   assert.equal(
     recoveredComposerAuthoritativeDisposition({
       status: "CANCELLED",
+      errorKind: "POLICY_BLOCKED"
+    }),
+    "blocked"
+  );
+  assert.equal(
+    recoveredComposerAuthoritativeDisposition({
+      status: "FAILED",
       errorKind: "POLICY_BLOCKED"
     }),
     "blocked"
@@ -639,6 +670,13 @@ test("delivery recovery retains ambiguity, replays missing status with the same 
   assert.equal(
     composerSendRecoveryDisposition({
       status: "CANCELLED",
+      errorKind: "POLICY_BLOCKED"
+    }),
+    "retain_uncertain"
+  );
+  assert.equal(
+    composerSendRecoveryDisposition({
+      status: "FAILED",
       errorKind: "POLICY_BLOCKED"
     }),
     "retain_uncertain"

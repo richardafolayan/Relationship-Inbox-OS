@@ -296,7 +296,8 @@ function assertExistingSendIntent(
 export class SendPolicyError extends Error {
   constructor(
     readonly reasonCode: string,
-    message: string
+    message: string,
+    readonly details?: Record<string, string>
   ) {
     super(message);
     this.name = "SendPolicyError";
@@ -972,6 +973,24 @@ export function createSendService(deps: SendServiceDeps) {
         const winner = await prisma.sendRequest.findUnique({
           where: { clientSendId: input.clientSendId }
         });
+        if (!winner && input.recoveryPredecessorClientSendId) {
+          const lineageWinner = await prisma.sendRequest.findUnique({
+            where: {
+              recoveryPredecessorClientSendId:
+                input.recoveryPredecessorClientSendId
+            }
+          });
+          if (lineageWinner) {
+            throw new SendPolicyError(
+              "recovery_predecessor_already_claimed",
+              "Another recovered send already claimed the earlier request",
+              {
+                winningClientSendId: lineageWinner.clientSendId,
+                winningStatus: lineageWinner.status
+              }
+            );
+          }
+        }
         if (!winner) throw new Error("clientSendId conflict could not be reconciled");
         assertExistingSendIntent(winner, { ...input, source });
         if (winner.status === "SENT" && winner.receiptJson) {
@@ -1719,6 +1738,24 @@ export function createSendService(deps: SendServiceDeps) {
       const winner = await prisma.sendRequest.findUnique({
         where: { clientSendId: input.clientSendId }
       });
+      if (!winner && input.recoveryPredecessorClientSendId) {
+        const lineageWinner = await prisma.sendRequest.findUnique({
+          where: {
+            recoveryPredecessorClientSendId:
+              input.recoveryPredecessorClientSendId
+          }
+        });
+        if (lineageWinner) {
+          throw new SendPolicyError(
+            "recovery_predecessor_already_claimed",
+            "Another recovered send already claimed the earlier request",
+            {
+              winningClientSendId: lineageWinner.clientSendId,
+              winningStatus: lineageWinner.status
+            }
+          );
+        }
+      }
       if (!winner) throw new Error("clientSendId conflict could not be reconciled");
       assertExistingSendIntent(winner, {
         ...input,

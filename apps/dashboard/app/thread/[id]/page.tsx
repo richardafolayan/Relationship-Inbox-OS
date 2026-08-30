@@ -180,6 +180,7 @@ import {
   composerIntentForRecovery,
   composerNotFoundRecoveryAfterDispatchFailure,
   composerNotFoundRecoveryOnResume,
+  composerRecoveryLineageConflict,
   composerRecoveryResolution,
   composerReplayPreflight,
   composerSendRecoveryDisposition,
@@ -336,6 +337,7 @@ type PendingSend = {
   composerIntent?: ThreadComposerIntentDraft;
   attemptKind?: "immediate" | "scheduled";
   draftRevision?: ThreadComposerDraftRevision | null;
+  lineageWinnerClientSendId?: string;
   recoveryPredecessorClientSendId?: string;
   notFoundRecovery?: "blocked" | "replay" | "restore";
   scheduledFor?: string | null;
@@ -366,6 +368,9 @@ function pendingComposerAttemptValue(
       : {}),
     attemptKind: pending.attemptKind,
     clientSendId: pending.clientSendId,
+    ...(pending.lineageWinnerClientSendId
+      ? { lineageWinnerClientSendId: pending.lineageWinnerClientSendId }
+      : {}),
     ...(pending.notFoundRecovery
       ? { notFoundRecovery: pending.notFoundRecovery }
       : {}),
@@ -3853,6 +3858,70 @@ export default function ThreadPage() {
       const pending = pendingSendsRef.current.find((item) => item.clientSendId === clientSendId);
       if (!pending) return;
       try {
+        if (pending.lineageWinnerClientSendId) {
+          const winner = await apiGet<SendStatusResponse>(
+            `/runner/data/send-status/${encodeURIComponent(
+              pending.lineageWinnerClientSendId
+            )}`
+          );
+          const winnerDisposition = composerSendRecoveryDisposition(winner);
+          if (
+            winnerDisposition === "cleanup" ||
+            winnerDisposition === "scheduled"
+          ) {
+            const terminalRecorded = await completePendingComposerSend(pending);
+            clearCapturedComposerAfterAcceptedAction(pending);
+            await refreshThread({ authoritative: true });
+            if (!terminalRecorded) {
+              retainTerminalComposerReceipt(
+                pending,
+                winner.status === "SCHEDULED" ? "SCHEDULED" : "SENT"
+              );
+              return;
+            }
+            setPendingSends((current) =>
+              current.filter((item) => item.clientSendId !== clientSendId)
+            );
+            if (routeThreadIdRef.current === pending.threadId) setError(null);
+            return;
+          }
+          if (winnerDisposition === "retain") {
+            const message =
+              "Another window already queued this recovered reply. Tovi is checking that request.";
+            setPendingSends((current) =>
+              current.map((item) =>
+                item.clientSendId === clientSendId
+                  ? {
+                      ...item,
+                      errorKind: undefined,
+                      errorMessage: message,
+                      failed: false,
+                      uncertain: false
+                    }
+                  : item
+              )
+            );
+            if (routeThreadIdRef.current === pending.threadId) setError(message);
+            return;
+          }
+          const message =
+            "Another retry already claimed this recovered reply. Check the conversation before trying anything else.";
+          setPendingSends((current) =>
+            current.map((item) =>
+              item.clientSendId === clientSendId
+                ? {
+                    ...item,
+                    errorKind: "POLICY_BLOCKED",
+                    errorMessage: message,
+                    failed: true,
+                    uncertain: false
+                  }
+                : item
+            )
+          );
+          blockComposerSession(pending.threadId, message);
+          return;
+        }
         const response = await apiGet<SendStatusResponse>(
           `/runner/data/send-status/${encodeURIComponent(clientSendId)}`
         );
@@ -4238,6 +4307,7 @@ export default function ThreadPage() {
       }
     },
     [
+      blockComposerSession,
       completePendingComposerSend,
       clearCapturedComposerAfterAcceptedAction,
       composerAttachmentStore,
@@ -4343,6 +4413,8 @@ export default function ThreadPage() {
                 ? "The saved attachment set is incomplete. Check delivery before trying again."
                 : undefined,
               failed: incomplete,
+              lineageWinnerClientSendId:
+                attempt.value.lineageWinnerClientSendId,
               notFoundRecovery: attempt.value.notFoundRecovery,
               recoveryPredecessorClientSendId:
                 attempt.intent.recoveryPredecessorClientSendId,
@@ -4371,6 +4443,8 @@ export default function ThreadPage() {
               errorMessage:
                 "The saved attachment set could not be read. Check delivery before trying again.",
               failed: true,
+              lineageWinnerClientSendId:
+                attempt.value.lineageWinnerClientSendId,
               notFoundRecovery: attempt.value.notFoundRecovery,
               recoveryPredecessorClientSendId:
                 attempt.intent.recoveryPredecessorClientSendId,
@@ -4527,6 +4601,8 @@ export default function ThreadPage() {
             ? "The saved attachment set is incomplete. Check delivery before trying again."
             : undefined,
           failed: incomplete,
+          lineageWinnerClientSendId:
+            attempt!.value.lineageWinnerClientSendId,
           notFoundRecovery: attempt!.value.notFoundRecovery,
           recoveryPredecessorClientSendId:
             attempt!.intent.recoveryPredecessorClientSendId,
@@ -4563,6 +4639,8 @@ export default function ThreadPage() {
           errorKind: "DELIVERY_UNCERTAIN",
           errorMessage: "The saved attachment set could not be read. Check delivery before trying again.",
           failed: true,
+          lineageWinnerClientSendId:
+            attempt!.value.lineageWinnerClientSendId,
           notFoundRecovery: attempt!.value.notFoundRecovery,
           recoveryPredecessorClientSendId:
             attempt!.intent.recoveryPredecessorClientSendId,
@@ -4609,6 +4687,50 @@ export default function ThreadPage() {
     const timer = setTimeout(() => setSuggestionsTimedOut(true), 30_000);
     return () => clearTimeout(timer);
   }, [generatingActive]);
+
+  const retainComposerLineageConflict = useCallback(async (
+    targetThreadId: string,
+    clientSendId: string,
+    error: unknown
+  ): Promise<boolean> => {
+    const conflict = composerRecoveryLineageConflict(error);
+    if (!conflict) return false;
+    await externalActionAttempts
+      .compareAndUpdateScopedValue<ThreadComposerSendAttemptValue>(
+        threadComposerSendScope(targetThreadId),
+        (value) => value.clientSendId === clientSendId,
+        (value) => ({
+          ...value,
+          lineageWinnerClientSendId: conflict.winningClientSendId,
+          notFoundRecovery: "blocked"
+        })
+      )
+      .catch(() => undefined);
+    const message =
+      "Another retry already claimed this recovered reply. Tovi is checking that request.";
+    const applyConflict = (current: PendingSend[]) =>
+      current.map((pending) =>
+        pending.clientSendId === clientSendId
+          ? {
+              ...pending,
+              errorKind: "POLICY_BLOCKED" as const,
+              errorMessage: message,
+              failed: conflict.winningStatus !== "PENDING",
+              lineageWinnerClientSendId: conflict.winningClientSendId,
+              notFoundRecovery: "blocked" as const,
+              uncertain: false
+            }
+          : pending
+      );
+    pendingSendsRef.current = applyConflict(pendingSendsRef.current);
+    setPendingSends(applyConflict);
+    blockComposerSession(targetThreadId, message);
+    window.setTimeout(
+      () => void checkPendingDeliveryRef.current(clientSendId),
+      0
+    );
+    return true;
+  }, [blockComposerSession, externalActionAttempts]);
 
   const onSend = useCallback(async () => {
     if (
@@ -4946,6 +5068,15 @@ export default function ThreadPage() {
       if (pending.draftRevision) void refreshThread();
       window.setTimeout(() => void checkPendingDelivery(clientSendId), 250);
     } catch (sendError) {
+      if (
+        await retainComposerLineageConflict(
+          startThreadId,
+          clientSendId,
+          sendError
+        )
+      ) {
+        return;
+      }
       const notFoundRecovery = composerNotFoundRecoveryAfterDispatchFailure(sendError);
       const nextValue = { ...attemptValue, notFoundRecovery };
       let durableNotFoundRecovery = attemptValue.notFoundRecovery ?? "replay";
@@ -4995,6 +5126,7 @@ export default function ThreadPage() {
     externalActionAttempts,
     missingComposerAttachments,
     persistComposerSession,
+    retainComposerLineageConflict,
     consumePendingDraftRevision,
     refreshThread,
     scheduling,
@@ -5929,6 +6061,16 @@ export default function ThreadPage() {
           0
         );
       } catch (sendError) {
+        if (
+          attemptClientSendId &&
+          await retainComposerLineageConflict(
+            startThreadId,
+            attemptClientSendId,
+            sendError
+          )
+        ) {
+          return;
+        }
         const failure = classifyConsumerFailure(sendError, {
           path: `/runner/control/thread/${startThreadId}/send`,
           method: "POST"
@@ -6019,6 +6161,7 @@ export default function ThreadPage() {
       externalActionAttempts,
       missingComposerAttachments,
       persistComposerSession,
+      retainComposerLineageConflict,
       refreshThread,
       scheduling,
       sending,

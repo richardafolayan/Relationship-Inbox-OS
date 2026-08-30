@@ -46,7 +46,12 @@ function harness({ createRaceWinner } = {}) {
     },
     sendRequest: {
       async findUnique({ where }) {
-        const row = rows.find((candidate) => candidate.clientSendId === where.clientSendId);
+        const row = rows.find((candidate) =>
+          where.clientSendId !== undefined
+            ? candidate.clientSendId === where.clientSendId
+            : candidate.recoveryPredecessorClientSendId ===
+              where.recoveryPredecessorClientSendId
+        );
         return row ? { ...row } : null;
       },
       async create({ data }) {
@@ -238,7 +243,11 @@ test("only one successor can claim a retry-safe predecessor", async () => {
       clientSendId: "33333333-3333-4333-8333-333333333333",
       recoveryPredecessorClientSendId: predecessorId
     })),
-    /unique|conflict|already claimed|predecessor/i
+    (error) =>
+      error?.reasonCode === "recovery_predecessor_already_claimed" &&
+      error?.details?.winningClientSendId === firstSuccessorId &&
+      error?.details?.winningStatus === "PENDING" &&
+      /already claimed/i.test(error.message)
   );
   assert.equal(h.rows.length, 2);
 
@@ -394,7 +403,11 @@ test("route cleanup discards newly uploaded files after an attachment replay", a
   );
   assert.match(
     indexSource,
-    /!stagedAttachmentsHandled[\s\S]*?sendRequestOwnsStagedAttachments\([\s\S]*?discardStagedAttachments\(stagedAttachments\)/
+    /const uploadedFiles =[\s\S]*?const uploadedAttachmentPaths =[\s\S]*?try \{[\s\S]*?\.parse\(req\.body\)/
+  );
+  assert.match(
+    indexSource,
+    /!stagedAttachmentsHandled[\s\S]*?stagedPersistenceAttempted[\s\S]*?sendRequestOwnsStagedAttachments\([\s\S]*?\.catch\(\(\) => "unknown"\)[\s\S]*?shouldDiscardStagedAttachments\([\s\S]*?discardStagedAttachments\(uploadedAttachmentPaths\)/
   );
   assert.match(
     indexSource,

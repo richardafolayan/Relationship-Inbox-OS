@@ -609,7 +609,10 @@ test("a current-stamp predecessor database gains send safety columns without los
     const currentSchema = readFileSync("packages/core/prisma/schema.prisma", "utf8");
     const predecessorSchema = currentSchema
       .replace(/^\s+draftConsumed\s+Boolean\s+@default\(false\)\s*$/m, "")
-      .replace(/^\s+recoveryPredecessorClientSendId\s+String\?\s*$/m, "");
+      .replace(
+        /^\s+recoveryPredecessorClientSendId\s+String\?\s+@unique\s*$/m,
+        ""
+      );
     assert.notEqual(predecessorSchema, currentSchema);
     const predecessorSchemaPath = join(directory, "predecessor-no-draft-consumed.prisma");
     writeFileSync(predecessorSchemaPath, predecessorSchema);
@@ -738,6 +741,65 @@ test("repair deterministically arbitrates duplicate recovery successors before a
       now + 1,
       now + 1
     );
+    insert.run(
+      "a-retry-safe",
+      "retry-safe-successor",
+      "thread-1",
+      "FAILED",
+      "same intent",
+      0,
+      "manual",
+      null,
+      JSON.stringify({ errorKind: "TRANSIENT", message: "timeout" }),
+      "ambiguous-failed-predecessor",
+      now + 2,
+      now + 2
+    );
+    insert.run(
+      "z-in-doubt",
+      "in-doubt-successor",
+      "thread-1",
+      "FAILED",
+      "same intent",
+      0,
+      "manual",
+      null,
+      JSON.stringify({
+        errorKind: "DELIVERY_UNCERTAIN",
+        message: "delivery unknown"
+      }),
+      "ambiguous-failed-predecessor",
+      now + 3,
+      now + 3
+    );
+    insert.run(
+      "a-retry-safe-claim",
+      "retry-safe-claim-successor",
+      "thread-1",
+      "FAILED",
+      "same intent",
+      0,
+      "manual",
+      null,
+      JSON.stringify({ errorKind: "TRANSIENT", message: "timeout" }),
+      "claimed-predecessor",
+      now + 4,
+      now + 4
+    );
+    insert.run(
+      "z-claimed",
+      "claimed-successor",
+      "thread-1",
+      "PENDING",
+      "same intent",
+      0,
+      "manual",
+      JSON.stringify({ claim: "send-worker-v1" }),
+      null,
+      "claimed-predecessor",
+      now + 5,
+      now + 5
+    );
     database.close();
 
     runRepair(databasePath);
@@ -750,6 +812,7 @@ test("repair deterministically arbitrates duplicate recovery successors before a
         .prepare(`
           SELECT "id", "status", "recoveryPredecessorClientSendId", "errorJson"
           FROM "send_requests"
+          WHERE "id" IN ('a-pending', 'z-sent')
           ORDER BY "id"
         `)
         .all()
@@ -776,6 +839,37 @@ test("repair deterministically arbitrates duplicate recovery successors before a
         }
       ]
     );
+    for (const [predecessorId, clientSendIds] of [
+      [
+        "ambiguous-failed-predecessor",
+        ["retry-safe-successor", "in-doubt-successor"]
+      ],
+      [
+        "claimed-predecessor",
+        ["retry-safe-claim-successor", "claimed-successor"]
+      ]
+    ]) {
+      const ambiguousRows = database
+        .prepare(`
+          SELECT "status", "recoveryPredecessorClientSendId", "errorJson"
+          FROM "send_requests"
+          WHERE "clientSendId" IN (?, ?)
+        `)
+        .all(...clientSendIds);
+      assert.equal(ambiguousRows.length, 2);
+      assert.equal(
+        ambiguousRows.filter(
+          (row) => row.recoveryPredecessorClientSendId === predecessorId
+        ).length,
+        1
+      );
+      assert.ok(ambiguousRows.every((row) => row.status === "FAILED"));
+      assert.ok(
+        ambiguousRows.every(
+          (row) => JSON.parse(row.errorJson).errorKind === "DELIVERY_UNCERTAIN"
+        )
+      );
+    }
     const insertAfterRepair = database.prepare(`
       INSERT INTO "send_requests" (
         "id", "clientSendId", "threadId", "status", "requestText",

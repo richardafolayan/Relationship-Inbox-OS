@@ -135,6 +135,18 @@ test("completed composer generations suppress copied-tab duplicate sends", () =>
     4,
     "every durable PendingSend reconstruction must retain its predecessor"
   );
+  assert.equal(
+    source.match(
+      /lineageWinnerClientSendId:\s*attempt!?\.value\.lineageWinnerClientSendId/g
+    )?.length,
+    4,
+    "every durable PendingSend reconstruction must retain its authoritative winner"
+  );
+  assert.match(source, /composerRecoveryLineageConflict\(error\)/);
+  assert.match(
+    source,
+    /pending\.lineageWinnerClientSendId[\s\S]*?data\/send-status\/\$\{encodeURIComponent\([\s\S]*?pending\.lineageWinnerClientSendId/
+  );
 });
 
 test("attachment restoration blocks send and schedule until every intended file is resolved", () => {

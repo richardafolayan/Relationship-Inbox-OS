@@ -29,6 +29,7 @@ export interface ThreadComposerSendAttemptValue {
   attachmentNamespace?: string;
   attemptKind?: ThreadComposerSendAttemptKind;
   clientSendId: string;
+  lineageWinnerClientSendId?: string;
   notFoundRecovery?: "blocked" | "replay" | "restore";
   replayClaimId?: string;
   resolution?: "restored" | "sent";
@@ -120,6 +121,11 @@ export function normalizeThreadComposerSendAttempt(
       rawValue.notFoundRecovery === "restore"
     ) ||
     !(
+      rawValue.lineageWinnerClientSendId === undefined ||
+      (typeof rawValue.lineageWinnerClientSendId === "string" &&
+        rawValue.lineageWinnerClientSendId)
+    ) ||
+    !(
       rawValue.resolution === undefined ||
       rawValue.resolution === "restored" ||
       rawValue.resolution === "sent"
@@ -177,6 +183,9 @@ export function normalizeThreadComposerSendAttempt(
         ? { attemptKind: rawValue.attemptKind }
         : {}),
       clientSendId: rawValue.clientSendId,
+      ...(typeof rawValue.lineageWinnerClientSendId === "string"
+        ? { lineageWinnerClientSendId: rawValue.lineageWinnerClientSendId }
+        : {}),
       ...(rawValue.notFoundRecovery === "blocked" ||
       rawValue.notFoundRecovery === "replay" ||
       rawValue.notFoundRecovery === "restore"
@@ -420,6 +429,27 @@ export function composerNotFoundRecoveryAfterDispatchFailure(
     : "replay";
 }
 
+export function composerRecoveryLineageConflict(
+  error: unknown
+): { winningClientSendId: string; winningStatus?: string } | null {
+  if (!error || typeof error !== "object" || !("payload" in error)) return null;
+  const payload = (error as { payload?: unknown }).payload;
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
+  const record = payload as Record<string, unknown>;
+  if (
+    record.reasonCode !== "recovery_predecessor_already_claimed" ||
+    typeof record.winningClientSendId !== "string"
+  ) {
+    return null;
+  }
+  return {
+    winningClientSendId: record.winningClientSendId,
+    ...(typeof record.winningStatus === "string"
+      ? { winningStatus: record.winningStatus }
+      : {})
+  };
+}
+
 export function composerNotFoundRecoveryOnResume(
   recovery: ThreadComposerSendAttemptValue["notFoundRecovery"]
 ): "replay" | "restore" {
@@ -436,7 +466,7 @@ export function composerSendRecoveryDisposition(status: {
   if (status.status === "PENDING") return "retain";
   if (status.status === "NOT_FOUND") return "replay_same_id";
   if (
-    status.status === "CANCELLED" &&
+    (status.status === "FAILED" || status.status === "CANCELLED") &&
     status.errorKind === "POLICY_BLOCKED"
   ) {
     return "retain_uncertain";

@@ -37,6 +37,10 @@ import { deleteDraftRevision } from "./services/draft";
 import { summarizeControlBody } from "./services/control-audit";
 import { createEventBus } from "./services/event-bus";
 import {
+  shouldDiscardStagedAttachments,
+  type StagedAttachmentOwnership
+} from "./services/staged-attachment-cleanup";
+import {
   createAiService,
   contactSnapshotFingerprint,
   operatorProfileFingerprint,
@@ -320,13 +324,13 @@ async function discardStagedAttachments(
 async function sendRequestOwnsStagedAttachments(
   clientSendId: string | undefined,
   attachments: Array<{ absolutePath: string }>
-): Promise<boolean> {
-  if (!clientSendId || attachments.length === 0) return false;
+): Promise<StagedAttachmentOwnership> {
+  if (!clientSendId || attachments.length === 0) return "unowned";
   const row = await prisma.sendRequest.findUnique({
     where: { clientSendId },
     select: { attachmentsJson: true }
   });
-  if (!row?.attachmentsJson) return false;
+  if (!row?.attachmentsJson) return "unowned";
   try {
     const persisted = JSON.parse(row.attachmentsJson) as Array<{
       absolutePath?: unknown;
@@ -338,9 +342,11 @@ async function sendRequestOwnsStagedAttachments(
     );
     return attachments.every((attachment) =>
       persistedPaths.has(attachment.absolutePath)
-    );
+    )
+      ? "owned"
+      : "unowned";
   } catch {
-    return false;
+    return "unknown";
   }
 }
 const uploadAttachments = multer({
@@ -4116,8 +4122,13 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
     kind: ReturnType<typeof kindFromMime>;
     mimeType: string;
   }> = [];
+  const uploadedFiles = (req.files as Express.Multer.File[] | undefined) ?? [];
+  const uploadedAttachmentPaths = uploadedFiles.map((file) => ({
+    absolutePath: file.path
+  }));
   let stagedAttachmentsHandled = false;
   let stagedClientSendId: string | undefined;
+  let stagedPersistenceAttempted = false;
   try {
   const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
   if (await checkPresenterGuard(res, settingsStore, { threadId, action: "send", kind: "thread-mutation" })) return;
@@ -4153,7 +4164,6 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
     )
     .parse(req.body);
   stagedClientSendId = payload.clientSendId;
-  const uploadedFiles = (req.files as Express.Multer.File[] | undefined) ?? [];
   stagedAttachments = await Promise.all(
     uploadedFiles.map(async (f) => ({
       absolutePath: f.path,
@@ -4189,6 +4199,7 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
   // over from there.
   if (payload.scheduledFor) {
     try {
+      stagedPersistenceAttempted = true;
       const scheduleResult = await sendService.enqueueScheduledSend({
         threadId,
         text: payload.text,
@@ -4250,6 +4261,7 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
       payload.clientSendId,
       payload.clientRequestedAt ?? new Date().toISOString()
     );
+    stagedPersistenceAttempted = true;
     const queueResult = await sendQueue.enqueueAndKick({
       threadId,
       text: payload.text,
@@ -4291,14 +4303,24 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
     throw error;
   }
   } finally {
-    if (
-      !stagedAttachmentsHandled &&
-      !(await sendRequestOwnsStagedAttachments(
-        stagedClientSendId,
-        stagedAttachments
-      ).catch(() => false))
-    ) {
-      await discardStagedAttachments(stagedAttachments).catch(() => undefined);
+    if (!stagedAttachmentsHandled) {
+      const ownership: StagedAttachmentOwnership = stagedPersistenceAttempted
+        ? await sendRequestOwnsStagedAttachments(
+            stagedClientSendId,
+            uploadedAttachmentPaths
+          ).catch(() => "unknown")
+        : "unowned";
+      if (
+        shouldDiscardStagedAttachments({
+          handled: stagedAttachmentsHandled,
+          ownership,
+          persistenceAttempted: stagedPersistenceAttempted
+        })
+      ) {
+        await discardStagedAttachments(uploadedAttachmentPaths).catch(
+          () => undefined
+        );
+      }
     }
     completeUserTriggeredIntent();
   }
@@ -4550,7 +4572,8 @@ app.post("/control/thread/:threadId/retry-send", asyncRoute(async (req, res) => 
       clientSendId: newClientSendId,
       source: originalSource,
       attachments: retryAttachments,
-      replyToMessageId: original.replyToMessageId ?? undefined
+      replyToMessageId: original.replyToMessageId ?? undefined,
+      recoveryPredecessorClientSendId: original.clientSendId
     });
     res.json({ ...queueResult, clientSendId: newClientSendId });
   } catch (error) {
@@ -9065,7 +9088,12 @@ app.use((error: unknown, req: express.Request, res: express.Response, _next: exp
 
   // eslint-disable-next-line no-console
   console.error(`[runner:error] ${req.method} ${path} -> ${statusCode}: ${message}`);
-  res.status(statusCode).json({ error: message });
+  res.status(statusCode).json({
+    error: message,
+    ...(error instanceof SendPolicyError
+      ? { reasonCode: error.reasonCode, ...error.details }
+      : {})
+  });
 });
 
 process.on("unhandledRejection", (reason) => {

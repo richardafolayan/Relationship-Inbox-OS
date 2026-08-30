@@ -216,6 +216,13 @@ export function repairSendRequestRecoveryPredecessorColumn(database) {
           "${SEND_RECOVERY_PREDECESSOR_COLUMN}" = NULL
         WHERE "id" = ?
       `);
+      const blockRetainedDuplicate = database.prepare(`
+        UPDATE "send_requests"
+        SET
+          "status" = 'FAILED',
+          "errorJson" = ?
+        WHERE "id" = ?
+      `);
       for (const { predecessorId } of duplicatePredecessors) {
         const successors = database
           .prepare(`
@@ -225,6 +232,17 @@ export function repairSendRequestRecoveryPredecessorColumn(database) {
             ORDER BY CASE WHEN "status" = 'SENT' THEN 0 ELSE 1 END, "id" ASC
           `)
           .all(predecessorId);
+        if (successors[0]?.status !== "SENT") {
+          blockRetainedDuplicate.run(
+            JSON.stringify({
+              errorKind: "DELIVERY_UNCERTAIN",
+              message:
+                "Multiple recovered sends claimed the same predecessor",
+              reasonCode: "recovery_predecessor_lineage_ambiguous"
+            }),
+            successors[0].id
+          );
+        }
         for (const successor of successors.slice(1)) {
           if (successor.status === "SENT") {
             clearTerminalDuplicate.run(successor.id);
