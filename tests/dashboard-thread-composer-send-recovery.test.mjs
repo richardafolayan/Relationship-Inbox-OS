@@ -10,8 +10,10 @@ import {
   composerRecoveryResolution,
   composerReplayPreflight,
   composerSendRecoveryDisposition,
+  recoveredComposerAuthoritativeDisposition,
   resolvedComposerScheduleInstant,
   recoveredComposerSessionDisposition,
+  runComposerReplayRouteFence,
   missingThreadComposerAttachments,
   normalizeThreadComposerSendAttempt,
   shouldHideComposerSessionForAttempt,
@@ -277,6 +279,89 @@ test("another tab suppresses the exact restored session after immediate or sched
       "sent"
     );
   }
+});
+
+test("a local terminal fence suppresses a recovered session when durable completion fails", () => {
+  const recovered = {
+    ...composerIntent,
+    recoveryClientSendId: attempt.value.clientSendId,
+    revision: 4,
+    revisionId: "session-y"
+  };
+  const restored = {
+    ...attempt.value,
+    resolution: "restored",
+    restoredSessionRevisionId: "session-y"
+  };
+
+  assert.equal(
+    recoveredComposerSessionDisposition(
+      recovered,
+      [restored],
+      undefined,
+      new Set([attempt.value.clientSendId])
+    ),
+    "sent"
+  );
+});
+
+test("recovered replies require an authoritative definite failure before another send", () => {
+  assert.equal(recoveredComposerAuthoritativeDisposition({ status: "SENT" }), "sent");
+  assert.equal(recoveredComposerAuthoritativeDisposition({ status: "SCHEDULED" }), "sent");
+  assert.equal(recoveredComposerAuthoritativeDisposition({ status: "FAILED" }), "retryable");
+  assert.equal(recoveredComposerAuthoritativeDisposition({ status: "CANCELLED" }), "retryable");
+  assert.equal(recoveredComposerAuthoritativeDisposition({ status: "NOT_FOUND" }), "blocked");
+  assert.equal(recoveredComposerAuthoritativeDisposition({ status: "PENDING" }), "blocked");
+  assert.equal(
+    recoveredComposerAuthoritativeDisposition({
+      status: "FAILED",
+      deliveryUncertain: true,
+      errorKind: "DELIVERY_UNCERTAIN"
+    }),
+    "blocked"
+  );
+});
+
+test("a held replay cannot dispatch after its conversation loses the active route", async () => {
+  let activeThreadId = "thread-a";
+  let releaseClaim;
+  const claimed = new Promise((resolve) => {
+    releaseClaim = resolve;
+  });
+  const events = [];
+  const resultPromise = runComposerReplayRouteFence({
+    claim: () => claimed,
+    dispatch: async () => events.push("dispatch"),
+    getActiveThreadId: () => activeThreadId,
+    moveToReview: async (value) => events.push(`review:${value ?? "unclaimed"}`),
+    prepare: async () => events.push("prepare"),
+    threadId: "thread-a"
+  });
+
+  activeThreadId = "thread-b";
+  releaseClaim("claimed-a");
+
+  assert.deepEqual(await resultPromise, { kind: "off_route" });
+  assert.deepEqual(events, ["review:claimed-a"]);
+});
+
+test("replay rechecks the live route after attachment preparation and before dispatch", async () => {
+  let activeThreadId = "thread-a";
+  const events = [];
+  const result = await runComposerReplayRouteFence({
+    claim: async () => "claimed-a",
+    dispatch: async () => events.push("dispatch"),
+    getActiveThreadId: () => activeThreadId,
+    moveToReview: async (value) => events.push(`review:${value ?? "unclaimed"}`),
+    prepare: async () => {
+      events.push("prepare");
+      activeThreadId = "thread-b";
+    },
+    threadId: "thread-a"
+  });
+
+  assert.deepEqual(result, { kind: "off_route" });
+  assert.deepEqual(events, ["prepare", "review:claimed-a"]);
 });
 
 test("an edited successor stays active and expired restoration proof fails closed", () => {

@@ -265,8 +265,15 @@ export function composerRecoveryResolution(
 export function recoveredComposerSessionDisposition(
   session: ThreadComposerSession,
   completed: ThreadComposerSendAttemptValue[],
-  prunedBefore?: number
+  prunedBefore?: number,
+  locallyTerminalClientSendIds?: ReadonlySet<string>
 ): "active" | "blocked" | "sent" | "superseded" {
+  if (
+    session.recoveryClientSendId &&
+    locallyTerminalClientSendIds?.has(session.recoveryClientSendId)
+  ) {
+    return "sent";
+  }
   const terminal = completed.find(
     (value) =>
       value.resolution !== "restored" &&
@@ -415,4 +422,49 @@ export function composerSendRecoveryDisposition(status: {
     return "retain_uncertain";
   }
   return "restore";
+}
+
+export function recoveredComposerAuthoritativeDisposition(status: {
+  status: "NOT_FOUND" | "PENDING" | "SCHEDULED" | "SENT" | "FAILED" | "CANCELLED";
+  deliveryUncertain?: boolean;
+  errorKind?: string;
+}): "blocked" | "retryable" | "sent" {
+  const disposition = composerSendRecoveryDisposition(status);
+  if (disposition === "cleanup" || disposition === "scheduled") return "sent";
+  if (disposition === "restore") return "retryable";
+  return "blocked";
+}
+
+export async function runComposerReplayRouteFence<TClaim>({
+  claim,
+  dispatch,
+  getActiveThreadId,
+  moveToReview,
+  prepare,
+  threadId
+}: {
+  claim: () => Promise<TClaim | undefined>;
+  dispatch: (claimed: TClaim) => Promise<void>;
+  getActiveThreadId: () => string;
+  moveToReview: (claimed?: TClaim) => Promise<void>;
+  prepare: (claimed: TClaim) => Promise<void>;
+  threadId: string;
+}): Promise<{ kind: "dispatched" | "not_claimed" | "off_route"; claimed?: TClaim }> {
+  if (getActiveThreadId() !== threadId) {
+    await moveToReview();
+    return { kind: "off_route" };
+  }
+  const claimed = await claim();
+  if (claimed === undefined) return { kind: "not_claimed" };
+  if (getActiveThreadId() !== threadId) {
+    await moveToReview(claimed);
+    return { kind: "off_route" };
+  }
+  await prepare(claimed);
+  if (getActiveThreadId() !== threadId) {
+    await moveToReview(claimed);
+    return { kind: "off_route" };
+  }
+  await dispatch(claimed);
+  return { claimed, kind: "dispatched" };
 }

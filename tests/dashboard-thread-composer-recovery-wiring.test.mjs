@@ -323,9 +323,11 @@ test("off-route NOT_FOUND attempts require review and global publication cannot 
   const checkStart = source.indexOf("const checkPendingDelivery = useCallback(");
   const checkEnd = source.indexOf("checkPendingDeliveryRef.current = checkPendingDelivery", checkStart);
   const check = source.slice(checkStart, checkEnd);
-  const backgroundGate = check.indexOf("if (pending.backgroundOnly)");
-  const dispatch = check.indexOf("await dispatchComposerSendAttempt(");
-  assert.ok(backgroundGate !== -1 && backgroundGate < dispatch);
+  const liveRouteGate = check.indexOf("routeThreadIdRef.current !== pending.threadId");
+  const routeFence = check.indexOf("runComposerReplayRouteFence");
+  assert.ok(liveRouteGate !== -1 && liveRouteGate < routeFence);
+  assert.match(check, /getActiveThreadId: \(\) => routeThreadIdRef\.current/);
+  assert.match(check, /moveToReview: async \(\) => movePendingReplayToReview\(pending\)/);
   assert.match(check, /notFoundRecovery: "restore"/);
   const inventoryStart = source.indexOf("const publishAndCheck = (pending: PendingSend)");
   const inventoryEnd = source.indexOf("const reconcileDurableAttempts", inventoryStart);
@@ -335,6 +337,39 @@ test("off-route NOT_FOUND attempts require review and global publication cannot 
     publish.indexOf("pendingSendsRef.current = next") <
       publish.indexOf("checkPendingDeliveryRef.current")
   );
+});
+
+test("global reconciliation reclassifies every pending row from the live route", () => {
+  const inventoryStart = source.indexOf("const reconcileDurableAttempts = () =>");
+  const inventoryEnd = source.indexOf("reconcileDurableAttempts();", inventoryStart);
+  const inventory = source.slice(inventoryStart, inventoryEnd);
+  assert.match(
+    inventory,
+    /const backgroundOnly = existing\.threadId !== routeThreadIdRef\.current/
+  );
+  assert.match(inventory, /checkPendingDeliveryRef\.current\(clientSendId\)/);
+  assert.doesNotMatch(inventory, /if \(existing\.backgroundOnly\)/);
+});
+
+test("foregrounding an inventoried attachment attempt still performs namespace migration", () => {
+  const resumeStart = source.indexOf("const resumedNotFoundRecovery =");
+  const resumeEnd = source.indexOf("const prepareResumedAttempt = async () =>", resumeStart);
+  const resumePrelude = source.slice(resumeStart, resumeEnd);
+  assert.doesNotMatch(resumePrelude, /pendingSendsRef\.current\.some/);
+  const migrationStart = source.indexOf(
+    "if (attachmentNamespace !== composerAttachmentStore.namespace)",
+    resumeEnd
+  );
+  assert.notEqual(migrationStart, -1);
+});
+
+test("a busy recovery queues the next durable failure instead of dropping it", () => {
+  const restoreStart = source.indexOf("const restorePendingComposerSend = useCallback(");
+  const restoreEnd = source.indexOf("restorePendingComposerSendRef.current =", restoreStart);
+  const restore = source.slice(restoreStart, restoreEnd);
+  assert.match(restore, /queuedComposerRecoveriesRef\.current\.set/);
+  assert.match(restore, /queuedComposerRecoveriesRef\.current\.entries\(\)\.next/);
+  assert.match(restore, /restorePendingComposerSendRef\.current/);
 });
 
 test("namespace migration transforms authoritative state without reverting replay claims", () => {

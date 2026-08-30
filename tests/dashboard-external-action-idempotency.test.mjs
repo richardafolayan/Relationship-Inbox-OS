@@ -436,6 +436,55 @@ test("a late terminal result advances restored lineage to its successor session"
   );
 });
 
+test("a failed terminal tombstone write leaves restored lineage non-terminal", async () => {
+  const values = new Map();
+  let failTerminalWrite = false;
+  const storage = {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => {
+      if (failTerminalWrite && key.includes("completed:scoped:")) {
+        throw new Error("quota");
+      }
+      values.set(key, value);
+    },
+    removeItem: (key) => values.delete(key)
+  };
+  const store = createExternalActionAttemptStore(storage);
+  const scope = "composer-send:terminal-write-failure";
+  const original = {
+    clientSendId: "send-x",
+    notFoundRecovery: "restore",
+    requestedAt: "2026-08-30T09:00:00.000Z",
+    sessionRevision: 1,
+    sessionRevisionId: "session-x"
+  };
+  const restored = {
+    ...original,
+    resolution: "restored",
+    restoredSessionRevisionId: "session-y"
+  };
+  await store.getOrCreateScopedValue(scope, { text: "preserved" }, () => original);
+  assert.equal(
+    await store.compareAndCompleteScopedValue(scope, () => true, true, restored),
+    true
+  );
+  failTerminalWrite = true;
+
+  await assert.rejects(
+    store.completeScopedValueWithLineage(
+      scope,
+      (value) => value.clientSendId === "send-x",
+      (value) => value.clientSendId === "send-x" && value.resolution === "restored",
+      terminalThreadComposerSendAttemptValue
+    ),
+    ExternalActionAttemptStorageError
+  );
+  assert.deepEqual(
+    composerRecoveryResolution(original, store.readCompletedScopedValues(scope)),
+    { kind: "restore", sessionRevisionId: "session-y" }
+  );
+});
+
 test("atomic value transforms preserve replay arbitration through namespace migration", async () => {
   const values = new Map();
   const storage = {
