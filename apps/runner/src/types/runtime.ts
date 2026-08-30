@@ -89,6 +89,9 @@ export interface EventBus {
 export interface SettingsStore {
   getSettings(): Promise<AppSettings>;
   updateSettings(partial: Partial<AppSettings>): Promise<AppSettings>;
+  mutateSettings<T>(
+    work: (mutation: PersistedMutation<AppSettings>) => Promise<T>
+  ): Promise<T>;
   getSelectorOverrides(): Promise<SelectorOverrideStore>;
   saveSelectorOverride(platform: PlatformName, key: keyof SelectorRegistry, selector: string): Promise<void>;
   resetSelectorOverride(platform: PlatformName, key: keyof SelectorRegistry): Promise<void>;
@@ -96,7 +99,18 @@ export interface SettingsStore {
   setDemoSeedManifest(manifest: DemoSeedManifest | null): Promise<void>;
   getOperatorProfile(): Promise<OperatorProfile>;
   updateOperatorProfile(partial: Partial<OperatorProfile>): Promise<OperatorProfile>;
+  mutateOperatorProfile<T>(
+    work: (mutation: PersistedMutation<OperatorProfile>) => Promise<T>
+  ): Promise<T>;
   acknowledgeFocusWindowPerson(windowId: string, personId: string): Promise<boolean>;
+}
+
+export interface PersistedMutation<T> {
+  current: T;
+  commit(
+    partial: Partial<T>,
+    persist?: (next: T) => Promise<void>
+  ): Promise<T>;
 }
 
 /** Reply tone the operator picks during voice setup. "" = not chosen yet. */

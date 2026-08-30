@@ -3,7 +3,7 @@ import { prisma } from "../db";
 import { safeJsonParse } from "../utils/json";
 import { createKeyedMutex } from "./keyed-mutex";
 
-const SETUP_PREFERENCES_KEY = "setup_preferences_v2";
+export const SETUP_PREFERENCES_KEY = "setup_preferences_v2";
 const SETUP_PLATFORMS: PlatformName[] = [
   "IMESSAGE",
   "LINKEDIN",
@@ -75,6 +75,8 @@ interface SetupPreferencesPersistence {
   write(next: SetupPreferences): Promise<void>;
 }
 
+export type SetupPreferencesWriter = (next: SetupPreferences) => Promise<void>;
+
 export function createSetupPreferencesStore(persistence: SetupPreferencesPersistence) {
   const mutex = createKeyedMutex();
 
@@ -87,7 +89,8 @@ export function createSetupPreferencesStore(persistence: SetupPreferencesPersist
 
   async function mutate(
     options: SetupPreferencesMutationOptions,
-    buildUpdate: (current: SetupPreferences) => Promise<SetupPreferencesUpdate>
+    buildUpdate: (current: SetupPreferences) => Promise<SetupPreferencesUpdate>,
+    persist: SetupPreferencesWriter = persistence.write
   ): Promise<SetupPreferences> {
     return mutex.runExclusive(SETUP_PREFERENCES_KEY, async () => {
       const current = await get();
@@ -103,7 +106,7 @@ export function createSetupPreferencesStore(persistence: SetupPreferencesPersist
         ...partial,
         revision: current.revision + 1
       });
-      await persistence.write(next);
+      await persist(next);
       return next;
     });
   }
@@ -143,7 +146,8 @@ export function updateSetupPreferences(
 
 export function mutateSetupPreferences(
   options: SetupPreferencesMutationOptions,
-  buildUpdate: (current: SetupPreferences) => Promise<SetupPreferencesUpdate>
+  buildUpdate: (current: SetupPreferences) => Promise<SetupPreferencesUpdate>,
+  persist?: SetupPreferencesWriter
 ): Promise<SetupPreferences> {
-  return setupPreferencesStore.mutate(options, buildUpdate);
+  return setupPreferencesStore.mutate(options, buildUpdate, persist);
 }

@@ -11,19 +11,18 @@ export interface SetupPreferenceWriteResult<TPreferences> {
   applied: boolean;
 }
 
-interface CompletedSetupPersistence {
+interface CompletedSetupPersistence<TPreferences> {
   completedAt: string;
-  persistOperatorProfile(completedAt: string): Promise<unknown>;
-  persistPreferences(completedAt: string): Promise<unknown>;
+  persistCompletion(completedAt: string): Promise<TPreferences>;
   markComplete(): void;
 }
 
-export async function persistCompletedSetup(
-  persistence: CompletedSetupPersistence
-): Promise<void> {
-  await persistence.persistOperatorProfile(persistence.completedAt);
-  await persistence.persistPreferences(persistence.completedAt);
+export async function persistCompletedSetup<TPreferences>(
+  persistence: CompletedSetupPersistence<TPreferences>
+): Promise<TPreferences> {
+  const preferences = await persistence.persistCompletion(persistence.completedAt);
   persistence.markComplete();
+  return preferences;
 }
 
 function validRevision(value: unknown): value is number {

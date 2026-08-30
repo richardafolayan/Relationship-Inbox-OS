@@ -13,17 +13,18 @@ import type {
   FocusWindowSource,
   FocusWindowState,
   OperatorProfile,
+  PersistedMutation,
   ReplyStyle,
   SettingsStore
 } from "../types/runtime";
 
-const APP_SETTINGS_KEY = "app_settings";
+export const APP_SETTINGS_KEY = "app_settings";
 const SELECTOR_OVERRIDES_KEY = "selector_overrides";
 const DEMO_SEED_MANIFEST_KEY = "demo_seed_manifest";
 // Kept at v1 deliberately: the voice/identity fields were added to the JSON
 // shape after about/interests. A pre-existing {about,interests} row parses
 // fine — the new fields just fall through to their defaults below.
-const OPERATOR_PROFILE_KEY = "operator_profile_v1";
+export const OPERATOR_PROFILE_KEY = "operator_profile_v1";
 
 const REPLY_STYLES: ReplyStyle[] = ["warm", "direct", "casual", "thoughtful", "concise"];
 const AI_HELP_LEVELS: AiHelpLevel[] = ["memory_only", "writing_support", "full_drafts"];
@@ -196,6 +197,47 @@ function cloneSettings(settings: AppSettings): AppSettings {
   };
 }
 
+function mergeOperatorProfile(
+  current: OperatorProfile,
+  partial: Partial<OperatorProfile>
+): OperatorProfile {
+  return {
+    displayName: typeof partial.displayName === "string" ? partial.displayName : current.displayName,
+    about: typeof partial.about === "string" ? partial.about : current.about,
+    interests: typeof partial.interests === "string" ? partial.interests : current.interests,
+    commonPhrases:
+      typeof partial.commonPhrases === "string" ? partial.commonPhrases : current.commonPhrases,
+    avoidedPhrases:
+      typeof partial.avoidedPhrases === "string" ? partial.avoidedPhrases : current.avoidedPhrases,
+    preferredStyle:
+      partial.preferredStyle !== undefined
+        ? asReplyStyle(partial.preferredStyle)
+        : current.preferredStyle,
+    aiHelpLevel:
+      partial.aiHelpLevel !== undefined ? asAiHelpLevel(partial.aiHelpLevel) : current.aiHelpLevel,
+    setupCompletedAt:
+      typeof partial.setupCompletedAt === "string"
+        ? partial.setupCompletedAt
+        : current.setupCompletedAt,
+    focusWindow:
+      partial.focusWindow !== undefined
+        ? mergeFocusWindowUpdate(current.focusWindow, partial.focusWindow)
+        : current.focusWindow,
+    ackTemplates:
+      partial.ackTemplates !== undefined
+        ? asAckTemplates(partial.ackTemplates)
+        : current.ackTemplates,
+    focusSettings:
+      partial.focusSettings !== undefined
+        ? asFocusSettings(partial.focusSettings)
+        : current.focusSettings,
+    calendarSync:
+      partial.calendarSync !== undefined
+        ? asCalendarSync(partial.calendarSync)
+        : current.calendarSync
+  };
+}
+
 function cloneSelectorOverrides(overrides: SelectorOverrideStore): SelectorOverrideStore {
   return Object.fromEntries(
     Object.entries(overrides).map(([platform, platformOverrides]) => [
@@ -253,24 +295,38 @@ export function createSettingsStore(): SettingsStore {
     return cloneSettings(await settingsLoadPromise);
   }
 
-  async function updateSettings(partial: Partial<AppSettings>): Promise<AppSettings> {
+  async function mutateSettings<T>(
+    work: (mutation: PersistedMutation<AppSettings>) => Promise<T>
+  ): Promise<T> {
     return writeMutex.runExclusive(APP_SETTINGS_KEY, async () => {
       const current = await getSettings();
-      const next: AppSettings = {
-        ...current,
-        ...partial
-      };
-
-      await prisma.setting.upsert({
-        where: { key: APP_SETTINGS_KEY },
-        update: { valueJson: JSON.stringify(next) },
-        create: { key: APP_SETTINGS_KEY, valueJson: JSON.stringify(next) }
+      let committed = false;
+      return work({
+        current,
+        commit: async (partial, persist) => {
+          if (committed) {
+            throw new Error("Settings mutation already committed.");
+          }
+          const next: AppSettings = { ...current, ...partial };
+          const write = persist ?? (async (value: AppSettings) => {
+            await prisma.setting.upsert({
+              where: { key: APP_SETTINGS_KEY },
+              update: { valueJson: JSON.stringify(value) },
+              create: { key: APP_SETTINGS_KEY, valueJson: JSON.stringify(value) }
+            });
+          });
+          await write(next);
+          committed = true;
+          settingsCache = cloneSettings(next);
+          settingsLoadPromise = null;
+          return cloneSettings(settingsCache);
+        }
       });
-
-      settingsCache = cloneSettings(next);
-      settingsLoadPromise = null;
-      return cloneSettings(settingsCache);
     });
+  }
+
+  async function updateSettings(partial: Partial<AppSettings>): Promise<AppSettings> {
+    return mutateSettings(({ commit }) => commit(partial));
   }
 
   async function getSelectorOverrides(): Promise<SelectorOverrideStore> {
@@ -379,51 +435,36 @@ export function createSettingsStore(): SettingsStore {
     }
   }
 
-  async function updateOperatorProfile(partial: Partial<OperatorProfile>): Promise<OperatorProfile> {
+  async function mutateOperatorProfile<T>(
+    work: (mutation: PersistedMutation<OperatorProfile>) => Promise<T>
+  ): Promise<T> {
     return writeMutex.runExclusive(OPERATOR_PROFILE_KEY, async () => {
       const current = await getOperatorProfile();
-      const next: OperatorProfile = {
-        displayName: typeof partial.displayName === "string" ? partial.displayName : current.displayName,
-        about: typeof partial.about === "string" ? partial.about : current.about,
-        interests: typeof partial.interests === "string" ? partial.interests : current.interests,
-        commonPhrases:
-          typeof partial.commonPhrases === "string" ? partial.commonPhrases : current.commonPhrases,
-        avoidedPhrases:
-          typeof partial.avoidedPhrases === "string" ? partial.avoidedPhrases : current.avoidedPhrases,
-        preferredStyle:
-          partial.preferredStyle !== undefined
-            ? asReplyStyle(partial.preferredStyle)
-            : current.preferredStyle,
-        aiHelpLevel:
-          partial.aiHelpLevel !== undefined ? asAiHelpLevel(partial.aiHelpLevel) : current.aiHelpLevel,
-        setupCompletedAt:
-          typeof partial.setupCompletedAt === "string"
-            ? partial.setupCompletedAt
-            : current.setupCompletedAt,
-        focusWindow:
-          partial.focusWindow !== undefined
-            ? mergeFocusWindowUpdate(current.focusWindow, partial.focusWindow)
-            : current.focusWindow,
-        ackTemplates:
-          partial.ackTemplates !== undefined
-            ? asAckTemplates(partial.ackTemplates)
-            : current.ackTemplates,
-        focusSettings:
-          partial.focusSettings !== undefined
-            ? asFocusSettings(partial.focusSettings)
-            : current.focusSettings,
-        calendarSync:
-          partial.calendarSync !== undefined
-            ? asCalendarSync(partial.calendarSync)
-            : current.calendarSync
-      };
-      await prisma.setting.upsert({
-        where: { key: OPERATOR_PROFILE_KEY },
-        update: { valueJson: JSON.stringify(next) },
-        create: { key: OPERATOR_PROFILE_KEY, valueJson: JSON.stringify(next) }
+      let committed = false;
+      return work({
+        current,
+        commit: async (partial, persist) => {
+          if (committed) {
+            throw new Error("Operator profile mutation already committed.");
+          }
+          const next = mergeOperatorProfile(current, partial);
+          const write = persist ?? (async (value: OperatorProfile) => {
+            await prisma.setting.upsert({
+              where: { key: OPERATOR_PROFILE_KEY },
+              update: { valueJson: JSON.stringify(value) },
+              create: { key: OPERATOR_PROFILE_KEY, valueJson: JSON.stringify(value) }
+            });
+          });
+          await write(next);
+          committed = true;
+          return next;
+        }
       });
-      return next;
     });
+  }
+
+  async function updateOperatorProfile(partial: Partial<OperatorProfile>): Promise<OperatorProfile> {
+    return mutateOperatorProfile(({ commit }) => commit(partial));
   }
 
   async function acknowledgeFocusWindowPerson(
@@ -455,6 +496,7 @@ export function createSettingsStore(): SettingsStore {
   return {
     getSettings,
     updateSettings,
+    mutateSettings,
     getSelectorOverrides,
     saveSelectorOverride,
     resetSelectorOverride,
@@ -462,6 +504,7 @@ export function createSettingsStore(): SettingsStore {
     setDemoSeedManifest,
     getOperatorProfile,
     updateOperatorProfile,
+    mutateOperatorProfile,
     acknowledgeFocusWindowPerson
   };
 }

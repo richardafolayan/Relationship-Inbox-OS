@@ -94,30 +94,53 @@ test("an older setup snapshot cannot replace newer authoritative preferences", (
   assert.equal(queue.latestRevision(), 8);
 });
 
-test("setup completion is marked locally only after both authoritative writes succeed", async () => {
+test("setup completion is marked locally only after the atomic server write succeeds", async () => {
   const events = [];
-  await persistCompletedSetup({
+  const preferences = await persistCompletedSetup({
     completedAt: "done",
-    persistOperatorProfile: async () => events.push("profile"),
-    persistPreferences: async () => events.push("preferences"),
+    persistCompletion: async () => {
+      events.push("server");
+      return { revision: 8, completedAt: "done" };
+    },
     markComplete: () => events.push("local")
   });
-  assert.deepEqual(events, ["profile", "preferences", "local"]);
+  assert.deepEqual(events, ["server", "local"]);
+  assert.equal(preferences.revision, 8);
 });
 
-test("a failed completion preference write leaves local setup incomplete", async () => {
+test("a failed atomic completion leaves local setup incomplete", async () => {
   const events = [];
   await assert.rejects(
     persistCompletedSetup({
       completedAt: "done",
-      persistOperatorProfile: async () => events.push("profile"),
-      persistPreferences: async () => {
-        events.push("preferences");
+      persistCompletion: async () => {
+        events.push("server");
         throw new Error("offline");
       },
       markComplete: () => events.push("local")
     }),
     /offline/
   );
-  assert.deepEqual(events, ["profile", "preferences"]);
+  assert.deepEqual(events, ["server"]);
+});
+
+test("an authoritative side-endpoint snapshot rebases the next queued write", async () => {
+  const calls = [];
+  const queue = createSetupPreferenceWriteQueue(3, async (payload) => {
+    calls.push(payload);
+    return {
+      revision: 5,
+      selectedPlatforms: [],
+      aiEnabled: true,
+      transcriptionMode: "standard",
+      startedAt: "start",
+      completedAt: ""
+    };
+  });
+
+  assert.equal(queue.acceptSnapshot({ revision: 4 }), true);
+  await queue.save({ completedAt: "done" });
+
+  assert.deepEqual(calls, [{ completedAt: "done", expectedRevision: 4 }]);
+  assert.equal(queue.latestRevision(), 5);
 });

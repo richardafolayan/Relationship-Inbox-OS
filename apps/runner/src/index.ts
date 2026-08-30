@@ -19,7 +19,11 @@ import { resolveConnectTimeoutMs, runnerConfig, projectRoot, dataDir } from "./c
 import { ensurePathInside, safeUploadFilename, streamFileToResponse } from "./utils/fs";
 import { safeJsonParse } from "./utils/json";
 import { filterDismissedOpenLoops } from "./utils/open-loops";
-import { createSettingsStore } from "./services/settings";
+import {
+  APP_SETTINGS_KEY,
+  createSettingsStore,
+  OPERATOR_PROFILE_KEY
+} from "./services/settings";
 import {
   applyGeminiKey,
   resolveEnvWritePath,
@@ -29,8 +33,8 @@ import {
 import {
   getSetupPreferences,
   mutateSetupPreferences,
+  SETUP_PREFERENCES_KEY,
   SetupPreferencesConflictError,
-  updateSetupPreferences,
   type SetupTranscriptionMode
 } from "./services/setup-preferences";
 import { createSetupPreferencesCoordinator } from "./services/setup-preferences-coordinator";
@@ -508,17 +512,36 @@ function kindFromMime(mime: string | undefined, filename: string | undefined): "
 }
 
 const settingsStore = createSettingsStore();
+
+async function persistSettingRows(
+  entries: ReadonlyArray<{ key: string; value: unknown }>
+): Promise<void> {
+  await prisma.$transaction(
+    entries.map(({ key, value }) =>
+      prisma.setting.upsert({
+        where: { key },
+        update: { valueJson: JSON.stringify(value) },
+        create: { key, valueJson: JSON.stringify(value) }
+      })
+    )
+  );
+}
+
 const setupPreferencesCoordinator = createSetupPreferencesCoordinator({
   availablePlatforms: runnerConfig.availablePlatforms,
-  getSettings: settingsStore.getSettings,
-  updateSettings: settingsStore.updateSettings,
+  mutateSettings: settingsStore.mutateSettings,
+  mutateOperatorProfile: settingsStore.mutateOperatorProfile,
   mutatePreferences: mutateSetupPreferences,
-  persistWhatsAppEnabled: (enabled) =>
-    upsertEnvFile(resolveEnvWritePath(), "WHATSAPP_ENABLED", String(enabled)),
-  applyWhatsAppEnabled: (enabled) => {
-    runnerConfig.whatsapp.enabled = enabled;
-    process.env.WHATSAPP_ENABLED = String(enabled);
-  }
+  persistSetupState: (settings, preferences) =>
+    persistSettingRows([
+      { key: APP_SETTINGS_KEY, value: settings },
+      { key: SETUP_PREFERENCES_KEY, value: preferences }
+    ]),
+  persistCompletedState: (operatorProfile, preferences) =>
+    persistSettingRows([
+      { key: OPERATOR_PROFILE_KEY, value: operatorProfile },
+      { key: SETUP_PREFERENCES_KEY, value: preferences }
+    ])
 });
 const overdueDigestStore = createOverdueDigestStore(prisma);
 const auditService = createAuditService();
@@ -2963,9 +2986,8 @@ app.post("/control/setup/ai-key", asyncRoute(async (req, res) => {
     res.status(result.status).json({ error: result.message });
     return;
   }
-  await settingsStore.updateSettings({ aiEnabled: true, aiProvider: "gemini" });
-  await updateSetupPreferences({ aiEnabled: true });
-  res.json({ ok: true, provider: "gemini" });
+  const preferences = await setupPreferencesCoordinator.enableAiProvider("gemini");
+  res.json({ ok: true, provider: "gemini", preferences });
 }));
 
 app.get("/data/setup/status", asyncRoute(async (_req, res) => {
@@ -3013,12 +3035,31 @@ app.post("/control/setup/preferences", asyncRoute(async (req, res) => {
       .optional(),
     aiEnabled: z.boolean().optional(),
     startedAt: z.string().max(100).optional(),
-    completedAt: z.string().max(100).optional(),
     expectedRevision: z.number().int().nonnegative().optional()
   }).parse(req.body);
   try {
     const preferences = await setupPreferencesCoordinator.update(payload);
     res.json({ ok: true, preferences });
+  } catch (error) {
+    if (error instanceof SetupPreferencesConflictError) {
+      res.status(409).json({
+        error: "Setup changed in another window. Review the latest choices and try again.",
+        preferences: error.current
+      });
+      return;
+    }
+    throw error;
+  }
+}));
+
+app.post("/control/setup/complete", asyncRoute(async (req, res) => {
+  const payload = z.object({
+    completedAt: z.string().datetime(),
+    expectedRevision: z.number().int().nonnegative().optional()
+  }).parse(req.body);
+  try {
+    const result = await setupPreferencesCoordinator.complete(payload);
+    res.json({ ok: true, ...result });
   } catch (error) {
     if (error instanceof SetupPreferencesConflictError) {
       res.status(409).json({
@@ -3040,9 +3081,14 @@ app.post("/control/setup/transcription", asyncRoute(async (req, res) => {
     mode: z.enum(["off", "standard", "enhanced"]),
     removeDownloadedModels: z.boolean().optional()
   }).parse(req.body) as { mode: SetupTranscriptionMode; removeDownloadedModels?: boolean };
+  const preferences = await setupPreferencesCoordinator.update({
+    transcriptionMode: payload.mode
+  });
   const status = transcriptionSetup.configure(payload.mode, payload.removeDownloadedModels === true);
-  await updateSetupPreferences({ transcriptionMode: payload.mode });
-  res.status(status.phase === "downloading" ? 202 : 200).json(status);
+  res.status(status.phase === "downloading" ? 202 : 200).json({
+    ...status,
+    preferences
+  });
 }));
 
 // ---- System / self-update -------------------------------------------------

@@ -1,61 +1,115 @@
 import type { AppSettings, PlatformName } from "@inbox-os/core";
+import type { OperatorProfile, PersistedMutation } from "../types/runtime";
 import type {
   SetupPreferences,
   SetupPreferencesMutationOptions,
-  SetupPreferencesUpdate
+  SetupPreferencesUpdate,
+  SetupPreferencesWriter
 } from "./setup-preferences";
 
 export interface SetupPreferencesPayload extends SetupPreferencesUpdate {
   expectedRevision?: number;
 }
 
+export interface CompleteSetupPayload {
+  completedAt: string;
+  expectedRevision?: number;
+}
+
 interface SetupPreferencesCoordinatorDeps {
   availablePlatforms: readonly PlatformName[];
-  getSettings(): Promise<AppSettings>;
-  updateSettings(partial: Partial<AppSettings>): Promise<unknown>;
+  mutateSettings<T>(
+    work: (mutation: PersistedMutation<AppSettings>) => Promise<T>
+  ): Promise<T>;
+  mutateOperatorProfile<T>(
+    work: (mutation: PersistedMutation<OperatorProfile>) => Promise<T>
+  ): Promise<T>;
   mutatePreferences(
     options: SetupPreferencesMutationOptions,
-    buildUpdate: (current: SetupPreferences) => Promise<SetupPreferencesUpdate>
+    buildUpdate: (current: SetupPreferences) => Promise<SetupPreferencesUpdate>,
+    persist?: SetupPreferencesWriter
   ): Promise<SetupPreferences>;
-  persistWhatsAppEnabled(enabled: boolean): void;
-  applyWhatsAppEnabled(enabled: boolean): void;
+  persistSetupState(settings: AppSettings, preferences: SetupPreferences): Promise<void>;
+  persistCompletedState(
+    operatorProfile: OperatorProfile,
+    preferences: SetupPreferences
+  ): Promise<void>;
 }
 
 export function createSetupPreferencesCoordinator(deps: SetupPreferencesCoordinatorDeps) {
-  async function update(payload: SetupPreferencesPayload): Promise<SetupPreferences> {
-    let whatsappEnabled = false;
-    const preferences = await deps.mutatePreferences(
-      { expectedRevision: payload.expectedRevision },
-      async (current) => {
-        const currentSettings = await deps.getSettings();
-        const existingPilotPlatforms = currentSettings.enabledPlatforms.filter((platform) =>
-          deps.availablePlatforms.includes(platform)
-        );
-        const selectedPlatforms = (
-          payload.selectedPlatforms ??
-          (current.startedAt || current.selectedPlatforms.length > 0
-            ? current.selectedPlatforms
-            : existingPilotPlatforms)
-        ).filter((platform) => deps.availablePlatforms.includes(platform));
-        const aiEnabled =
-          payload.aiEnabled ??
-          (current.startedAt ? current.aiEnabled : currentSettings.aiEnabled !== false);
-        whatsappEnabled = selectedPlatforms.includes("WHATSAPP");
+  async function updateState(
+    payload: SetupPreferencesPayload,
+    additionalSettings: Partial<AppSettings> = {}
+  ): Promise<SetupPreferences> {
+    return deps.mutateSettings(async (settingsMutation) =>
+      deps.mutatePreferences(
+        { expectedRevision: payload.expectedRevision },
+        async (current) => {
+          const existingPilotPlatforms = settingsMutation.current.enabledPlatforms.filter(
+            (platform) => deps.availablePlatforms.includes(platform)
+          );
+          const selectedPlatforms = (
+            payload.selectedPlatforms ??
+            (current.startedAt || current.selectedPlatforms.length > 0
+              ? current.selectedPlatforms
+              : existingPilotPlatforms)
+          ).filter((platform) => deps.availablePlatforms.includes(platform));
+          const aiEnabled =
+            payload.aiEnabled ??
+            (current.startedAt
+              ? current.aiEnabled
+              : settingsMutation.current.aiEnabled !== false);
 
-        deps.persistWhatsAppEnabled(whatsappEnabled);
-        await deps.updateSettings({ enabledPlatforms: selectedPlatforms, aiEnabled });
-
-        return {
-          ...payload,
-          selectedPlatforms,
-          aiEnabled
-        };
-      }
+          return {
+            ...payload,
+            selectedPlatforms,
+            aiEnabled
+          };
+        },
+        async (preferences) => {
+          await settingsMutation.commit(
+            {
+              enabledPlatforms: preferences.selectedPlatforms,
+              aiEnabled: preferences.aiEnabled,
+              ...additionalSettings
+            },
+            (settings) => deps.persistSetupState(settings, preferences)
+          );
+        }
+      )
     );
-
-    deps.applyWhatsAppEnabled(whatsappEnabled);
-    return preferences;
   }
 
-  return { update };
+  async function update(payload: SetupPreferencesPayload): Promise<SetupPreferences> {
+    return updateState(payload);
+  }
+
+  async function enableAiProvider(provider: "gemini"): Promise<SetupPreferences> {
+    return updateState({ aiEnabled: true }, { aiProvider: provider });
+  }
+
+  async function complete(payload: CompleteSetupPayload): Promise<{
+    preferences: SetupPreferences;
+    operatorProfile: OperatorProfile;
+  }> {
+    return deps.mutateOperatorProfile(async (profileMutation) => {
+      let operatorProfile: OperatorProfile | null = null;
+      const preferences = await deps.mutatePreferences(
+        { expectedRevision: payload.expectedRevision },
+        async () => ({ completedAt: payload.completedAt }),
+        async (nextPreferences) => {
+          operatorProfile = await profileMutation.commit(
+            { setupCompletedAt: payload.completedAt },
+            (nextProfile) => deps.persistCompletedState(nextProfile, nextPreferences)
+          );
+        }
+      );
+      if (!operatorProfile) {
+        throw new Error("Setup completion did not persist the operator profile.");
+      }
+      return { preferences, operatorProfile };
+    });
+  }
+
+  return { update, enableAiProvider, complete };
 }

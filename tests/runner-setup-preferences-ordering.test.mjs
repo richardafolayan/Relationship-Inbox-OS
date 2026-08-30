@@ -95,7 +95,7 @@ test("a stale expected revision is rejected before mutation work or persistence"
   assert.equal(writes, 0);
 });
 
-test("setup mutation side effects finish before the new revision is persisted", async () => {
+test("setup mutation can persist its new revision through an atomic outer transaction", async () => {
   const events = [];
   let stored = null;
   const store = createSetupPreferencesStore({
@@ -106,13 +106,38 @@ test("setup mutation side effects finish before the new revision is persisted", 
     }
   });
 
-  const result = await store.mutate({}, async () => {
-    events.push("environment");
-    events.push("settings");
-    return { selectedPlatforms: ["WHATSAPP"] };
-  });
+  const result = await store.mutate(
+    {},
+    async () => ({ selectedPlatforms: ["WHATSAPP"] }),
+    async (next) => {
+      events.push("transaction");
+      stored = structuredClone(next);
+    }
+  );
 
-  assert.deepEqual(events, ["environment", "settings", "preferences"]);
+  assert.deepEqual(events, ["transaction"]);
   assert.deepEqual(result.selectedPlatforms, ["WHATSAPP"]);
   assert.equal(result.revision, 1);
+});
+
+test("a failed atomic persistence callback does not advance the preference revision", async () => {
+  let stored = null;
+  const store = createSetupPreferencesStore({
+    read: async () => stored,
+    write: async (next) => {
+      stored = structuredClone(next);
+    }
+  });
+
+  await assert.rejects(
+    store.mutate({}, async () => ({ startedAt: "start" }), async () => {
+      throw new Error("transaction failed");
+    }),
+    /transaction failed/
+  );
+
+  const recovered = await store.update({ aiEnabled: true });
+  assert.equal(recovered.revision, 1);
+  assert.equal(recovered.startedAt, "");
+  assert.equal(recovered.aiEnabled, true);
 });

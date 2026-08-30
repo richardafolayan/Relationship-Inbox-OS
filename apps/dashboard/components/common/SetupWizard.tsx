@@ -69,6 +69,10 @@ interface TranscriptionStatus {
   error: string | null;
 }
 
+type TranscriptionSetupResponse = TranscriptionStatus & {
+  preferences: SetupPreferences;
+};
+
 interface ContactHealth {
   contactsLoaded: number;
   addressBookContactCount: number;
@@ -217,6 +221,62 @@ export function SetupWizard() {
     }
   }, [applyPreferences, preferenceWriter]);
 
+  const runSetupRequest = useCallback(
+    async <T extends { preferences: SetupPreferences },>(
+      request: () => Promise<T>
+    ): Promise<T> => {
+      pendingPreferenceWrites.current += 1;
+      setSavingPreferences(true);
+      setPersistenceError("");
+      try {
+        const result = await request();
+        if (preferenceWriter.acceptSnapshot(result.preferences)) {
+          applyPreferences(result.preferences);
+        }
+        return result;
+      } catch (error) {
+        const conflict =
+          error instanceof ApiRequestError && error.status === 409 &&
+          error.payload && typeof error.payload === "object"
+            ? (error.payload as { preferences?: SetupPreferences }).preferences
+            : undefined;
+        if (conflict && preferenceWriter.acceptSnapshot(conflict)) {
+          applyPreferences(conflict);
+        }
+        setPersistenceError(
+          conflict
+            ? "Setup changed in another window. The latest choices are shown. Review them and try again."
+            : `That setup change was not saved. Check that ${APP_NAME} is running and try again.`
+        );
+        throw error;
+      } finally {
+        pendingPreferenceWrites.current -= 1;
+        if (pendingPreferenceWrites.current === 0) {
+          setSavingPreferences(false);
+        }
+      }
+    },
+    [applyPreferences, preferenceWriter]
+  );
+
+  const saveAiKey = useCallback(async (key: string) => {
+    await runSetupRequest(() =>
+      apiPost<{ preferences: SetupPreferences }>("/runner/control/setup/ai-key", { key })
+    );
+    setAiConfigured(true);
+  }, [runSetupRequest]);
+
+  const configureTranscription = useCallback(
+    (mode: TranscriptionMode, removeDownloadedModels = false) =>
+      runSetupRequest(() =>
+        apiPost<TranscriptionSetupResponse>("/runner/control/setup/transcription", {
+          mode,
+          removeDownloadedModels
+        })
+      ),
+    [runSetupRequest]
+  );
+
   const finish = useCallback(async () => {
     const now = new Date().toISOString();
     setFinishing(true);
@@ -224,20 +284,28 @@ export function SetupWizard() {
     try {
       await persistCompletedSetup({
         completedAt: now,
-        persistOperatorProfile: (completedAt) =>
-          apiPost("/runner/control/operator-profile", { setupCompletedAt: completedAt }),
-        persistPreferences: (completedAt) => savePreferences({ completedAt }),
+        persistCompletion: async (completedAt) => {
+          const result = await runSetupRequest(() =>
+            apiPost<{ preferences: SetupPreferences }>("/runner/control/setup/complete", {
+              completedAt,
+              expectedRevision: preferenceWriter.latestRevision()
+            })
+          );
+          return result.preferences;
+        },
         markComplete: () => markSetupComplete(window.localStorage)
       });
       setOpen(false);
       return true;
-    } catch {
-      setPersistenceError("Setup is still open because the final changes were not saved. Try again.");
+    } catch (error) {
+      if (!(error instanceof ApiRequestError && error.status === 409)) {
+        setPersistenceError("Setup is still open because the final changes were not saved. Try again.");
+      }
       return false;
     } finally {
       setFinishing(false);
     }
-  }, [savePreferences]);
+  }, [preferenceWriter, runSetupRequest]);
 
   if (!open) return null;
 
@@ -287,10 +355,10 @@ export function SetupWizard() {
         {step === "contacts" ? <ContactsStep health={status?.contacts ?? null} onBack={back} onNext={next} /> : null}
 
         {step === "ai" ? (
-          <AiStep enabled={aiEnabled} configured={aiConfigured} onEnabled={async (value) => { await savePreferences({ aiEnabled: value }); }} onConfigured={() => setAiConfigured(true)} onBack={back} onNext={next} />
+          <AiStep enabled={aiEnabled} configured={aiConfigured} onEnabled={async (value) => { await savePreferences({ aiEnabled: value }); }} onSaveKey={saveAiKey} onBack={back} onNext={next} />
         ) : null}
 
-        {step === "transcription" ? <TranscriptionStep initial={status?.transcription} onBack={back} onNext={next} /> : null}
+        {step === "transcription" ? <TranscriptionStep initial={status?.transcription} onConfigure={configureTranscription} onBack={back} onNext={next} /> : null}
 
         {step === "review" ? (
           <ReviewStep selected={selected} aiEnabled={aiEnabled} aiConfigured={aiConfigured} automaticUpdates={status?.settings.automaticUpdates !== false} version={status?.version ?? ""} onBack={back} onRefresh={load} onNext={next} />
@@ -430,28 +498,28 @@ function ContactsStep({ health, onBack, onNext }: { health: ContactHealth | null
   </Card>;
 }
 
-function AiStep({ enabled, configured, onEnabled, onConfigured, onBack, onNext }: { enabled: boolean; configured: boolean; onEnabled: (value: boolean) => Promise<void>; onConfigured: () => void; onBack: () => void; onNext: () => void }) {
+function AiStep({ enabled, configured, onEnabled, onSaveKey, onBack, onNext }: { enabled: boolean; configured: boolean; onEnabled: (value: boolean) => Promise<void>; onSaveKey: (key: string) => Promise<void>; onBack: () => void; onNext: () => void }) {
   const [key, setKey] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const chooseEnabled = async (value: boolean) => { setBusy(true); setError(""); try { await onEnabled(value); } catch { setError(`That AI setting was not saved. Check that ${APP_NAME} is running and try again.`); } finally { setBusy(false); } };
-  const saveKey = async () => { setBusy(true); setError(""); try { await apiPost("/runner/control/setup/ai-key", { key: key.trim() }); await onEnabled(true); onConfigured(); } catch (err) { const payload = err instanceof ApiRequestError ? err.payload as { error?: string } : undefined; setError(payload?.error ?? "The key could not be checked. Try copying it again."); } finally { setBusy(false); } };
+  const saveKey = async () => { setBusy(true); setError(""); try { await onSaveKey(key.trim()); } catch (err) { const payload = err instanceof ApiRequestError ? err.payload as { error?: string } : undefined; setError(payload?.error ?? "The key could not be checked. Try copying it again."); } finally { setBusy(false); } };
   return <Card icon={<KeyRound />} eyebrow="Optional AI help" title="Would you like summaries and writing help?" body="AI is optional. When it is on, the relevant conversation text is sent to Google Gemini for summaries or help you request. AI suggestions never send on their own.">
     <div className="mt-5 grid gap-3"><Choice disabled={busy} selected={!enabled} title="No AI help" body="Keep message organisation and reply tracking. No conversation text is sent to an AI service." onClick={() => void chooseEnabled(false)} /><Choice disabled={busy} selected={enabled} title="Use optional AI help" body="Add a free Gemini key. You can turn this off later." onClick={() => void chooseEnabled(true)} /></div>
     {enabled ? configured ? <Notice>AI is ready. Your saved Gemini key will be used.</Notice> : <div className="mt-4 rounded-[10px] border border-hairline bg-paper-2/40 p-4"><ol className="m-0 pl-5 text-[13px] leading-6 text-ink-2"><li>Open <a className="underline" target="_blank" rel="noreferrer" href="https://aistudio.google.com/apikey">Google AI Studio</a> and sign in.</li><li>Press Create API key, then Copy.</li><li>Paste the key below. {APP_NAME} checks it and keeps it on this Mac.</li></ol><div className="mt-3 flex gap-2"><input type="password" value={key} onChange={(event) => setKey(event.target.value)} className="min-w-0 flex-1 rounded-[8px] border border-hairline bg-paper px-3 py-2 font-mono text-[13px]" placeholder="Paste Gemini API key" /><Primary disabled={busy || !key.trim()} onClick={() => void saveKey()}>{busy ? "Checking..." : "Check and save"}</Primary></div>{error ? <Notice>{error}</Notice> : null}</div> : null}
-    <Actions><Back onClick={onBack} /><Primary onClick={onNext}>{enabled && !configured ? "Set up later" : "Continue"}</Primary></Actions>
+    <Actions><Back disabled={busy} onClick={onBack} /><Primary disabled={busy} onClick={onNext}>{enabled && !configured ? "Set up later" : "Continue"}</Primary></Actions>
   </Card>;
 }
 
-function TranscriptionStep({ initial, onBack, onNext }: { initial?: TranscriptionStatus; onBack: () => void; onNext: () => void }) {
+function TranscriptionStep({ initial, onConfigure, onBack, onNext }: { initial?: TranscriptionStatus; onConfigure: (mode: TranscriptionMode, removeDownloadedModels?: boolean) => Promise<TranscriptionSetupResponse>; onBack: () => void; onNext: () => void }) {
   const [status, setStatus] = useState<TranscriptionStatus | undefined>(initial);
   const [busy, setBusy] = useState(false);
   const refresh = useCallback(() => apiGetRaw<TranscriptionStatus>("/runner/data/setup/transcription").then(setStatus).catch(() => undefined), []);
   useEffect(() => { if (status?.phase !== "downloading") return; const timer = window.setInterval(() => void refresh(), 1500); return () => window.clearInterval(timer); }, [status?.phase, refresh]);
-  const choose = async (mode: TranscriptionMode, removeDownloadedModels = false) => { setBusy(true); const nextStatus = await apiPost<TranscriptionStatus>("/runner/control/setup/transcription", { mode, removeDownloadedModels }).catch(() => null); if (nextStatus) setStatus(nextStatus); setBusy(false); };
+  const choose = async (mode: TranscriptionMode, removeDownloadedModels = false) => { setBusy(true); const nextStatus = await onConfigure(mode, removeDownloadedModels).catch(() => null); if (nextStatus) setStatus(nextStatus); setBusy(false); };
   const downloading = status?.phase === "downloading";
   return <Card icon={<Mic2 />} eyebrow="Optional voice notes" title="Choose voice transcription." body="Transcription runs on this Mac. Audio does not need to go to an AI company. Models download only when you choose one.">
-    <div className="mt-5 grid gap-3"><Choice selected={status?.mode === "off"} title="Off" body="No model download. Voice notes can still be played." onClick={() => void choose("off")} /><Choice selected={status?.mode === "standard"} title="Standard, about 150 MB" body="Good everyday English transcription using the local base model." onClick={() => void choose("standard")} /><Choice selected={status?.mode === "enhanced"} title="Enhanced, about 500 MB" body="Better accuracy using a larger local model. Choose this only if you want it." onClick={() => void choose("enhanced")} /></div>
+    <div className="mt-5 grid gap-3"><Choice disabled={busy || downloading} selected={status?.mode === "off"} title="Off" body="No model download. Voice notes can still be played." onClick={() => void choose("off")} /><Choice disabled={busy || downloading} selected={status?.mode === "standard"} title="Standard, about 150 MB" body="Good everyday English transcription using the local base model." onClick={() => void choose("standard")} /><Choice disabled={busy || downloading} selected={status?.mode === "enhanced"} title="Enhanced, about 500 MB" body="Better accuracy using a larger local model. Choose this only if you want it." onClick={() => void choose("enhanced")} /></div>
     {downloading ? <Notice><Download className="mr-2 inline h-4 w-4" />Downloading the chosen model. You can keep this screen open. It turns on only after the download finishes.</Notice> : null}
     {status?.phase === "error" ? <Notice>The download did not finish. Check your internet connection and choose the model again.</Notice> : null}
     {status?.installedMode !== "off" && status?.mode === "off" ? <button type="button" onClick={() => void choose("off", true)} className="mt-4 text-[12.5px] text-ink-2 underline underline-offset-2">Remove the downloaded model from this Mac</button> : null}
@@ -483,7 +551,7 @@ function Card({ icon, eyebrow, title, body, children }: { icon: React.ReactNode;
 function Actions({ children }: { children: React.ReactNode }) { return <div className="mt-6 flex flex-wrap items-center gap-3">{children}</div>; }
 function Primary({ onClick, disabled, children }: { onClick: () => void; disabled?: boolean; children: React.ReactNode }) { return <button type="button" onClick={onClick} disabled={disabled} className="inline-flex items-center gap-1.5 rounded-pill bg-ink px-4 py-[9px] text-[13.5px] font-medium text-paper hover:bg-ink-2 disabled:opacity-50 [&>svg]:h-3.5 [&>svg]:w-3.5">{children}</button>; }
 function Quiet({ onClick, disabled, children }: { onClick: () => void; disabled?: boolean; children: React.ReactNode }) { return <button type="button" onClick={onClick} disabled={disabled} className="inline-flex items-center rounded-pill border border-hairline px-4 py-[9px] text-[13.5px] font-medium text-ink-2 hover:bg-paper-2 disabled:opacity-50">{children}</button>; }
-function Back({ onClick }: { onClick: () => void }) { return <Quiet onClick={onClick}><ArrowLeft className="mr-1.5 h-3.5 w-3.5" />Back</Quiet>; }
+function Back({ onClick, disabled }: { onClick: () => void; disabled?: boolean }) { return <Quiet onClick={onClick} disabled={disabled}><ArrowLeft className="mr-1.5 h-3.5 w-3.5" />Back</Quiet>; }
 function Notice({ children }: { children: React.ReactNode }) { return <p className="m-0 mt-4 rounded-[8px] border border-hairline bg-paper-2/55 px-3 py-2.5 text-[12.5px] leading-5 text-ink-2" aria-live="polite">{children}</p>; }
 function InfoRows({ rows }: { rows: Array<[string, string]> }) { return <div className="mt-5 divide-y divide-hairline rounded-[10px] border border-hairline bg-paper-2/35">{rows.map(([label, body]) => <div key={label} className="px-4 py-3"><p className="m-0 text-[13.5px] font-medium text-ink">{label}</p><p className="m-0 mt-0.5 text-[12.5px] text-ink-3">{body}</p></div>)}</div>; }
 function Choice({ selected, title, body, onClick, disabled }: { selected: boolean; title: string; body: string; onClick: () => void; disabled?: boolean }) { return <button type="button" aria-pressed={selected} onClick={onClick} disabled={disabled} className={cn("rounded-[10px] border px-4 py-3 text-left disabled:opacity-50", selected ? "border-accent bg-accent/5" : "border-hairline bg-paper-2/35")}><span className="flex items-center gap-2 text-[14px] font-medium text-ink">{selected ? <Check className="h-4 w-4 text-accent" /> : <span className="h-4 w-4 rounded-full border border-hairline-strong" />}{title}</span><span className="mt-1 block pl-6 text-[12.5px] leading-5 text-ink-3">{body}</span></button>; }
