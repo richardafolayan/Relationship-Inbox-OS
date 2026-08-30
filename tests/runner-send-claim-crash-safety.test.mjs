@@ -10,6 +10,10 @@ import { AdapterFailure } from "../apps/runner/dist/platforms/utils.js";
 import { createKeyedMutex } from "../apps/runner/dist/services/keyed-mutex.js";
 import { createAdminResetCoordinator } from "../apps/runner/dist/services/admin-reset-coordinator.js";
 import { persistedSendRetryEligibility } from "../apps/runner/dist/services/send-failure.js";
+import {
+  focusAutoAckClientSendId,
+  focusManualAckClientSendId
+} from "../apps/runner/dist/services/focus-auto-ack.js";
 
 // ---------------------------------------------------------------------------
 // BUG PH5 — processSendRequest must atomically CLAIM the PENDING row before the
@@ -27,7 +31,11 @@ function matchesWhere(row, where) {
     if (key === "id") {
       if (row.id !== expected) return false;
     } else if (key === "clientSendId") {
-      if (row.clientSendId !== expected) return false;
+      if (expected && Array.isArray(expected.in)) {
+        if (!expected.in.includes(row.clientSendId)) return false;
+      } else if (row.clientSendId !== expected) {
+        return false;
+      }
     } else if (key === "status") {
       if (expected && Array.isArray(expected.in)) {
         if (!expected.in.includes(row.status)) return false;
@@ -53,6 +61,13 @@ function matchesWhere(row, where) {
     } else if (key === "createdAt") {
       if (expected?.gt && !(row.createdAt > expected.gt)) return false;
       if (expected?.gte && !(row.createdAt >= expected.gte)) return false;
+    } else if (key === "errorJson") {
+      if (
+        expected?.contains &&
+        !(row.errorJson ?? "").includes(expected.contains)
+      ) {
+        return false;
+      }
     } else if (key === "NOT") {
       if (matchesWhere(row, expected)) return false;
     } else {
@@ -80,8 +95,27 @@ function makeHarness(initialRows, opts = {}) {
         );
         return r ? { ...r } : null;
       },
+      async create({ data }) {
+        if (rows.some((row) => row.clientSendId === data.clientSendId)) {
+          const error = new Error("Unique constraint failed");
+          error.code = "P2002";
+          throw error;
+        }
+        const row = {
+          id: `created-${rows.length + 1}`,
+          receiptJson: null,
+          errorJson: null,
+          attachmentsJson: null,
+          replyToMessageId: null,
+          scheduledFor: null,
+          createdAt: new Date(),
+          ...data
+        };
+        rows.push(row);
+        return { ...row };
+      },
       async findFirst({ where }) {
-        if (where.source?.in) {
+        if (where.createdAt) {
           supersedingQueryCount += 1;
           await opts.onSupersedingQuery?.(supersedingQueryCount);
         }
@@ -134,6 +168,7 @@ function makeHarness(initialRows, opts = {}) {
         if (!threadExists) return null;
         return {
           id: where.id,
+          personId: opts.personId ?? "p1",
           platform: opts.platform ?? "LINKEDIN",
           category: opts.category ?? "genuine",
           isGroup: opts.isGroup ?? false,
@@ -231,7 +266,7 @@ function makeHarness(initialRows, opts = {}) {
               windowId: opts.windowId ?? "focus-1",
               startedAt: "2026-08-24T11:00:00.000Z",
               endsAt: "2099-08-24T13:00:00.000Z",
-              ackedPersonIds: [opts.personId ?? "p1"],
+              ackedPersonIds: [],
               audience: "favourites",
               note: "I am focusing until [until].",
               professionalNote: "I am focusing until [until].",
@@ -538,6 +573,144 @@ test("a completed focus-policy write during boundary revalidation still supersed
   releasePolicyMutation();
   releaseFinalQuery();
   await processing;
+
+  assert.equal(h.sends.length, 0);
+  assert.equal(h.rows[0].status, "FAILED");
+  assert.equal(JSON.parse(h.rows[0].errorJson).reasonCode, "focus_auto_ack_superseded");
+});
+
+test("a completed manual intent between the two dispatch guards still supersedes auto-ack", async () => {
+  let h;
+  h = makeHarness([focusAutoAckRow()], {
+    async beforeAdapterDispatch() {
+      const releaseIntent = h.svc.registerUserTriggeredIntent("t1");
+      releaseIntent();
+    }
+  });
+
+  await h.svc.processSendRequest("sr1");
+
+  assert.equal(h.sends.length, 0);
+  assert.equal(h.rows[0].status, "FAILED");
+  assert.equal(JSON.parse(h.rows[0].errorJson).reasonCode, "focus_auto_ack_superseded");
+});
+
+test("an unreconciled earlier manual send blocks auto-ack dispatch", async () => {
+  const autoAck = focusAutoAckRow({ id: "auto-ack" });
+  const unresolvedManual = pendingRow({
+    id: "manual-sent",
+    clientSendId: "manual-sent-client",
+    source: "manual",
+    status: "SENT",
+    createdAt: new Date("2026-08-24T11:00:00.000Z"),
+    receiptJson: JSON.stringify({
+      sentAt: "2026-08-24T11:00:00.000Z",
+      verifiedBy: "best_effort"
+    }),
+    errorJson: JSON.stringify({
+      reconciliationRequired: true,
+      reason: "local_projection_required"
+    })
+  });
+  const h = makeHarness([autoAck, unresolvedManual]);
+
+  await h.svc.processSendRequest("auto-ack");
+
+  assert.equal(h.sends.length, 0);
+  assert.equal(h.rows[0].status, "FAILED");
+  assert.equal(JSON.parse(h.rows[0].errorJson).reasonCode, "focus_auto_ack_superseded");
+});
+
+test("manual focus acknowledgements require deterministic window and person identity", async () => {
+  const h = makeHarness([]);
+
+  await assert.rejects(
+    h.svc.enqueueSend({
+      threadId: "t1",
+      text: "I am focusing until 2:00pm.",
+      clientSendId: "00000000-0000-4000-8000-000000000000",
+      source: "focus_ack",
+      focusWindowId: "focus-1"
+    }),
+    /identity does not match/
+  );
+  assert.equal(h.rows.length, 0);
+});
+
+test("manual focus acknowledgements reject a stale focus window", async () => {
+  const h = makeHarness([], { windowId: "focus-current" });
+
+  await assert.rejects(
+    h.svc.enqueueSend({
+      threadId: "t1",
+      text: "I am focusing until 2:00pm.",
+      clientSendId: focusManualAckClientSendId("focus-stale", "p1"),
+      source: "focus_ack",
+      focusWindowId: "focus-stale"
+    }),
+    /no longer eligible/
+  );
+  assert.equal(h.rows.length, 0);
+});
+
+test("manual focus acknowledgement supersedes an unclaimed automatic row", async () => {
+  const h = makeHarness([]);
+  const automaticId = focusAutoAckClientSendId("focus-1", "p1");
+  const manualId = focusManualAckClientSendId("focus-1", "p1");
+
+  await h.svc.enqueueSend({
+    threadId: "t1",
+    text: "I am focusing until 2:00pm.",
+    clientSendId: automaticId,
+    source: "focus_auto_ack",
+    focusWindowId: "focus-1"
+  });
+  await h.svc.enqueueSend({
+    threadId: "t1",
+    text: "I am focusing until 2:00pm.",
+    clientSendId: manualId,
+    source: "focus_ack",
+    focusWindowId: "focus-1"
+  });
+
+  assert.equal(h.rows.find((row) => row.clientSendId === automaticId)?.status, "CANCELLED");
+  assert.equal(h.rows.find((row) => row.clientSendId === manualId)?.status, "PENDING");
+  assert.equal(h.rows.filter((row) => row.status === "PENDING").length, 1);
+});
+
+test("a manual focus acknowledgement does not supersede itself while its request is active", async () => {
+  const h = makeHarness([]);
+  const clientSendId = focusManualAckClientSendId("focus-1", "p1");
+  const releaseIntent = h.svc.registerUserTriggeredIntent("t1");
+  await h.svc.enqueueSend({
+    threadId: "t1",
+    text: "I am focusing until 2:00pm.",
+    clientSendId,
+    source: "focus_ack",
+    focusWindowId: "focus-1"
+  });
+
+  await h.svc.processSendRequest(h.rows[0].id);
+  releaseIntent();
+
+  assert.deepEqual(h.sends, ["I am focusing until 2:00pm."]);
+  assert.equal(h.rows[0].status, "SENT");
+});
+
+test("an intent completed after auto-ack enqueue still blocks later dispatch", async () => {
+  const h = makeHarness([]);
+  const clientSendId = focusAutoAckClientSendId("focus-1", "p1");
+  await h.svc.enqueueSend({
+    threadId: "t1",
+    text: "I am focusing until 2:00pm.",
+    clientSendId,
+    source: "focus_auto_ack",
+    focusWindowId: "focus-1"
+  });
+  const releaseIntent = h.svc.registerUserTriggeredIntent("t1");
+  releaseIntent();
+
+  await h.svc.processSendRequest(h.rows[0].id);
 
   assert.equal(h.sends.length, 0);
   assert.equal(h.rows[0].status, "FAILED");

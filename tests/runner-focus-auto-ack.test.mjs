@@ -4,7 +4,8 @@ import {
   bindFocusAutoAckEvents,
   createFocusAutoAckService,
   focusAutoAckCoverage,
-  focusAutoAckText
+  focusAutoAckText,
+  focusManualAckClientSendId
 } from "../apps/runner/src/services/focus-auto-ack.ts";
 import { createEventBus } from "../apps/runner/src/services/event-bus.ts";
 import { mergeFocusWindowUpdate } from "../apps/runner/src/services/settings.ts";
@@ -141,6 +142,9 @@ function harness({
         source: send.source,
         status: "SENT"
       };
+    },
+    setDelivered(request) {
+      deliveredSendRequest = { ...request, status: "SENT" };
     }
   };
 }
@@ -189,6 +193,32 @@ test("a delivered automatic note is acknowledged when its send event arrives", a
 
   assert.deepEqual(h.current().focusWindow.ackedPersonIds, ["person-1"]);
   assert.equal(h.queued.length, 1);
+  unsubscribe();
+});
+
+test("a delivered manual focus note is reconciled without enqueueing an automatic duplicate", async () => {
+  const h = harness();
+  const eventBus = createEventBus();
+  const unsubscribe = bindFocusAutoAckEvents(eventBus, h.service);
+  const clientSendId = focusManualAckClientSendId("focus-1", "person-1");
+  h.setDelivered({
+    clientSendId,
+    threadId: "thread-1",
+    source: "focus_ack"
+  });
+
+  eventBus.emit({
+    type: "MESSAGE_SENT",
+    jobId: "focus-manual-ack-sent",
+    threadId: "thread-1",
+    platform: "IMESSAGE",
+    clientSendId,
+    verifiedBy: "best_effort"
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(h.current().focusWindow.ackedPersonIds, ["person-1"]);
+  assert.equal(h.queued.length, 0);
   unsubscribe();
 });
 

@@ -98,15 +98,57 @@ test("manual focus acknowledgement completion trusts only a delivered matching s
     "/control/thread/:threadId/focus-ack/complete",
     "/control/thread/:threadId/open"
   );
-  assert.match(block, /request\.threadId !== threadId \|\| request\.source !== "focus_ack"/);
+  assert.match(
+    block,
+    /request\.source !== "focus_ack" && request\.source !== "focus_auto_ack"/
+  );
   assert.match(block, /request\.status !== "SENT"/);
   assert.match(block, /profile\.focusWindow\.windowId !== payload\.focusWindowId/);
   assert.match(block, /request\.createdAt\.getTime\(\) < windowStartedAt/);
+  assert.match(block, /focusAcknowledgementClientSendIds\(/);
   assert.match(
     block,
     /settingsStore\.acknowledgeFocusWindowPerson\(\s*payload\.focusWindowId,\s*request\.thread\.personId/
   );
   assert.doesNotMatch(block, /setOperatorProfile|updateOperatorProfile/);
+});
+
+test("retry-safe manual focus acknowledgements reuse the deterministic send id", () => {
+  const block = route(
+    "/control/thread/:threadId/retry-send",
+    "/control/thread/:threadId/focus-ack/complete"
+  );
+  assert.match(block, /originalSource === "focus_auto_ack"/);
+  assert.match(block, /automatic_focus_ack_retry_not_operator_triggered/);
+  assert.match(block, /focusManualAckClientSendId\(/);
+  assert.match(block, /clientSendId: original\.clientSendId/);
+  assert.match(block, /source: "focus_ack"/);
+  assert.match(block, /focusWindowId: profile\.focusWindow\.windowId/);
+});
+
+test("the queue summary excludes durable non-message action rows", () => {
+  const start = source.indexOf('app.get("/data/send-queue"');
+  const end = source.indexOf('app.get("/data/send-status/:clientSendId"', start);
+  const block = source.slice(start, end);
+  assert.notEqual(start, -1);
+  assert.notEqual(end, -1);
+  assert.equal((block.match(/source: \{ in: QUEUED_MESSAGE_SOURCES \}/g) ?? []).length, 2);
+  assert.doesNotMatch(block, /manual_poll/);
+});
+
+test("attempt scopes are replaced only after local projection reconciliation", () => {
+  const start = source.indexOf('app.get("/data/external-action-status/:clientId"');
+  const end = source.indexOf('app.get("/data/people"', start);
+  const block = source.slice(start, end);
+  assert.notEqual(start, -1);
+  assert.notEqual(end, -1);
+  assert.match(block, /needsLocalReconciliation\(sendRequest\.errorJson\)/);
+  assert.match(block, /sendService\.reconcileSentProjections\(\)/);
+  assert.match(block, /durableExternalActionService\.reconcileSentProjections\(\)/);
+  assert.match(
+    block,
+    /exactlyOneRecord && record\?\.status === "SENT" && record\.errorJson === null/
+  );
 });
 
 test("send workers and every session reset share the same external-action lock vocabulary", () => {

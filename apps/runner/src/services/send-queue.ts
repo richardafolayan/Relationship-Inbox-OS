@@ -44,6 +44,7 @@ export interface SendQueueService {
     text: string;
     clientSendId: string;
     source?: SendSource;
+    focusWindowId?: string;
     attachments?: Array<{
       absolutePath: string;
       displayName: string;
@@ -75,6 +76,36 @@ export function createSendQueue(deps: SendQueueDeps): SendQueueService {
   const prisma = deps.prisma ?? defaultPrisma;
   let running = false;
   let rerunRequested = false;
+  let startupRecoveryComplete = false;
+  let startupRecovery: Promise<boolean> | null = null;
+
+  function recoverBeforeDrain(): Promise<boolean> {
+    if (startupRecoveryComplete) return Promise.resolve(true);
+    if (startupRecovery) return startupRecovery;
+    startupRecovery = (async () => {
+      try {
+        const reconciled = await deps.sendService.reconcileInterruptedSends();
+        if (reconciled > 0) {
+          console.warn(
+            `[send-queue] reconciled ${reconciled} interrupted send(s) to FAILED after restart`
+          );
+        }
+        await deps.sendService.reconcileSentProjections();
+        startupRecoveryComplete = true;
+        return true;
+      } catch (error) {
+        console.warn(
+          `[send-queue] startup recovery failed; queue remains paused: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
+        return false;
+      } finally {
+        startupRecovery = null;
+      }
+    })();
+    return startupRecovery;
+  }
 
   async function tick(): Promise<void> {
     if (running) {
@@ -83,6 +114,12 @@ export function createSendQueue(deps: SendQueueDeps): SendQueueService {
     }
     running = true;
     try {
+      rerunRequested = false;
+      if (!(await recoverBeforeDrain())) {
+        const retry = setTimeout(() => kick(), 5_000);
+        retry.unref?.();
+        return;
+      }
       do {
         rerunRequested = false;
         while (true) {
@@ -141,36 +178,11 @@ export function createSendQueue(deps: SendQueueDeps): SendQueueService {
     // First reconcile any in-doubt rows: a PENDING row claimed by the previous
     // process but never terminalised (it crashed between the physical send and
     // the SENT write). Re-dispatching those would re-message the recipient, so
-    // they are flipped to FAILED (INTERRUPTED) for the operator to verify. THEN
-    // drain the genuinely-unclaimed PENDING rows. Reconcile is fire-and-forget
-    // before the kick — the drain's findFirst already filters claimed rows out,
-    // so ordering between the two is not load-bearing for safety.
-    void deps.sendService
-      .reconcileInterruptedSends()
-      .then((reconciled) => {
-        if (reconciled > 0) {
-          console.warn(
-            `[send-queue] reconciled ${reconciled} interrupted send(s) to FAILED after restart`
-          );
-        }
-      })
-      .catch((error) => {
-        console.warn(
-          `[send-queue] reconcileInterruptedSends failed: ${
-            error instanceof Error ? error.message : String(error)
-          }`
-        );
-      });
-    void deps.sendService.reconcileSentProjections().catch((error) => {
-      console.warn(
-        `[send-queue] reconcileSentProjections failed: ${
-          error instanceof Error ? error.message : String(error)
-        }`
-      );
-    });
-    // Same as kick — the loop will find any leftover (unclaimed) PENDING rows
-    // from before the last process exited. Separate name for clarity at the
-    // call site (createPlatformFactory at runner boot).
+    // they are flipped to FAILED (INTERRUPTED) for the operator to verify. Then
+    // repair SENT projections before draining genuinely-unclaimed rows, because
+    // automatic focus decisions must observe completed manual sends first.
+    // tick() gates every future kick on this recovery, including sends queued
+    // while the database is temporarily unavailable.
     kick();
   }
 
@@ -179,6 +191,7 @@ export function createSendQueue(deps: SendQueueDeps): SendQueueService {
     text: string;
     clientSendId: string;
     source?: SendSource;
+    focusWindowId?: string;
     // attachments must mirror the public interface above so iMessage
     // voice notes / photos survive the type contract — without this the
     // field is silently dropped by any future refactor that relies on
@@ -210,7 +223,7 @@ export function createSendQueue(deps: SendQueueDeps): SendQueueService {
       orderBy: { createdAt: "asc" },
       select: { id: true, clientSendId: true }
     });
-    const queuePosition = activeRows.findIndex((row) => row.clientSendId === input.clientSendId);
+    const queuePosition = activeRows.findIndex((row) => row.clientSendId === result.clientSendId);
     deps.eventBus.emit({
       type: "SEND_QUEUE_UPDATED",
       jobId: "send-queue",

@@ -41,7 +41,7 @@ import {
 } from "lucide-react";
 import { Menu } from "@/components/ui/menu";
 import { ActionSheet, type ActionSheetGroup } from "@/components/ui/action-sheet";
-import { apiGet, apiPost, apiPostForm, peekCache, runAction } from "@/lib/api";
+import { apiGet, apiGetRaw, apiPost, apiPostForm, peekCache, runAction } from "@/lib/api";
 import { BrandLoader } from "@/components/common/brand-loader";
 import {
   SiblingPlatformFilter,
@@ -149,7 +149,11 @@ import {
 } from "@/lib/message-sync-latency";
 import { nextSendReconcileDelayMs } from "@/lib/send-reconcile";
 import { classifyConsumerFailure } from "@/lib/consumer-failure";
-import { resolveSendRecovery, type SendStatusResponse } from "@/lib/send-delivery";
+import {
+  resolveSendRecovery,
+  waitForTerminalSendStatus,
+  type SendStatusResponse
+} from "@/lib/send-delivery";
 import { openPilotFeedback } from "@/lib/pilot";
 import {
   snapshotTimelineViewport,
@@ -198,6 +202,18 @@ const SCROLL_BOTTOM_THRESHOLD = 200;
 // history, not on a small nudge away from the bottom.
 const JUMP_TO_LATEST_THRESHOLD = 600;
 const PHONE_LAYOUT_MEDIA_QUERY = "(max-width: 767px), (hover: none) and (pointer: coarse)";
+
+async function canReplaceExternalActionAttempt(value: {
+  clientActionId?: string;
+  clientSendId?: string;
+}): Promise<boolean> {
+  const clientId = value.clientActionId ?? value.clientSendId;
+  if (!clientId) return false;
+  const status = await apiGetRaw<{ safeToReplace: boolean }>(
+    `/runner/data/external-action-status/${encodeURIComponent(clientId)}`
+  );
+  return status.safeToReplace;
+}
 
 type ComposerAttachment = {
   id: string;
@@ -2100,12 +2116,13 @@ export default function ThreadPage() {
       options,
       allowMultipleAnswers: whatsAppPollAllowMultiple
     };
-    const { clientSendId } = externalActionAttempts.getOrCreateScopedValue(
-      scope,
-      intent,
-      () => ({ clientSendId: uuid() })
-    );
     try {
+      const { clientSendId } = await externalActionAttempts.getOrCreateScopedValue(
+        scope,
+        intent,
+        () => ({ clientSendId: uuid() }),
+        canReplaceExternalActionAttempt
+      );
       const output = await apiPost<{
         status: "pending" | "ok";
         reconciliationPending?: boolean;
@@ -2121,7 +2138,7 @@ export default function ThreadPage() {
         return;
       }
       if (!output.reconciliationPending) {
-        externalActionAttempts.completeScopedValue<{ clientSendId: string }>(
+        await externalActionAttempts.completeScopedValue<{ clientSendId: string }>(
           scope,
           (value) => value.clientSendId === clientSendId
         );
@@ -2480,23 +2497,65 @@ export default function ThreadPage() {
       text: trimmed,
       replyToMessageId: focusedThreadParentId ?? null
     };
-    const { clientSendId } = externalActionAttempts.getOrCreateScopedValue(
+    let { clientSendId } = await externalActionAttempts.getOrCreateScopedValue(
       scope,
       intent,
-      () => ({ clientSendId: uuid() })
+      () => ({ clientSendId: uuid() }),
+      canReplaceExternalActionAttempt
     );
     const sentAt = new Date().toISOString();
     setError(null);
     setPendingSends((current) => [...current, { clientSendId, text: trimmed, sentAt, attachments: [] }]);
     stickToBottomRef.current = true;
     try {
-      await apiPost(`/runner/control/thread/${thread.id}/send`, {
+      const queued = await apiPost<{ clientSendId: string }>(`/runner/control/thread/${thread.id}/send`, {
         text: trimmed,
         clientSendId,
         clientRequestedAt: sentAt,
         ...(focusedThreadParentId ? { replyToMessageId: focusedThreadParentId } : {})
       });
-      externalActionAttempts.completeScopedValue<{ clientSendId: string }>(
+      if (queued.clientSendId !== clientSendId) {
+        const previousClientSendId = clientSendId;
+        const replaced = await externalActionAttempts.replaceScopedValue(
+          scope,
+          (value: { clientSendId: string }) => value.clientSendId === previousClientSendId,
+          { clientSendId: queued.clientSendId }
+        );
+        if (!replaced) throw new Error("This dictated message changed in another window. Check it before retrying.");
+        clientSendId = queued.clientSendId;
+        setPendingSends((current) => current.map((pending) =>
+          pending.clientSendId === previousClientSendId
+            ? { ...pending, clientSendId }
+            : pending
+        ));
+      }
+      let status = await waitForTerminalSendStatus(clientSendId, apiGetRaw);
+      if (status.status === "FAILED" && status.retrySafe) {
+        const previousClientSendId = clientSendId;
+        const retry = await apiPost<{ clientSendId: string }>(
+          `/runner/control/thread/${thread.id}/retry-send`,
+          { clientSendId }
+        );
+        const replaced = await externalActionAttempts.replaceScopedValue(
+          scope,
+          (value: { clientSendId: string }) => value.clientSendId === previousClientSendId,
+          { clientSendId: retry.clientSendId }
+        );
+        if (!replaced) throw new Error("This dictated message changed in another window. Check it before retrying.");
+        clientSendId = retry.clientSendId;
+        setPendingSends((current) => current.map((pending) =>
+          pending.clientSendId === previousClientSendId
+            ? { ...pending, clientSendId }
+            : pending
+        ));
+        status = await waitForTerminalSendStatus(clientSendId, apiGetRaw);
+      }
+      const recovery = resolveSendRecovery(status);
+      if (recovery.kind === "waiting") {
+        throw new Error("Delivery is still pending. Check it before retrying.");
+      }
+      if (recovery.kind !== "sent") throw new Error(recovery.message);
+      await externalActionAttempts.completeScopedValue<{ clientSendId: string }>(
         scope,
         (value) => value.clientSendId === clientSendId
       );
@@ -2534,20 +2593,21 @@ export default function ThreadPage() {
         text,
         scheduledFor
       };
-      const { clientSendId } = externalActionAttempts.getOrCreateScopedValue(
-        scope,
-        intent,
-        () => ({ clientSendId: uuid() })
-      );
       setScheduling(true);
       setError(null);
       try {
+        const { clientSendId } = await externalActionAttempts.getOrCreateScopedValue(
+          scope,
+          intent,
+          () => ({ clientSendId: uuid() }),
+          canReplaceExternalActionAttempt
+        );
         await apiPost(`/runner/control/thread/${thread.id}/send`, {
           text,
           clientSendId,
           scheduledFor
         });
-        externalActionAttempts.completeScopedValue<{ clientSendId: string }>(
+        await externalActionAttempts.completeScopedValue<{ clientSendId: string }>(
           scope,
           (value) => value.clientSendId === clientSendId
         );
@@ -2927,10 +2987,11 @@ export default function ThreadPage() {
     }));
     try {
       const scope = `reaction:${thread.id}:${messageId}`;
-      const { clientActionId } = externalActionAttempts.getOrCreateScopedValue(
+      const { clientActionId } = await externalActionAttempts.getOrCreateScopedValue(
         scope,
         { threadId: thread.id, messageId, emoji },
-        () => ({ clientActionId: uuid() })
+        () => ({ clientActionId: uuid() }),
+        canReplaceExternalActionAttempt
       );
       const output = await apiPost<{
         status: string;
@@ -2941,7 +3002,7 @@ export default function ThreadPage() {
         { clientActionId, emoji }
       );
       if (!output.reconciliationPending) {
-        externalActionAttempts.completeScopedValue<{ clientActionId: string }>(
+        await externalActionAttempts.completeScopedValue<{ clientActionId: string }>(
           scope,
           (value) => value.clientActionId === clientActionId
         );
@@ -2983,10 +3044,12 @@ export default function ThreadPage() {
   const voteOnPoll = async (messageId: string, selectedOptions: string[]) => {
     if (!thread) return;
     const scope = `poll-vote:${thread.id}:${messageId}`;
-    const { clientActionId } = externalActionAttempts.getOrCreateScopedValue(
+    const normalizedSelectedOptions = [...selectedOptions].sort();
+    const { clientActionId } = await externalActionAttempts.getOrCreateScopedValue(
       scope,
-      { threadId: thread.id, messageId, selectedOptions: [...selectedOptions].sort() },
-      () => ({ clientActionId: uuid() })
+      { threadId: thread.id, messageId, selectedOptions: normalizedSelectedOptions },
+      () => ({ clientActionId: uuid() }),
+      canReplaceExternalActionAttempt
     );
     const output = await apiPost<{
       status: string;
@@ -2994,10 +3057,10 @@ export default function ThreadPage() {
       reconciliationPending?: boolean;
     }>(
       `/runner/control/thread/${thread.id}/message/${messageId}/poll-vote`,
-      { clientActionId, selectedOptions }
+      { clientActionId, selectedOptions: normalizedSelectedOptions }
     );
     if (!output.reconciliationPending) {
-      externalActionAttempts.completeScopedValue<{ clientActionId: string }>(
+      await externalActionAttempts.completeScopedValue<{ clientActionId: string }>(
         scope,
         (value) => value.clientActionId === clientActionId
       );
@@ -3053,10 +3116,11 @@ export default function ThreadPage() {
     });
     try {
       const scope = `edit:${thread.id}:${messageId}`;
-      const { clientActionId } = externalActionAttempts.getOrCreateScopedValue(
+      const { clientActionId } = await externalActionAttempts.getOrCreateScopedValue(
         scope,
         { threadId: thread.id, messageId, text: nextText },
-        () => ({ clientActionId: uuid() })
+        () => ({ clientActionId: uuid() }),
+        canReplaceExternalActionAttempt
       );
       const output = await apiPost<{
         status: string;
@@ -3067,7 +3131,7 @@ export default function ThreadPage() {
         { clientActionId, text: nextText }
       );
       if (!output.reconciliationPending) {
-        externalActionAttempts.completeScopedValue<{ clientActionId: string }>(
+        await externalActionAttempts.completeScopedValue<{ clientActionId: string }>(
           scope,
           (value) => value.clientActionId === clientActionId
         );

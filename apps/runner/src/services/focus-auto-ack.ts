@@ -119,11 +119,36 @@ function isLiveAutoWindow(profile: OperatorProfile, now: Date): boolean {
   return Number.isFinite(startedAt) && Number.isFinite(endsAt) && endsAt > now.getTime();
 }
 
+function isLiveFocusWindow(profile: OperatorProfile, now: Date): boolean {
+  const window = profile.focusWindow;
+  if (!window.active || !window.windowId) return false;
+  const startedAt = Date.parse(window.startedAt);
+  const endsAt = Date.parse(window.endsAt);
+  return Number.isFinite(startedAt) && Number.isFinite(endsAt) && endsAt > now.getTime();
+}
+
 export function focusAutoAckClientSendId(
   windowId: string,
   personId: string
 ): string {
   return uuidv5(`${windowId}:${personId}`, uuidv5.URL);
+}
+
+export function focusManualAckClientSendId(
+  windowId: string,
+  personId: string
+): string {
+  return uuidv5(`manual:${windowId}:${personId}`, uuidv5.URL);
+}
+
+export function focusAcknowledgementClientSendIds(
+  windowId: string,
+  personId: string
+): [string, string] {
+  return [
+    focusManualAckClientSendId(windowId, personId),
+    focusAutoAckClientSendId(windowId, personId)
+  ];
 }
 
 export function focusAutoAckDispatchEligible(
@@ -136,6 +161,7 @@ export function focusAutoAckDispatchEligible(
   if (!isLiveAutoWindow(profile, now) || !focusAutoAckCoverage(thread, profile)) {
     return false;
   }
+  if (profile.focusWindow.ackedPersonIds.includes(thread.person.id)) return false;
   if (!thread.latestInboundAt) return false;
   const startedAt = Date.parse(profile.focusWindow.startedAt);
   if (!Number.isFinite(startedAt) || thread.latestInboundAt.getTime() < startedAt) {
@@ -156,6 +182,33 @@ export function focusAutoAckDispatchEligible(
   );
 }
 
+export function focusManualAckDispatchEligible(
+  thread: FocusAutoAckThread,
+  profile: OperatorProfile,
+  clientSendId: string,
+  now: Date
+): boolean {
+  if (!isLiveFocusWindow(profile, now) || !focusAutoAckCoverage(thread, profile)) {
+    return false;
+  }
+  if (profile.focusWindow.ackedPersonIds.includes(thread.person.id)) return false;
+  if (!thread.latestInboundAt) return false;
+  const startedAt = Date.parse(profile.focusWindow.startedAt);
+  if (!Number.isFinite(startedAt) || thread.latestInboundAt.getTime() < startedAt) {
+    return false;
+  }
+  if (
+    thread.latestOutboundAt &&
+    thread.latestOutboundAt.getTime() >= thread.latestInboundAt.getTime()
+  ) {
+    return false;
+  }
+  return (
+    clientSendId ===
+    focusManualAckClientSendId(profile.focusWindow.windowId, thread.person.id)
+  );
+}
+
 export function createFocusAutoAckService(deps: FocusAutoAckDeps) {
   const inFlight = new Set<string>();
 
@@ -169,21 +222,23 @@ export function createFocusAutoAckService(deps: FocusAutoAckDeps) {
     }
 
     if (profile.focusWindow.windowId) {
-      const deliveredClientSendId = focusAutoAckClientSendId(
+      const deliveredIds = focusAcknowledgementClientSendIds(
         profile.focusWindow.windowId,
         personId
       );
-      const delivered = await deps.loadSendRequest(deliveredClientSendId);
-      if (
-        delivered?.threadId === threadId &&
-        delivered.source === "focus_auto_ack" &&
-        delivered.status === "SENT"
-      ) {
-        await deps.settingsStore.acknowledgeFocusWindowPerson(
-          profile.focusWindow.windowId,
-          personId
-        );
-        return { type: "skipped", reason: "already_acknowledged" };
+      for (const deliveredClientSendId of deliveredIds) {
+        const delivered = await deps.loadSendRequest(deliveredClientSendId);
+        if (
+          delivered?.threadId === threadId &&
+          (delivered.source === "focus_ack" || delivered.source === "focus_auto_ack") &&
+          delivered.status === "SENT"
+        ) {
+          await deps.settingsStore.acknowledgeFocusWindowPerson(
+            profile.focusWindow.windowId,
+            personId
+          );
+          return { type: "skipped", reason: "already_acknowledged" };
+        }
       }
     }
 
@@ -246,7 +301,8 @@ export function createFocusAutoAckService(deps: FocusAutoAckDeps) {
         threadId,
         text,
         clientSendId,
-        source: "focus_auto_ack"
+        source: "focus_auto_ack",
+        focusWindowId: latest.focusWindow.windowId
       });
 
       if (enqueueResult.status === "FAILED") {
@@ -285,22 +341,64 @@ export function createFocusAutoAckService(deps: FocusAutoAckDeps) {
     }
   }
 
-  return { handleThread };
+  async function handleDeliveredSend(
+    threadId: string,
+    clientSendId: string
+  ): Promise<FocusAutoAckResult> {
+    const request = await deps.loadSendRequest(clientSendId);
+    if (
+      !request ||
+      request.threadId !== threadId ||
+      request.status !== "SENT" ||
+      (request.source !== "focus_ack" && request.source !== "focus_auto_ack")
+    ) {
+      return { type: "skipped", reason: "not_focus_acknowledgement" };
+    }
+    const [profile, thread] = await Promise.all([
+      deps.settingsStore.getOperatorProfile(),
+      deps.loadThread(threadId)
+    ]);
+    if (!thread || !profile.focusWindow.windowId) {
+      return { type: "skipped", reason: "thread_not_found" };
+    }
+    const expectedIds = focusAcknowledgementClientSendIds(
+      profile.focusWindow.windowId,
+      thread.person.id
+    );
+    if (!expectedIds.includes(clientSendId)) {
+      return { type: "skipped", reason: "focus_window_changed" };
+    }
+    await deps.settingsStore.acknowledgeFocusWindowPerson(
+      profile.focusWindow.windowId,
+      thread.person.id
+    );
+    return { type: "skipped", reason: "already_acknowledged" };
+  }
+
+  return { handleThread, handleDeliveredSend };
 }
 
 export function bindFocusAutoAckEvents(
   eventBus: Pick<EventBus, "subscribe">,
-  service: Pick<ReturnType<typeof createFocusAutoAckService>, "handleThread">
+  service: Pick<
+    ReturnType<typeof createFocusAutoAckService>,
+    "handleThread" | "handleDeliveredSend"
+  >
 ): () => void {
   return eventBus.subscribe((event) => {
-    if (
-      event.type !== "MESSAGES_PERSISTED" &&
-      event.type !== "THREAD_UPDATED" &&
-      event.type !== "MESSAGE_SENT"
-    ) return;
-    void service.handleThread(event.threadId).catch((error) => {
+    let work: Promise<FocusAutoAckResult> | null = null;
+    let threadId: string | null = null;
+    if (event.type === "MESSAGE_SENT" && event.clientSendId) {
+      threadId = event.threadId;
+      work = service.handleDeliveredSend(event.threadId, event.clientSendId);
+    } else if (event.type === "MESSAGES_PERSISTED" || event.type === "THREAD_UPDATED") {
+      threadId = event.threadId;
+      work = service.handleThread(event.threadId);
+    }
+    if (!work || !threadId) return;
+    void work.catch((error) => {
       console.warn(
-        `[focus-auto-ack] failed for threadId=${event.threadId}: ${
+        `[focus-auto-ack] failed for threadId=${threadId}: ${
           error instanceof Error ? error.message : String(error)
         }`
       );

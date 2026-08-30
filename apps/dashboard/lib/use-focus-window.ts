@@ -9,6 +9,7 @@
 // "focus-window-changed" event so the other mounted surfaces refetch.
 
 import { useCallback, useEffect, useState } from "react";
+import { v5 as uuidv5 } from "uuid";
 import { apiGet, apiGetRaw, apiPost } from "@/lib/api";
 import { useCacheSeed } from "@/lib/use-cache-seed";
 import { createExternalActionAttemptStore } from "@/lib/external-action-attempts";
@@ -31,12 +32,27 @@ import {
 
 const PROFILE_PATH = "/runner/data/operator-profile";
 const FOCUS_CHANGED_EVENT = "focus-window-changed";
+const FOCUS_CHANGED_CHANNEL = "tovi-focus-window-changed";
 const focusAcknowledgementAttempts = createExternalActionAttemptStore();
+
+async function canReplaceFocusAcknowledgementAttempt(value: {
+  clientSendId: string;
+}): Promise<boolean> {
+  const status = await apiGetRaw<{ safeToReplace: boolean }>(
+    `/runner/data/external-action-status/${encodeURIComponent(value.clientSendId)}`
+  );
+  return status.safeToReplace;
+}
 
 /** Tell every mounted focus surface to refetch the profile. */
 export function emitFocusChanged(): void {
   if (typeof window !== "undefined") {
     window.dispatchEvent(new CustomEvent(FOCUS_CHANGED_EVENT));
+    if (typeof BroadcastChannel !== "undefined") {
+      const channel = new BroadcastChannel(FOCUS_CHANGED_CHANNEL);
+      channel.postMessage({ type: FOCUS_CHANGED_EVENT });
+      channel.close();
+    }
   }
 }
 
@@ -107,33 +123,74 @@ export async function sendAcknowledgement(
   text: string,
   focusWindowId: string
 ): Promise<void> {
-  const scope = `focus-ack:${focusWindowId}:${personId ?? threadId}`;
+  if (!personId) throw new Error("This focus note cannot be safely linked to a person.");
+  const scope = `focus-ack:${focusWindowId}:${personId}`;
   const intent = {
     source: "focus_ack" as const,
     threadId,
-    personId: personId ?? null,
+    personId,
     text,
     focusWindowId
   };
-  const { clientSendId } = focusAcknowledgementAttempts.getOrCreateScopedValue(
+  const expectedClientSendId = uuidv5(`manual:${focusWindowId}:${personId}`, uuidv5.URL);
+  let { clientSendId } = await focusAcknowledgementAttempts.getOrCreateScopedValue(
     scope,
     intent,
-    () => ({ clientSendId: newWindowId() })
+    () => ({ clientSendId: expectedClientSendId }),
+    canReplaceFocusAcknowledgementAttempt
   );
-  await apiPost(`/runner/control/thread/${threadId}/send`, {
+  const queued = await apiPost<{ clientSendId: string }>(`/runner/control/thread/${threadId}/send`, {
     text,
     clientSendId,
-    source: "focus_ack"
+    source: "focus_ack",
+    focusWindowId
   });
-  await waitForFocusAcknowledgementDelivery(clientSendId);
+  if (queued.clientSendId !== clientSendId) {
+    const replaced = await focusAcknowledgementAttempts.replaceScopedValue(
+      scope,
+      (value: { clientSendId: string }) => value.clientSendId === clientSendId,
+      { clientSendId: queued.clientSendId }
+    );
+    if (!replaced) throw new Error("The focus note status changed in another window. Check it before retrying.");
+    clientSendId = queued.clientSendId;
+  }
+  try {
+    await waitForFocusAcknowledgementDelivery(clientSendId);
+  } catch (error) {
+    if (!(error instanceof FocusAcknowledgementDeliveryError) || !error.status.retrySafe) {
+      throw error;
+    }
+    const retry = await apiPost<{ clientSendId: string }>(
+      `/runner/control/thread/${threadId}/retry-send`,
+      { clientSendId }
+    );
+    if (retry.clientSendId !== clientSendId) {
+      const replaced = await focusAcknowledgementAttempts.replaceScopedValue(
+        scope,
+        (value: { clientSendId: string }) => value.clientSendId === clientSendId,
+        { clientSendId: retry.clientSendId }
+      );
+      if (!replaced) throw new Error("The focus note status changed in another window. Check it before retrying.");
+      clientSendId = retry.clientSendId;
+    }
+    await waitForFocusAcknowledgementDelivery(clientSendId);
+  }
   await apiPost(`/runner/control/thread/${threadId}/focus-ack/complete`, {
     clientSendId,
     focusWindowId
   });
-  focusAcknowledgementAttempts.completeScopedValue<{ clientSendId: string }>(
+  await focusAcknowledgementAttempts.completeScopedValue<{ clientSendId: string }>(
     scope,
     (value) => value.clientSendId === clientSendId
   );
+  emitFocusChanged();
+}
+
+export class FocusAcknowledgementDeliveryError extends Error {
+  constructor(readonly status: SendStatusResponse, message: string) {
+    super(message);
+    this.name = "FocusAcknowledgementDeliveryError";
+  }
 }
 
 export async function waitForFocusAcknowledgementDelivery(
@@ -150,12 +207,21 @@ export async function waitForFocusAcknowledgementDelivery(
     if (status.status === "SENT") return;
     if (status.status === "FAILED") {
       if (status.deliveryUncertain || status.errorKind === "DELIVERY_UNCERTAIN") {
-        throw new Error("Delivery could not be confirmed. Check the conversation before trying again.");
+        throw new FocusAcknowledgementDeliveryError(
+          status,
+          "Delivery could not be confirmed. Check the conversation before trying again."
+        );
       }
-      throw new Error(status.errorMessage ?? "The focus note was not sent.");
+      throw new FocusAcknowledgementDeliveryError(
+        status,
+        status.errorMessage ?? "The focus note was not sent."
+      );
     }
     if (status.status === "CANCELLED" || status.status === "NOT_FOUND") {
-      throw new Error("The focus note did not reach the recipient.");
+      throw new FocusAcknowledgementDeliveryError(
+        status,
+        "The focus note did not reach the recipient."
+      );
     }
     await wait(Math.min(250 + attempt * 50, 1_000));
   }
@@ -220,10 +286,16 @@ export function useFocusWindow(): UseFocusWindow {
   useEffect(() => {
     load();
     const onChange = () => load();
+    const channel = typeof BroadcastChannel !== "undefined"
+      ? new BroadcastChannel(FOCUS_CHANGED_CHANNEL)
+      : null;
+    channel?.addEventListener("message", onChange);
     window.addEventListener(FOCUS_CHANGED_EVENT, onChange);
     // A Settings voice-profile save also refreshes the whole profile.
     window.addEventListener("operator-profile-saved", onChange);
     return () => {
+      channel?.removeEventListener("message", onChange);
+      channel?.close();
       window.removeEventListener(FOCUS_CHANGED_EVENT, onChange);
       window.removeEventListener("operator-profile-saved", onChange);
     };

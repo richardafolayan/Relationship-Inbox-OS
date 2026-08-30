@@ -365,7 +365,6 @@ export class GoogleMessagesAdapter implements PlatformAdapter {
       dispatchAuthorized = true;
     };
     if (files.length) {
-      await authorizeDispatch();
       let input = page.locator("input[type='file']").first();
       if ((await input.count()) === 0) {
         await page.locator("button[aria-label*='Attach' i], button[aria-label*='media' i]").first().click();

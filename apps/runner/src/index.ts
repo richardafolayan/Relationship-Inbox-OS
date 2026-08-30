@@ -110,7 +110,11 @@ import {
   MESSAGE_SYNC_METRICS,
   type MessageSyncMetric
 } from "./services/message-sync-latency";
-import { createSendService, parsePersistedSendSource } from "./services/send";
+import {
+  createSendService,
+  needsLocalReconciliation,
+  parsePersistedSendSource
+} from "./services/send";
 import {
   abandonUnstartedUserTriggeredIntent,
   beginUserTriggeredIntentOperation,
@@ -120,7 +124,12 @@ import {
 } from "./services/user-triggered-intent-middleware";
 import { createSendQueue, QUEUED_MESSAGE_SOURCES } from "./services/send-queue";
 import { createPlatformSessionResetCoordinator } from "./services/platform-session-reset-coordinator";
-import { bindFocusAutoAckEvents, createFocusAutoAckService } from "./services/focus-auto-ack";
+import {
+  bindFocusAutoAckEvents,
+  createFocusAutoAckService,
+  focusAcknowledgementClientSendIds,
+  focusManualAckClientSendId
+} from "./services/focus-auto-ack";
 import { createAdminResetCoordinator } from "./services/admin-reset-coordinator";
 import { createThreadExternalActionFence } from "./services/external-action-fence";
 import {
@@ -4083,6 +4092,7 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
       // immediately (existing behaviour).
       scheduledFor: z.string().datetime().optional(),
       source: z.literal("focus_ack").optional(),
+      focusWindowId: z.string().min(1).max(80).optional(),
       // App-level threading. When the dashboard's focused-thread composer
       // sends a reply, it includes the parent Message.id here. The send
       // itself still goes out as a regular text bubble — the threading is
@@ -4106,6 +4116,10 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
   }
   if (payload.source && payload.scheduledFor) {
     res.status(400).json({ error: "focus acknowledgements cannot be scheduled" });
+    return;
+  }
+  if (payload.source === "focus_ack" && !payload.focusWindowId) {
+    res.status(400).json({ error: "focus_window_required" });
     return;
   }
 
@@ -4178,6 +4192,7 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
       clientSendId: payload.clientSendId,
       attachments: stagedAttachments,
       source: payload.source ?? "manual",
+      focusWindowId: payload.focusWindowId,
       replyToMessageId: payload.replyToMessageId
     });
     if (queueResult.replayed) {
@@ -4405,6 +4420,55 @@ app.post("/control/thread/:threadId/retry-send", asyncRoute(async (req, res) => 
     res.status(409).json({ error: "invalid_attachment_metadata" });
     return;
   }
+  if (originalSource === "focus_auto_ack") {
+    res.status(409).json({ error: "automatic_focus_ack_retry_not_operator_triggered" });
+    return;
+  }
+  if (originalSource === "focus_ack") {
+    const [profile, focusThread] = await Promise.all([
+      settingsStore.getOperatorProfile(),
+      prisma.thread.findUnique({
+        where: { id: threadId },
+        select: { personId: true }
+      })
+    ]);
+    if (
+      !focusThread ||
+      !profile.focusWindow.windowId ||
+      original.clientSendId !==
+        focusManualAckClientSendId(profile.focusWindow.windowId, focusThread.personId)
+    ) {
+      res.status(409).json({ error: "focus_window_changed" });
+      return;
+    }
+    const reset = await prisma.sendRequest.updateMany({
+      where: {
+        id: original.id,
+        status: "FAILED",
+        receiptJson: null
+      },
+      data: {
+        status: "PENDING",
+        receiptJson: null,
+        errorJson: null
+      }
+    });
+    if (reset.count !== 1) {
+      res.status(409).json({ error: "focus_ack_retry_state_changed" });
+      return;
+    }
+    const queueResult = await sendQueue.enqueueAndKick({
+      threadId,
+      text: original.requestText,
+      clientSendId: original.clientSendId,
+      source: "focus_ack",
+      focusWindowId: profile.focusWindow.windowId,
+      attachments: retryAttachments,
+      replyToMessageId: original.replyToMessageId ?? undefined
+    });
+    res.json(queueResult);
+    return;
+  }
   const newClientSendId = deriveRetryClientSendId(original.clientSendId);
   try {
     const queueResult = await sendQueue.enqueueAndKick({
@@ -4450,7 +4514,10 @@ app.post("/control/thread/:threadId/focus-ack/complete", asyncRoute(async (req, 
     res.status(404).json({ error: "send_request_not_found" });
     return;
   }
-  if (request.threadId !== threadId || request.source !== "focus_ack") {
+  if (
+    request.threadId !== threadId ||
+    (request.source !== "focus_ack" && request.source !== "focus_auto_ack")
+  ) {
     res.status(409).json({ error: "focus_ack_intent_mismatch" });
     return;
   }
@@ -4463,7 +4530,11 @@ app.post("/control/thread/:threadId/focus-ack/complete", asyncRoute(async (req, 
   if (
     profile.focusWindow.windowId !== payload.focusWindowId ||
     !Number.isFinite(windowStartedAt) ||
-    request.createdAt.getTime() < windowStartedAt
+    request.createdAt.getTime() < windowStartedAt ||
+    !focusAcknowledgementClientSendIds(
+      payload.focusWindowId,
+      request.thread.personId
+    ).includes(request.clientSendId)
   ) {
     res.status(409).json({ error: "focus_window_changed" });
     return;
@@ -6801,6 +6872,7 @@ app.get("/data/send-queue", asyncRoute(async (_req, res) => {
     prisma.sendRequest.findMany({
       where: {
         status: { in: ["SENT", "FAILED"] },
+        source: { in: QUEUED_MESSAGE_SOURCES },
         thread: { platform: { in: runnerConfig.availablePlatforms } }
       },
       include: {
@@ -6914,6 +6986,51 @@ app.get("/data/send-status/:clientSendId", asyncRoute(async (req, res) => {
     errorKind: failure?.errorKind,
     retrySafe: failure?.retrySafe ?? false,
     deliveryUncertain: failure?.deliveryUncertain ?? false
+  });
+}));
+
+app.get("/data/external-action-status/:clientId", asyncRoute(async (req, res) => {
+  const { clientId } = z.object({ clientId: z.string().uuid() }).parse(req.params);
+  let [sendRequest, actionRequest] = await Promise.all([
+    prisma.sendRequest.findUnique({
+      where: { clientSendId: clientId },
+      select: { status: true, errorJson: true }
+    }),
+    prisma.externalActionRequest.findUnique({
+      where: { clientActionId: clientId },
+      select: { status: true, errorJson: true }
+    })
+  ]);
+
+  if (sendRequest?.status === "SENT" && needsLocalReconciliation(sendRequest.errorJson)) {
+    await sendService.reconcileSentProjections().catch(() => undefined);
+  }
+  if (
+    actionRequest?.status === "SENT" &&
+    actionRequest.errorJson?.includes("local_projection_required")
+  ) {
+    await durableExternalActionService.reconcileSentProjections().catch(() => undefined);
+  }
+  if (sendRequest || actionRequest) {
+    [sendRequest, actionRequest] = await Promise.all([
+      prisma.sendRequest.findUnique({
+        where: { clientSendId: clientId },
+        select: { status: true, errorJson: true }
+      }),
+      prisma.externalActionRequest.findUnique({
+        where: { clientActionId: clientId },
+        select: { status: true, errorJson: true }
+      })
+    ]);
+  }
+
+  const exactlyOneRecord = Boolean(sendRequest) !== Boolean(actionRequest);
+  const record = sendRequest ?? actionRequest;
+  res.json({
+    clientId,
+    status: record?.status ?? "NOT_FOUND",
+    safeToReplace:
+      exactlyOneRecord && record?.status === "SENT" && record.errorJson === null
   });
 }));
 

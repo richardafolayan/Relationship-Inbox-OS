@@ -30,8 +30,8 @@ test("browser adapters authorize immediately before their first outbound mutatio
   }
 
   const googleBlock = google.slice(google.indexOf("async sendMessage("), google.indexOf("async reactToMessage(", google.indexOf("async sendMessage(")));
-  assert.ok(googleBlock.indexOf("await authorizeDispatch()") < googleBlock.indexOf("setInputFiles(files)"));
-  assert.ok(googleBlock.lastIndexOf("await authorizeDispatch()") < googleBlock.indexOf("await send.click()"));
+  assert.ok(googleBlock.indexOf("setInputFiles(files)") < googleBlock.indexOf("await authorizeDispatch()"));
+  assert.ok(googleBlock.indexOf("await authorizeDispatch()") < googleBlock.indexOf("await send.click()"));
 
   const instagramBlock = instagram.slice(instagram.indexOf("async sendMessage("), instagram.indexOf("async openThread(", instagram.indexOf("async sendMessage(")));
   assert.match(instagramBlock, /performClick: async \(\) => \{\s*await beforeDispatch\?\.\(\);\s*submissionMayHaveOccurred = true;/);

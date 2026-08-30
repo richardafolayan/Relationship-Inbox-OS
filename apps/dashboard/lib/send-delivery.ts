@@ -38,3 +38,20 @@ export function resolveSendRecovery(response: SendStatusResponse): SendRecoveryO
     errorKind: response.errorKind
   };
 }
+
+export async function waitForTerminalSendStatus(
+  clientSendId: string,
+  readStatus: (path: string) => Promise<SendStatusResponse>,
+  wait: (delayMs: number) => Promise<void> = (delayMs) =>
+    new Promise((resolve) => setTimeout(resolve, delayMs)),
+  maxAttempts = 120
+): Promise<SendStatusResponse> {
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const status = await readStatus(
+      `/runner/data/send-status/${encodeURIComponent(clientSendId)}`
+    );
+    if (status.status !== "PENDING" && status.status !== "SCHEDULED") return status;
+    await wait(Math.min(250 + attempt * 50, 1_000));
+  }
+  throw new Error("Delivery is still pending. Its status must be checked before retrying.");
+}

@@ -64,6 +64,7 @@ export function FocusReviewSheet({
   const [notes, setNotes] = useState<Record<string, string>>({});
   const [editing, setEditing] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [errors, setErrors] = useState<Record<string, string>>({});
 
   // Latest window/settings/templates, read at snapshot time. Held in refs so
   // sending an ack (which mutates focusWindow.ackedPersonIds) does NOT re-run
@@ -107,6 +108,7 @@ export function FocusReviewSheet({
         setFiltered(left);
         setState(nextState);
         setNotes(nextNotes);
+        setErrors({});
         setEditing(null);
       })
       .catch(() => {
@@ -129,6 +131,7 @@ export function FocusReviewSheet({
       // "till X" that has passed, so nothing may be sent past the end.
       if (!active || state[key] !== "open" || busy) return;
       setBusy(true);
+      setErrors((current) => ({ ...current, [key]: "" }));
       try {
         await sendAcknowledgement(
           row.id,
@@ -138,8 +141,11 @@ export function FocusReviewSheet({
         );
         setState((prev) => ({ ...prev, [key]: "sent" }));
         setEditing(null);
-      } catch {
-        // Keep the row actionable so the operator can retry.
+      } catch (error) {
+        setErrors((current) => ({
+          ...current,
+          [key]: error instanceof Error ? error.message : "The focus note was not sent."
+        }));
       } finally {
         setBusy(false);
       }
@@ -166,6 +172,7 @@ export function FocusReviewSheet({
       const open = candidates.filter((row) => state[rowKey(row)] === "open");
       for (const row of open) {
         const key = rowKey(row);
+        setErrors((current) => ({ ...current, [key]: "" }));
         try {
           await sendAcknowledgement(
             row.id,
@@ -174,8 +181,11 @@ export function FocusReviewSheet({
             focusWindow.windowId
           );
           setState((prev) => ({ ...prev, [key]: "sent" }));
-        } catch {
-          // Skip a failed send; the row stays open for a manual retry.
+        } catch (error) {
+          setErrors((current) => ({
+            ...current,
+            [key]: error instanceof Error ? error.message : "The focus note was not sent."
+          }));
         }
       }
     } finally {
@@ -277,6 +287,11 @@ export function FocusReviewSheet({
                           {notes[key]}
                         </p>
                       )}
+                      {errors[key] ? (
+                        <p className="m-0 mb-[10px] text-[12px] leading-[1.4] text-risk-overdue" role="alert">
+                          {errors[key]}
+                        </p>
+                      ) : null}
                       <div className="flex items-center gap-2">
                         <button
                           type="button"

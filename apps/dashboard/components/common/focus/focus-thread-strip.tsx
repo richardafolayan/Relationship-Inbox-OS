@@ -55,6 +55,7 @@ export function FocusThreadStrip({
   const [editing, setEditing] = useState(false);
   const [status, setStatus] = useState<"open" | "sent" | "dismissed">("open");
   const [busy, setBusy] = useState(false);
+  const [sendError, setSendError] = useState<string | null>(null);
 
   const row = useMemo(() => focusRowFromThread(thread), [thread]);
   const candidate = active && isFocusAckCandidate(row, focusWindow, settings);
@@ -77,6 +78,7 @@ export function FocusThreadStrip({
     setEditing(false);
     setStatus("open");
     setBusy(false);
+    setSendError(null);
   }, [thread.id, focusWindow.windowId]);
 
   useEffect(() => {
@@ -144,6 +146,7 @@ export function FocusThreadStrip({
     // and a note promising "till X" must never go out after X.
     if (busy || !candidate) return;
     setBusy(true);
+    setSendError(null);
     try {
       await sendAcknowledgement(
         thread.id,
@@ -154,8 +157,8 @@ export function FocusThreadStrip({
       setStatus("sent");
       setEditing(false);
       onSent?.();
-    } catch {
-      // Leave the strip actionable so the operator can retry.
+    } catch (error) {
+      setSendError(error instanceof Error ? error.message : "The focus note was not sent.");
     } finally {
       setBusy(false);
     }
@@ -199,6 +202,11 @@ export function FocusThreadStrip({
         ) : (
           <div className="text-[13px] leading-[1.45] text-ink">{note}</div>
         )}
+        {sendError ? (
+          <p className="mb-0 mt-2 text-[12px] leading-[1.4] text-risk-overdue" role="alert">
+            {sendError}
+          </p>
+        ) : null}
       </div>
       <div className="flex shrink-0 items-center gap-[6px]">
         <button

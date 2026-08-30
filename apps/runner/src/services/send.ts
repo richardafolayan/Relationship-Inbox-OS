@@ -8,9 +8,14 @@ import { AdapterFailure } from "../platforms/utils";
 import { buildDemoSendReceipt } from "./demo-send";
 import { classifySendFailureKind, consumerSendFailure } from "./send-failure";
 import {
+  focusAcknowledgementClientSendIds,
   focusAutoAckDispatchEligible,
+  focusAutoAckClientSendId,
+  focusManualAckClientSendId,
+  focusManualAckDispatchEligible,
   type FocusAutoAckThread
 } from "./focus-auto-ack";
+import { createKeyedMutex } from "./keyed-mutex";
 
 interface SendServiceDeps {
   // Partial: not every PlatformName has an adapter on main today. The
@@ -317,6 +322,12 @@ export function createSendService(deps: SendServiceDeps) {
   const userTriggeredIntentEpochs = new Map<string, number>();
   let focusPolicyMutationIntentCount = 0;
   let focusPolicyMutationIntentEpoch = 0;
+  const focusAcknowledgementEnqueueMutex = createKeyedMutex();
+  const focusAcknowledgementDispatchBaselines = new Map<string, {
+    threadIntentEpoch: number;
+    focusPolicyIntentEpoch: number;
+    selfIntentAllowance: number;
+  }>();
 
   function registerUserTriggeredIntent(threadId: string): () => void {
     userTriggeredIntentEpochs.set(
@@ -526,6 +537,7 @@ export function createSendService(deps: SendServiceDeps) {
     clientSendId: string;
     attachments?: SendAttachment[];
     source?: SendSource;
+    focusWindowId?: string;
     /**
      * App-level threading: when set, the resulting Message row links back
      * to the parent (a Message.id cuid in the same thread). The send still
@@ -540,99 +552,219 @@ export function createSendService(deps: SendServiceDeps) {
     if (!thread) {
       throw new Error("Thread not found");
     }
-    assertInstagramManualTextSend({
-      platform: thread.platform as PlatformName,
-      attachmentCount: input.attachments?.length ?? 0,
-      source: input.source ?? "manual"
-    });
+    const source = input.source ?? "manual";
 
-    const existing = await prisma.sendRequest.findUnique({
-      where: { clientSendId: input.clientSendId }
-    });
-    if (existing) {
-      assertExistingSendIntent(existing, {
-        ...input,
-        source: input.source ?? "manual"
-      });
-      if (existing.status === "SENT" && existing.receiptJson) {
-        await reconcileSentProjectionRow(existing).catch(() => false);
-        return {
-          clientSendId: input.clientSendId,
-          status: "SENT",
-          replayed: true,
-          result: { ...parseReceipt(existing.receiptJson), replayed: true }
-        };
-      }
-      if (existing.status === "FAILED") {
-        return {
-          clientSendId: input.clientSendId,
-          status: "FAILED",
-          replayed: true,
-          errorMessage: parseFailedSendMessage(existing.errorJson)
-        };
-      }
-      if (existing.status === "PENDING") {
-        return { clientSendId: input.clientSendId, status: "PENDING", replayed: true };
-      }
-      // SCHEDULED / CANCELLED: the immediate-send path can't replay these. A
-      // SCHEDULED row is drained by the scheduled-send promoter, not the
-      // PENDING worker, and a CANCELLED row is intentionally dead. Returning
-      // "PENDING" here would tell the dashboard the send is queued while
-      // nothing ever sends. Surface the real state (mirrors
-      // enqueueScheduledSend's conflict throw).
-      throw new Error(`Send request ${input.clientSendId} already exists in status ${existing.status}`);
-    }
-
-    try {
-      await prisma.sendRequest.create({
-        data: {
-          clientSendId: input.clientSendId,
-          threadId: input.threadId,
-          requestText: input.text,
-          status: "PENDING",
-          source: input.source ?? "manual",
-          attachmentsJson: normalizedAttachmentsJson(input.attachments),
-          replyToMessageId: input.replyToMessageId ?? null
-        }
-      });
-    } catch (error) {
-      if (!isUniqueConstraintError(error)) {
-        throw error;
-      }
-      const winner = await prisma.sendRequest.findUnique({
+    const enqueue = async (): Promise<EnqueueSendResult> => {
+      const existing = await prisma.sendRequest.findUnique({
         where: { clientSendId: input.clientSendId }
       });
-      if (!winner) throw new Error("clientSendId conflict could not be reconciled");
-      assertExistingSendIntent(winner, {
-        ...input,
-        source: input.source ?? "manual"
-      });
-      if (winner.status === "SENT" && winner.receiptJson) {
-        await reconcileSentProjectionRow(winner).catch(() => false);
-        return {
-          clientSendId: input.clientSendId,
-          status: "SENT",
-          replayed: true,
-          result: { ...parseReceipt(winner.receiptJson), replayed: true }
-        };
+      if (existing) {
+        assertExistingSendIntent(existing, { ...input, source });
       }
-      if (winner.status === "FAILED") {
-        return {
-          clientSendId: input.clientSendId,
-          status: "FAILED",
-          replayed: true,
-          errorMessage: parseFailedSendMessage(winner.errorJson)
-        };
-      }
-      if (winner.status !== "PENDING") {
-        throw new Error(
-          `Send request ${input.clientSendId} already exists in status ${winner.status}`
-        );
-      }
-      return { clientSendId: input.clientSendId, status: "PENDING", replayed: true };
-    }
 
-    return { clientSendId: input.clientSendId, status: "PENDING", replayed: false };
+      assertInstagramManualTextSend({
+        platform: thread.platform as PlatformName,
+        attachmentCount: input.attachments?.length ?? 0,
+        source
+      });
+
+      if (source === "focus_ack" || source === "focus_auto_ack") {
+        if (!input.focusWindowId) {
+          throw new SendPolicyError(
+            "focus_window_required",
+            "Focus acknowledgements require the active focus window"
+          );
+        }
+        const expectedClientSendId = source === "focus_ack"
+          ? focusManualAckClientSendId(input.focusWindowId, thread.personId)
+          : focusAutoAckClientSendId(input.focusWindowId, thread.personId);
+        if (input.clientSendId !== expectedClientSendId) {
+          throw new SendPolicyError(
+            "focus_ack_identity_mismatch",
+            "Focus acknowledgement identity does not match this window and person"
+          );
+        }
+
+        const deliveryIds = focusAcknowledgementClientSendIds(
+          input.focusWindowId,
+          thread.personId
+        );
+        let winner = await prisma.sendRequest.findFirst({
+          where: { clientSendId: { in: deliveryIds } },
+          orderBy: [{ createdAt: "asc" }, { id: "asc" }]
+        });
+        if (winner && winner.clientSendId !== input.clientSendId) {
+          if (
+            source === "focus_ack" &&
+            winner.source === "focus_auto_ack" &&
+            winner.status === "PENDING" &&
+            winner.receiptJson === null
+          ) {
+            const cancelled = await prisma.sendRequest.updateMany({
+              where: {
+                id: winner.id,
+                status: "PENDING",
+                receiptJson: null,
+                source: "focus_auto_ack"
+              },
+              data: { status: "CANCELLED" }
+            });
+            if (cancelled.count === 1) winner = null;
+          } else if (
+            source === "focus_ack" &&
+            winner.source === "focus_auto_ack" &&
+            winner.status === "FAILED" &&
+            winner.receiptJson === null &&
+            !/"errorKind":"(?:DELIVERY_UNCERTAIN|INTERRUPTED)"/.test(
+              winner.errorJson ?? ""
+            )
+          ) {
+            winner = null;
+          }
+        }
+        if (winner && winner.clientSendId !== input.clientSendId) {
+          if (winner.status === "SENT" && winner.receiptJson) {
+            await reconcileSentProjectionRow(winner).catch(() => false);
+            return {
+              clientSendId: winner.clientSendId,
+              status: "SENT",
+              replayed: true,
+              result: { ...parseReceipt(winner.receiptJson), replayed: true }
+            };
+          }
+          if (winner.status === "FAILED") {
+            return {
+              clientSendId: winner.clientSendId,
+              status: "FAILED",
+              replayed: true,
+              errorMessage: parseFailedSendMessage(winner.errorJson)
+            };
+          }
+          if (winner.status === "PENDING") {
+            return {
+              clientSendId: winner.clientSendId,
+              status: "PENDING",
+              replayed: true
+            };
+          }
+          throw new SendPolicyError(
+            "focus_ack_already_claimed",
+            "This person already has a focus acknowledgement for this window"
+          );
+        }
+
+        const profile = await deps.settingsStore.getOperatorProfile();
+        const endsAt = Date.parse(profile.focusWindow.endsAt);
+        if (
+          profile.focusWindow.windowId !== input.focusWindowId ||
+          !profile.focusWindow.active ||
+          !Number.isFinite(endsAt) ||
+          endsAt <= Date.now() ||
+          profile.focusWindow.ackedPersonIds.includes(thread.personId)
+        ) {
+          throw new SendPolicyError(
+            "focus_ack_not_eligible",
+            "This focus acknowledgement is no longer eligible"
+          );
+        }
+        focusAcknowledgementDispatchBaselines.set(input.clientSendId, {
+          threadIntentEpoch: userTriggeredIntentEpochs.get(thread.id) ?? 0,
+          focusPolicyIntentEpoch: focusPolicyMutationIntentEpoch,
+          selfIntentAllowance:
+            source === "focus_ack" &&
+            (userTriggeredIntentCounts.get(thread.id) ?? 0) > 0
+              ? 1
+              : 0
+        });
+      }
+
+      if (existing) {
+        if (existing.status === "SENT" && existing.receiptJson) {
+          await reconcileSentProjectionRow(existing).catch(() => false);
+          return {
+            clientSendId: input.clientSendId,
+            status: "SENT",
+            replayed: true,
+            result: { ...parseReceipt(existing.receiptJson), replayed: true }
+          };
+        }
+        if (existing.status === "FAILED") {
+          return {
+            clientSendId: input.clientSendId,
+            status: "FAILED",
+            replayed: true,
+            errorMessage: parseFailedSendMessage(existing.errorJson)
+          };
+        }
+        if (existing.status === "PENDING") {
+          return { clientSendId: input.clientSendId, status: "PENDING", replayed: true };
+        }
+        // SCHEDULED / CANCELLED: the immediate-send path can't replay these. A
+        // SCHEDULED row is drained by the scheduled-send promoter, not the
+        // PENDING worker, and a CANCELLED row is intentionally dead. Returning
+        // "PENDING" here would tell the dashboard the send is queued while
+        // nothing ever sends. Surface the real state (mirrors
+        // enqueueScheduledSend's conflict throw).
+        throw new Error(`Send request ${input.clientSendId} already exists in status ${existing.status}`);
+      }
+
+      try {
+        await prisma.sendRequest.create({
+          data: {
+            clientSendId: input.clientSendId,
+            threadId: input.threadId,
+            requestText: input.text,
+            status: "PENDING",
+            source,
+            attachmentsJson: normalizedAttachmentsJson(input.attachments),
+            replyToMessageId: input.replyToMessageId ?? null
+          }
+        });
+      } catch (error) {
+        if (!isUniqueConstraintError(error)) {
+          throw error;
+        }
+        const winner = await prisma.sendRequest.findUnique({
+          where: { clientSendId: input.clientSendId }
+        });
+        if (!winner) throw new Error("clientSendId conflict could not be reconciled");
+        assertExistingSendIntent(winner, { ...input, source });
+        if (winner.status === "SENT" && winner.receiptJson) {
+          await reconcileSentProjectionRow(winner).catch(() => false);
+          return {
+            clientSendId: input.clientSendId,
+            status: "SENT",
+            replayed: true,
+            result: { ...parseReceipt(winner.receiptJson), replayed: true }
+          };
+        }
+        if (winner.status === "FAILED") {
+          return {
+            clientSendId: input.clientSendId,
+            status: "FAILED",
+            replayed: true,
+            errorMessage: parseFailedSendMessage(winner.errorJson)
+          };
+        }
+        if (winner.status !== "PENDING") {
+          throw new Error(
+            `Send request ${input.clientSendId} already exists in status ${winner.status}`
+          );
+        }
+        return { clientSendId: input.clientSendId, status: "PENDING", replayed: true };
+      }
+
+      return { clientSendId: input.clientSendId, status: "PENDING", replayed: false };
+    };
+
+    if (source === "focus_ack" || source === "focus_auto_ack") {
+      const windowId = input.focusWindowId ?? "missing";
+      return focusAcknowledgementEnqueueMutex.runExclusive(
+        `${windowId}:${thread.personId}`,
+        enqueue
+      );
+    }
+    return enqueue();
   }
 
   /**
@@ -664,9 +796,20 @@ export function createSendService(deps: SendServiceDeps) {
     if (!discoveredThread) return;
     const platform = discoveredThread.platform as PlatformName;
 
-    await deps.withExternalActionLock(platform, () =>
-      processSendRequestWithExternalLock(sendRequestId, platform)
-    );
+    try {
+      await deps.withExternalActionLock(platform, () =>
+        processSendRequestWithExternalLock(sendRequestId, platform)
+      );
+    } finally {
+      if (
+        discoveredRequest.source === "focus_ack" ||
+        discoveredRequest.source === "focus_auto_ack"
+      ) {
+        focusAcknowledgementDispatchBaselines.delete(
+          discoveredRequest.clientSendId
+        );
+      }
+    }
   }
 
   async function processSendRequestWithExternalLock(
@@ -690,6 +833,18 @@ export function createSendService(deps: SendServiceDeps) {
     if (isClaimMarker(sendRequest.receiptJson)) {
       return;
     }
+    const rememberedDispatchBaseline = focusAcknowledgementDispatchBaselines.get(
+      sendRequest.clientSendId
+    );
+    const expectedThreadIntentEpoch =
+      rememberedDispatchBaseline?.threadIntentEpoch ??
+      userTriggeredIntentEpochs.get(sendRequest.threadId) ??
+      0;
+    const expectedFocusPolicyIntentEpoch =
+      rememberedDispatchBaseline?.focusPolicyIntentEpoch ??
+      focusPolicyMutationIntentEpoch;
+    const selfIntentAllowance =
+      rememberedDispatchBaseline?.selfIntentAllowance ?? 0;
 
     const thread = await prisma.thread.findUnique({
       where: { id: sendRequest.threadId },
@@ -826,17 +981,31 @@ export function createSendService(deps: SendServiceDeps) {
         // Serialize the page-driving send against scans on the shared managed
         // page. The demo branch above drives no page, so it stays unlocked.
         receipt = await deps.withPlatformLock(thread.platform as PlatformName, async () => {
-          const assertFocusAutoAckDispatchEligible = source === "focus_auto_ack"
+          const assertFocusAcknowledgementDispatchEligible =
+            source === "focus_auto_ack" || source === "focus_ack"
             ? async () => {
-              const threadIntentEpoch = userTriggeredIntentEpochs.get(thread.id) ?? 0;
-              const focusIntentEpoch = focusPolicyMutationIntentEpoch;
-              const [supersedingUserRequest, authoritativeThread, profile] = await Promise.all([
+              const [
+                supersedingUserRequest,
+                unresolvedSentProjection,
+                authoritativeThread,
+                profile
+              ] = await Promise.all([
                 prisma.sendRequest.findFirst({
                   where: {
                     threadId: thread.id,
                     source: { in: ["manual", "focus_ack", "manual_poll"] },
                     status: { in: ["PENDING", "SENT", "FAILED", "SCHEDULED"] },
                     createdAt: { gte: sendRequest.createdAt },
+                    NOT: { id: sendRequest.id }
+                  },
+                  select: { id: true }
+                }),
+                prisma.sendRequest.findFirst({
+                  where: {
+                    threadId: thread.id,
+                    source: { in: ["manual", "focus_ack", "manual_poll"] },
+                    status: "SENT",
+                    errorJson: { contains: LOCAL_RECONCILIATION_REQUIRED },
                     NOT: { id: sendRequest.id }
                   },
                   select: { id: true }
@@ -879,37 +1048,46 @@ export function createSendService(deps: SendServiceDeps) {
                 : null;
               if (
                 !autoAckThread ||
-                !focusAutoAckDispatchEligible(
-                  autoAckThread,
-                  profile,
-                  sendRequest.clientSendId,
-                  new Date(),
-                  sendRequest.requestText
-                )
+                !(source === "focus_auto_ack"
+                  ? focusAutoAckDispatchEligible(
+                      autoAckThread,
+                      profile,
+                      sendRequest.clientSendId,
+                      new Date(),
+                      sendRequest.requestText
+                    )
+                  : focusManualAckDispatchEligible(
+                      autoAckThread,
+                      profile,
+                      sendRequest.clientSendId,
+                      new Date()
+                    ))
               ) {
                 throw new SendPolicyError(
-                  "focus_auto_ack_not_eligible",
-                  "Automatic focus acknowledgement is no longer eligible for this conversation"
+                  `${source}_not_eligible`,
+                  "Focus acknowledgement is no longer eligible for this conversation"
                 );
               }
               if (
                 supersedingUserRequest ||
-                (userTriggeredIntentCounts.get(thread.id) ?? 0) > 0 ||
-                (userTriggeredIntentEpochs.get(thread.id) ?? 0) !== threadIntentEpoch ||
+                unresolvedSentProjection ||
+                (userTriggeredIntentCounts.get(thread.id) ?? 0) >
+                  selfIntentAllowance ||
+                (userTriggeredIntentEpochs.get(thread.id) ?? 0) !== expectedThreadIntentEpoch ||
                 focusPolicyMutationIntentCount > 0 ||
-                focusPolicyMutationIntentEpoch !== focusIntentEpoch
+                focusPolicyMutationIntentEpoch !== expectedFocusPolicyIntentEpoch
               ) {
                 throw new SendPolicyError(
-                  "focus_auto_ack_superseded",
-                  "Automatic focus acknowledgement was superseded by a user-triggered reply"
+                  `${source}_superseded`,
+                  "Focus acknowledgement was superseded by a user-triggered action"
                 );
               }
             }
             : undefined;
 
-          await assertFocusAutoAckDispatchEligible?.();
+          await assertFocusAcknowledgementDispatchEligible?.();
           const beforeDispatch = async () => {
-            await assertFocusAutoAckDispatchEligible?.();
+            await assertFocusAcknowledgementDispatchEligible?.();
             dispatchStarted = true;
           };
           const delivered = await adapter.sendMessage(
