@@ -6,7 +6,10 @@ import {
   ExternalActionAttemptConflictError,
   ExternalActionAttemptStorageError
 } from "../apps/dashboard/lib/external-action-attempts.ts";
-import { composerRecoveryResolution } from "../apps/dashboard/lib/thread-composer-send-recovery.ts";
+import {
+  composerRecoveryResolution,
+  terminalThreadComposerSendAttemptValue
+} from "../apps/dashboard/lib/thread-composer-send-recovery.ts";
 
 const source = await readFile(
   new URL("../apps/dashboard/app/thread/[id]/page.tsx", import.meta.url),
@@ -29,9 +32,10 @@ test("message mutations keep one client action id across an uncertain retry", ()
   );
   assert.equal((source.match(/\{ clientActionId,/g) ?? []).length >= 3, true);
   assert.equal(
-    (source.match(/\.completeScopedValue/g) ?? []).length >= 7,
+    (source.match(/externalActionAttempts\.completeScopedValue/g) ?? []).length >= 6,
     true
   );
+  assert.equal((source.match(/recordTerminalComposerSend\(/g) ?? []).length >= 2, true);
   const dictation = source.slice(
     source.indexOf("const sendDictationMessage"),
     source.indexOf("// Cmd/Ctrl-Enter sends.")
@@ -385,6 +389,92 @@ test("a released generation retains an explicit recovery tombstone", async () =>
     true
   );
   assert.deepEqual(store.readCompletedScopedValues(scope), [tombstone]);
+});
+
+test("a late terminal result advances restored lineage to its successor session", async () => {
+  const values = new Map();
+  const storage = {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, value),
+    removeItem: (key) => values.delete(key)
+  };
+  const store = createExternalActionAttemptStore(storage);
+  const scope = "composer-send:late-terminal";
+  const original = {
+    clientSendId: "send-x",
+    notFoundRecovery: "restore",
+    requestedAt: "2026-08-30T09:00:00.000Z",
+    sessionRevision: 1,
+    sessionRevisionId: "session-x"
+  };
+  const restored = {
+    ...original,
+    resolution: "restored",
+    restoredSessionRevisionId: "session-y"
+  };
+  await store.getOrCreateScopedValue(scope, { text: "preserved" }, () => original);
+  assert.equal(
+    await store.compareAndCompleteScopedValue(scope, () => true, true, restored),
+    true
+  );
+  assert.equal(
+    await store.completeScopedValueWithLineage(
+      scope,
+      (value) => value.clientSendId === "send-x",
+      (value) => value.clientSendId === "send-x" && value.resolution === "restored",
+      terminalThreadComposerSendAttemptValue
+    ),
+    true
+  );
+
+  assert.deepEqual(
+    composerRecoveryResolution(
+      original,
+      store.readCompletedScopedValues(scope)
+    ),
+    { kind: "sent", sessionRevisionId: "session-y" }
+  );
+});
+
+test("atomic value transforms preserve replay arbitration through namespace migration", async () => {
+  const values = new Map();
+  const storage = {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, value),
+    removeItem: (key) => values.delete(key)
+  };
+  const store = createExternalActionAttemptStore(storage);
+  const original = {
+    attachmentNamespace: "old",
+    clientSendId: "send-x",
+    notFoundRecovery: "replay"
+  };
+
+  for (const [scope, first, second] of [
+    ["claim-then-migrate", "claim", "migrate"],
+    ["migrate-then-claim", "migrate", "claim"]
+  ]) {
+    await store.getOrCreateScopedValue(scope, { text: scope }, () => original);
+    const apply = async (operation) =>
+      store.compareAndUpdateScopedValue(
+        scope,
+        (value) =>
+          value.clientSendId === "send-x" &&
+          (operation === "claim"
+            ? value.notFoundRecovery === "replay"
+            : value.attachmentNamespace === "old"),
+        (value) => operation === "claim"
+          ? { ...value, notFoundRecovery: "blocked" }
+          : { ...value, attachmentNamespace: "new" }
+      );
+    await apply(first);
+    await apply(second);
+    assert.deepEqual(store.readScopedAttempt(scope)?.value, {
+      attachmentNamespace: "new",
+      clientSendId: "send-x",
+      notFoundRecovery: "blocked"
+    });
+  }
 });
 
 test("a completed successor suppresses its restored predecessor after a stale-tab remount", async () => {

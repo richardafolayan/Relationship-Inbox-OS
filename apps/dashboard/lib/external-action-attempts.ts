@@ -473,6 +473,37 @@ export function createExternalActionAttemptStore(
     });
   }
 
+  async function compareAndUpdateScopedValue<TValue>(
+    scope: string,
+    matches: (value: TValue) => boolean,
+    update: (value: TValue) => TValue
+  ): Promise<TValue | undefined> {
+    return withScopeLock(scope, async () => {
+      const key = valueStorageKey(scope);
+      const record = readRecord<unknown, TValue>(key);
+      if (!record || !matches(record.value)) return undefined;
+      if (completedValueDominates(record.value, readCompletedScopedValues<TValue>(scope))) {
+        removeRecord(key);
+        const completedPin = readPinnedOperation(scope);
+        if (
+          completedPin &&
+          durableActionIdentity(completedPin.value) === durableActionIdentity(record.value)
+        ) removePinnedOperation(scope);
+        return undefined;
+      }
+      const nextValue = update(record.value);
+      writeRecord(key, { ...record, value: nextValue });
+      const pinned = readPinnedOperation(scope);
+      if (pinned && canonicalJson(pinned.value) === canonicalJson(record.value)) {
+        writePinnedOperation(scope, {
+          intentJson: pinned.intentJson,
+          value: nextValue
+        });
+      }
+      return nextValue;
+    });
+  }
+
   async function completeScopedValue<TValue>(
     scope: string,
     matches: (value: TValue) => boolean,
@@ -524,6 +555,38 @@ export function createExternalActionAttemptStore(
     });
   }
 
+  async function completeScopedValueWithLineage<TValue>(
+    scope: string,
+    matchesActive: (value: TValue) => boolean,
+    matchesCompletedLineage: (value: TValue) => boolean,
+    terminalValue: (matchedValue: TValue) => TValue
+  ): Promise<boolean> {
+    return withScopeLock(scope, async () => {
+      const key = valueStorageKey(scope);
+      const record = readRecord<unknown, TValue>(key);
+      const pinned = readPinnedOperation(scope);
+      if (pinned && matchesActive(pinned.value as TValue)) {
+        appendCompletedScopedValue(scope, terminalValue(pinned.value as TValue));
+        if (record && canonicalJson(record.value) === canonicalJson(pinned.value)) {
+          removeRecord(key);
+        }
+        removePinnedOperation(scope);
+        return true;
+      }
+      if (record && matchesActive(record.value)) {
+        appendCompletedScopedValue(scope, terminalValue(record.value));
+        removeRecord(key);
+        return true;
+      }
+      const completedLineage = readCompletedScopedValues<TValue>(scope).find(
+        matchesCompletedLineage
+      );
+      if (!completedLineage) return false;
+      appendCompletedScopedValue(scope, terminalValue(completedLineage));
+      return true;
+    });
+  }
+
   function readScopedAttempt<TIntent, TValue>(scope: string):
     | { intent: TIntent; value: TValue }
     | undefined {
@@ -568,6 +631,8 @@ export function createExternalActionAttemptStore(
   return {
     compareAndCompleteScopedValue,
     compareAndReplaceScopedValue,
+    compareAndUpdateScopedValue,
+    completeScopedValueWithLineage,
     getOrCreateScopedValue,
     replaceScopedValue,
     completeScopedValue,

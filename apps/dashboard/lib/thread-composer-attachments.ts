@@ -306,6 +306,20 @@ function liveOwnerDisposition(
   }
 }
 
+function newerLogicalOwner(
+  candidate: PersistedAttachmentOwner,
+  current: PersistedAttachmentOwner
+): boolean {
+  return (
+    candidate.key !== current.key &&
+    candidate.namespace === current.namespace &&
+    candidate.threadId === current.threadId &&
+    candidate.ownerId === current.ownerId &&
+    (candidate.updatedAt > current.updatedAt ||
+      (candidate.updatedAt === current.updatedAt && candidate.key > current.key))
+  );
+}
+
 function descriptorMatches(
   record: PersistedAttachmentRecord,
   descriptor: ThreadComposerAttachmentDescriptor
@@ -382,19 +396,35 @@ export function createIndexedDbThreadComposerAttachmentStore(
       if (!cursor) return;
       const record = cursor.value as PersistedAttachmentOwner;
       if (record.updatedAt < staleBefore) {
-        if (liveOwnerDisposition(ownerIsLive, record.threadId, record.ownerId)) {
+        const expireOwner = () => {
+          const attachment = attachments.get(record.attachmentKey);
+          attachment.onsuccess = () => {
+            const value = attachment.result as PersistedAttachmentRecord | undefined;
+            if (value) attachments.put({ ...value, updatedAt: now() });
+            cursor.delete();
+            cursor.continue();
+          };
+          attachment.onerror = () => cursor.continue();
+        };
+        const logicalOwners = owners.index("attachmentKey").getAll(record.attachmentKey);
+        logicalOwners.onsuccess = () => {
+          const hasNewerHolder = (logicalOwners.result as PersistedAttachmentOwner[])
+            .some((candidate) => newerLogicalOwner(candidate, record));
+          if (hasNewerHolder) {
+            expireOwner();
+            return;
+          }
+          if (liveOwnerDisposition(ownerIsLive, record.threadId, record.ownerId)) {
+            cursor.update({ ...record, updatedAt: now() });
+            cursor.continue();
+            return;
+          }
+          expireOwner();
+        };
+        logicalOwners.onerror = () => {
           cursor.update({ ...record, updatedAt: now() });
           cursor.continue();
-          return;
-        }
-        const attachment = attachments.get(record.attachmentKey);
-        attachment.onsuccess = () => {
-          const value = attachment.result as PersistedAttachmentRecord | undefined;
-          if (value) attachments.put({ ...value, updatedAt: now() });
-          cursor.delete();
-          cursor.continue();
         };
-        attachment.onerror = () => cursor.continue();
         return;
       }
       cursor.continue();
@@ -575,6 +605,18 @@ export function createMemoryThreadComposerAttachmentStore(
       for (const [ownerKey, owner] of current) {
         if (owner.updatedAt < staleBefore) {
           const record = records.get(key);
+          const hasNewerHolder = [...current].some(
+            ([candidateKey, candidate]) =>
+              candidate.ownerId === owner.ownerId &&
+              candidateKey !== ownerKey &&
+              (candidate.updatedAt > owner.updatedAt ||
+                (candidate.updatedAt === owner.updatedAt && candidateKey > ownerKey))
+          );
+          if (hasNewerHolder) {
+            current.delete(ownerKey);
+            ownerExpired = true;
+            continue;
+          }
           if (
             record &&
             liveOwnerDisposition(ownerIsLive, record.threadId, owner.ownerId)

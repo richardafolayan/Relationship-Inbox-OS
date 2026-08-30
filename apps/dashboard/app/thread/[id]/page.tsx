@@ -188,6 +188,7 @@ import {
   recoveredComposerSessionDisposition,
   resolvedComposerScheduleInstant,
   shouldHideComposerSessionForAttempt,
+  terminalThreadComposerSendAttemptValue,
   threadComposerSendScope,
   type ThreadComposerDraftRevision,
   type ThreadComposerSendAttempt,
@@ -316,8 +317,11 @@ function composerAttachmentKind(
   return "unknown";
 }
 
+const COMPOSER_SEND_COMPLETED_EVENT = "tovi-composer-send-completed";
+
 type PendingSend = {
   attachmentNamespace?: string;
+  backgroundOnly?: boolean;
   clientSendId: string;
   threadId: string;
   text: string;
@@ -784,6 +788,8 @@ export default function ThreadPage() {
   }, []);
   const [composer, setComposer] = useState("");
   const [composerRecoveryInProgress, setComposerRecoveryInProgress] = useState(false);
+  const composerRecoveryVisible =
+    composerRecoveryInProgress && composerRecoveryInProgressRef.current === threadId;
   const composerInputRef = useRef<HTMLTextAreaElement | null>(null);
   const [whatsAppPollOpen, setWhatsAppPollOpen] = useState(false);
   const [whatsAppPollQuestion, setWhatsAppPollQuestion] = useState("");
@@ -2571,6 +2577,27 @@ export default function ThreadPage() {
     return () => window.removeEventListener("pagehide", preserveComposer);
   }, [persistComposerSession]);
 
+  const recordTerminalComposerSend = useCallback(async (
+    targetThreadId: string,
+    clientSendId: string
+  ): Promise<boolean> => {
+    const completed = await externalActionAttempts.completeScopedValueWithLineage<
+      ThreadComposerSendAttemptValue
+    >(
+      threadComposerSendScope(targetThreadId),
+      (value) => value.clientSendId === clientSendId,
+      (value) =>
+        value.clientSendId === clientSendId && value.resolution === "restored",
+      terminalThreadComposerSendAttemptValue
+    );
+    if (completed) {
+      window.dispatchEvent(new CustomEvent(COMPOSER_SEND_COMPLETED_EVENT, {
+        detail: { threadId: targetThreadId }
+      }));
+    }
+    return completed;
+  }, [externalActionAttempts]);
+
   // Load the operator voice profile once. Reloads on a profile-saved
   // event so an AI-help-level change in Settings lands without a reload.
   useEffect(() => {
@@ -2627,6 +2654,13 @@ export default function ThreadPage() {
           (item) => item.clientSendId === detail.clientSendId
         );
         void (async () => {
+          const terminalThreadId = pending?.threadId ?? detail.threadId;
+          if (terminalThreadId) {
+            await recordTerminalComposerSend(
+              terminalThreadId,
+              detail.clientSendId!
+            ).catch(() => false);
+          }
           if (pending) {
             if (detail.draftConsumed) consumePendingDraftRevision(pending);
             clearCapturedComposerAfterAcceptedAction(pending);
@@ -2665,14 +2699,6 @@ export default function ThreadPage() {
                 )
               );
             }
-            await externalActionAttempts
-              .completeScopedValue<ThreadComposerSendAttemptValue>(
-                threadComposerSendScope(pending.threadId),
-                (value) => value.clientSendId === pending.clientSendId,
-                true,
-                pendingComposerAttemptValue(pending, "sent") ?? undefined
-              )
-              .catch(() => undefined);
             const activeAttachmentIds = new Set(
               composerAttachmentsRef.current.map((attachment) => attachment.id)
             );
@@ -2757,6 +2783,7 @@ export default function ThreadPage() {
   }, [
     composerAttachmentStore,
     externalActionAttempts,
+    recordTerminalComposerSend,
     releaseComposerAttachmentOwnership,
     refreshThread,
     scheduleThreadRefresh,
@@ -2799,14 +2826,10 @@ export default function ThreadPage() {
               .catch(() => undefined)
           )
         );
-        await externalActionAttempts
-          .completeScopedValue<ThreadComposerSendAttemptValue>(
-            threadComposerSendScope(pending.threadId),
-            (value) => value.clientSendId === pending.clientSendId,
-            true,
-            pendingComposerAttemptValue(pending, "sent") ?? undefined
-          )
-          .catch(() => undefined);
+        await recordTerminalComposerSend(
+          pending.threadId,
+          pending.clientSendId
+        ).catch(() => false);
       }
       const activeAttachmentIds = new Set(
         composerAttachmentsRef.current.map((attachment) => attachment.id)
@@ -2817,7 +2840,11 @@ export default function ThreadPage() {
         }
       }
     },
-    [composerAttachmentStore, externalActionAttempts, releaseComposerAttachmentOwnership]
+    [
+      composerAttachmentStore,
+      recordTerminalComposerSend,
+      releaseComposerAttachmentOwnership
+    ]
   );
 
   const restorePendingComposerSend = useCallback(
@@ -2983,7 +3010,9 @@ export default function ThreadPage() {
             );
             return;
           }
-          composerSessionPresentRef.current = true;
+          if (routeThreadIdRef.current === pending.threadId) {
+            composerSessionPresentRef.current = true;
+          }
           acceptedComposerSessionIdsRef.current.set(
             pending.threadId,
             preparedRecoverySession.revisionId
@@ -3059,7 +3088,9 @@ export default function ThreadPage() {
                 predecessorSession
               );
               if (rolledBack) {
-                composerSessionPresentRef.current = Boolean(predecessorSession);
+                if (routeThreadIdRef.current === pending.threadId) {
+                  composerSessionPresentRef.current = Boolean(predecessorSession);
+                }
                 if (predecessorSession) {
                   acceptedComposerSessionIdsRef.current.set(
                     pending.threadId,
@@ -3120,7 +3151,9 @@ export default function ThreadPage() {
               );
               return;
             }
-            composerSessionPresentRef.current = true;
+            if (routeThreadIdRef.current === pending.threadId) {
+              composerSessionPresentRef.current = true;
+            }
             acceptedComposerSessionIdsRef.current.set(
               pending.threadId,
               restoredSession.revisionId
@@ -3135,6 +3168,46 @@ export default function ThreadPage() {
           showPendingError(
             "Tovi could not safely restore this failed reply for another attempt. Reload before trying again."
           );
+          return;
+        }
+        let terminalResolution: ReturnType<typeof composerRecoveryResolution>;
+        try {
+          terminalResolution = composerRecoveryResolution(
+            pendingValue,
+            externalActionAttempts.readCompletedScopedValues<ThreadComposerSendAttemptValue>(
+              scope
+            )
+          );
+        } catch {
+          showPendingError(
+            "Tovi could not safely verify delivery after recovery. Your reply remains saved; reload before sending."
+          );
+          return;
+        }
+        if (terminalResolution?.kind === "sent") {
+          compareAndReplaceThreadComposerSession(
+            pending.threadId,
+            restoredSession,
+            null
+          );
+          await composerAttachmentStore
+            .releaseOwnership(
+              pending.threadId,
+              restoredSession.revisionId,
+              attachmentNamespace
+            )
+            .catch(() => undefined);
+          await composerAttachmentStore
+            .removeUnowned(pending.threadId, attachmentIds, attachmentNamespace)
+            .catch(() => undefined);
+          acceptedComposerSessionIdsRef.current.delete(pending.threadId);
+          if (routeThreadIdRef.current === pending.threadId) {
+            composerSessionPresentRef.current = false;
+          }
+          setPendingSends((current) =>
+            current.filter((item) => item.clientSendId !== pending.clientSendId)
+          );
+          showPendingError("This reply was already sent from another window.");
           return;
         }
         const finalDisposition = safeSendFailureDisposition(
@@ -3404,9 +3477,17 @@ export default function ThreadPage() {
     const onStorage = (event: StorageEvent) => {
       if (event.key === completedKey) reconcileCompletedSession();
     };
+    const onLocalCompletion = (event: Event) => {
+      const detail = (event as CustomEvent<{ threadId?: string }>).detail;
+      if (detail?.threadId === threadId) reconcileCompletedSession();
+    };
     reconcileCompletedSession();
     window.addEventListener("storage", onStorage);
-    return () => window.removeEventListener("storage", onStorage);
+    window.addEventListener(COMPOSER_SEND_COMPLETED_EVENT, onLocalCompletion);
+    return () => {
+      window.removeEventListener("storage", onStorage);
+      window.removeEventListener(COMPOSER_SEND_COMPLETED_EVENT, onLocalCompletion);
+    };
   }, [
     blockComposerSession,
     clearComposerRecoveryBlock,
@@ -3567,6 +3648,48 @@ export default function ThreadPage() {
           return;
         }
         if (disposition === "replay_same_id") {
+          if (pending.backgroundOnly) {
+            const scope = threadComposerSendScope(pending.threadId);
+            let durableRecovery = pending.notFoundRecovery;
+            try {
+              const transitioned = await externalActionAttempts.compareAndUpdateScopedValue<
+                ThreadComposerSendAttemptValue
+              >(
+                scope,
+                (value) =>
+                  value.clientSendId === pending.clientSendId &&
+                  value.notFoundRecovery !== "blocked" &&
+                  value.notFoundRecovery !== "restore",
+                (value) => ({ ...value, notFoundRecovery: "restore" })
+              );
+              durableRecovery = transitioned?.notFoundRecovery ??
+                normalizeThreadComposerSendAttempt(
+                  externalActionAttempts.readScopedAttempt(scope)
+                )?.value.notFoundRecovery;
+            } catch {
+              durableRecovery = "blocked";
+            }
+            const message = durableRecovery === "blocked"
+              ? "Tovi is still resolving this saved request. Open the conversation to review it."
+              : "The saved request was not queued. Open the conversation to review the recovered reply.";
+            setPendingSends((current) =>
+              current.map((item) =>
+                item.clientSendId === pending.clientSendId
+                  ? {
+                      ...item,
+                      errorKind: durableRecovery === "blocked"
+                        ? "DELIVERY_UNCERTAIN"
+                        : undefined,
+                      errorMessage: message,
+                      failed: true,
+                      notFoundRecovery: durableRecovery ?? "restore",
+                      uncertain: durableRecovery === "blocked"
+                    }
+                  : item
+              )
+            );
+            return;
+          }
           if (pending.notFoundRecovery === "restore") {
             await restorePendingComposerSend(
               pending,
@@ -3668,30 +3791,16 @@ export default function ThreadPage() {
             await restorePendingComposerSend(pending, preflight.message);
             return;
           }
-          const replayValue: ThreadComposerSendAttemptValue = {
-            ...(pending.attachmentNamespace
-              ? { attachmentNamespace: pending.attachmentNamespace }
-              : {}),
-            attemptKind: pending.attemptKind,
-            clientSendId: pending.clientSendId,
-            notFoundRecovery: "blocked",
-            requestedAt: pending.sentAt,
-            scheduledFor: pending.scheduledFor ?? null,
-            sessionRevision: pending.sessionRevision,
-            ...(pending.sessionRevisionId
-              ? { sessionRevisionId: pending.sessionRevisionId }
-              : {})
-          };
-          const claimed = await externalActionAttempts.compareAndReplaceScopedValue<
+          const replayValue = await externalActionAttempts.compareAndUpdateScopedValue<
             ThreadComposerSendAttemptValue
           >(
             threadComposerSendScope(pending.threadId),
             (value) =>
               value.clientSendId === pending.clientSendId &&
               value.notFoundRecovery === "replay",
-            replayValue
+            (value) => ({ ...value, notFoundRecovery: "blocked" })
           );
-          if (!claimed) {
+          if (!replayValue) {
             const sharedAttempt = normalizeThreadComposerSendAttempt(
               externalActionAttempts.readScopedAttempt(
                 threadComposerSendScope(pending.threadId)
@@ -3726,7 +3835,12 @@ export default function ThreadPage() {
             );
             return;
           }
-          const claimedPending = { ...pending, notFoundRecovery: "blocked" as const };
+          const claimedPending = {
+            ...pending,
+            attachmentNamespace:
+              replayValue.attachmentNamespace ?? pending.attachmentNamespace,
+            notFoundRecovery: "blocked" as const
+          };
           setPendingSends((current) =>
             current.map((item) =>
               item.clientSendId === pending.clientSendId ? claimedPending : item
@@ -3737,7 +3851,7 @@ export default function ThreadPage() {
               composerAttachmentStore,
               pending.threadId,
               pending.composerIntent.attachments,
-              pending.attachmentNamespace
+              claimedPending.attachmentNamespace
             );
             const replayResponse = await dispatchComposerSendAttempt(
               replayIntent,
@@ -3754,29 +3868,15 @@ export default function ThreadPage() {
               const notFoundRecovery = composerNotFoundRecoveryAfterDispatchFailure(
                 replayError
               );
-              const nextValue: ThreadComposerSendAttemptValue = {
-                  ...(pending.attachmentNamespace
-                    ? { attachmentNamespace: pending.attachmentNamespace }
-                    : {}),
-                  attemptKind: pending.attemptKind,
-                  clientSendId: pending.clientSendId,
-                  notFoundRecovery,
-                  requestedAt: pending.sentAt,
-                  scheduledFor: pending.scheduledFor ?? null,
-                  sessionRevision: pending.sessionRevision,
-                  ...(pending.sessionRevisionId
-                    ? { sessionRevisionId: pending.sessionRevisionId }
-                    : {})
-              };
               const transitioned = await externalActionAttempts
-                .compareAndReplaceScopedValue<ThreadComposerSendAttemptValue>(
+                .compareAndUpdateScopedValue<ThreadComposerSendAttemptValue>(
                   threadComposerSendScope(pending.threadId),
                   (value) =>
                     value.clientSendId === pending.clientSendId &&
                     value.notFoundRecovery === "blocked",
-                  nextValue
+                  (value) => ({ ...value, notFoundRecovery })
                 )
-                .catch(() => false);
+                .catch(() => undefined);
               const durableNotFoundRecovery = transitioned
                 ? notFoundRecovery
                 : "blocked";
@@ -3879,6 +3979,20 @@ export default function ThreadPage() {
 
   useEffect(() => {
     let disposed = false;
+    const publishAndCheck = (pending: PendingSend) => {
+      const next = [
+        ...pendingSendsRef.current.filter(
+          (item) => item.clientSendId !== pending.clientSendId
+        ),
+        pending
+      ];
+      pendingSendsRef.current = next;
+      setPendingSends(next);
+      void checkPendingDeliveryRef.current(pending.clientSendId)
+        .finally(() => {
+          durableAttemptReconciliationRef.current.delete(pending.clientSendId);
+        });
+    };
     const reconcileDurableAttempts = () => {
       let attempts: ThreadComposerSendAttempt[];
       try {
@@ -3898,10 +4012,20 @@ export default function ThreadPage() {
       }
       for (const attempt of attempts) {
         const clientSendId = attempt.value.clientSendId;
-        if (
-          pendingSendsRef.current.some((pending) => pending.clientSendId === clientSendId) ||
-          durableAttemptReconciliationRef.current.has(clientSendId)
-        ) {
+        const existing = pendingSendsRef.current.find(
+          (pending) => pending.clientSendId === clientSendId
+        );
+        if (durableAttemptReconciliationRef.current.has(clientSendId)) {
+          continue;
+        }
+        if (existing) {
+          if (existing.backgroundOnly) {
+            durableAttemptReconciliationRef.current.add(clientSendId);
+            void checkPendingDeliveryRef.current(clientSendId)
+              .finally(() => {
+                durableAttemptReconciliationRef.current.delete(clientSendId);
+              });
+          }
           continue;
         }
         durableAttemptReconciliationRef.current.add(clientSendId);
@@ -3927,6 +4051,8 @@ export default function ThreadPage() {
               attachmentNamespace,
               attemptKind: attempt.intent.kind,
               attachments,
+              backgroundOnly:
+                attempt.intent.threadId !== routeThreadIdRef.current,
               clientSendId,
               composerIntent: attempt.intent.composerIntent,
               draftRevision: attempt.intent.draftRevision,
@@ -3944,14 +4070,7 @@ export default function ThreadPage() {
               threadId: attempt.intent.threadId,
               uncertain: incomplete
             };
-            setPendingSends((current) => [
-              ...current.filter((item) => item.clientSendId !== clientSendId),
-              pending
-            ]);
-            window.setTimeout(
-              () => void checkPendingDeliveryRef.current(clientSendId),
-              0
-            );
+            publishAndCheck(pending);
           })
           .catch(() => {
             if (disposed) return;
@@ -3959,6 +4078,8 @@ export default function ThreadPage() {
               attachmentNamespace,
               attemptKind: attempt.intent.kind,
               attachments: [],
+              backgroundOnly:
+                attempt.intent.threadId !== routeThreadIdRef.current,
               clientSendId,
               composerIntent: attempt.intent.composerIntent,
               draftRevision: attempt.intent.draftRevision,
@@ -3975,17 +4096,12 @@ export default function ThreadPage() {
               threadId: attempt.intent.threadId,
               uncertain: true
             };
-            setPendingSends((current) => [
-              ...current.filter((item) => item.clientSendId !== clientSendId),
-              pending
-            ]);
-            window.setTimeout(
-              () => void checkPendingDeliveryRef.current(clientSendId),
-              0
-            );
+            publishAndCheck(pending);
           })
           .finally(() => {
-            durableAttemptReconciliationRef.current.delete(clientSendId);
+            if (disposed) {
+              durableAttemptReconciliationRef.current.delete(clientSendId);
+            }
           });
       }
     };
@@ -4024,6 +4140,13 @@ export default function ThreadPage() {
         (pending) => pending.clientSendId === attempt?.value.clientSendId
       )
     ) {
+      const next = pendingSendsRef.current.map((pending) =>
+        pending.clientSendId === attempt?.value.clientSendId
+          ? { ...pending, backgroundOnly: false }
+          : pending
+      );
+      pendingSendsRef.current = next;
+      setPendingSends(next);
       window.setTimeout(
         () => void checkPendingDeliveryRef.current(attempt!.value.clientSendId),
         0
@@ -4036,22 +4159,18 @@ export default function ThreadPage() {
     const prepareResumedAttempt = async () => {
       if (attempt!.value.notFoundRecovery === resumedNotFoundRecovery) return attempt!;
       const previousRecovery = attempt!.value.notFoundRecovery;
-      const resumedValue: ThreadComposerSendAttemptValue = {
-        ...attempt!.value,
-        notFoundRecovery: resumedNotFoundRecovery
-      };
       const transitioned = await externalActionAttempts
-        .compareAndReplaceScopedValue<ThreadComposerSendAttemptValue>(
+        .compareAndUpdateScopedValue<ThreadComposerSendAttemptValue>(
           threadComposerSendScope(threadId),
           (value) =>
             value.clientSendId === attempt!.value.clientSendId &&
             value.notFoundRecovery === previousRecovery,
-          resumedValue
+          (value) => ({ ...value, notFoundRecovery: resumedNotFoundRecovery })
         );
       if (!transitioned) {
         throw new Error("This saved send changed in another window.");
       }
-      attempt!.value = resumedValue;
+      attempt!.value = transitioned;
       return attempt!;
     };
     void prepareResumedAttempt()
@@ -4086,24 +4205,23 @@ export default function ThreadPage() {
                 composerAttachmentStore.namespace
               )
             : null;
-          const migratedValue: ThreadComposerSendAttemptValue = {
-            ...attempt!.value,
-            attachmentNamespace: composerAttachmentStore.namespace
-          };
-          let migrated = false;
+          let migratedValue: ThreadComposerSendAttemptValue | undefined;
           try {
-            migrated = await externalActionAttempts.compareAndReplaceScopedValue<ThreadComposerSendAttemptValue>(
+            migratedValue = await externalActionAttempts.compareAndUpdateScopedValue<ThreadComposerSendAttemptValue>(
               threadComposerSendScope(threadId),
               (value) =>
                 value.clientSendId === attempt!.value.clientSendId &&
                 (value.attachmentNamespace ?? attachmentNamespace) === attachmentNamespace,
-              migratedValue
+              (value) => ({
+                ...value,
+                attachmentNamespace: composerAttachmentStore.namespace
+              })
             );
           } catch (error) {
             await namespaceHandoff?.rollback().catch(() => undefined);
             throw error;
           }
-          if (!migrated) {
+          if (!migratedValue) {
             await namespaceHandoff?.rollback().catch(() => undefined);
             throw new Error("This saved send changed in another window.");
           }
@@ -6703,9 +6821,9 @@ export default function ThreadPage() {
             {
               label: repliesGenerating ? "Preparing suggestions" : "Suggested replies",
               description: "Choose one to edit in your own words.",
-              disabled: repliesGenerating || composerRecoveryInProgress,
+              disabled: repliesGenerating || composerRecoveryVisible,
               onSelect: () => {
-                if (!composerRecoveryInProgressRef.current) {
+                if (!composerRecoveryVisible) {
                   setMobileSuggestionsOpen(true);
                 }
               }
@@ -6721,10 +6839,10 @@ export default function ThreadPage() {
             {
               label: "Photo or file",
               description: "Attach something to this reply.",
-              disabled: composerRecoveryInProgress,
+              disabled: composerRecoveryVisible,
               preserveUserActivation: true,
               onSelect: () => {
-                if (!composerRecoveryInProgressRef.current) {
+                if (!composerRecoveryVisible) {
                   document.getElementById("composer-file-input")?.click();
                 }
               }
@@ -6740,7 +6858,7 @@ export default function ThreadPage() {
                 : browserAudioCaptureAvailable
                   ? "Record audio to send as an attachment."
                   : "Choose an audio recording from Files. This never opens the camera.",
-              disabled: composerRecoveryInProgress,
+              disabled: composerRecoveryVisible,
               preserveUserActivation: true,
               onSelect: () => (recording ? stopRecording() : void startRecording())
             }
@@ -6762,9 +6880,9 @@ export default function ThreadPage() {
                 (!composer.trim() && composerAttachments.length === 0) ||
                 sending ||
                 scheduling ||
-                composerRecoveryInProgress,
+                composerRecoveryVisible,
               onSelect: () => {
-                if (!composerRecoveryInProgressRef.current) {
+                if (!composerRecoveryVisible) {
                   setMobileScheduleOpen(true);
                 }
               }
@@ -6797,9 +6915,9 @@ export default function ThreadPage() {
       items: chips.map((chip) => ({
         label: chip.intent,
         description: chip.text,
-        disabled: composerRecoveryInProgress,
+        disabled: composerRecoveryVisible,
         onSelect: () => {
-          if (composerRecoveryInProgressRef.current) return;
+          if (composerRecoveryVisible) return;
           setComposer(chip.text);
           setComposerSource("user");
           window.requestAnimationFrame(() => composerInputRef.current?.focus());
@@ -6808,7 +6926,7 @@ export default function ThreadPage() {
     }
   ];
   const composerExternalActionBlocked =
-    composerAttachmentsRestoring || composerRecoveryBlocked || composerRecoveryInProgress;
+    composerAttachmentsRestoring || composerRecoveryBlocked || composerRecoveryVisible;
   const mobileScheduleGroups: ActionSheetGroup[] = [
     {
       id: "presets",
@@ -6996,7 +7114,7 @@ export default function ThreadPage() {
   // popover Menu. Grouping only applies on phone; desktop stays a flat list.
   const saveDraftAction = {
     label: "Save draft",
-    disabled: sending || scheduling || composerRecoveryInProgress,
+    disabled: sending || scheduling || composerRecoveryVisible,
     onSelect: () =>
       runActionWithFeedback(
         saveCurrentDraft(),
@@ -7011,7 +7129,7 @@ export default function ThreadPage() {
   const deleteDraftAction = {
     label: "Delete draft",
     danger: true as const,
-    disabled: sending || scheduling || composerRecoveryInProgress,
+    disabled: sending || scheduling || composerRecoveryVisible,
     onSelect: () =>
       runActionWithFeedback(
         deleteCurrentDraft(),
@@ -8555,7 +8673,7 @@ export default function ThreadPage() {
             {error ? (
               <p className="mb-1.5 rounded-[10px] border border-hairline bg-paper-2 px-2.5 py-1.5 text-[12px] leading-[1.45] text-ink-2">{error}</p>
             ) : null}
-            {composerRecoveryInProgress ? (
+            {composerRecoveryVisible ? (
               <p
                 role="status"
                 aria-live="polite"
@@ -8625,8 +8743,8 @@ export default function ThreadPage() {
             <div
               data-thread-composer="true"
               data-demo-target="composer-input"
-              aria-busy={composerRecoveryInProgress}
-              inert={composerRecoveryInProgress ? true : undefined}
+              aria-busy={composerRecoveryVisible}
+              inert={composerRecoveryVisible ? true : undefined}
               // Predraft state earns a tinted accent border + soft ring
               // (#350): the textarea on its own looks like a passive
               // surface, so operators read the AI predraft as static
@@ -8678,7 +8796,7 @@ export default function ThreadPage() {
                     <button
                       type="button"
                       onClick={() => {
-                        if (composerRecoveryInProgressRef.current) return;
+                        if (composerRecoveryVisible) return;
                         predraftDismissedRef.current.add(threadId);
                         setComposer("");
                         setComposerSource("empty");
@@ -8873,7 +8991,7 @@ export default function ThreadPage() {
               <textarea
                 placeholder={`Reply to ${firstName}…`}
                 value={composer}
-                disabled={composerRecoveryInProgress}
+                disabled={composerRecoveryVisible}
                 // #466 (pilot R-0065): native browser assists where supported
                 // (spellCheck underlines on desktop; autoCapitalize/autoCorrect
                 // on iOS/Safari). The JS layer below covers desktop Firefox.
@@ -9088,7 +9206,7 @@ export default function ThreadPage() {
                             key={chip.intent}
                             type="button"
                             onClick={() => {
-                              if (composerRecoveryInProgressRef.current) return;
+                              if (composerRecoveryVisible) return;
                               setComposer(chip.text);
                               setChipsMenuOpen(false);
                             }}
@@ -9200,9 +9318,9 @@ export default function ThreadPage() {
                             <input
                               type="datetime-local"
                               value={customScheduleValue}
-                              disabled={composerRecoveryInProgress}
+                              disabled={composerRecoveryVisible}
                               onChange={(e) => {
-                                if (composerRecoveryInProgressRef.current) return;
+                                if (composerRecoveryVisible) return;
                                 setCustomScheduleValue(e.target.value);
                                 setRecoveredScheduledFor(null);
                               }}
@@ -9442,9 +9560,9 @@ export default function ThreadPage() {
                         <input
                           type="datetime-local"
                           value={customScheduleValue}
-                          disabled={composerRecoveryInProgress}
+                          disabled={composerRecoveryVisible}
                           onChange={(event) => {
-                            if (composerRecoveryInProgressRef.current) return;
+                            if (composerRecoveryVisible) return;
                             setCustomScheduleValue(event.target.value);
                             setRecoveredScheduledFor(null);
                           }}

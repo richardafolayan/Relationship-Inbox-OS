@@ -334,6 +334,18 @@ export function missingThreadComposerAttachments(
   return intent.attachments.filter((attachment) => !recovered.has(attachment.id));
 }
 
+export function terminalThreadComposerSendAttemptValue(
+  value: ThreadComposerSendAttemptValue
+): ThreadComposerSendAttemptValue {
+  const successorRevisionId =
+    value.resolution === "restored" ? value.restoredSessionRevisionId : undefined;
+  return {
+    ...value,
+    resolution: "sent",
+    ...(successorRevisionId ? { sessionRevisionId: successorRevisionId } : {})
+  };
+}
+
 export function composerReplayPreflight(
   attempt: ThreadComposerSendAttemptIntent,
   recoveredAttachmentCount: number,

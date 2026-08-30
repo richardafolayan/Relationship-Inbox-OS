@@ -205,6 +205,53 @@ test("cloned tabs with one namespace and revision keep independent live-holder l
   assert.deepEqual(await tabB.read("thread-a", [descriptor]), []);
 });
 
+test("repeated reload holders for one live revision are compacted to the newest lease", async () => {
+  let now = 1_000;
+  const state = __test.createMemoryThreadComposerAttachmentState();
+  const file = new File(["pilot attachment"], descriptor.name, {
+    lastModified: descriptor.lastModified,
+    type: descriptor.type
+  });
+  const first = createMemoryThreadComposerAttachmentStore(
+    "reload-namespace",
+    () => now,
+    true,
+    "holder-0",
+    state
+  );
+  await first.put("thread-a", descriptor, file);
+  await first.claimOwnership("thread-a", [descriptor.id], "session-x");
+  for (let index = 1; index <= 8; index += 1) {
+    now += 1;
+    const reloaded = createMemoryThreadComposerAttachmentStore(
+      "reload-namespace",
+      () => now,
+      true,
+      `holder-${index}`,
+      state
+    );
+    await reloaded.claimOwnership("thread-a", [descriptor.id], "session-x");
+  }
+
+  now += __test.STALE_AFTER_MS + 1;
+  const newest = createMemoryThreadComposerAttachmentStore(
+    "reload-namespace",
+    () => now,
+    true,
+    "holder-newest",
+    state
+  );
+  await newest.claimOwnership("thread-a", [descriptor.id], "session-x");
+  await newest.purgeStale(
+    (threadId, ownerId) => threadId === "thread-a" && ownerId === "session-x"
+  );
+
+  const ownerSets = [...state.owners.values()];
+  assert.equal(ownerSets.length, 1);
+  assert.equal(ownerSets[0].size, 1);
+  assert.equal((await newest.read("thread-a", [descriptor])).length, 1);
+});
+
 test("the stale sweep revisits a released blob after its quarantine expires", async () => {
   let now = 1_000;
   const store = createMemoryThreadComposerAttachmentStore("shared-namespace", () => now);

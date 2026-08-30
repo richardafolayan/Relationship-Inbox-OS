@@ -256,9 +256,9 @@ test("recovery blocks passive persistence and exposes a visible busy state", () 
   assert.match(persistence, /threadComposerMutationIsBlocked\(/);
   assert.match(apply, /threadComposerMutationIsBlocked\(/);
   assert.match(source, /role="status"[\s\S]*?Recovering your reply\.\.\./);
-  assert.match(source, /aria-busy=\{composerRecoveryInProgress\}/);
-  assert.match(source, /inert=\{composerRecoveryInProgress \? true : undefined\}/);
-  assert.match(source, /disabled=\{composerRecoveryInProgress\}[\s\S]*?onChange=\{\(event\) => \{[\s\S]*?threadComposerMutationIsBlocked\(/);
+  assert.match(source, /aria-busy=\{composerRecoveryVisible\}/);
+  assert.match(source, /inert=\{composerRecoveryVisible \? true : undefined\}/);
+  assert.match(source, /disabled=\{composerRecoveryVisible\}[\s\S]*?onChange=\{\(event\) => \{[\s\S]*?threadComposerMutationIsBlocked\(/);
   assert.match(source, /requestAnimationFrame\(\(\) => composerInputRef\.current\?\.focus\(\)\)/);
 });
 
@@ -276,6 +276,76 @@ test("all durable composer attempts reconcile and terminal SSE cleanup precedes 
   assert.notEqual(terminalSend, -1);
   assert.ok(routeFilteredRefresh > terminalSend);
   assert.doesNotMatch(sse.slice(0, terminalSend), /if \(!shouldRefetchForThreadEvent/);
+});
+
+test("late terminal delivery closes restored lineage before the composer is published", () => {
+  const restoreStart = source.indexOf("const restorePendingComposerSend = useCallback(");
+  const restoreEnd = source.indexOf("const clearCapturedComposerAfterAcceptedAction", restoreStart);
+  const restore = source.slice(restoreStart, restoreEnd);
+  const finalResolution = restore.lastIndexOf(
+    "terminalResolution = composerRecoveryResolution("
+  );
+  const publishComposer = restore.lastIndexOf("setComposer(recoveryIntent.text)");
+  assert.ok(finalResolution !== -1 && finalResolution < publishComposer);
+  assert.match(restore, /if \(terminalResolution\?\.kind === "sent"\)/);
+  assert.match(source, /completeScopedValueWithLineage</);
+  assert.match(source, /const recordTerminalComposerSend = useCallback/);
+  assert.equal((source.match(/recordTerminalComposerSend\(/g) ?? []).length >= 2, true);
+  assert.match(source, /COMPOSER_SEND_COMPLETED_EVENT/);
+});
+
+test("cross-route recovery never mutates the next thread's singleton presence or busy state", () => {
+  const restoreStart = source.indexOf("const restorePendingComposerSend = useCallback(");
+  const restoreEnd = source.indexOf("const clearCapturedComposerAfterAcceptedAction", restoreStart);
+  const restore = source.slice(restoreStart, restoreEnd);
+  for (const marker of [
+    "composerSessionPresentRef.current = Boolean(predecessorSession)",
+    "composerSessionPresentRef.current = true"
+  ]) {
+    let index = restore.indexOf(marker);
+    while (index !== -1) {
+      const precedingGuard = restore.lastIndexOf(
+        "if (routeThreadIdRef.current === pending.threadId)",
+        index
+      );
+      assert.ok(precedingGuard !== -1 && index - precedingGuard < 1800);
+      index = restore.indexOf(marker, index + marker.length);
+    }
+  }
+  assert.match(
+    source,
+    /const composerRecoveryVisible =[\s\S]*?composerRecoveryInProgressRef\.current === threadId/
+  );
+  assert.doesNotMatch(source, /aria-busy=\{composerRecoveryInProgress\}/);
+});
+
+test("off-route NOT_FOUND attempts require review and global publication cannot lose its wakeup", () => {
+  const checkStart = source.indexOf("const checkPendingDelivery = useCallback(");
+  const checkEnd = source.indexOf("checkPendingDeliveryRef.current = checkPendingDelivery", checkStart);
+  const check = source.slice(checkStart, checkEnd);
+  const backgroundGate = check.indexOf("if (pending.backgroundOnly)");
+  const dispatch = check.indexOf("await dispatchComposerSendAttempt(");
+  assert.ok(backgroundGate !== -1 && backgroundGate < dispatch);
+  assert.match(check, /notFoundRecovery: "restore"/);
+  const inventoryStart = source.indexOf("const publishAndCheck = (pending: PendingSend)");
+  const inventoryEnd = source.indexOf("const reconcileDurableAttempts", inventoryStart);
+  const publish = source.slice(inventoryStart, inventoryEnd);
+  assert.match(publish, /pendingSendsRef\.current = next/);
+  assert.ok(
+    publish.indexOf("pendingSendsRef.current = next") <
+      publish.indexOf("checkPendingDeliveryRef.current")
+  );
+});
+
+test("namespace migration transforms authoritative state without reverting replay claims", () => {
+  const start = source.indexOf("const prepareResumedAttempt = async () =>");
+  const end = source.indexOf("const attachments = recovered.map", start);
+  const resume = source.slice(start, end);
+  assert.equal((resume.match(/compareAndUpdateScopedValue/g) ?? []).length >= 2, true);
+  assert.match(
+    resume,
+    /\(value\) => \(\{[\s\S]*?\.\.\.value,[\s\S]*?attachmentNamespace: composerAttachmentStore\.namespace/
+  );
 });
 
 test("a newer composer generation does not release an accepted pending attachment owner", () => {
@@ -323,7 +393,7 @@ test("NOT_FOUND replay requires an authoritative shared-generation transition", 
   const statusStart = source.indexOf("const checkPendingDelivery = useCallback(");
   const statusEnd = source.indexOf("checkPendingDeliveryRef.current = checkPendingDelivery", statusStart);
   const status = source.slice(statusStart, statusEnd);
-  assert.match(status, /compareAndReplaceScopedValue/);
+  assert.match(status, /compareAndUpdateScopedValue/);
   assert.match(status, /value\.notFoundRecovery === "replay"/);
   assert.match(status, /notFoundRecovery: "blocked"/);
 });
@@ -544,11 +614,11 @@ test("cross-tab attachment recovery migrates ownership before removing the old p
   const migration = source.slice(start, end);
   assert.match(migration, /composerAttachmentStore\.put/);
   assert.match(migration, /prepareThreadComposerAttachmentNamespaceHandoff/);
-  assert.match(migration, /externalActionAttempts\.compareAndReplaceScopedValue/);
+  assert.match(migration, /externalActionAttempts\.compareAndUpdateScopedValue/);
   assert.match(migration, /namespaceHandoff\?\.commit/);
   assert.match(migration, /namespaceHandoff\?\.rollback/);
   assert.ok(
     migration.indexOf("prepareThreadComposerAttachmentNamespaceHandoff") <
-      migration.indexOf("compareAndReplaceScopedValue")
+      migration.indexOf("compareAndUpdateScopedValue")
   );
 });
