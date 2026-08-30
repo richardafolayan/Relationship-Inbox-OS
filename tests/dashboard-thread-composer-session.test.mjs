@@ -5,6 +5,7 @@ const {
   attachDraftRevisionToThreadComposerSession,
   consumeThreadComposerSession,
   readThreadComposerSession,
+  restoreThreadComposerSession,
   rotateThreadComposerSession,
   safeSendFailureDisposition,
   snapshotThreadComposerSessionAfterAcceptedAction,
@@ -360,6 +361,36 @@ test("a definite failed send rotates the recovered intent to a new delivery gene
   assert.equal(recovered.text, failed.text);
   assert.equal(recovered.revision, failed.revision + 1);
   assert.notEqual(recovered.revisionId, failed.revisionId);
+});
+
+test("separate tabs restore a failed send under the same shared successor generation", () => {
+  const firstTab = makeStorage();
+  const secondTab = makeStorage();
+  const intent = {
+    attachments: [attachment],
+    customScheduleValue: "2026-12-15T09:30",
+    replyToMessageId: "parent-message",
+    source: "user",
+    text: "Try this once"
+  };
+
+  const first = restoreThreadComposerSession(
+    "thread-a",
+    intent,
+    "shared-successor-session",
+    firstTab
+  );
+  const second = restoreThreadComposerSession(
+    "thread-a",
+    intent,
+    "shared-successor-session",
+    secondTab
+  );
+
+  assert.equal(first.revisionId, "shared-successor-session");
+  assert.equal(second.revisionId, "shared-successor-session");
+  assert.deepEqual(readThreadComposerSession("thread-a", firstTab), first);
+  assert.deepEqual(readThreadComposerSession("thread-a", secondTab), second);
 });
 
 test("a definite failed send keeps only the draft revision captured by that attempt", () => {

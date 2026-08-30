@@ -55,6 +55,24 @@ test("send and schedule wait for the latest authoritative saved draft revision",
   assert.deepEqual(events, ["save-started", "send-captured", "schedule-captured"]);
 });
 
+test("a draft mutation started after action capture waits until the action releases", async () => {
+  const barrier = createDraftMutationBarrier();
+  const action = await barrier.acquireAction("thread-a", oldRevision);
+  let saveStarted = false;
+  const save = barrier.enqueueSave("thread-a", async () => {
+    saveStarted = true;
+    return savedRevision;
+  });
+
+  await Promise.resolve();
+  assert.equal(saveStarted, false);
+  assert.deepEqual(action.revision, oldRevision);
+
+  action.release();
+  assert.deepEqual(await save, savedRevision);
+  assert.equal(saveStarted, true);
+});
+
 test("a send waiting on an edited save consumes the revision that just completed", async () => {
   const barrier = createDraftMutationBarrier();
   const response = deferred();

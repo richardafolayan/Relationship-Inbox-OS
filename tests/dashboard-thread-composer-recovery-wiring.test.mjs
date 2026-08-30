@@ -83,8 +83,11 @@ test("a failed captured reply stays separate when the operator has typed newer t
   assert.match(restore, /item\.clientSendId === pending\.clientSendId/);
   assert.match(
     restore,
-    /rotateThreadComposerSession\([\s\S]*?pending\.threadId,[\s\S]*?recoveryIntent,[\s\S]*?pending\.draftRevision/
+    /restoreThreadComposerSession\([\s\S]*?pending\.threadId,[\s\S]*?recoveryIntent,[\s\S]*?recoverySessionRevisionId,[\s\S]*?pending\.draftRevision/
   );
+  assert.match(restore, /resolution: "restored"/);
+  assert.match(restore, /composerRecoveryResolution\(/);
+  assert.match(restore, /composerIntentForRecovery\(/);
 });
 
 test("completed composer generations suppress copied-tab duplicate sends", () => {
@@ -92,6 +95,9 @@ test("completed composer generations suppress copied-tab duplicate sends", () =>
   assert.match(source, /sessionRevisionId: capturedSession\.revisionId,[\s\S]*?kind: "immediate"/);
   assert.match(source, /sessionRevisionId: capturedSession\.revisionId,[\s\S]*?kind: "scheduled"/);
   assert.match(source, /readCompletedScopedValues<ThreadComposerSendAttemptValue>/);
+  assert.match(source, /const restoredPredecessor = completedValues\.find/);
+  assert.match(source, /composerRecoveryResolution\(\s*restoredPredecessor/);
+  assert.match(source, /restoreThreadComposerSession\(/);
   assert.match(source, /value\.sessionRevisionId === storedSession\?\.revisionId/);
   assert.match(source, /value\.sessionRevisionId === capturedSession\.revisionId/);
   assert.match(source, /notFoundRecovery: "replay"/);
@@ -112,13 +118,30 @@ test("NOT_FOUND replay requires an authoritative shared-generation transition", 
   assert.match(status, /notFoundRecovery: "blocked"/);
 });
 
+test("a blocked NOT_FOUND recovery observes release, restoration, and successor completion", () => {
+  const statusStart = source.indexOf("const checkPendingDelivery = useCallback(");
+  const statusEnd = source.indexOf("checkPendingDeliveryRef.current = checkPendingDelivery", statusStart);
+  const status = source.slice(statusStart, statusEnd);
+  const blockedStart = status.indexOf('pending.notFoundRecovery !== "replay"');
+  const blockedEnd = status.indexOf("if (", blockedStart + 40);
+  const blocked = status.slice(blockedStart, blockedEnd === -1 ? undefined : blockedEnd);
+  assert.match(status.slice(blockedStart), /externalActionAttempts\.readScopedAttempt\(scope\)/);
+  assert.match(status.slice(blockedStart), /composerRecoveryResolution\(/);
+  assert.match(source, /completeReleasedScopedValue/);
+  assert.match(status.slice(blockedStart), /recordAlreadyReleased: true/);
+  assert.notEqual(blockedStart, -1);
+  assert.notEqual(blocked, "");
+});
+
 test("authoritative thread refreshes apply only the latest started request", () => {
   const start = source.indexOf("const refreshThread = useCallback");
   const end = source.indexOf("const refreshSiblings", start);
   const refresh = source.slice(start, end);
-  assert.match(refresh, /threadRequestGate\.next\(\)/);
-  assert.match(refresh, /threadRequestGate\.isLatest\(requestToken\)/);
-  assert.ok(refresh.indexOf("threadRequestGate.isLatest(requestToken)") < refresh.indexOf("applyThread(fresh"));
+  assert.match(refresh, /threadRequestGate\.next\(threadId\)/);
+  assert.match(refresh, /threadRequestGate\.isLatest\(threadId, requestToken\)/);
+  assert.ok(
+    refresh.indexOf("threadRequestGate.isLatest(threadId, requestToken)") < refresh.indexOf("applyThread(fresh")
+  );
 });
 
 test("late draft mutations CAS the originating session and never write feedback into another route", () => {
@@ -199,9 +222,19 @@ test("draft mutations are ordered with sends, schedules, and both delete control
   const scheduleStart = source.indexOf("const scheduleSend = useCallback(");
   const deleteStart = source.indexOf("const deleteCurrentDraft =");
   const actionStart = source.indexOf("const saveDraftAction", deleteStart);
-  assert.match(source.slice(sendStart, scheduleStart), /await draftMutations\.waitForRevision/);
-  assert.match(source.slice(scheduleStart, deleteStart), /await draftMutations\.waitForRevision/);
+  assert.match(source.slice(sendStart, scheduleStart), /await draftMutations\.acquireAction/);
+  assert.match(source.slice(sendStart, scheduleStart), /releaseDraftAction\?\.\(\)/);
+  assert.match(source.slice(scheduleStart, deleteStart), /await draftMutations\.acquireAction/);
+  assert.match(source.slice(scheduleStart, deleteStart), /releaseDraftAction\?\.\(\)/);
   assert.match(source.slice(deleteStart, actionStart), /draftMutations\.enqueueDelete/);
+  assert.equal(
+    (source.slice(source.indexOf("const saveCurrentDraft"), actionStart)
+      .match(/composerActionRef\.current\?\.threadId === targetThreadId/g) ?? []).length,
+    2
+  );
+  assert.equal((source.match(/disabled=\{sending \|\| scheduling\}/g) ?? []).length, 2);
+  assert.match(source.slice(actionStart), /label: "Save draft",\s*disabled: sending \|\| scheduling/);
+  assert.match(source.slice(actionStart), /label: "Delete draft",[\s\S]*?disabled: sending \|\| scheduling/);
   assert.equal((source.match(/deleteCurrentDraft\(\)/g) ?? []).length, 2);
   assert.match(source, /draftRevisionForComposerSend\(/);
   assert.match(source, /draftMutations\.consumeRevision/);
@@ -261,6 +294,15 @@ test("a still-pending send retains attachment bytes for a later definite failure
   const waiting = source.slice(start, end);
   assert.doesNotMatch(waiting, /composerAttachmentStore[\s\S]*?\.remove/);
   assert.doesNotMatch(waiting, /attachments:\s*\[\]/);
+});
+
+test("terminal cleanup preserves attachment ids owned by a newer composer generation", () => {
+  assert.equal(
+    (source.match(/removableThreadComposerAttachmentIds\(/g) ?? []).length >= 2,
+    true
+  );
+  assert.match(source, /composerIntentRef\.current\.attachments/);
+  assert.match(source, /activeAttachmentIds\.has\(attachment\.id\)/);
 });
 
 test("partial attachment recovery stays visible and blocks an incomplete send", () => {

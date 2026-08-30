@@ -12,6 +12,11 @@ export interface LatestRequestGate {
   isLatest(token: number): boolean;
 }
 
+export interface LatestKeyedRequestGate<Key> {
+  next(key: Key): number;
+  isLatest(key: Key, token: number): boolean;
+}
+
 export function createLatestRequestGate(): LatestRequestGate {
   let latest = 0;
   return {
@@ -21,6 +26,20 @@ export function createLatestRequestGate(): LatestRequestGate {
     },
     isLatest(token: number): boolean {
       return token === latest;
+    },
+  };
+}
+
+export function createLatestKeyedRequestGate<Key = string>(): LatestKeyedRequestGate<Key> {
+  const latestByKey = new Map<Key, number>();
+  return {
+    next(key: Key): number {
+      const token = (latestByKey.get(key) ?? 0) + 1;
+      latestByKey.set(key, token);
+      return token;
+    },
+    isLatest(key: Key, token: number): boolean {
+      return latestByKey.get(key) === token;
     },
   };
 }

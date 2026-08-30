@@ -4,7 +4,8 @@ import test from "node:test";
 const {
   assertThreadComposerAttachmentsRecoverable,
   createMemoryThreadComposerAttachmentStore,
-  getOrCreateThreadComposerTabId
+  getOrCreateThreadComposerTabId,
+  removableThreadComposerAttachmentIds
 } = await import("../apps/dashboard/lib/thread-composer-attachments.ts");
 
 const descriptor = {
@@ -59,6 +60,16 @@ test("consumed or discarded attachments cannot be recovered", async () => {
   await store.put("thread-a", descriptor, file);
   await store.remove("thread-a", [descriptor.id]);
   assert.deepEqual(await store.read("thread-a", [descriptor]), []);
+});
+
+test("completion preserves attachment bytes still referenced by a newer composer generation", () => {
+  const completed = [descriptor, { ...descriptor, id: "attachment-2" }];
+  const newer = [{ ...descriptor, name: "still-in-the-composer.pdf" }];
+
+  assert.deepEqual(
+    removableThreadComposerAttachmentIds(completed, newer),
+    ["attachment-2"]
+  );
 });
 
 test("external actions wait for a verified recoverable attachment copy", async () => {

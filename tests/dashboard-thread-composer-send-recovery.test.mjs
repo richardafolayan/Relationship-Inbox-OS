@@ -6,6 +6,8 @@ import {
   composerDispatchFailureIsAmbiguous,
   composerNotFoundRecoveryAfterDispatchFailure,
   composerNotFoundRecoveryOnResume,
+  composerIntentForRecovery,
+  composerRecoveryResolution,
   composerReplayPreflight,
   composerSendRecoveryDisposition,
   missingThreadComposerAttachments,
@@ -125,6 +127,52 @@ test("NOT_FOUND replay restores expired schedules and incomplete attachment sets
   );
   assert.equal(composerReplayPreflight(attempt.intent, 0).ok, false);
   assert.deepEqual(composerReplayPreflight(attempt.intent, 1), { ok: true });
+});
+
+test("a future quick-preset schedule restores its exact visible local time", () => {
+  const scheduledFor = "2026-12-15T09:30:00.000Z";
+  const recovered = composerIntentForRecovery(
+    { ...composerIntent, customScheduleValue: "" },
+    "scheduled",
+    scheduledFor,
+    Date.parse("2026-12-15T09:00:00.000Z")
+  );
+  const date = new Date(scheduledFor);
+  const pad = (value) => String(value).padStart(2, "0");
+  const expected = `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+
+  assert.equal(recovered.customScheduleValue, expected);
+});
+
+test("a restored predecessor shares one successor generation and is suppressed after it sends", () => {
+  const restored = {
+    ...attempt.value,
+    resolution: "restored",
+    restoredSessionRevisionId: "successor-session"
+  };
+  assert.deepEqual(
+    composerRecoveryResolution(attempt.value, [restored]),
+    { kind: "restore", sessionRevisionId: "successor-session" }
+  );
+  assert.deepEqual(
+    composerRecoveryResolution(attempt.value, [
+      restored,
+      {
+        ...attempt.value,
+        clientSendId: "successor-send",
+        resolution: "sent",
+        sessionRevisionId: "successor-session"
+      }
+    ]),
+    { kind: "sent", sessionRevisionId: "successor-session" }
+  );
+  assert.deepEqual(
+    composerRecoveryResolution(attempt.value, [
+      restored,
+      { ...attempt.value, resolution: "sent" }
+    ]),
+    { kind: "sent", sessionRevisionId: attempt.value.sessionRevisionId }
+  );
 });
 
 test("dispatch failures stay unresolved when the response can follow durable insertion", () => {

@@ -29,7 +29,9 @@ export interface ThreadComposerSendAttemptValue {
   attemptKind?: ThreadComposerSendAttemptKind;
   clientSendId: string;
   notFoundRecovery?: "blocked" | "replay" | "restore";
+  resolution?: "restored" | "sent";
   requestedAt: string;
+  restoredSessionRevisionId?: string;
   scheduledFor?: string | null;
   sessionRevision: number;
   sessionRevisionId?: string;
@@ -110,9 +112,19 @@ export function normalizeThreadComposerSendAttempt(
       rawValue.notFoundRecovery === "replay" ||
       rawValue.notFoundRecovery === "restore"
     ) ||
+    !(
+      rawValue.resolution === undefined ||
+      rawValue.resolution === "restored" ||
+      rawValue.resolution === "sent"
+    ) ||
     typeof rawValue.clientSendId !== "string" ||
     !rawValue.clientSendId ||
     !validIsoDate(rawValue.requestedAt) ||
+    !(
+      rawValue.restoredSessionRevisionId === undefined ||
+      (typeof rawValue.restoredSessionRevisionId === "string" &&
+        rawValue.restoredSessionRevisionId)
+    ) ||
     !(
       rawValue.scheduledFor === undefined ||
       rawValue.scheduledFor === null ||
@@ -153,7 +165,13 @@ export function normalizeThreadComposerSendAttempt(
       rawValue.notFoundRecovery === "restore"
         ? { notFoundRecovery: rawValue.notFoundRecovery }
         : {}),
+      ...(rawValue.resolution === "restored" || rawValue.resolution === "sent"
+        ? { resolution: rawValue.resolution }
+        : {}),
       requestedAt: rawValue.requestedAt,
+      ...(typeof rawValue.restoredSessionRevisionId === "string"
+        ? { restoredSessionRevisionId: rawValue.restoredSessionRevisionId }
+        : {}),
       ...(rawValue.scheduledFor === null || validIsoDate(rawValue.scheduledFor)
         ? { scheduledFor: rawValue.scheduledFor }
         : {}),
@@ -163,6 +181,61 @@ export function normalizeThreadComposerSendAttempt(
         : {})
     }
   };
+}
+
+function toLocalScheduleValue(iso: string): string {
+  const date = new Date(iso);
+  const pad = (value: number) => value.toString().padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+export function composerIntentForRecovery(
+  intent: ThreadComposerIntentDraft,
+  kind: ThreadComposerSendAttemptKind,
+  scheduledFor: string | null | undefined,
+  now = Date.now()
+): ThreadComposerIntentDraft {
+  if (
+    kind !== "scheduled" ||
+    !scheduledFor ||
+    !validIsoDate(scheduledFor) ||
+    Date.parse(scheduledFor) <= now
+  ) {
+    return intent;
+  }
+  return { ...intent, customScheduleValue: toLocalScheduleValue(scheduledFor) };
+}
+
+export function composerRecoveryResolution(
+  pending: ThreadComposerSendAttemptValue,
+  completed: ThreadComposerSendAttemptValue[]
+):
+  | { kind: "restore"; sessionRevisionId: string }
+  | { kind: "sent"; sessionRevisionId?: string }
+  | null {
+  const directValues = completed.filter(
+    (value) => value.clientSendId === pending.clientSendId
+  );
+  const directSent = directValues.find((value) => value.resolution !== "restored");
+  if (directSent) {
+    return {
+      kind: "sent",
+      ...(directSent.sessionRevisionId
+        ? { sessionRevisionId: directSent.sessionRevisionId }
+        : {})
+    };
+  }
+  const direct = directValues.find((value) => value.resolution === "restored");
+  if (!direct) return null;
+  if (!direct.restoredSessionRevisionId) return null;
+  const successorSent = completed.some(
+    (value) =>
+      value.resolution !== "restored" &&
+      value.sessionRevisionId === direct.restoredSessionRevisionId
+  );
+  return successorSent
+    ? { kind: "sent", sessionRevisionId: direct.restoredSessionRevisionId }
+    : { kind: "restore", sessionRevisionId: direct.restoredSessionRevisionId };
 }
 
 export function composerClientSendId(

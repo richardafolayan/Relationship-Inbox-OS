@@ -136,10 +136,20 @@ export function createExternalActionAttemptStore(
     if (!storage) throw new ExternalActionAttemptStorageError();
     const current = readCompletedScopedValues<TValue>(scope);
     const serializedValue = canonicalJson(value);
-    const values = [
+    const nextValues = [
       ...current.filter((candidate) => canonicalJson(candidate) !== serializedValue),
       value
-    ].slice(-100);
+    ];
+    const restorationLineage = nextValues.filter(
+      (candidate) =>
+        candidate &&
+        typeof candidate === "object" &&
+        (candidate as Record<string, unknown>).resolution === "restored"
+    );
+    const recentCompletions = nextValues
+      .filter((candidate) => !restorationLineage.includes(candidate))
+      .slice(-100);
+    const values = [...restorationLineage, ...recentCompletions];
     const serialized = JSON.stringify({ version: 1, values });
     try {
       storage.setItem(completedStorageKey(scope), serialized);
@@ -398,7 +408,8 @@ export function createExternalActionAttemptStore(
   async function completeScopedValue<TValue>(
     scope: string,
     matches: (value: TValue) => boolean,
-    retainCompletedValue = false
+    retainCompletedValue = false,
+    completedValue?: TValue
   ): Promise<boolean> {
     return withScopeLock(scope, async () => {
       const key = valueStorageKey(scope);
@@ -406,7 +417,7 @@ export function createExternalActionAttemptStore(
       const pinned = readPinnedOperation(scope);
       if (pinned && matches(pinned.value as TValue)) {
         if (retainCompletedValue) {
-          appendCompletedScopedValue(scope, pinned.value as TValue);
+          appendCompletedScopedValue(scope, completedValue ?? pinned.value as TValue);
         }
         if (record && canonicalJson(record.value) === canonicalJson(pinned.value)) {
           removeRecord(key);
@@ -415,7 +426,9 @@ export function createExternalActionAttemptStore(
         return true;
       }
       if (!record || !matches(record.value)) return false;
-      if (retainCompletedValue) appendCompletedScopedValue(scope, record.value);
+      if (retainCompletedValue) {
+        appendCompletedScopedValue(scope, completedValue ?? record.value);
+      }
       removeRecord(key);
       return true;
     });
@@ -424,18 +437,37 @@ export function createExternalActionAttemptStore(
   async function compareAndCompleteScopedValue<TValue>(
     scope: string,
     matches: (value: TValue) => boolean,
-    retainCompletedValue = false
+    retainCompletedValue = false,
+    completedValue?: TValue
   ): Promise<boolean> {
     return withScopeLock(scope, async () => {
       const key = valueStorageKey(scope);
       const record = readRecord<unknown, TValue>(key);
       if (!record || !matches(record.value)) return false;
-      if (retainCompletedValue) appendCompletedScopedValue(scope, record.value);
+      if (retainCompletedValue) {
+        appendCompletedScopedValue(scope, completedValue ?? record.value);
+      }
       removeRecord(key);
       const pinned = readPinnedOperation(scope);
       if (pinned && canonicalJson(pinned.value) === canonicalJson(record.value)) {
         removePinnedOperation(scope);
       }
+      return true;
+    });
+  }
+
+  async function completeReleasedScopedValue<TValue>(
+    scope: string,
+    matches: (value: TValue) => boolean,
+    completedValue: TValue
+  ): Promise<boolean> {
+    return withScopeLock(scope, async () => {
+      const key = valueStorageKey(scope);
+      if (readRecord<unknown, TValue>(key)) return false;
+      if (readCompletedScopedValues<TValue>(scope).some(matches)) return false;
+      appendCompletedScopedValue(scope, completedValue);
+      const pinned = readPinnedOperation(scope);
+      if (pinned && matches(pinned.value as TValue)) removePinnedOperation(scope);
       return true;
     });
   }
@@ -452,6 +484,7 @@ export function createExternalActionAttemptStore(
   return {
     compareAndCompleteScopedValue,
     compareAndReplaceScopedValue,
+    completeReleasedScopedValue,
     getOrCreateScopedValue,
     replaceScopedValue,
     completeScopedValue,

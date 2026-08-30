@@ -70,7 +70,8 @@ function createLegacySendRequestTable(database) {
       clientSendId TEXT NOT NULL,
       threadId TEXT NOT NULL,
       status TEXT NOT NULL DEFAULT 'PENDING',
-      requestText TEXT NOT NULL
+      requestText TEXT NOT NULL,
+      draftConsumed BOOLEAN NOT NULL DEFAULT false
     )
   `);
 }
@@ -669,9 +670,11 @@ test("database-only retries a pending verified restore before schema checks", ()
     let database = new Database(databasePath);
     createLegacyDraftTable(database);
     database.exec('CREATE UNIQUE INDEX "drafts_threadId_key" ON "drafts"("threadId")');
+    createLegacySendRequestTable(database);
     database.exec("CREATE TABLE pilot (id TEXT PRIMARY KEY)");
     database.prepare("INSERT INTO pilot (id) VALUES ('preserved')").run();
     database.close();
+    runRepair(databasePath);
 
     const backupPath = join(directory, "backups", "verified.sqlite");
     mkdirSync(join(directory, "backups"), { recursive: true });

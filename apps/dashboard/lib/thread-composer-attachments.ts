@@ -36,6 +36,16 @@ export async function assertThreadComposerAttachmentsRecoverable(
   }
 }
 
+export function removableThreadComposerAttachmentIds(
+  completed: ThreadComposerAttachmentDescriptor[],
+  preserved: ThreadComposerAttachmentDescriptor[]
+): string[] {
+  const preservedIds = new Set(preserved.map((attachment) => attachment.id));
+  return completed
+    .map((attachment) => attachment.id)
+    .filter((attachmentId) => !preservedIds.has(attachmentId));
+}
+
 interface PersistedAttachmentRecord extends ThreadComposerAttachmentDescriptor {
   blob: Blob;
   key: string;

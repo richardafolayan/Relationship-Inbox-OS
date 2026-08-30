@@ -119,6 +119,36 @@ export function createDraftMutationBarrier() {
     return state.latest;
   }
 
+  async function acquireAction(
+    threadId: string,
+    fallback: DraftRevision
+  ): Promise<{ release: () => void; revision: DraftRevision }> {
+    const state = stateFor(threadId);
+    let releaseHold: () => void = () => undefined;
+    const hold = new Promise<void>((resolve) => {
+      releaseHold = resolve;
+    });
+    const acquired = state.tail.then(() => {
+      if (state.uncertain) throw new DraftMutationUncertainError();
+      if (!state.hasLatest) {
+        state.hasLatest = true;
+        state.latest = fallback;
+      }
+      return state.latest;
+    });
+    state.tail = acquired.then(() => hold, () => undefined);
+    const revision = await acquired;
+    let released = false;
+    return {
+      release() {
+        if (released) return;
+        released = true;
+        releaseHold();
+      },
+      revision
+    };
+  }
+
   function generation(threadId: string): number {
     return stateFor(threadId).generation;
   }
@@ -183,6 +213,7 @@ export function createDraftMutationBarrier() {
   }
 
   return {
+    acquireAction,
     consumeRevision,
     enqueueDelete,
     enqueueSave,
