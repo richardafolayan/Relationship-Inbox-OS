@@ -24,6 +24,29 @@ const focusSettingsStore = {
   }
 };
 
+function focusPrisma(onCreate) {
+  const prisma = {
+    thread: {
+      findUnique: async () => ({
+        id: "thread-1",
+        personId,
+        platform: "LINKEDIN",
+        userIntentVersion: 0
+      })
+    },
+    sendRequest: {
+      findUnique: async () => null,
+      findFirst: async () => null,
+      create: async ({ data }) => {
+        onCreate(data);
+        return data;
+      }
+    }
+  };
+  prisma.$transaction = async (work) => work(prisma);
+  return prisma;
+}
+
 test("persisted provenance accepts only known send sources", () => {
   assert.equal(parsePersistedSendSource("manual"), "manual");
   assert.equal(parsePersistedSendSource("focus_ack"), "focus_ack");
@@ -42,24 +65,9 @@ test("enqueue persists auto-ack provenance for the worker safety boundary", asyn
     auditLog: async () => "audit-id",
     withExternalActionLock: async (_platform, work) => work(),
     withPlatformLock: async (_platform, work) => work(),
-    prisma: {
-      thread: {
-        findUnique: async () => ({
-          id: "thread-1",
-          personId,
-          platform: "LINKEDIN",
-          userIntentVersion: 0
-        })
-      },
-      sendRequest: {
-        findUnique: async () => null,
-        findFirst: async () => null,
-        create: async ({ data }) => {
-          created = data;
-          return data;
-        }
-      }
-    }
+    prisma: focusPrisma((data) => {
+      created = data;
+    })
   });
 
   await service.enqueueSend({
@@ -83,24 +91,9 @@ test("enqueue persists user-triggered focus provenance instead of disguising it 
     auditLog: async () => "audit-id",
     withExternalActionLock: async (_platform, work) => work(),
     withPlatformLock: async (_platform, work) => work(),
-    prisma: {
-      thread: {
-        findUnique: async () => ({
-          id: "thread-1",
-          personId,
-          platform: "LINKEDIN",
-          userIntentVersion: 0
-        })
-      },
-      sendRequest: {
-        findUnique: async () => null,
-        findFirst: async () => null,
-        create: async ({ data }) => {
-          created = data;
-          return data;
-        }
-      }
-    }
+    prisma: focusPrisma((data) => {
+      created = data;
+    })
   });
 
   await service.enqueueSend({
