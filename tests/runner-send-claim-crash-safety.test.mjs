@@ -286,12 +286,12 @@ function makeHarness(initialRows, opts = {}) {
               ackedPersonIds: [],
               audience: "favourites",
               note: "I am focusing until [until].",
-              professionalNote: "I am focusing until [until].",
+              professionalNote: "I am focusing until 2:00pm.",
               reason: "deep work"
             },
             ackTemplates: {
               close: "I am focusing until [until].",
-              professional: "I am focusing until [until]."
+              professional: "I am focusing until 2:00pm."
             },
             focusSettings: { reasonLabel: false }
           };
