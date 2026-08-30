@@ -5,6 +5,7 @@ const {
   assertThreadComposerAttachmentsRecoverable,
   createMemoryThreadComposerAttachmentStore,
   getOrCreateThreadComposerTabId,
+  prepareThreadComposerAttachmentOwnershipHandoff,
   reconcileThreadComposerAttachmentOwnership,
   removableThreadComposerAttachmentIds,
   __test
@@ -153,6 +154,108 @@ test("the stale sweep revisits a released blob after its quarantine expires", as
   await store.purgeStale();
 
   assert.deepEqual(await store.read("thread-a", [descriptor]), []);
+});
+
+test("the memory store expires stale owners with IndexedDB parity", async () => {
+  let now = 1_000;
+  const store = createMemoryThreadComposerAttachmentStore("tab-a", () => now);
+  const file = new File(["pilot attachment"], descriptor.name, {
+    lastModified: descriptor.lastModified,
+    type: descriptor.type
+  });
+  await store.put("thread-a", descriptor, file);
+  await store.claimOwnership("thread-a", [descriptor.id], "session-x");
+
+  now += __test.STALE_AFTER_MS + 1;
+  await store.purgeStale();
+
+  assert.deepEqual(await store.read("thread-a", [descriptor]), []);
+});
+
+test("a recovery handoff claims its successor before releasing its predecessor", async () => {
+  let now = 1_000;
+  const store = createMemoryThreadComposerAttachmentStore("tab-a", () => now);
+  const file = new File(["pilot attachment"], descriptor.name, {
+    lastModified: descriptor.lastModified,
+    type: descriptor.type
+  });
+  const calls = [];
+  let allowSuccessorClaim;
+  const successorClaimAllowed = new Promise((resolve) => {
+    allowSuccessorClaim = resolve;
+  });
+  let markSuccessorClaimStarted;
+  const successorClaimStarted = new Promise((resolve) => {
+    markSuccessorClaimStarted = resolve;
+  });
+  const observedStore = {
+    ...store,
+    async claimOwnership(...args) {
+      calls.push(`claim:${args[2]}`);
+      if (args[2] === "session-y") {
+        markSuccessorClaimStarted();
+        await successorClaimAllowed;
+      }
+      await store.claimOwnership(...args);
+    },
+    async releaseOwnership(...args) {
+      calls.push(`release:${args[1]}`);
+      await store.releaseOwnership(...args);
+    }
+  };
+  await store.put("thread-a", descriptor, file);
+  await store.claimOwnership("thread-a", [descriptor.id], "session-x");
+  now += __test.STALE_AFTER_MS + 1;
+  await store.claimOwnership("thread-a", [descriptor.id], "session-x");
+
+  const preparing = prepareThreadComposerAttachmentOwnershipHandoff(
+    observedStore,
+    "thread-a",
+    [descriptor.id],
+    "session-x",
+    "session-y",
+    "tab-a"
+  );
+  await successorClaimStarted;
+  assert.deepEqual(calls, ["claim:session-y"]);
+  await store.purgeStale();
+  assert.equal((await store.read("thread-a", [descriptor])).length, 1);
+
+  allowSuccessorClaim();
+  const handoff = await preparing;
+  assert.deepEqual(calls, ["claim:session-y"]);
+  await handoff.commit();
+  assert.deepEqual(calls, ["claim:session-y", "release:session-x"]);
+  await store.purgeStale();
+  assert.equal((await store.read("thread-a", [descriptor])).length, 1);
+});
+
+test("rolling back an unpublished recovery releases only its speculative successor", async () => {
+  const store = createMemoryThreadComposerAttachmentStore("tab-a");
+  const calls = [];
+  const observedStore = {
+    ...store,
+    async claimOwnership(...args) {
+      calls.push(`claim:${args[2]}`);
+      await store.claimOwnership(...args);
+    },
+    async releaseOwnership(...args) {
+      calls.push(`release:${args[1]}`);
+      await store.releaseOwnership(...args);
+    }
+  };
+  const handoff = await prepareThreadComposerAttachmentOwnershipHandoff(
+    observedStore,
+    "thread-a",
+    [descriptor.id],
+    "session-x",
+    "session-y",
+    "tab-a"
+  );
+
+  await handoff.rollback();
+
+  assert.deepEqual(calls, ["claim:session-y", "release:session-y"]);
 });
 
 test("an inactive copied-tab lease is released after its shared send completes", async () => {

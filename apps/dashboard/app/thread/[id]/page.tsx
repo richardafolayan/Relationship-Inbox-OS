@@ -150,6 +150,7 @@ import { chooseDisplayBrief } from "@/lib/reply-brief";
 import {
   assertThreadComposerAttachmentsRecoverable,
   defaultThreadComposerAttachmentStore,
+  prepareThreadComposerAttachmentOwnershipHandoff,
   reconcileThreadComposerAttachmentOwnership,
   removableThreadComposerAttachmentIds,
   type ThreadComposerAttachmentOwnership,
@@ -1406,46 +1407,6 @@ export default function ThreadPage() {
       return "blocked" as const;
     }
   }, [externalActionAttempts]);
-  useEffect(() => {
-    const purgeStaleAttachments = () => {
-      void (async () => {
-        const ownership = [...attachmentOwnershipRef.current.entries()];
-        for (const [ownerThreadId, value] of ownership) {
-          const result = await reconcileThreadComposerAttachmentOwnership(
-            composerAttachmentStore,
-            ownerThreadId,
-            value,
-            () => inspectThreadComposerSession(ownerThreadId),
-            (session) => composerSessionDisposition(ownerThreadId, session),
-            () => attachmentOwnershipRef.current.get(ownerThreadId)?.ownerId === value.ownerId
-          );
-          if (
-            result === "released" &&
-            attachmentOwnershipRef.current.get(ownerThreadId)?.ownerId === value.ownerId
-          ) {
-            attachmentOwnershipRef.current.delete(ownerThreadId);
-            attachmentOwnershipBarrierRef.current.delete(ownerThreadId);
-          }
-        }
-        await composerAttachmentStore.purgeStale();
-      })().catch(() => undefined);
-    };
-    const purgeWhenVisible = () => {
-      if (document.visibilityState === "visible") purgeStaleAttachments();
-    };
-    purgeStaleAttachments();
-    const interval = window.setInterval(
-      purgeStaleAttachments,
-      6 * 60 * 60 * 1000
-    );
-    window.addEventListener("focus", purgeStaleAttachments);
-    document.addEventListener("visibilitychange", purgeWhenVisible);
-    return () => {
-      window.clearInterval(interval);
-      window.removeEventListener("focus", purgeStaleAttachments);
-      document.removeEventListener("visibilitychange", purgeWhenVisible);
-    };
-  }, [composerAttachmentStore, composerSessionDisposition]);
   const persistComposerSession = useCallback((
     ownerThreadId: string,
     intent: ThreadComposerIntentDraft,
@@ -2202,6 +2163,44 @@ export default function ThreadPage() {
     composerSessionPresentRef.current = Boolean(
       storedSession && !sessionHiddenByCompletedSend
     );
+    if (storedSession && !sessionHiddenByCompletedSend) {
+      const previousOwnership = attachmentOwnershipRef.current.get(threadId);
+      const namespace = hiddenByPendingAttempt
+        ? pendingAttempt?.value.attachmentNamespace ?? composerAttachmentStore.namespace
+        : composerAttachmentStore.namespace;
+      const ownership: ThreadComposerAttachmentOwnership = {
+        attachmentIds: storedSession.attachments.map((attachment) => attachment.id),
+        namespace,
+        ownerId: storedSession.revisionId,
+        revisionId: storedSession.revisionId
+      };
+      attachmentOwnershipRef.current.set(threadId, ownership);
+      const ownershipPromise = composerAttachmentStore
+        .claimOwnership(
+          threadId,
+          ownership.attachmentIds,
+          ownership.ownerId,
+          ownership.namespace
+        )
+        .then(async () => {
+          if (!previousOwnership || previousOwnership.ownerId === ownership.ownerId) return;
+          await composerAttachmentStore.releaseOwnership(
+            threadId,
+            previousOwnership.ownerId,
+            previousOwnership.namespace
+          );
+          await composerAttachmentStore.removeUnowned(
+            threadId,
+            previousOwnership.attachmentIds,
+            previousOwnership.namespace
+          );
+        });
+      attachmentOwnershipBarrierRef.current.set(threadId, {
+        promise: ownershipPromise,
+        revisionId: ownership.revisionId
+      });
+      void ownershipPromise.catch(() => undefined);
+    }
     composerRestoreRef.current = { intent: restoredIntent, threadId };
     composerIntentRef.current = restoredIntent;
     if (!recoveryBlocked) clearComposerRecoveryBlock();
@@ -2343,6 +2342,23 @@ export default function ThreadPage() {
     ) {
       return;
     }
+    const acceptedRevisionId = acceptedComposerSessionIdsRef.current.get(threadId);
+    const acceptedSession = acceptedRevisionId
+      ? readThreadComposerSession(threadId)
+      : null;
+    const emptyIntent: ThreadComposerIntentDraft = {
+      attachments: [],
+      customScheduleValue: "",
+      replyToMessageId: null,
+      source: "empty",
+      text: ""
+    };
+    if (
+      acceptedSession?.revisionId === acceptedRevisionId &&
+      sameThreadComposerIntent(composerIntentRef.current, emptyIntent)
+    ) {
+      return;
+    }
     const restoring = composerRestoreRef.current;
     if (
       restoring?.threadId === threadId &&
@@ -2367,6 +2383,47 @@ export default function ThreadPage() {
     persistComposerSession,
     threadId
   ]);
+
+  useEffect(() => {
+    const purgeStaleAttachments = () => {
+      void (async () => {
+        const ownership = [...attachmentOwnershipRef.current.entries()];
+        for (const [ownerThreadId, value] of ownership) {
+          const result = await reconcileThreadComposerAttachmentOwnership(
+            composerAttachmentStore,
+            ownerThreadId,
+            value,
+            () => inspectThreadComposerSession(ownerThreadId),
+            (session) => composerSessionDisposition(ownerThreadId, session),
+            () => attachmentOwnershipRef.current.get(ownerThreadId)?.ownerId === value.ownerId
+          );
+          if (
+            result === "released" &&
+            attachmentOwnershipRef.current.get(ownerThreadId)?.ownerId === value.ownerId
+          ) {
+            attachmentOwnershipRef.current.delete(ownerThreadId);
+            attachmentOwnershipBarrierRef.current.delete(ownerThreadId);
+          }
+        }
+        await composerAttachmentStore.purgeStale();
+      })().catch(() => undefined);
+    };
+    const purgeWhenVisible = () => {
+      if (document.visibilityState === "visible") purgeStaleAttachments();
+    };
+    purgeStaleAttachments();
+    const interval = window.setInterval(
+      purgeStaleAttachments,
+      6 * 60 * 60 * 1000
+    );
+    window.addEventListener("focus", purgeStaleAttachments);
+    document.addEventListener("visibilitychange", purgeWhenVisible);
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener("focus", purgeStaleAttachments);
+      document.removeEventListener("visibilitychange", purgeWhenVisible);
+    };
+  }, [composerAttachmentStore, composerSessionDisposition]);
 
   useEffect(() => {
     const preserveComposer = () => {
@@ -2689,22 +2746,60 @@ export default function ThreadPage() {
         resolution: "restored",
         restoredSessionRevisionId: proposedRevisionId
       };
+      const attachmentIds = pending.composerIntent.attachments.map(
+        (attachment) => attachment.id
+      );
+      if (attachmentIds.length > 0 && !pending.sessionRevisionId) {
+        showPendingError(
+          "Tovi could not safely identify this reply's recovered attachments. Reload before trying again."
+        );
+        return;
+      }
+      const predecessorOwnerId = pending.sessionRevisionId ?? proposedRevisionId;
+      const attachmentNamespace =
+        pending.attachmentNamespace ?? composerAttachmentStore.namespace;
+      let ownershipHandoff: Awaited<ReturnType<
+        typeof prepareThreadComposerAttachmentOwnershipHandoff
+      >> | null = null;
       let recoverySessionRevisionId: string | null = null;
+      let releaseStateUnknown = false;
       if (!options.recordAlreadyReleased) {
-        const released = await externalActionAttempts
-          .compareAndCompleteScopedValue<ThreadComposerSendAttemptValue>(
+        try {
+          ownershipHandoff = await prepareThreadComposerAttachmentOwnershipHandoff(
+            composerAttachmentStore,
+            pending.threadId,
+            attachmentIds,
+            predecessorOwnerId,
+            proposedRevisionId,
+            attachmentNamespace
+          );
+        } catch {
+          showPendingError(
+            "Tovi could not safely preserve this reply's attachments for recovery. Reload before trying again."
+          );
+          return;
+        }
+        let released = false;
+        try {
+          released = await externalActionAttempts.compareAndCompleteScopedValue<ThreadComposerSendAttemptValue>(
             scope,
             (value) =>
               value.clientSendId === pending.clientSendId &&
               value.notFoundRecovery === pending.notFoundRecovery,
             true,
             restoredTombstone
-          )
-          .catch(() => false);
-        if (released) recoverySessionRevisionId = proposedRevisionId;
+          );
+        } catch {
+          releaseStateUnknown = true;
+        }
+        if (released) {
+          recoverySessionRevisionId = proposedRevisionId;
+          await ownershipHandoff.commit().catch(() => undefined);
+        }
       }
       if (!recoverySessionRevisionId) {
         let resolution: ReturnType<typeof composerRecoveryResolution> = null;
+        let resolutionStateUnknown = false;
         const readResolution = () => composerRecoveryResolution(
           pendingValue,
           externalActionAttempts.readCompletedScopedValues<ThreadComposerSendAttemptValue>(
@@ -2714,11 +2809,12 @@ export default function ThreadPage() {
         try {
           resolution = readResolution();
         } catch {
-          resolution = null;
+          resolutionStateUnknown = true;
         }
         if (recoverySessionRevisionId) {
           resolution = null;
         } else if (resolution?.kind === "sent") {
+          await ownershipHandoff?.rollback().catch(() => undefined);
           const storedSession = readThreadComposerSession(pending.threadId);
           if (
             storedSession &&
@@ -2738,7 +2834,35 @@ export default function ThreadPage() {
           return;
         } else if (resolution?.kind === "restore") {
           recoverySessionRevisionId = resolution.sessionRevisionId;
+          if (recoverySessionRevisionId === proposedRevisionId && ownershipHandoff) {
+            await ownershipHandoff.commit().catch(() => undefined);
+          } else {
+            let resolvedHandoff: Awaited<ReturnType<
+              typeof prepareThreadComposerAttachmentOwnershipHandoff
+            >>;
+            try {
+              resolvedHandoff = await prepareThreadComposerAttachmentOwnershipHandoff(
+                composerAttachmentStore,
+                pending.threadId,
+                attachmentIds,
+                predecessorOwnerId,
+                recoverySessionRevisionId,
+                attachmentNamespace
+              );
+            } catch {
+              showPendingError(
+                "Tovi could not safely preserve this reply's attachments for recovery. Reload before trying again."
+              );
+              return;
+            }
+            await resolvedHandoff.commit().catch(() => undefined);
+            await ownershipHandoff?.rollback().catch(() => undefined);
+            ownershipHandoff = resolvedHandoff;
+          }
         } else {
+          if (!releaseStateUnknown && !resolutionStateUnknown) {
+            await ownershipHandoff?.rollback().catch(() => undefined);
+          }
           showPendingError("Tovi could not safely release the failed send because it changed in another window. Reload before trying again.");
           return;
         }
@@ -2781,7 +2905,7 @@ export default function ThreadPage() {
       );
       showPendingError(message);
     },
-    [externalActionAttempts]
+    [composerAttachmentStore, externalActionAttempts]
   );
 
   const clearCapturedComposerAfterAcceptedAction = useCallback((pending: PendingSend) => {

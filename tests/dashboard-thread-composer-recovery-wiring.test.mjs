@@ -7,6 +7,10 @@ const source = readFileSync(
   fileURLToPath(new URL("../apps/dashboard/app/thread/[id]/page.tsx", import.meta.url)),
   "utf8"
 );
+const attachmentStoreSource = readFileSync(
+  fileURLToPath(new URL("../apps/dashboard/lib/thread-composer-attachments.ts", import.meta.url)),
+  "utf8"
+);
 
 test("thread navigation snapshots the previous full intent and restores only the new thread", () => {
   const start = source.indexOf("useLayoutEffect(() => {");
@@ -161,6 +165,35 @@ test("attachment quarantine is swept again while a thread stays open", () => {
   assert.match(source, /inspectThreadComposerSession\(ownerThreadId\)/);
   assert.match(source, /attachmentOwnershipRef\.current\.delete\(ownerThreadId\)/);
   assert.match(source, /result === "released"/);
+});
+
+test("startup refreshes restored leases before the first stale purge", () => {
+  assert.doesNotMatch(attachmentStoreSource, /void purgeStale\(\)\.catch/);
+  const persistence = source.indexOf("const saved = persistComposerSession(", 0);
+  const sweep = source.indexOf("const purgeStaleAttachments = () =>");
+  assert.notEqual(persistence, -1);
+  assert.notEqual(sweep, -1);
+  assert.ok(persistence < sweep);
+  const lifecycleStart = source.indexOf("useLayoutEffect(() => {");
+  const lifecycleEnd = source.indexOf("useEffect(() => {", lifecycleStart);
+  const lifecycle = source.slice(lifecycleStart, lifecycleEnd);
+  const lease = lifecycle.indexOf("attachmentOwnershipRef.current.set(threadId");
+  const hydration = lifecycle.indexOf("composerAttachmentStore\n        .read(threadId");
+  assert.ok(lease !== -1 && lease < hydration);
+  assert.match(lifecycle, /pendingAttempt\?\.value\.attachmentNamespace/);
+});
+
+test("failed-send recovery claims the successor lease before publishing its tombstone", () => {
+  const start = source.indexOf("const restorePendingComposerSend = useCallback(");
+  const end = source.indexOf("const clearCapturedComposerAfterAcceptedAction", start);
+  const restore = source.slice(start, end);
+  const prepare = restore.indexOf("prepareThreadComposerAttachmentOwnershipHandoff(");
+  const publish = restore.indexOf("compareAndCompleteScopedValue<ThreadComposerSendAttemptValue>");
+  const commit = restore.indexOf("ownershipHandoff.commit()");
+  assert.ok(prepare !== -1 && prepare < publish);
+  assert.ok(commit > publish);
+  assert.doesNotMatch(restore, /compareAndCompleteScopedValue<[\s\S]*?\.catch\(\(\) => false\)/);
+  assert.match(restore, /if \(!releaseStateUnknown && !resolutionStateUnknown\)/);
 });
 
 test("editing an unverifiable recovery clears its matching block notice", () => {

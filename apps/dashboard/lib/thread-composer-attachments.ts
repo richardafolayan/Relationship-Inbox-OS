@@ -42,6 +42,35 @@ export interface ThreadComposerAttachmentOwnership {
   revisionId: string;
 }
 
+export interface PreparedThreadComposerAttachmentOwnershipHandoff {
+  commit(): Promise<void>;
+  rollback(): Promise<void>;
+}
+
+export async function prepareThreadComposerAttachmentOwnershipHandoff(
+  store: ThreadComposerAttachmentStore,
+  threadId: string,
+  attachmentIds: string[],
+  predecessorOwnerId: string,
+  successorOwnerId: string,
+  namespace: string
+): Promise<PreparedThreadComposerAttachmentOwnershipHandoff> {
+  await store.claimOwnership(threadId, attachmentIds, successorOwnerId, namespace);
+  let settled: "committed" | "rolled_back" | null = null;
+  return {
+    async commit() {
+      if (settled) return;
+      await store.releaseOwnership(threadId, predecessorOwnerId, namespace);
+      settled = "committed";
+    },
+    async rollback() {
+      if (settled) return;
+      await store.releaseOwnership(threadId, successorOwnerId, namespace);
+      settled = "rolled_back";
+    }
+  };
+}
+
 type ThreadComposerSessionDisposition = "active" | "blocked" | "sent" | "superseded";
 
 export async function reconcileThreadComposerAttachmentOwnership(
@@ -307,8 +336,6 @@ export function createIndexedDbThreadComposerAttachmentStore(
     };
     await transactionComplete(transaction);
   };
-  void purgeStale().catch(() => undefined);
-
   return {
     namespace: tabId,
     purgeStale,
@@ -426,9 +453,15 @@ export function createMemoryThreadComposerAttachmentStore(
   now: () => number = Date.now
 ): ThreadComposerAttachmentStore {
   const records = new Map<string, PersistedAttachmentRecord>();
-  const owners = new Map<string, Set<string>>();
+  const owners = new Map<string, Map<string, number>>();
   const purgeStale = async () => {
     const staleBefore = now() - STALE_AFTER_MS;
+    for (const [key, current] of owners) {
+      for (const [ownerKey, updatedAt] of current) {
+        if (updatedAt < staleBefore) current.delete(ownerKey);
+      }
+      if (current.size === 0) owners.delete(key);
+    }
     for (const [key, record] of records) {
       if (record.updatedAt < staleBefore && (owners.get(key)?.size ?? 0) === 0) {
         records.delete(key);
@@ -441,8 +474,8 @@ export function createMemoryThreadComposerAttachmentStore(
     async claimOwnership(threadId, attachmentIds, ownerId, targetNamespace = namespace) {
       for (const attachmentId of attachmentIds) {
         const key = attachmentKey(targetNamespace, threadId, attachmentId);
-        const current = owners.get(key) ?? new Set<string>();
-        current.add(attachmentOwnerKey(targetNamespace, threadId, ownerId));
+        const current = owners.get(key) ?? new Map<string, number>();
+        current.set(attachmentOwnerKey(targetNamespace, threadId, ownerId), now());
         owners.set(key, current);
       }
     },
