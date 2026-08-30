@@ -63,7 +63,7 @@ wrong. Fetch first, then compare the live refs.
 
 - Active corrective branch: `fix/external-action-safety-final`.
 - Base: merged Instagram integration on `develop` at `905103e8`.
-- Latest verified code commit: `85b0ef20`.
+- Latest verified code commit: `de071077`.
 - The broad `chore/full-product-hardening` branch remains audit evidence and is
   not an integration branch.
 - The corrective branch prevents a focus acknowledgement from overtaking newer
@@ -76,13 +76,14 @@ wrong. Fetch first, then compare the live refs.
   completed edit.
 - Legacy database upgrade coverage verifies creation of the durable external
   action table alongside the existing deterministic Draft repair.
-- The third adversarial pass reopened pending focus replay, claimed auto-note,
-  policy-blocked recovery, and repeated completed-action semantics. Commit
-  `85b0ef20` preserves the original durable intent fence, keeps claimed automatic
-  acknowledgements out of the manual identity, allows only a fresh manual action
-  to re-arm a safely blocked note, and gives a later identical action a fresh ID
-  without duplicating a stale in-flight tab.
-- The complete repository suite passes under Node 20.20.0: 3,204 tests, zero
+- The adversarial passes reopened pending focus replay, claimed and in-doubt
+  automatic notes, policy-blocked recovery, and repeated completed-action
+  semantics. Commit `de071077` keeps each tab's unresolved operation generation
+  through a reload, prevents stale completion from overwriting a newer action,
+  and returns automatic-note conflicts as a no-retry delivery check. Earlier
+  corrections preserve the original durable intent fence and allow only a fresh
+  manual action to re-arm a safely blocked note.
+- The complete repository suite passes under Node 20.20.0: 3,209 tests, zero
   failures, zero skips, zero cancellations, and zero todos. Core, runner, and
   dashboard type checks, documentation checks, and the whitespace check pass.
 - The exact commit still requires final adversarial confirmation, pull request
