@@ -7974,7 +7974,8 @@ app.post("/control/pilot-feedback", asyncRoute(async (req, res) => {
           threadId: z.string().max(120).nullable().default(null),
           appVersion: z.string().max(80).default(""),
           userAgent: z.string().max(500).default(""),
-          timestamp: z.string().max(40).default("")
+          timestamp: z.string().max(40).default(""),
+          lastError: z.string().max(500).nullable().default(null)
         })
         .default({}),
       screenshots: z
