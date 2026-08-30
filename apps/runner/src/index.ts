@@ -42,6 +42,10 @@ import {
   multipartOnly
 } from "./services/staged-attachment-request";
 import {
+  OUTGOING_ATTACHMENT_ORPHAN_GRACE_MS,
+  sweepOutgoingAttachmentOrphans
+} from "./services/outgoing-attachment-orphan-sweep";
+import {
   createAiService,
   contactSnapshotFingerprint,
   operatorProfileFingerprint,
@@ -348,6 +352,22 @@ async function sendRequestOwnsStagedAttachments(
       : "unowned";
   } catch {
     return "unknown";
+  }
+}
+let outgoingAttachmentSweepRunning = false;
+async function sweepOutgoingAttachmentOrphansOnce(): Promise<void> {
+  if (outgoingAttachmentSweepRunning) return;
+  outgoingAttachmentSweepRunning = true;
+  try {
+    await sweepOutgoingAttachmentOrphans({
+      outgoingAttachmentsRoot,
+      graceMs: OUTGOING_ATTACHMENT_ORPHAN_GRACE_MS,
+      loadRows: () => prisma.sendRequest.findMany({
+        select: { attachmentsJson: true }
+      })
+    });
+  } finally {
+    outgoingAttachmentSweepRunning = false;
   }
 }
 const uploadAttachments = multer({
@@ -9103,6 +9123,12 @@ process.on("uncaughtException", (error) => {
 
 async function start(): Promise<void> {
   await ensureRuntimeDirs();
+  await sweepOutgoingAttachmentOrphansOnce();
+  const outgoingAttachmentSweepTimer = setInterval(
+    () => void sweepOutgoingAttachmentOrphansOnce(),
+    OUTGOING_ATTACHMENT_ORPHAN_GRACE_MS
+  );
+  outgoingAttachmentSweepTimer.unref();
   await settingsStore.getSettings();
   scanQueue.startScheduler();
 
