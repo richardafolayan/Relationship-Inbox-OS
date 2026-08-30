@@ -14,7 +14,8 @@ const {
   extractThreadId,
   MAX_SCREENSHOT_BYTES,
   MAX_SCREENSHOTS,
-  PILOT_REPORT_TYPE_SHORT_LABELS
+  PILOT_REPORT_TYPE_SHORT_LABELS,
+  runPilotReportSubmission
 } = await import("../apps/dashboard/lib/pilot.ts");
 
 const META = {
@@ -23,8 +24,7 @@ const META = {
   threadId: "abc-123",
   appVersion: "0.1.0",
   userAgent: "test-agent",
-  timestamp: "2026-05-21T10:00:00.000Z",
-  lastError: null
+  timestamp: "2026-05-21T10:00:00.000Z"
 };
 
 test("buildPilotReportPayload assembles only the safe fields", () => {
@@ -50,7 +50,6 @@ test("buildPilotReportPayload assembles only the safe fields", () => {
   ]);
   assert.deepEqual(Object.keys(payload.meta).sort(), [
     "appVersion",
-    "lastError",
     "pathname",
     "route",
     "threadId",
@@ -138,28 +137,51 @@ test("formatReportForCopy renders the report without message content", () => {
   assert.match(text, /Page: Thread/);
 });
 
-test("formatReportForCopy surfaces a recent client error when present, omits it otherwise", () => {
-  const withError = buildPilotReportPayload({
-    type: "feedback",
-    title: "Got an error?",
-    description: "What's this about?",
-    expected: "",
-    privacyAck: false,
-    meta: { ...META, lastError: "TypeError: x is not a function" },
-    screenshots: []
-  });
-  assert.match(formatReportForCopy(withError), /Last client error: TypeError: x is not a function/);
-
-  const noError = buildPilotReportPayload({
+test("buildPilotReportPayload drops legacy automatic client-error text", () => {
+  const payload = buildPilotReportPayload({
     type: "feedback",
     title: "Just a note",
     description: "Looks good",
     expected: "",
     privacyAck: false,
-    meta: { ...META, lastError: null },
+    meta: { ...META, lastError: "PRIVATE_MESSAGE_CANARY_7F3A" },
     screenshots: []
   });
-  assert.doesNotMatch(formatReportForCopy(noError), /Last client error/);
+  assert.doesNotMatch(JSON.stringify(payload), /PRIVATE_MESSAGE_CANARY_7F3A/);
+  assert.doesNotMatch(formatReportForCopy(payload), /Last client error/);
+});
+
+test("a rejected report submission preserves the form for retry", async () => {
+  let accepted = 0;
+  let failure = "";
+  const succeeded = await runPilotReportSubmission({
+    request: () => Promise.reject(new Error("feedback receiver offline")),
+    onAccepted: () => {
+      accepted += 1;
+    },
+    onFailure: (message) => {
+      failure = message;
+    }
+  });
+
+  assert.equal(succeeded, false);
+  assert.equal(accepted, 0);
+  assert.equal(failure, "feedback receiver offline");
+});
+
+test("an accepted report submission clears exactly once", async () => {
+  let accepted = 0;
+  const succeeded = await runPilotReportSubmission({
+    request: () => Promise.resolve("R-SYNTHETIC"),
+    onAccepted: (reportId) => {
+      assert.equal(reportId, "R-SYNTHETIC");
+      accepted += 1;
+    },
+    onFailure: () => assert.fail("accepted feedback must not report failure")
+  });
+
+  assert.equal(succeeded, true);
+  assert.equal(accepted, 1);
 });
 
 test("validateScreenshotFile accepts a reasonable image", () => {

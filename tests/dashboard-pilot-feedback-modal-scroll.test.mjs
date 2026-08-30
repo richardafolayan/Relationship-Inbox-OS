@@ -182,6 +182,13 @@ test("feedback never auto-includes private message content", () => {
   );
 });
 
+test("failed feedback remains visible and retryable", () => {
+  assert.match(MODAL, /data-pilot-feedback-error="true"/);
+  assert.match(MODAL, /Your details are still here, so you can try again/);
+  assert.match(MODAL, /submittingRef\.current/);
+  assert.match(MODAL, /Sending report\.\.\./);
+});
+
 test("back and close behaviour is explicit", () => {
   assert.match(MODAL, />\s*Back\s*</, "reports view has Back to the form");
   assert.match(MODAL, />\s*Close\s*</, "reports view has Close");
