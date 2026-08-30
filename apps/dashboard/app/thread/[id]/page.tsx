@@ -70,6 +70,7 @@ import { WhatsAppPoll } from "@/components/thread/whatsapp-poll";
 import { WhatsAppText } from "@/components/thread/whatsapp-text";
 import { getWhatsAppPoll, type PollVoteRecord } from "@/lib/whatsapp-poll";
 import { isNonContentIMessageSystemEvent } from "@/lib/imessage-system-events";
+import { dedupeThreadMessages } from "@/lib/dedupe-thread-messages";
 import { foldSynthesizedReactions } from "@/lib/synthesized-reactions";
 import { formatClock, formatRelative } from "@/lib/time";
 import { initials, isDegradedAndInUse, PLATFORM_LABEL, toDisplayRisk } from "@/lib/risk";
@@ -3127,6 +3128,10 @@ export default function ThreadPage() {
   // older pages). `messagePage.hasOlder` tells us whether more history
   // exists on the server.
   // Render-time filter on top of the runner's API filter. Drops:
+  //   - exact duplicate rows (#881) that share a platform message id or
+  //     the same direction/timestamp/text/media fingerprint (WhatsApp can
+  //     persist one physical message under two Prisma ids when send-time
+  //     and scan-time keys diverge; client merge only keys on Message.id);
   //   - iMessage "kept an audio message" system events (the runner
   //     hides these too; this is belt-and-braces);
   //   - bubbles with no displayable content at all (empty text + no
@@ -3137,24 +3142,27 @@ export default function ThreadPage() {
   // this full filter pass and hand a fresh array reference to the reaction-
   // fold and reply-graph memos below — they only recompute when messages
   // actually change.
-  const visibleMessagesBeforeReactionFold: ThreadMessage[] = useMemo(
-    () =>
-      (thread?.messages ?? []).filter((m) => {
-        if (isNonContentIMessageSystemEvent(m.text)) return false;
-        const text = (m.text ?? "").trim();
-        const hasText = text.length > 0;
-        const hasPlayable = (m.attachments ?? []).some(
-          (a) => Boolean(a.guid) && a.kind !== undefined && a.kind !== "unknown"
-        );
-        const hasTranscript =
-          !!m.audioTranscription &&
-          m.audioTranscription.status === "transcribed" &&
-          !!m.audioTranscription.transcript &&
-          m.audioTranscription.transcript.trim().length > 0;
-        return hasText || hasPlayable || hasTranscript;
-      }),
-    [thread?.messages]
-  );
+  const visibleMessagesBeforeReactionFold: ThreadMessage[] = useMemo(() => {
+    const deduped = dedupeThreadMessages(
+      thread?.messages ?? [],
+      thread?.id ?? "",
+      thread?.platform
+    );
+    return deduped.filter((m) => {
+      if (isNonContentIMessageSystemEvent(m.text)) return false;
+      const text = (m.text ?? "").trim();
+      const hasText = text.length > 0;
+      const hasPlayable = (m.attachments ?? []).some(
+        (a) => Boolean(a.guid) && a.kind !== undefined && a.kind !== "unknown"
+      );
+      const hasTranscript =
+        !!m.audioTranscription &&
+        m.audioTranscription.status === "transcribed" &&
+        !!m.audioTranscription.transcript &&
+        m.audioTranscription.transcript.trim().length > 0;
+      return hasText || hasPlayable || hasTranscript;
+    });
+  }, [thread?.messages, thread?.id, thread?.platform]);
   // #422: iMessage stores arbitrary-emoji reactions as "Reacted X to
   // 'Y'" text bubbles when either party isn't on iOS 18. Collapse those
   // synthesised bubbles into reaction stickers on the parent so the
