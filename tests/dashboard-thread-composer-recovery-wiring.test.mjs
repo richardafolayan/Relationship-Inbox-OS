@@ -10,13 +10,13 @@ const source = readFileSync(
 
 test("thread navigation snapshots the previous full intent and restores only the new thread", () => {
   const start = source.indexOf("useLayoutEffect(() => {");
-  const end = source.indexOf("}, [composerAttachmentStore, externalActionAttempts, threadId]);", start);
+  const end = source.indexOf("}, [composerAttachmentStore, externalActionAttempts, persistComposerSession, threadId]);", start);
   assert.notEqual(start, -1);
   assert.notEqual(end, -1);
   const lifecycle = source.slice(start, end);
   assert.match(
     lifecycle,
-    /snapshotThreadComposerSession\([\s\S]*?previousThreadId,[\s\S]*?currentIntent,[\s\S]*?composerDraftRevisionRef\.current/
+    /persistComposerSession\([\s\S]*?previousThreadId,[\s\S]*?currentIntent,[\s\S]*?composerDraftRevisionRef\.current/
   );
   assert.match(lifecycle, /readThreadComposerSession\(threadId\)/);
   assert.match(lifecycle, /setComposer\(restoredIntent\.text\)/);
@@ -33,7 +33,7 @@ test("a scheduled reply carries complete intent under the shared durable compose
   const schedule = source.slice(start, end);
   assert.match(
     schedule,
-    /snapshotThreadComposerSession\([\s\S]*?startThreadId,[\s\S]*?capturedIntent,[\s\S]*?capturedDraftRevision/
+    /persistComposerSession\([\s\S]*?startThreadId,[\s\S]*?capturedIntent,[\s\S]*?capturedDraftRevision/
   );
   assert.match(schedule, /kind: "scheduled"/);
   assert.match(schedule, /threadComposerSendScope\(startThreadId\)/);
@@ -69,7 +69,7 @@ test("an immediate send preserves its full intent until the exact attempt is res
   assert.match(send, /checkPendingDelivery\(clientSendId\)/);
   assert.match(
     send,
-    /snapshotThreadComposerSession\([\s\S]*?ownerThreadId,[\s\S]*?composerIntentRef\.current,[\s\S]*?composerDraftRevisionRef\.current/
+    /persistComposerSession\([\s\S]*?ownerThreadId,[\s\S]*?composerIntentRef\.current,[\s\S]*?composerDraftRevisionRef\.current/
   );
 });
 
@@ -88,15 +88,68 @@ test("a failed captured reply stays separate when the operator has typed newer t
 });
 
 test("completed composer generations suppress copied-tab duplicate sends", () => {
-  assert.match(source, /composerClientSendId\(capturedSession\.revisionId\)/);
+  assert.match(source, /composerClientSendId\([\s\S]*?capturedSession\.revisionId,[\s\S]*?attemptIntent\.kind,[\s\S]*?attemptIntent\.scheduledFor/);
   assert.match(source, /sessionRevisionId: capturedSession\.revisionId,[\s\S]*?kind: "immediate"/);
   assert.match(source, /sessionRevisionId: capturedSession\.revisionId,[\s\S]*?kind: "scheduled"/);
   assert.match(source, /readCompletedScopedValues<ThreadComposerSendAttemptValue>/);
   assert.match(source, /value\.sessionRevisionId === storedSession\?\.revisionId/);
   assert.match(source, /value\.sessionRevisionId === capturedSession\.revisionId/);
   assert.match(source, /notFoundRecovery: "replay"/);
+  assert.match(source, /attemptKind: "immediate"/);
+  assert.match(source, /attemptKind: "scheduled"/);
+  assert.match(source, /value\.attemptKind === attemptIntent\.kind/);
+  assert.match(source, /value\.scheduledFor === attemptIntent\.scheduledFor/);
   assert.match(source, /composerNotFoundRecoveryOnResume/);
   assert.match(source, /pending\.notFoundRecovery !== "replay"/);
+});
+
+test("NOT_FOUND replay requires an authoritative shared-generation transition", () => {
+  const statusStart = source.indexOf("const checkPendingDelivery = useCallback(");
+  const statusEnd = source.indexOf("checkPendingDeliveryRef.current = checkPendingDelivery", statusStart);
+  const status = source.slice(statusStart, statusEnd);
+  assert.match(status, /compareAndReplaceScopedValue/);
+  assert.match(status, /value\.notFoundRecovery === "replay"/);
+  assert.match(status, /notFoundRecovery: "blocked"/);
+});
+
+test("authoritative thread refreshes apply only the latest started request", () => {
+  const start = source.indexOf("const refreshThread = useCallback");
+  const end = source.indexOf("const refreshSiblings", start);
+  const refresh = source.slice(start, end);
+  assert.match(refresh, /threadRequestGate\.next\(\)/);
+  assert.match(refresh, /threadRequestGate\.isLatest\(requestToken\)/);
+  assert.ok(refresh.indexOf("threadRequestGate.isLatest(requestToken)") < refresh.indexOf("applyThread(fresh"));
+});
+
+test("late draft mutations CAS the originating session and never write feedback into another route", () => {
+  const saveStart = source.indexOf("const saveCurrentDraft =");
+  const actionStart = source.indexOf("const saveDraftAction", saveStart);
+  const draftActions = source.slice(saveStart, actionStart);
+  assert.match(draftActions, /attachDraftRevisionToThreadComposerSession/);
+  assert.match(draftActions, /consumeThreadComposerSession/);
+  assert.match(draftActions, /routeThreadIdRef\.current === targetThreadId/);
+  const feedback = source.slice(actionStart, source.indexOf("const snoozeOverflowAction", actionStart));
+  assert.match(feedback, /setThreadActionError/);
+  assert.doesNotMatch(feedback, /setError,/);
+});
+
+test("accepted composer generations rotate before identical text can be sent again", () => {
+  assert.match(source, /snapshotThreadComposerSessionAfterAcceptedAction/);
+  assert.match(source, /acceptedComposerSessionIdsRef/);
+  const clearStart = source.indexOf("const clearCapturedComposerAfterAcceptedAction");
+  const clearEnd = source.indexOf("// Send-queue polling fallback", clearStart);
+  const clear = source.slice(clearStart, clearEnd);
+  assert.match(clear, /currentSession\.revisionId !== pending\.sessionRevisionId/);
+  assert.match(clear, /generationWasAlreadyAccepted/);
+});
+
+test("late composer failures are scoped to the thread that started them", () => {
+  const sendStart = source.indexOf("const onSend = useCallback(");
+  const sendEnd = source.indexOf("const addFiles = useCallback", sendStart);
+  const send = source.slice(sendStart, sendEnd);
+  assert.match(send, /if \(routeThreadIdRef\.current === startThreadId\) setError\(/);
+  const addFiles = source.slice(sendEnd, source.indexOf("const removeAttachment", sendEnd));
+  assert.match(addFiles, /routeThreadIdRef\.current === ownerThreadId/);
 });
 
 test("send status and terminal events apply durable draft consumption before authoritative refresh", () => {
@@ -225,7 +278,7 @@ test("cross-tab attachment recovery migrates ownership before removing the old p
   const end = source.indexOf("const attachments = recovered.map", start);
   const migration = source.slice(start, end);
   assert.match(migration, /composerAttachmentStore\.put/);
-  assert.match(migration, /externalActionAttempts\.replaceScopedValue/);
+  assert.match(migration, /externalActionAttempts\.compareAndReplaceScopedValue/);
   assert.match(migration, /composerAttachmentStore\s*\.remove/);
-  assert.ok(migration.indexOf("replaceScopedValue") < migration.indexOf(".remove("));
+  assert.ok(migration.indexOf("compareAndReplaceScopedValue") < migration.indexOf(".remove("));
 });

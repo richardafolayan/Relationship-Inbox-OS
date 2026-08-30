@@ -7,6 +7,7 @@ import Database from "better-sqlite3";
 
 const DRAFT_THREAD_INDEX = "drafts_threadId_key";
 const SEND_SOURCE_COLUMN = "source";
+const SEND_DRAFT_CONSUMED_COLUMN = "draftConsumed";
 const SEND_SOURCE_REPAIR_MARKER_ID = "data_repair_send_request_source_v2";
 const SEND_SOURCE_REPAIR_MARKER_KEY = "data_repair_send_request_source_v2";
 const SEND_SOURCE_REPAIR_MARKER_VALUE = '{"version":2}';
@@ -101,6 +102,23 @@ export function hasSendRequestSourceColumn(database) {
         ["'manual'", "'legacy_unknown'"].includes(
           String(column.dflt_value).replaceAll('"', "'")
         ))
+  );
+}
+
+export function hasSendRequestDraftConsumedColumn(database) {
+  const sendRequestsTable = database
+    .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'send_requests'")
+    .get();
+  if (!sendRequestsTable) return false;
+  const column = database
+    .prepare('PRAGMA table_info("send_requests")')
+    .all()
+    .find((candidate) => candidate.name === SEND_DRAFT_CONSUMED_COLUMN);
+  return Boolean(
+    column &&
+      String(column.type).toUpperCase() === "BOOLEAN" &&
+      Number(column.notnull) === 1 &&
+      ["false", "0"].includes(String(column.dflt_value).toLowerCase())
   );
 }
 
@@ -224,7 +242,8 @@ function runCli() {
       if (
         !draftsTable ||
         !hasCorrectDraftThreadIndex(database) ||
-        sendRequestSourceRequiresRepair(database)
+        sendRequestSourceRequiresRepair(database) ||
+        !hasSendRequestDraftConsumedColumn(database)
       ) {
         process.exitCode = 2;
       }

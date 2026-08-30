@@ -2,10 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 const {
+  attachDraftRevisionToThreadComposerSession,
   consumeThreadComposerSession,
   readThreadComposerSession,
   rotateThreadComposerSession,
   safeSendFailureDisposition,
+  snapshotThreadComposerSessionAfterAcceptedAction,
   snapshotThreadComposerSession,
   __test
 } = await import("../apps/dashboard/lib/thread-composer-session.ts");
@@ -85,6 +87,82 @@ test("composer sessions preserve the exact saved draft revision they originated 
     storage
   );
   assert.deepEqual(editedAgain.draftRevision, draftRevision);
+});
+
+test("a late save attaches its revision only to the exact originating session", () => {
+  const storage = makeStorage();
+  const intent = {
+    attachments: [],
+    customScheduleValue: "",
+    replyToMessageId: null,
+    source: "user",
+    text: "Save this reply"
+  };
+  const original = snapshotThreadComposerSession("thread-a", intent, storage);
+  const savedRevision = {
+    text: intent.text,
+    updatedAt: "2026-08-30T09:05:00.000Z"
+  };
+
+  assert.deepEqual(
+    attachDraftRevisionToThreadComposerSession(
+      "thread-a",
+      original.revision,
+      original.revisionId,
+      savedRevision,
+      storage
+    )?.draftRevision,
+    savedRevision
+  );
+  assert.deepEqual(readThreadComposerSession("thread-a", storage)?.draftRevision, savedRevision);
+
+  const newer = snapshotThreadComposerSession(
+    "thread-a",
+    { ...intent, text: "A newer reply" },
+    storage
+  );
+  assert.equal(
+    attachDraftRevisionToThreadComposerSession(
+      "thread-a",
+      original.revision,
+      original.revisionId,
+      { ...savedRevision, updatedAt: "2026-08-30T09:06:00.000Z" },
+      storage
+    ),
+    null
+  );
+  assert.deepEqual(readThreadComposerSession("thread-a", storage), newer);
+});
+
+test("re-entering identical text after acceptance creates a new generation", () => {
+  const storage = makeStorage();
+  const intent = {
+    attachments: [],
+    customScheduleValue: "",
+    replyToMessageId: null,
+    source: "user",
+    text: "Send this twice on purpose"
+  };
+  const first = snapshotThreadComposerSession("thread-a", intent, storage);
+  const second = snapshotThreadComposerSessionAfterAcceptedAction(
+    "thread-a",
+    intent,
+    first.revisionId,
+    storage
+  );
+
+  assert.notEqual(second.revisionId, first.revisionId);
+  assert.equal(second.revision, first.revision + 1);
+  assert.equal(
+    consumeThreadComposerSession(
+      "thread-a",
+      first.revision,
+      first.revisionId,
+      storage
+    ),
+    false
+  );
+  assert.deepEqual(readThreadComposerSession("thread-a", storage), second);
 });
 
 test("unchanged snapshots keep their revision while any intent change advances it", () => {

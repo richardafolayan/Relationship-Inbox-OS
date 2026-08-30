@@ -5,6 +5,7 @@ import {
   createDraftMutationBarrier,
   DraftMutationUncertainError
 } from "../apps/dashboard/lib/draft-mutation-barrier.ts";
+import { draftRevisionForComposerSend } from "../apps/dashboard/lib/saved-draft-revision.ts";
 
 function deferred() {
   let resolve;
@@ -52,6 +53,25 @@ test("send and schedule wait for the latest authoritative saved draft revision",
   assert.deepEqual(await sendRevision, savedRevision);
   assert.deepEqual(await scheduleRevision, savedRevision);
   assert.deepEqual(events, ["save-started", "send-captured", "schedule-captured"]);
+});
+
+test("a send waiting on an edited save consumes the revision that just completed", async () => {
+  const barrier = createDraftMutationBarrier();
+  const response = deferred();
+  const save = barrier.enqueueSave("thread-a", () => response.promise);
+  const originatingRevision = {
+    text: "Original saved text",
+    updatedAt: "2026-08-30T09:00:00.000Z"
+  };
+  const sendRevision = barrier
+    .waitForRevision("thread-a", originatingRevision)
+    .then((current) =>
+      draftRevisionForComposerSend(current, originatingRevision, savedRevision.text)
+    );
+
+  response.resolve(savedRevision);
+  await save;
+  assert.deepEqual(await sendRevision, savedRevision);
 });
 
 test("delete runs after an in-flight save and leaves no draft revision", async () => {

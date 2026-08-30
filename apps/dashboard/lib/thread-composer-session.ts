@@ -280,6 +280,50 @@ export function rotateThreadComposerSession(
   }
 }
 
+export function snapshotThreadComposerSessionAfterAcceptedAction(
+  threadId: string,
+  draft: ThreadComposerIntentDraft,
+  acceptedRevisionId: string | null | undefined,
+  storage: StorageLike | null = defaultStorage(),
+  draftRevision?: ThreadComposerDraftRevision | null
+): ThreadComposerSession | null {
+  if (!acceptedRevisionId) {
+    return snapshotThreadComposerSession(threadId, draft, storage, draftRevision);
+  }
+  const current = readThreadComposerSession(threadId, storage);
+  return current?.revisionId === acceptedRevisionId
+    ? rotateThreadComposerSession(threadId, draft, storage, draftRevision)
+    : snapshotThreadComposerSession(threadId, draft, storage, draftRevision);
+}
+
+export function attachDraftRevisionToThreadComposerSession(
+  threadId: string,
+  expectedRevision: number,
+  expectedRevisionId: string,
+  draftRevision: ThreadComposerDraftRevision,
+  storage: StorageLike | null = defaultStorage()
+): ThreadComposerSession | null {
+  if (
+    !storage ||
+    !threadId ||
+    !Number.isInteger(expectedRevision) ||
+    !expectedRevisionId
+  ) return null;
+  try {
+    const current = readThreadComposerSession(threadId, storage);
+    if (
+      !current ||
+      current.revision !== expectedRevision ||
+      current.revisionId !== expectedRevisionId
+    ) return null;
+    const next: ThreadComposerSession = { ...current, draftRevision };
+    storage.setItem(keyFor(threadId), JSON.stringify(next));
+    return next;
+  } catch {
+    return null;
+  }
+}
+
 export function consumeThreadComposerSession(
   threadId: string,
   expectedRevision: number,

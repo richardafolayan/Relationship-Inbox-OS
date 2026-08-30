@@ -581,6 +581,88 @@ test("database-only invalidates provenance from the immediately preceding source
   }
 });
 
+test("a current-stamp predecessor database gains draftConsumed without losing sends", () => {
+  const { directory, databasePath, cleanup } = fixture();
+  try {
+    const currentSchema = readFileSync("packages/core/prisma/schema.prisma", "utf8");
+    const predecessorSchema = currentSchema.replace(
+      /^\s+draftConsumed\s+Boolean\s+@default\(false\)\s*$/m,
+      ""
+    );
+    assert.notEqual(predecessorSchema, currentSchema);
+    const predecessorSchemaPath = join(directory, "predecessor-no-draft-consumed.prisma");
+    writeFileSync(predecessorSchemaPath, predecessorSchema);
+    writeFileSync(databasePath, "", { mode: 0o600 });
+    const prismaCli = join(appDir, "node_modules", "prisma", "build", "index.js");
+    const predecessorPush = spawnSync(
+      process.execPath,
+      [prismaCli, "db", "push", "--schema", predecessorSchemaPath, "--skip-generate"],
+      {
+        cwd: appDir,
+        encoding: "utf8",
+        env: { ...process.env, DATABASE_URL: `file:${databasePath}` }
+      }
+    );
+    assert.equal(
+      predecessorPush.status,
+      0,
+      `${predecessorPush.stdout}\n${predecessorPush.stderr}`
+    );
+
+    let database = new Database(databasePath);
+    database.pragma("foreign_keys = OFF");
+    const now = Date.now();
+    database
+      .prepare(`
+        INSERT INTO "send_requests" (
+          "id", "clientSendId", "threadId", "status", "requestText",
+          "source", "createdAt", "updatedAt"
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `)
+      .run(
+        "send-before-draft-consumed",
+        "client-before-draft-consumed",
+        "thread-predecessor",
+        "PENDING",
+        "preserve me",
+        "manual",
+        now,
+        now
+      );
+    database.close();
+    writeFileSync(
+      join(directory, "app-prepare-stamps.json"),
+      `${JSON.stringify({ schemaHash: currentSchemaHash() })}\n`
+    );
+
+    const check = spawnSync(process.execPath, [repairScript, "--check", databasePath], {
+      cwd: appDir,
+      encoding: "utf8"
+    });
+    assert.equal(check.status, 2, check.stderr);
+
+    const result = runDatabaseOnly(directory, databasePath);
+    assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+    database = new Database(databasePath, { readonly: true, fileMustExist: true });
+    assert.equal(
+      database
+        .prepare('PRAGMA table_info("send_requests")')
+        .all()
+        .find((column) => column.name === "draftConsumed")?.notnull,
+      1
+    );
+    assert.deepEqual(
+      database
+        .prepare('SELECT "id", "draftConsumed" FROM "send_requests" WHERE "id" = ?')
+        .get("send-before-draft-consumed"),
+      { id: "send-before-draft-consumed", draftConsumed: 0 }
+    );
+    database.close();
+  } finally {
+    cleanup();
+  }
+});
+
 test("database-only retries a pending verified restore before schema checks", () => {
   const { directory, databasePath, cleanup } = fixture();
   try {

@@ -26,9 +26,11 @@ export interface ThreadComposerSendAttemptIntent {
 
 export interface ThreadComposerSendAttemptValue {
   attachmentNamespace?: string;
+  attemptKind?: ThreadComposerSendAttemptKind;
   clientSendId: string;
   notFoundRecovery?: "blocked" | "replay" | "restore";
   requestedAt: string;
+  scheduledFor?: string | null;
   sessionRevision: number;
   sessionRevisionId?: string;
 }
@@ -98,6 +100,11 @@ export function normalizeThreadComposerSendAttempt(
       (typeof rawValue.attachmentNamespace === "string" && rawValue.attachmentNamespace)
     ) ||
     !(
+      rawValue.attemptKind === undefined ||
+      rawValue.attemptKind === "immediate" ||
+      rawValue.attemptKind === "scheduled"
+    ) ||
+    !(
       rawValue.notFoundRecovery === undefined ||
       rawValue.notFoundRecovery === "blocked" ||
       rawValue.notFoundRecovery === "replay" ||
@@ -106,6 +113,11 @@ export function normalizeThreadComposerSendAttempt(
     typeof rawValue.clientSendId !== "string" ||
     !rawValue.clientSendId ||
     !validIsoDate(rawValue.requestedAt) ||
+    !(
+      rawValue.scheduledFor === undefined ||
+      rawValue.scheduledFor === null ||
+      validIsoDate(rawValue.scheduledFor)
+    ) ||
     !Number.isInteger(rawValue.sessionRevision) ||
     (rawValue.sessionRevision as number) < 1 ||
     !(
@@ -132,6 +144,9 @@ export function normalizeThreadComposerSendAttempt(
       ...(typeof rawValue.attachmentNamespace === "string"
         ? { attachmentNamespace: rawValue.attachmentNamespace }
         : {}),
+      ...(rawValue.attemptKind === "immediate" || rawValue.attemptKind === "scheduled"
+        ? { attemptKind: rawValue.attemptKind }
+        : {}),
       clientSendId: rawValue.clientSendId,
       ...(rawValue.notFoundRecovery === "blocked" ||
       rawValue.notFoundRecovery === "replay" ||
@@ -139,6 +154,9 @@ export function normalizeThreadComposerSendAttempt(
         ? { notFoundRecovery: rawValue.notFoundRecovery }
         : {}),
       requestedAt: rawValue.requestedAt,
+      ...(rawValue.scheduledFor === null || validIsoDate(rawValue.scheduledFor)
+        ? { scheduledFor: rawValue.scheduledFor }
+        : {}),
       sessionRevision: rawValue.sessionRevision as number,
       ...(typeof rawValue.sessionRevisionId === "string"
         ? { sessionRevisionId: rawValue.sessionRevisionId }
@@ -147,8 +165,15 @@ export function normalizeThreadComposerSendAttempt(
   };
 }
 
-export function composerClientSendId(sessionRevisionId: string): string {
-  return uuidv5(sessionRevisionId, COMPOSER_SEND_ID_NAMESPACE);
+export function composerClientSendId(
+  sessionRevisionId: string,
+  kind: ThreadComposerSendAttemptKind = "immediate",
+  scheduledFor: string | null = null
+): string {
+  return uuidv5(
+    `${sessionRevisionId}:${kind}:${scheduledFor ?? ""}`,
+    COMPOSER_SEND_ID_NAMESPACE
+  );
 }
 
 export function shouldHideComposerSessionForAttempt(

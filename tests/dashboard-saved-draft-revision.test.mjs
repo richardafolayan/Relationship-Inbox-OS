@@ -126,14 +126,38 @@ test("send consumes the exact draft revision from which the composer originated"
     updatedAt: "2026-08-30T09:00:00.000Z"
   };
   assert.deepEqual(
-    draftRevisionForComposerSend(current, originatedFrom),
+    draftRevisionForComposerSend(current, originatedFrom, "Unsaved edited reply Y"),
     originatedFrom
   );
   assert.deepEqual(
-    draftRevisionForComposerSend(originatedFrom, originatedFrom),
+    draftRevisionForComposerSend(originatedFrom, originatedFrom, originatedFrom.text),
     originatedFrom
   );
-  assert.equal(draftRevisionForComposerSend(current, null), null);
+  assert.equal(draftRevisionForComposerSend(current, null, "Unsaved reply"), null);
+});
+
+test("send consumes a save that finished while the action was waiting", () => {
+  const originatingRevision = {
+    text: "Saved reply X",
+    updatedAt: "2026-08-30T09:00:00.000Z"
+  };
+  const justSavedRevision = {
+    text: "Edited reply Y",
+    updatedAt: "2026-08-30T09:05:00.000Z"
+  };
+
+  assert.deepEqual(
+    draftRevisionForComposerSend(
+      justSavedRevision,
+      originatingRevision,
+      "Edited reply Y"
+    ),
+    justSavedRevision
+  );
+  assert.deepEqual(
+    draftRevisionForComposerSend(justSavedRevision, null, "Edited reply Y"),
+    justSavedRevision
+  );
 });
 
 test("the draft endpoint returns the exact persisted revision used by send consumption", () => {

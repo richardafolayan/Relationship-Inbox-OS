@@ -260,6 +260,91 @@ test("one tab completing an action leaves the shared id for a stale tab", async 
   assert.equal(created, 1);
 });
 
+test("a stale tab cannot claim a generation after another tab definitively releases it", async () => {
+  const values = new Map();
+  const storage = {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, value),
+    removeItem: (key) => values.delete(key)
+  };
+  const firstPins = new Map();
+  const stalePins = new Map();
+  const pinStorage = (pins) => ({
+    getItem: (key) => pins.get(key) ?? null,
+    setItem: (key, value) => pins.set(key, value),
+    removeItem: (key) => pins.delete(key)
+  });
+  const first = createExternalActionAttemptStore(storage, undefined, pinStorage(firstPins));
+  const stale = createExternalActionAttemptStore(storage, undefined, pinStorage(stalePins));
+  const scope = "revoked-composer-send";
+  const intent = { text: "Do not replay after revocation" };
+  const value = { clientSendId: "send-1", notFoundRecovery: "replay" };
+
+  await first.getOrCreateScopedValue(scope, intent, () => value);
+  await stale.getOrCreateScopedValue(scope, intent, () => value);
+  assert.equal(
+    await first.completeScopedValue(
+      scope,
+      (candidate) => candidate.clientSendId === value.clientSendId
+    ),
+    true
+  );
+
+  assert.equal(
+    await stale.compareAndReplaceScopedValue(
+      scope,
+      (candidate) =>
+        candidate.clientSendId === value.clientSendId &&
+        candidate.notFoundRecovery === "replay",
+      { ...value, notFoundRecovery: "blocked" }
+    ),
+    false
+  );
+  assert.equal(stale.readScopedAttempt(scope), undefined);
+});
+
+test("a recovery claim must compare against shared state rather than a stale tab pin", async () => {
+  const values = new Map();
+  const storage = {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, value),
+    removeItem: (key) => values.delete(key)
+  };
+  const firstPins = new Map();
+  const stalePins = new Map();
+  const pinStorage = (pins) => ({
+    getItem: (key) => pins.get(key) ?? null,
+    setItem: (key, value) => pins.set(key, value),
+    removeItem: (key) => pins.delete(key)
+  });
+  const first = createExternalActionAttemptStore(storage, undefined, pinStorage(firstPins));
+  const stale = createExternalActionAttemptStore(storage, undefined, pinStorage(stalePins));
+  const scope = "changed-composer-recovery";
+  const intent = { text: "Preserved reply" };
+  const replay = { clientSendId: "send-1", notFoundRecovery: "replay" };
+  const restore = { ...replay, notFoundRecovery: "restore" };
+
+  await first.getOrCreateScopedValue(scope, intent, () => replay);
+  await stale.getOrCreateScopedValue(scope, intent, () => replay);
+  assert.equal(
+    await first.compareAndReplaceScopedValue(
+      scope,
+      (candidate) => candidate.clientSendId === "send-1",
+      restore
+    ),
+    true
+  );
+  assert.equal(
+    await stale.compareAndReplaceScopedValue(
+      scope,
+      (candidate) => candidate.notFoundRecovery === "replay",
+      { ...replay, notFoundRecovery: "blocked" }
+    ),
+    false
+  );
+  assert.deepEqual(stale.readScopedAttempt(scope)?.value, restore);
+});
+
 test("the completing tab allocates a new id for a later identical operation", async () => {
   const values = new Map();
   const storage = {
@@ -470,6 +555,54 @@ test("a copied composer revision reuses its content-free completed send marker",
     false
   );
   assert.deepEqual(copiedTab.readCompletedScopedValues(scope), [value]);
+});
+
+test("a completed composer marker is reused only for the same action semantics", async () => {
+  const values = new Map();
+  const storage = {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, value),
+    removeItem: (key) => values.delete(key)
+  };
+  const scope = "composer-send:thread-semantics";
+  const revisionId = "28d6bb4f-0fe9-4a94-8284-e5c166097c60";
+  const immediateValue = {
+    attemptKind: "immediate",
+    clientSendId: "send-immediate",
+    scheduledFor: null,
+    sessionRevisionId: revisionId
+  };
+  const first = createExternalActionAttemptStore(storage);
+  await first.getOrCreateScopedValue(
+    scope,
+    { kind: "immediate", scheduledFor: null, sessionRevisionId: revisionId },
+    () => immediateValue
+  );
+  await first.completeScopedValue(scope, () => true, true);
+
+  let allocations = 0;
+  const scheduledFor = "2026-08-31T09:00:00.000Z";
+  const scheduled = await createExternalActionAttemptStore(storage).getOrCreateScopedValue(
+    scope,
+    { kind: "scheduled", scheduledFor, sessionRevisionId: revisionId },
+    () => {
+      allocations += 1;
+      return {
+        attemptKind: "scheduled",
+        clientSendId: "send-scheduled",
+        scheduledFor,
+        sessionRevisionId: revisionId
+      };
+    },
+    async () => true,
+    (candidate) =>
+      candidate.sessionRevisionId === revisionId &&
+      candidate.attemptKind === "scheduled" &&
+      candidate.scheduledFor === scheduledFor
+  );
+
+  assert.equal(scheduled.clientSendId, "send-scheduled");
+  assert.equal(allocations, 1);
 });
 
 test("a copied stale pin cannot suppress a later identical composer intent with a new revision", async () => {

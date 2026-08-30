@@ -374,6 +374,27 @@ export function createExternalActionAttemptStore(
     });
   }
 
+  async function compareAndReplaceScopedValue<TValue>(
+    scope: string,
+    matches: (value: TValue) => boolean,
+    nextValue: TValue
+  ): Promise<boolean> {
+    return withScopeLock(scope, async () => {
+      const key = valueStorageKey(scope);
+      const record = readRecord<unknown, TValue>(key);
+      if (!record || !matches(record.value)) return false;
+      writeRecord(key, { ...record, value: nextValue });
+      const pinned = readPinnedOperation(scope);
+      if (pinned && canonicalJson(pinned.value) === canonicalJson(record.value)) {
+        writePinnedOperation(scope, {
+          intentJson: pinned.intentJson,
+          value: nextValue
+        });
+      }
+      return true;
+    });
+  }
+
   async function completeScopedValue<TValue>(
     scope: string,
     matches: (value: TValue) => boolean,
@@ -400,6 +421,25 @@ export function createExternalActionAttemptStore(
     });
   }
 
+  async function compareAndCompleteScopedValue<TValue>(
+    scope: string,
+    matches: (value: TValue) => boolean,
+    retainCompletedValue = false
+  ): Promise<boolean> {
+    return withScopeLock(scope, async () => {
+      const key = valueStorageKey(scope);
+      const record = readRecord<unknown, TValue>(key);
+      if (!record || !matches(record.value)) return false;
+      if (retainCompletedValue) appendCompletedScopedValue(scope, record.value);
+      removeRecord(key);
+      const pinned = readPinnedOperation(scope);
+      if (pinned && canonicalJson(pinned.value) === canonicalJson(record.value)) {
+        removePinnedOperation(scope);
+      }
+      return true;
+    });
+  }
+
   function readScopedAttempt<TIntent, TValue>(scope: string):
     | { intent: TIntent; value: TValue }
     | undefined {
@@ -410,6 +450,8 @@ export function createExternalActionAttemptStore(
   }
 
   return {
+    compareAndCompleteScopedValue,
+    compareAndReplaceScopedValue,
     getOrCreateScopedValue,
     replaceScopedValue,
     completeScopedValue,

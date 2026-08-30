@@ -157,9 +157,21 @@ test("a composer revision has one durable send id even after finite completion h
   const first = composerClientSendId("ae5926d5-3ec7-48b0-bb35-047d8eb2a431");
   const copiedTab = composerClientSendId("ae5926d5-3ec7-48b0-bb35-047d8eb2a431");
   const laterRevision = composerClientSendId("9b35961d-a8fc-441d-986f-a2f366bcc9e3");
+  const scheduled = composerClientSendId(
+    "ae5926d5-3ec7-48b0-bb35-047d8eb2a431",
+    "scheduled",
+    "2026-08-31T09:00:00.000Z"
+  );
+  const scheduledLater = composerClientSendId(
+    "ae5926d5-3ec7-48b0-bb35-047d8eb2a431",
+    "scheduled",
+    "2026-08-31T10:00:00.000Z"
+  );
 
   assert.equal(copiedTab, first);
   assert.notEqual(laterRevision, first);
+  assert.notEqual(scheduled, first);
+  assert.notEqual(scheduledLater, scheduled);
   assert.match(first, /^[0-9a-f-]{36}$/i);
 });
 
