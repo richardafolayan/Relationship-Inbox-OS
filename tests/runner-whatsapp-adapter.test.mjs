@@ -4,7 +4,12 @@ import { EventEmitter } from "node:events";
 import { rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { WhatsAppAdapter, extractPollPayload, renderMessageText } from "../apps/runner/dist/platforms/whatsapp-adapter.js";
+import {
+  WhatsAppAdapter,
+  expectedWhatsAppTypeForOutbound,
+  extractPollPayload,
+  renderMessageText
+} from "../apps/runner/dist/platforms/whatsapp-adapter.js";
 
 /**
  * Minimal whatsapp-web.js Client stub. Wweb.js Client extends EventEmitter
@@ -545,6 +550,374 @@ test("media sends wait for WhatsApp and keep a missing result delivery uncertain
     assert.equal(sentOptions.caption, "caption");
   } finally {
     await rm(file, { force: true });
+  }
+});
+
+test("expectedWhatsAppTypeForOutbound maps kind and mime to wweb.js types", () => {
+  assert.equal(expectedWhatsAppTypeForOutbound({ kind: "photo" }), "image");
+  assert.equal(expectedWhatsAppTypeForOutbound({ kind: "video" }), "video");
+  assert.equal(expectedWhatsAppTypeForOutbound({ kind: "gif" }), "video");
+  assert.equal(expectedWhatsAppTypeForOutbound({ kind: "voice_note" }), "ptt");
+  assert.equal(expectedWhatsAppTypeForOutbound({ kind: "audio" }), "audio");
+  assert.equal(expectedWhatsAppTypeForOutbound({ kind: "sticker" }), "sticker");
+  assert.equal(expectedWhatsAppTypeForOutbound({ kind: "pdf" }), "document");
+  assert.equal(
+    expectedWhatsAppTypeForOutbound({ kind: "unknown", mimeType: "image/png" }),
+    "image"
+  );
+  assert.equal(
+    expectedWhatsAppTypeForOutbound({ kind: "unknown", mimeType: "application/pdf" }),
+    "document"
+  );
+  assert.equal(
+    expectedWhatsAppTypeForOutbound({ kind: "audio" }, { sendAudioAsVoice: true }),
+    "ptt"
+  );
+  assert.equal(expectedWhatsAppTypeForOutbound({ kind: "unknown" }), undefined);
+});
+
+test("multi-attachment recovery does not reuse an earlier attachment id (#882)", async () => {
+  const stamp = Date.now();
+  const file1 = join(tmpdir(), `whatsapp-send-a-${stamp}.jpg`);
+  const file2 = join(tmpdir(), `whatsapp-send-b-${stamp}.jpg`);
+  await writeFile(file1, "photo-one");
+  await writeFile(file2, "photo-two");
+
+  let sendCount = 0;
+  /** @type {unknown[]} */
+  let recoveryArgs = [];
+  const client = createFakeClient({
+    sendMessage: async () => {
+      sendCount += 1;
+      if (sendCount === 1) {
+        return {
+          timestamp: 1_700_000_100,
+          id: { _serialized: "first-media-id" },
+          ack: 1
+        };
+      }
+      // Second attachment: library returns no Message (the bug trigger).
+      return undefined;
+    },
+    pupPage: {
+      // Mirror production recovery filters so a store that only has the
+      // first attachment cannot satisfy the second recovery attempt.
+      // pupPage.evaluate(fn, ...args) — first arg is the browser fn.
+      evaluate: async (
+        _fn,
+        _chatId,
+        _earliest,
+        _expectedText,
+        expectedType,
+        excludeMessageIds,
+        expectedMimetype
+      ) => {
+        recoveryArgs = [expectedType, excludeMessageIds, expectedMimetype];
+        const excluded = new Set(excludeMessageIds ?? []);
+        const store = [
+          {
+            id: { _serialized: "first-media-id", fromMe: true },
+            body: "two photos",
+            type: "image",
+            mimetype: "image/jpeg",
+            t: 1_700_000_100,
+            timestamp: 1_700_000_100,
+            from: "me@c.us",
+            to: "friend@c.us",
+            ack: 1,
+            hasMedia: true
+          }
+        ];
+        const match = store.find((message) => {
+          if (excluded.has(message.id._serialized)) return false;
+          if (expectedType !== undefined && message.type !== expectedType) return false;
+          if (expectedMimetype !== undefined) {
+            if (!message.mimetype) return false;
+            if (
+              message.mimetype.split(";")[0].trim().toLowerCase() !==
+              String(expectedMimetype).split(";")[0].trim().toLowerCase()
+            ) {
+              return false;
+            }
+          }
+          return true;
+        });
+        return match ?? null;
+      }
+    }
+  });
+  const adapter = new WhatsAppAdapter({
+    ...baseDeps(),
+    createClient: () => client
+  });
+  const ready = adapter.ensureConnected();
+  setImmediate(() => client.emit("ready"));
+  await ready;
+
+  try {
+    await assert.rejects(
+      adapter.sendMessage(
+        {
+          platformThreadId: "friend@c.us",
+          displayName: "Friend",
+          lastMessagePreview: ""
+        },
+        "two photos",
+        [
+          {
+            absolutePath: file1,
+            displayName: "one.jpg",
+            mimeType: "image/jpeg",
+            kind: "photo"
+          },
+          {
+            absolutePath: file2,
+            displayName: "two.jpg",
+            mimeType: "image/jpeg",
+            kind: "photo"
+          }
+        ]
+      ),
+      /delivery could not be confirmed.*no message result/i
+    );
+    assert.equal(sendCount, 2, "both attachments should be attempted");
+    assert.equal(recoveryArgs[0], "image", "second recovery must expect image type");
+    assert.deepEqual(
+      recoveryArgs[1],
+      ["first-media-id"],
+      "second recovery must exclude the earlier attachment id"
+    );
+  } finally {
+    await rm(file1, { force: true });
+    await rm(file2, { force: true });
+  }
+});
+
+test("multi-attachment recovery can still identify a later message that is not claimed", async () => {
+  const stamp = Date.now();
+  const file1 = join(tmpdir(), `whatsapp-send-c-${stamp}.jpg`);
+  const file2 = join(tmpdir(), `whatsapp-send-d-${stamp}.png`);
+  await writeFile(file1, "photo-one");
+  await writeFile(file2, "photo-two");
+
+  let sendCount = 0;
+  const client = createFakeClient({
+    sendMessage: async () => {
+      sendCount += 1;
+      if (sendCount === 1) {
+        return {
+          timestamp: 1_700_000_100,
+          id: { _serialized: "first-media-id" },
+          ack: 1
+        };
+      }
+      return undefined;
+    },
+    pupPage: {
+      // pupPage.evaluate(fn, ...args) — first arg is the browser fn.
+      evaluate: async (
+        _fn,
+        _chatId,
+        _earliest,
+        _expectedText,
+        expectedType,
+        excludeMessageIds,
+        expectedMimetype
+      ) => {
+        const excluded = new Set(excludeMessageIds ?? []);
+        const store = [
+          {
+            id: { _serialized: "first-media-id", fromMe: true },
+            type: "image",
+            mimetype: "image/jpeg",
+            t: 1_700_000_100,
+            timestamp: 1_700_000_100,
+            ack: 1,
+            hasMedia: true
+          },
+          {
+            id: { _serialized: "second-media-id", fromMe: true },
+            type: "image",
+            mimetype: "image/png",
+            t: 1_700_000_101,
+            timestamp: 1_700_000_101,
+            ack: 1,
+            hasMedia: true
+          }
+        ];
+        const match = store
+          .filter((message) => {
+            if (excluded.has(message.id._serialized)) return false;
+            if (expectedType !== undefined && message.type !== expectedType) return false;
+            if (expectedMimetype !== undefined) {
+              if (!message.mimetype) return false;
+              if (
+                message.mimetype.split(";")[0].trim().toLowerCase() !==
+                String(expectedMimetype).split(";")[0].trim().toLowerCase()
+              ) {
+                return false;
+              }
+            }
+            return true;
+          })
+          .sort((a, b) => b.t - a.t)[0];
+        return match ?? null;
+      }
+    }
+  });
+  const adapter = new WhatsAppAdapter({
+    ...baseDeps(),
+    createClient: () => client
+  });
+  const ready = adapter.ensureConnected();
+  setImmediate(() => client.emit("ready"));
+  await ready;
+
+  try {
+    const receipt = await adapter.sendMessage(
+      {
+        platformThreadId: "friend@c.us",
+        displayName: "Friend",
+        lastMessagePreview: ""
+      },
+      "",
+      [
+        {
+          absolutePath: file1,
+          displayName: "one.jpg",
+          mimeType: "image/jpeg",
+          kind: "photo"
+        },
+        {
+          absolutePath: file2,
+          displayName: "two.png",
+          mimeType: "image/png",
+          kind: "photo"
+        }
+      ]
+    );
+    assert.equal(receipt.platformMessageKey, "first-media-id");
+    assert.equal(receipt.attachments?.length, 2);
+    assert.equal(receipt.attachments?.[0]?.guid, "first-media-id");
+    assert.equal(receipt.attachments?.[1]?.guid, "second-media-id");
+  } finally {
+    await rm(file1, { force: true });
+    await rm(file2, { force: true });
+  }
+});
+
+test("multi-attachment recovery rejects candidates missing mimetype when expected (#882)", async () => {
+  const stamp = Date.now();
+  const file1 = join(tmpdir(), `whatsapp-send-e-${stamp}.jpg`);
+  const file2 = join(tmpdir(), `whatsapp-send-f-${stamp}.jpg`);
+  await writeFile(file1, "photo-one");
+  await writeFile(file2, "photo-two");
+
+  let sendCount = 0;
+  const client = createFakeClient({
+    sendMessage: async () => {
+      sendCount += 1;
+      if (sendCount === 1) {
+        return {
+          timestamp: 1_700_000_100,
+          id: { _serialized: "first-media-id" },
+          ack: 1
+        };
+      }
+      // Second attachment: library returns no Message (recovery path).
+      return undefined;
+    },
+    pupPage: {
+      evaluate: async (
+        _fn,
+        _chatId,
+        _earliest,
+        _expectedText,
+        expectedType,
+        excludeMessageIds,
+        expectedMimetype
+      ) => {
+        const excluded = new Set(excludeMessageIds ?? []);
+        // Only candidate left is an unrelated recent message with NO mimetype.
+        // Fail closed: must not treat missing mimetype as a match when expected.
+        const store = [
+          {
+            id: { _serialized: "first-media-id", fromMe: true },
+            type: "image",
+            mimetype: "image/jpeg",
+            t: 1_700_000_100,
+            timestamp: 1_700_000_100,
+            ack: 1,
+            hasMedia: true
+          },
+          {
+            id: { _serialized: "unrelated-no-mime", fromMe: true },
+            type: "image",
+            // mimetype intentionally absent
+            t: 1_700_000_102,
+            timestamp: 1_700_000_102,
+            ack: 1,
+            hasMedia: true
+          }
+        ];
+        const match = store
+          .filter((message) => {
+            if (excluded.has(message.id._serialized)) return false;
+            if (expectedType !== undefined && message.type !== expectedType) return false;
+            if (expectedMimetype !== undefined) {
+              if (!message.mimetype) return false;
+              if (
+                message.mimetype.split(";")[0].trim().toLowerCase() !==
+                String(expectedMimetype).split(";")[0].trim().toLowerCase()
+              ) {
+                return false;
+              }
+            }
+            return true;
+          })
+          .sort((a, b) => b.t - a.t)[0];
+        return match ?? null;
+      }
+    }
+  });
+  const adapter = new WhatsAppAdapter({
+    ...baseDeps(),
+    createClient: () => client
+  });
+  const ready = adapter.ensureConnected();
+  setImmediate(() => client.emit("ready"));
+  await ready;
+
+  try {
+    await assert.rejects(
+      adapter.sendMessage(
+        {
+          platformThreadId: "friend@c.us",
+          displayName: "Friend",
+          lastMessagePreview: ""
+        },
+        "",
+        [
+          {
+            absolutePath: file1,
+            displayName: "one.jpg",
+            mimeType: "image/jpeg",
+            kind: "photo"
+          },
+          {
+            absolutePath: file2,
+            displayName: "two.jpg",
+            mimeType: "image/jpeg",
+            kind: "photo"
+          }
+        ]
+      ),
+      /delivery could not be confirmed.*no message result/i
+    );
+    assert.equal(sendCount, 2, "both attachments should be attempted");
+  } finally {
+    await rm(file1, { force: true });
+    await rm(file2, { force: true });
   }
 });
 
