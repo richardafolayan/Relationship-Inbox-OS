@@ -214,11 +214,7 @@ export function resolvedComposerScheduleInstant(
   customScheduleValue: string,
   recoveredScheduledFor?: string
 ): Date {
-  if (
-    recoveredScheduledFor &&
-    validIsoDate(recoveredScheduledFor) &&
-    toLocalScheduleValue(recoveredScheduledFor) === customScheduleValue
-  ) {
+  if (recoveredScheduledFor && validIsoDate(recoveredScheduledFor)) {
     return new Date(recoveredScheduledFor);
   }
   return new Date(customScheduleValue);
@@ -287,7 +283,7 @@ export function recoveredComposerSessionDisposition(
   if (!predecessor) {
     if (
       prunedBefore !== undefined &&
-      (session.createdAt === undefined || session.createdAt <= prunedBefore)
+      session.createdAt === undefined
     ) {
       return "blocked";
     }

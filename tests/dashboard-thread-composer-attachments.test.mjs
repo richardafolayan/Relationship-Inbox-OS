@@ -5,7 +5,8 @@ const {
   assertThreadComposerAttachmentsRecoverable,
   createMemoryThreadComposerAttachmentStore,
   getOrCreateThreadComposerTabId,
-  removableThreadComposerAttachmentIds
+  removableThreadComposerAttachmentIds,
+  __test
 } = await import("../apps/dashboard/lib/thread-composer-attachments.ts");
 
 const descriptor = {
@@ -113,7 +114,8 @@ test("a shared attempt can recover attachment bytes from its originating namespa
 });
 
 test("one tab cannot delete attachment bytes still owned by another tab", async () => {
-  const store = createMemoryThreadComposerAttachmentStore("shared-namespace");
+  let now = 1_000;
+  const store = createMemoryThreadComposerAttachmentStore("shared-namespace", () => now);
   const file = new File(["pilot attachment"], descriptor.name, {
     lastModified: descriptor.lastModified,
     type: descriptor.type
@@ -128,7 +130,39 @@ test("one tab cannot delete attachment bytes still owned by another tab", async 
 
   await store.releaseOwnership("thread-a", "tab-b:session-y");
   await store.removeUnowned("thread-a", [descriptor.id]);
+  assert.equal((await store.read("thread-a", [descriptor])).length, 1);
+
+  now += __test.STALE_AFTER_MS + 1;
+  await store.removeUnowned("thread-a", [descriptor.id]);
   assert.deepEqual(await store.read("thread-a", [descriptor]), []);
+});
+
+test("a blocked IndexedDB upgrade rejects instead of hanging attachment recovery", async () => {
+  const request = {};
+  const opening = __test.openDatabase({
+    open() {
+      queueMicrotask(() => request.onblocked());
+      return request;
+    }
+  });
+
+  await assert.rejects(opening, /Close other Tovi windows, then reload/);
+});
+
+test("an open attachment database closes when another version upgrade begins", async () => {
+  let closes = 0;
+  const database = { close: () => { closes += 1; } };
+  const request = { result: database };
+  const opening = __test.openDatabase({
+    open() {
+      queueMicrotask(() => request.onsuccess());
+      return request;
+    }
+  });
+
+  assert.equal(await opening, database);
+  database.onversionchange();
+  assert.equal(closes, 1);
 });
 
 test("a tab keeps its recovery namespace without sharing a generated id", () => {

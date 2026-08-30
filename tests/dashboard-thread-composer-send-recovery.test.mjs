@@ -165,6 +165,18 @@ test("a recovered schedule preserves the exact instant across a DST overlap", ()
   );
 });
 
+test("a recovered schedule keeps its exact instant after the local timezone changes", () => {
+  const scheduledFor = "2026-12-15T09:30:00.000Z";
+
+  assert.equal(
+    resolvedComposerScheduleInstant(
+      "2026-12-15T04:30",
+      scheduledFor
+    ).toISOString(),
+    scheduledFor
+  );
+});
+
 test("a restored predecessor shares one successor generation and is suppressed after it sends", () => {
   const restored = {
     ...attempt.value,
@@ -285,21 +297,27 @@ test("an edited successor stays active and expired restoration proof fails close
   assert.equal(recoveredComposerSessionDisposition(edited, []), "active");
 });
 
-test("a session older than truncated completion evidence fails closed", () => {
-  const oldSession = {
+test("truncated completion evidence preserves ordinary drafts and blocks unverifiable recovery", () => {
+  const ordinaryOldSession = {
     ...composerIntent,
     createdAt: 100,
     revision: 1,
     revisionId: "old-session"
   };
-  const newSession = {
-    ...oldSession,
-    createdAt: 300,
-    revisionId: "new-session"
+  const legacySession = {
+    ...composerIntent,
+    revision: 1,
+    revisionId: "legacy-session"
+  };
+  const recoveredSession = {
+    ...ordinaryOldSession,
+    recoveryClientSendId: "pruned-predecessor",
+    revisionId: "recovered-session"
   };
 
-  assert.equal(recoveredComposerSessionDisposition(oldSession, [], 200), "blocked");
-  assert.equal(recoveredComposerSessionDisposition(newSession, [], 200), "active");
+  assert.equal(recoveredComposerSessionDisposition(ordinaryOldSession, [], 200), "active");
+  assert.equal(recoveredComposerSessionDisposition(legacySession, [], 200), "blocked");
+  assert.equal(recoveredComposerSessionDisposition(recoveredSession, [], 200), "blocked");
 });
 
 test("dispatch failures stay unresolved when the response can follow durable insertion", () => {

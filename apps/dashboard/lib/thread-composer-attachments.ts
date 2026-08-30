@@ -103,6 +103,7 @@ function transactionComplete(transaction: IDBTransaction): Promise<void> {
 
 function openDatabase(indexedDb: IDBFactory): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
+    let settled = false;
     const request = indexedDb.open(DATABASE_NAME, DATABASE_VERSION);
     request.onupgradeneeded = () => {
       const database = request.result;
@@ -115,8 +116,29 @@ function openDatabase(indexedDb: IDBFactory): Promise<IDBDatabase> {
         owners.createIndex("ownerKey", "ownerKey", { unique: false });
       }
     };
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error ?? new Error("IndexedDB could not open."));
+    request.onblocked = () => {
+      settled = true;
+      reject(
+        new Error(
+          "Tovi could not update attachment recovery while another window is open. Close other Tovi windows, then reload."
+        )
+      );
+    };
+    request.onsuccess = () => {
+      const database = request.result;
+      if (settled) {
+        database.close();
+        return;
+      }
+      settled = true;
+      database.onversionchange = () => database.close();
+      resolve(database);
+    };
+    request.onerror = () => {
+      if (settled) return;
+      settled = true;
+      reject(request.error ?? new Error("IndexedDB could not open."));
+    };
   });
 }
 
@@ -313,7 +335,14 @@ export function createIndexedDbThreadComposerAttachmentStore(
         const key = attachmentKey(namespace, threadId, attachmentId);
         const count = owners.count(key);
         count.onsuccess = () => {
-          if (count.result === 0) attachments.delete(key);
+          if (count.result !== 0) return;
+          const record = attachments.get(key);
+          record.onsuccess = () => {
+            const value = record.result as PersistedAttachmentRecord | undefined;
+            if (value && value.updatedAt < now() - STALE_AFTER_MS) {
+              attachments.delete(key);
+            }
+          };
         };
       }
       await transactionComplete(transaction);
@@ -337,7 +366,8 @@ export function createIndexedDbThreadComposerAttachmentStore(
 }
 
 export function createMemoryThreadComposerAttachmentStore(
-  namespace = "memory"
+  namespace = "memory",
+  now: () => number = Date.now
 ): ThreadComposerAttachmentStore {
   const records = new Map<string, PersistedAttachmentRecord>();
   const owners = new Map<string, Set<string>>();
@@ -358,7 +388,7 @@ export function createMemoryThreadComposerAttachmentStore(
         key: attachmentKey(targetNamespace, threadId, descriptor.id),
         tabId: targetNamespace,
         threadId,
-        updatedAt: Date.now()
+        updatedAt: now()
       });
     },
     async read(threadId, descriptors, targetNamespace = namespace) {
@@ -381,7 +411,14 @@ export function createMemoryThreadComposerAttachmentStore(
     async removeUnowned(threadId, attachmentIds, targetNamespace = namespace) {
       for (const attachmentId of attachmentIds) {
         const key = attachmentKey(targetNamespace, threadId, attachmentId);
-        if ((owners.get(key)?.size ?? 0) === 0) records.delete(key);
+        const record = records.get(key);
+        if (
+          (owners.get(key)?.size ?? 0) === 0 &&
+          record &&
+          record.updatedAt < now() - STALE_AFTER_MS
+        ) {
+          records.delete(key);
+        }
       }
     },
     async releaseOwnership(threadId, ownerId, targetNamespace = namespace) {
@@ -417,5 +454,6 @@ export const __test = {
   OWNERS_STORE,
   STALE_AFTER_MS,
   TAB_ID_KEY,
-  attachmentKey
+  attachmentKey,
+  openDatabase
 };

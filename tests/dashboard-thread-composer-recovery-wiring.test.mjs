@@ -116,6 +116,38 @@ test("completed composer generations suppress copied-tab duplicate sends", () =>
   assert.match(source, /pending\.notFoundRecovery !== "replay"/);
 });
 
+test("attachment restoration blocks send and schedule until every intended file is resolved", () => {
+  const sendStart = source.indexOf("const onSend = useCallback");
+  const scheduleStart = source.indexOf("const scheduleSend = useCallback");
+  const send = source.slice(sendStart, scheduleStart);
+  const schedule = source.slice(scheduleStart, source.indexOf("const cancelScheduledSend", scheduleStart));
+
+  assert.match(source, /composerAttachmentsRestoringRef\.current = restoredIntent\.attachments\.length > 0/);
+  assert.match(source, /setComposerAttachmentsRestoring\(restoredIntent\.attachments\.length > 0\)/);
+  assert.match(send, /composerAttachmentsRestoringRef\.current/);
+  assert.match(schedule, /composerAttachmentsRestoringRef\.current/);
+  assert.match(send, /await awaitComposerAttachmentOwnership\(startThreadId, capturedSession\)/);
+  assert.match(schedule, /await awaitComposerAttachmentOwnership\(startThreadId, capturedSession\)/);
+  assert.match(source, /disabled=\{[\s\S]*?composerAttachmentsRestoring/);
+});
+
+test("unverifiable recovery quarantines content and a live successor is restored instead of erased", () => {
+  const blockStart = source.indexOf("const blockComposerSession = useCallback");
+  const blockEnd = source.indexOf("const suppressComposerSession = useCallback", blockStart);
+  const block = source.slice(blockStart, blockEnd);
+  const reconcileStart = source.indexOf("const reconcileCompletedSession = () =>");
+  const reconcileEnd = source.indexOf("const onStorage", reconcileStart);
+  const reconcile = source.slice(reconcileStart, reconcileEnd);
+
+  assert.notEqual(blockStart, -1);
+  assert.doesNotMatch(block, /consumeThreadComposerSession/);
+  assert.match(reconcile, /restoreSupersededComposerSession/);
+  assert.match(reconcile, /blockComposerSession/);
+  assert.match(reconcile, /suppressComposerSession/);
+  assert.match(source, /const ownerId = saved\.revisionId/);
+  assert.doesNotMatch(source, /attachmentOwnerIdRef/);
+});
+
 test("NOT_FOUND replay requires an authoritative shared-generation transition", () => {
   const statusStart = source.indexOf("const checkPendingDelivery = useCallback(");
   const statusEnd = source.indexOf("checkPendingDeliveryRef.current = checkPendingDelivery", statusStart);
