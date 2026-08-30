@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   ArrowLeft,
@@ -23,7 +23,8 @@ import { startPilotTour } from "@/lib/pilot-tour";
 import {
   isSetupComplete,
   markSetupComplete,
-  onSetupWizardStart
+  onSetupWizardStart,
+  persistSetupCompletion
 } from "@/lib/setup-wizard";
 import type { OperatorProfile, PlatformCard } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -93,6 +94,9 @@ export function SetupWizard() {
   const [aiConfigured, setAiConfigured] = useState(false);
   const [selected, setSelected] = useState<SetupPlatform[]>([]);
   const [aiEnabled, setAiEnabled] = useState(false);
+  const [finishing, setFinishing] = useState(false);
+  const [finishError, setFinishError] = useState<string | null>(null);
+  const finishingRef = useRef(false);
 
   const load = useCallback(async () => {
     const [setup, ai] = await Promise.all([
@@ -152,12 +156,28 @@ export function SetupWizard() {
     return result.preferences;
   }, []);
 
-  const finish = useCallback(async () => {
+  const finish = useCallback(async (): Promise<boolean> => {
+    if (finishingRef.current) return false;
+    finishingRef.current = true;
+    setFinishing(true);
+    setFinishError(null);
     const now = new Date().toISOString();
-    await savePreferences({ completedAt: now }).catch(() => undefined);
-    await apiPost("/runner/control/operator-profile", { setupCompletedAt: now }).catch(() => undefined);
-    markSetupComplete(window.localStorage);
-    setOpen(false);
+    try {
+      await persistSetupCompletion({
+        saveProfileCompletion: () =>
+          apiPost("/runner/control/operator-profile", { setupCompletedAt: now }),
+        savePreferencesCompletion: () => savePreferences({ completedAt: now }),
+        markComplete: () => markSetupComplete(window.localStorage)
+      });
+      setOpen(false);
+      return true;
+    } catch {
+      setFinishError("Tovi couldn't save your setup yet. Your choices are still here, so you can try again.");
+      return false;
+    } finally {
+      finishingRef.current = false;
+      setFinishing(false);
+    }
   }, [savePreferences]);
 
   if (!open) return null;
@@ -172,11 +192,17 @@ export function SetupWizard() {
             ))}
           </div>
           {step !== "done" ? (
-            <button type="button" onClick={() => void finish()} className="font-mono text-[11px] text-ink-3 underline underline-offset-2 hover:text-ink">
-              Finish later
+            <button type="button" disabled={finishing} onClick={() => void finish()} className="font-mono text-[11px] text-ink-3 underline underline-offset-2 hover:text-ink disabled:cursor-not-allowed disabled:opacity-50">
+              {finishing ? "Saving..." : "Finish later"}
             </button>
           ) : null}
         </div>
+
+        {finishError ? (
+          <p role="alert" data-testid="setup-finish-error" className="mb-5 rounded-[10px] border border-risk-overdue/30 bg-risk-overdue/5 px-4 py-3 text-[13px] leading-5 text-risk-overdue">
+            {finishError}
+          </p>
+        ) : null}
 
         {step === "welcome" ? (
           <Card icon={<Sparkles />} eyebrow="Welcome" title={`Make ${APP_NAME} yours.`} body={`Choose what you want ${APP_NAME} to help with. You can add, change, or remove anything later in Settings.`}>
@@ -218,8 +244,8 @@ export function SetupWizard() {
         {step === "done" ? (
           <Card icon={<Check />} eyebrow="Ready" title={`${APP_NAME} is ready when you are.`} body="New conversations appear after their first scan. You can rerun this assistant or manage optional parts from Settings at any time.">
             <Actions>
-              <Primary onClick={() => { void finish().then(() => router.push("/today")); }}>Go to Today</Primary>
-              <Quiet onClick={() => { void finish().then(() => { router.push("/today"); window.setTimeout(() => startPilotTour(), 350); }); }}>Show me with safe demo messages</Quiet>
+              <Primary disabled={finishing} onClick={() => { void finish().then((saved) => { if (saved) router.push("/today"); }); }}>{finishing ? "Saving..." : "Go to Today"}</Primary>
+              <Quiet disabled={finishing} onClick={() => { void finish().then((saved) => { if (saved) { router.push("/today"); window.setTimeout(() => startPilotTour(), 350); } }); }}>Show me with safe demo messages</Quiet>
             </Actions>
           </Card>
         ) : null}
@@ -392,7 +418,7 @@ function ReviewStep({ selected, aiEnabled, aiConfigured, automaticUpdates, versi
 function Card({ icon, eyebrow, title, body, children }: { icon: React.ReactNode; eyebrow: string; title: string; body: string; children?: React.ReactNode }) { return <section className="relative overflow-hidden rounded-card border border-hairline bg-paper p-6 shadow-card sm:p-8"><div className="relative"><p className="m-0 flex items-center gap-2 font-mono text-[10px] uppercase tracking-[0.1em] text-accent-ink"><span className="[&>svg]:h-[18px] [&>svg]:w-[18px]">{icon}</span>{eyebrow}</p><h1 className="m-0 mt-3 max-w-[28ch] font-display text-[27px] font-semibold leading-[1.15] tracking-[-0.02em] text-ink">{title}</h1><p className="m-0 mt-3 max-w-[62ch] text-[14px] leading-[1.6] text-ink-2">{body}</p>{children}</div></section>; }
 function Actions({ children }: { children: React.ReactNode }) { return <div className="mt-6 flex flex-wrap items-center gap-3">{children}</div>; }
 function Primary({ onClick, disabled, children }: { onClick: () => void; disabled?: boolean; children: React.ReactNode }) { return <button type="button" onClick={onClick} disabled={disabled} className="inline-flex items-center gap-1.5 rounded-pill bg-ink px-4 py-[9px] text-[13.5px] font-medium text-paper hover:bg-ink-2 disabled:opacity-50 [&>svg]:h-3.5 [&>svg]:w-3.5">{children}</button>; }
-function Quiet({ onClick, children }: { onClick: () => void; children: React.ReactNode }) { return <button type="button" onClick={onClick} className="inline-flex items-center rounded-pill border border-hairline px-4 py-[9px] text-[13.5px] font-medium text-ink-2 hover:bg-paper-2">{children}</button>; }
+function Quiet({ onClick, disabled, children }: { onClick: () => void; disabled?: boolean; children: React.ReactNode }) { return <button type="button" onClick={onClick} disabled={disabled} className="inline-flex items-center rounded-pill border border-hairline px-4 py-[9px] text-[13.5px] font-medium text-ink-2 hover:bg-paper-2 disabled:cursor-not-allowed disabled:opacity-50">{children}</button>; }
 function Back({ onClick }: { onClick: () => void }) { return <Quiet onClick={onClick}><ArrowLeft className="mr-1.5 h-3.5 w-3.5" />Back</Quiet>; }
 function Notice({ children }: { children: React.ReactNode }) { return <p className="m-0 mt-4 rounded-[8px] border border-hairline bg-paper-2/55 px-3 py-2.5 text-[12.5px] leading-5 text-ink-2" aria-live="polite">{children}</p>; }
 function InfoRows({ rows }: { rows: Array<[string, string]> }) { return <div className="mt-5 divide-y divide-hairline rounded-[10px] border border-hairline bg-paper-2/35">{rows.map(([label, body]) => <div key={label} className="px-4 py-3"><p className="m-0 text-[13.5px] font-medium text-ink">{label}</p><p className="m-0 mt-0.5 text-[12.5px] text-ink-3">{body}</p></div>)}</div>; }

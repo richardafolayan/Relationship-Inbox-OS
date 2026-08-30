@@ -29,6 +29,20 @@ export function markSetupComplete(storage: SetupWizardStorage): void {
   storage.setItem(SETUP_WIZARD_COMPLETE_KEY, "1");
 }
 
+export async function persistSetupCompletion({
+  saveProfileCompletion,
+  savePreferencesCompletion,
+  markComplete
+}: {
+  saveProfileCompletion: () => Promise<unknown>;
+  savePreferencesCompletion: () => Promise<unknown>;
+  markComplete: () => void;
+}): Promise<void> {
+  await saveProfileCompletion();
+  await savePreferencesCompletion();
+  markComplete();
+}
+
 export type SetupGateDecision =
   /** Fresh install with no previous setup state: show the wizard. */
   | "show"

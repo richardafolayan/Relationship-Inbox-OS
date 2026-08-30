@@ -8,6 +8,7 @@ import assert from "node:assert/strict";
 const {
   isSetupComplete,
   markSetupComplete,
+  persistSetupCompletion,
   resolveSetupGate,
   SETUP_WIZARD_COMPLETE_KEY
 } = await import("../apps/dashboard/lib/setup-wizard.ts");
@@ -71,4 +72,36 @@ test("complete flag round-trips through storage", () => {
   markSetupComplete(storage);
   assert.equal(isSetupComplete(storage), true);
   assert.equal(storage.getItem(SETUP_WIZARD_COMPLETE_KEY), "1");
+});
+
+test("setup completion is not marked when durable preferences fail", async () => {
+  const calls = [];
+  await assert.rejects(
+    persistSetupCompletion({
+      saveProfileCompletion: async () => {
+        calls.push("profile");
+      },
+      savePreferencesCompletion: async () => {
+        calls.push("preferences");
+        throw new Error("runner unavailable");
+      },
+      markComplete: () => calls.push("complete")
+    }),
+    /runner unavailable/
+  );
+  assert.deepEqual(calls, ["profile", "preferences"]);
+});
+
+test("setup completion is marked only after both durable writes", async () => {
+  const calls = [];
+  await persistSetupCompletion({
+    saveProfileCompletion: async () => {
+      calls.push("profile");
+    },
+    savePreferencesCompletion: async () => {
+      calls.push("preferences");
+    },
+    markComplete: () => calls.push("complete")
+  });
+  assert.deepEqual(calls, ["profile", "preferences", "complete"]);
 });
