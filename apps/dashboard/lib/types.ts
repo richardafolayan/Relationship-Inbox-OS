@@ -635,6 +635,7 @@ export interface ThreadResponse {
    */
   replyBrief?: ReplyBrief | null;
   draft: string;
+  draftUpdatedAt: string | null;
   contextUpdatedAt: string;
   messages: ThreadMessage[];
   messagePage: {
@@ -672,7 +673,13 @@ export interface ThreadResponse {
    * second fetch. Empty array when nothing is scheduled.
    */
   scheduledSends?: Array<{
+    attachments?: Array<{
+      displayName: string;
+      kind: string | null;
+      mimeType: string | null;
+    }>;
     clientSendId: string;
+    replyToMessageId: string | null;
     text: string;
     scheduledFor: string | null;
     createdAt: string;

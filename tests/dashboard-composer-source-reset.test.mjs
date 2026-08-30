@@ -100,16 +100,21 @@ test("onSend resets composerSource after clearing the composer", () => {
   );
 });
 
-test("scheduleSend resets composerSource after clearing the composer", () => {
-  const start = SRC.indexOf("const scheduleSend = useCallback(");
-  const end = SRC.indexOf("const cancelScheduledSend", start);
-  assert.notEqual(start, -1, "located scheduleSend");
-  assert.notEqual(end, -1, "located the end of scheduleSend");
+test("an accepted scheduled send resets composerSource when it clears the composer", () => {
+  const start = SRC.indexOf("const clearCapturedComposerAfterAcceptedAction = useCallback(");
+  const end = SRC.indexOf("// Send-queue polling fallback", start);
+  assert.notEqual(start, -1, "located accepted-action composer cleanup");
+  assert.notEqual(end, -1, "located the end of accepted-action composer cleanup");
   const block = SRC.slice(start, end);
-  assert.match(block, /setComposer\(""\);/, "scheduleSend clears the composer text");
+  assert.match(block, /setComposer\(""\);/, "accepted scheduled send clears the composer text");
   assert.match(
     block,
     RESET,
-    "scheduleSend must reset composerSource so the predraft badge does not frame an empty composer"
+    "accepted scheduled send must reset composerSource so the predraft badge does not frame an empty composer"
+  );
+  assert.match(
+    SRC,
+    /disposition === "scheduled" && pending\.attemptKind === "scheduled"[\s\S]*?clearCapturedComposerAfterAcceptedAction\(pending\)/,
+    "the scheduled status path must use the accepted-action cleanup"
   );
 });

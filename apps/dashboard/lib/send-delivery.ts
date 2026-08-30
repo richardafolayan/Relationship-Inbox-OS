@@ -11,6 +11,7 @@ export interface SendStatusResponse {
 export type SendRecoveryOutcome =
   | { kind: "waiting" }
   | { kind: "sent" }
+  | { kind: "retry_same_id"; message: string }
   | { kind: "not_sent"; message: string }
   | { kind: "failed"; message: string; errorKind?: SendStatusResponse["errorKind"] }
   | { kind: "uncertain"; message: string };
@@ -20,7 +21,13 @@ export function resolveSendRecovery(response: SendStatusResponse): SendRecoveryO
   if (response.status === "PENDING" || response.status === "SCHEDULED") {
     return { kind: "waiting" };
   }
-  if (response.status === "NOT_FOUND" || response.status === "CANCELLED") {
+  if (response.status === "NOT_FOUND") {
+    return {
+      kind: "retry_same_id",
+      message: "The original request is not visible yet. Tovi will retry it with the same safety ID."
+    };
+  }
+  if (response.status === "CANCELLED") {
     return {
       kind: "not_sent",
       message: "This message did not reach the send queue. It is safe to review and send again."

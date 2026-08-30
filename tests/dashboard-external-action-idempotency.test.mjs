@@ -18,12 +18,19 @@ const focusSource = await readFile(
 
 test("message mutations keep one client action id across an uncertain retry", () => {
   assert.match(source, /createExternalActionAttemptStore\(\)/);
-  for (const action of ["send-poll", "dictation-send", "schedule-send", "reaction", "poll-vote", "edit"]) {
+  for (const action of ["send-poll", "dictation-send", "reaction", "poll-vote", "edit"]) {
     assert.match(source, new RegExp("scope = `" + action + ":"));
   }
-  assert.equal((source.match(/externalActionAttempts\.getOrCreateScopedValue\(/g) ?? []).length, 6);
+  assert.match(source, /threadComposerSendScope\(startThreadId\)/);
+  assert.equal(
+    (source.match(/externalActionAttempts\.getOrCreateScopedValue/g) ?? []).length >= 7,
+    true
+  );
   assert.equal((source.match(/\{ clientActionId,/g) ?? []).length >= 3, true);
-  assert.equal((source.match(/externalActionAttempts\.completeScopedValue/g) ?? []).length, 6);
+  assert.equal(
+    (source.match(/\.completeScopedValue/g) ?? []).length >= 7,
+    true
+  );
   const dictation = source.slice(
     source.indexOf("const sendDictationMessage"),
     source.indexOf("// Cmd/Ctrl-Enter sends.")
@@ -383,4 +390,26 @@ test("unavailable durable storage fails closed", async () => {
     ),
     ExternalActionAttemptStorageError
   );
+});
+
+test("an unresolved scoped action can be read after remount and completed actions stay hidden", async () => {
+  const values = new Map();
+  const storage = {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, value),
+    removeItem: (key) => values.delete(key)
+  };
+  const scope = "composer-send:thread-a";
+  const intent = { kind: "immediate", threadId: "thread-a", text: "Hello" };
+  const value = { clientSendId: "send-1", sessionRevision: 1 };
+  const first = createExternalActionAttemptStore(storage);
+  await first.getOrCreateScopedValue(scope, intent, () => value);
+
+  assert.deepEqual(createExternalActionAttemptStore(storage).readScopedAttempt(scope), {
+    intent,
+    value
+  });
+
+  await first.completeScopedValue(scope, (candidate) => candidate.clientSendId === "send-1");
+  assert.equal(createExternalActionAttemptStore(storage).readScopedAttempt(scope), undefined);
 });

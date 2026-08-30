@@ -70,7 +70,7 @@ test("desktop toolbar remains available at md+ and is not the mobile row", () =>
 test("thread switch closes the mobile more sheet", () => {
   const effectBodies = [
     ...src.matchAll(
-      /useLayoutEffect\(\(\)\s*=>\s*\{([\s\S]*?)\},\s*\[composerAttachmentStore, threadId\]\)/g
+      /useLayoutEffect\(\(\)\s*=>\s*\{([\s\S]*?)\},\s*\[composerAttachmentStore, externalActionAttempts, threadId\]\)/g
     )
   ].map((m) => m[1]);
   const reset = effectBodies.find(

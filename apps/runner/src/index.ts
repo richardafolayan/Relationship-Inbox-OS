@@ -4093,6 +4093,8 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
       text: z.string(),
       clientSendId: z.string().uuid(),
       clientRequestedAt: z.string().datetime().optional(),
+      consumeDraftText: z.string().max(5000).optional(),
+      consumeDraftUpdatedAt: z.string().datetime().optional(),
       // Optional ISO 8601 timestamp. When present, the send is persisted
       // as SCHEDULED and the scheduled-send promoter flips it to PENDING
       // when the time elapses. When absent, the send is enqueued
@@ -4106,6 +4108,12 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
       // only persisted on our side and rendered by the dashboard.
       replyToMessageId: z.string().min(1).optional()
     })
+    .refine(
+      (value) =>
+        (value.consumeDraftText === undefined) ===
+        (value.consumeDraftUpdatedAt === undefined),
+      { message: "consumeDraftText and consumeDraftUpdatedAt must be provided together" }
+    )
     .parse(req.body);
   const uploadedFiles = (req.files as Express.Multer.File[] | undefined) ?? [];
   const stagedAttachments = await Promise.all(
@@ -4149,7 +4157,14 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
         clientSendId: payload.clientSendId,
         scheduledFor: new Date(payload.scheduledFor),
         attachments: stagedAttachments,
-        replyToMessageId: payload.replyToMessageId
+        replyToMessageId: payload.replyToMessageId,
+        consumeDraft:
+          payload.consumeDraftText !== undefined && payload.consumeDraftUpdatedAt
+            ? {
+                text: payload.consumeDraftText,
+                updatedAt: new Date(payload.consumeDraftUpdatedAt)
+              }
+            : undefined
       });
       if (scheduleResult.replayed) {
         await discardStagedAttachments(stagedAttachments);
@@ -4203,7 +4218,14 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
       focusIntentVersion:
         payload.source === "focus_ack" ? requestIntentVersion : undefined,
       rearmPolicyBlockedFocusAcknowledgement: payload.source === "focus_ack",
-      replyToMessageId: payload.replyToMessageId
+      replyToMessageId: payload.replyToMessageId,
+      consumeDraft:
+        payload.consumeDraftText !== undefined && payload.consumeDraftUpdatedAt
+          ? {
+              text: payload.consumeDraftText,
+              updatedAt: new Date(payload.consumeDraftUpdatedAt)
+            }
+          : undefined
     });
     if (queueResult.replayed) {
       await discardStagedAttachments(stagedAttachments);
@@ -4320,7 +4342,7 @@ app.post("/control/thread/:threadId/update-send", asyncRoute(async (req, res) =>
   const payload = z
     .object({
       clientSendId: z.string().uuid(),
-      text: z.string().min(1).max(5000).optional(),
+      text: z.string().max(5000).optional(),
       scheduledFor: z.string().datetime().optional()
     })
     .refine((v) => v.text !== undefined || v.scheduledFor !== undefined, {
@@ -6569,6 +6591,7 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
     remember: safeJsonParse<RememberItem[]>(aiThread.rememberJson, []),
     replyBrief: replyBriefResponse,
     draft: thread.drafts[0]?.text ?? "",
+    draftUpdatedAt: thread.drafts[0]?.updatedAt.toISOString() ?? null,
     contextUpdatedAt: thread.updatedAt.toISOString(),
     relationshipMemory,
     messages: pageMessages
@@ -6640,7 +6663,21 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
     suggestedReplies: suggested,
     suggestedRepliesStatus,
     scheduledSends: scheduledSendRows.map((row) => ({
+      attachments: safeJsonParse<Array<Record<string, unknown>>>(
+        row.attachmentsJson,
+        []
+      ).flatMap((attachment) =>
+        typeof attachment.displayName === "string"
+          ? [{
+              displayName: attachment.displayName,
+              kind: typeof attachment.kind === "string" ? attachment.kind : null,
+              mimeType:
+                typeof attachment.mimeType === "string" ? attachment.mimeType : null
+            }]
+          : []
+      ),
       clientSendId: row.clientSendId,
+      replyToMessageId: row.replyToMessageId,
       text: row.requestText,
       scheduledFor: row.scheduledFor?.toISOString() ?? null,
       createdAt: row.createdAt.toISOString()

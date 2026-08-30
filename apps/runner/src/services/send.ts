@@ -576,6 +576,7 @@ export function createSendService(deps: SendServiceDeps) {
      * by the dashboard.
      */
     replyToMessageId?: string;
+    consumeDraft?: { text: string; updatedAt: Date };
   }): Promise<EnqueueSendResult> {
     const thread = await prisma.thread.findUnique({
       where: { id: input.threadId }
@@ -866,18 +867,30 @@ export function createSendService(deps: SendServiceDeps) {
       }
 
       try {
-        await prisma.sendRequest.create({
-          data: {
-            clientSendId: input.clientSendId,
-            threadId: input.threadId,
-            requestText: input.text,
-            status: "PENDING",
-            source,
-            focusIntentVersion,
-            attachmentsJson: normalizedAttachmentsJson(input.attachments),
-            replyToMessageId: input.replyToMessageId ?? null
-          }
-        });
+        const data = {
+          clientSendId: input.clientSendId,
+          threadId: input.threadId,
+          requestText: input.text,
+          status: "PENDING" as const,
+          source,
+          focusIntentVersion,
+          attachmentsJson: normalizedAttachmentsJson(input.attachments),
+          replyToMessageId: input.replyToMessageId ?? null
+        };
+        if (input.consumeDraft) {
+          await prisma.$transaction(async (transaction) => {
+            await transaction.sendRequest.create({ data });
+            await transaction.draft.deleteMany({
+              where: {
+                threadId: input.threadId,
+                text: input.consumeDraft!.text,
+                updatedAt: input.consumeDraft!.updatedAt
+              }
+            });
+          });
+        } else {
+          await prisma.sendRequest.create({ data });
+        }
       } catch (error) {
         if (!isUniqueConstraintError(error)) {
           throw error;
@@ -1492,6 +1505,7 @@ export function createSendService(deps: SendServiceDeps) {
     scheduledFor: Date;
     attachments?: SendAttachment[];
     replyToMessageId?: string;
+    consumeDraft?: { text: string; updatedAt: Date };
   }): Promise<ScheduleSendResult> {
     const thread = await prisma.thread.findUnique({
       where: { id: input.threadId }
@@ -1532,18 +1546,30 @@ export function createSendService(deps: SendServiceDeps) {
     }
 
     try {
-      await prisma.sendRequest.create({
-        data: {
-          clientSendId: input.clientSendId,
-          threadId: input.threadId,
-          requestText: input.text,
-          status: "SCHEDULED",
-          source: "manual",
-          scheduledFor: input.scheduledFor,
-          replyToMessageId: input.replyToMessageId ?? null,
-          attachmentsJson: normalizedAttachmentsJson(input.attachments)
-        }
-      });
+      const data = {
+        clientSendId: input.clientSendId,
+        threadId: input.threadId,
+        requestText: input.text,
+        status: "SCHEDULED" as const,
+        source: "manual" as const,
+        scheduledFor: input.scheduledFor,
+        replyToMessageId: input.replyToMessageId ?? null,
+        attachmentsJson: normalizedAttachmentsJson(input.attachments)
+      };
+      if (input.consumeDraft) {
+        await prisma.$transaction(async (transaction) => {
+          await transaction.sendRequest.create({ data });
+          await transaction.draft.deleteMany({
+            where: {
+              threadId: input.threadId,
+              text: input.consumeDraft!.text,
+              updatedAt: input.consumeDraft!.updatedAt
+            }
+          });
+        });
+      } else {
+        await prisma.sendRequest.create({ data });
+      }
     } catch (error) {
       if (!isUniqueConstraintError(error)) {
         throw error;
@@ -1674,7 +1700,9 @@ export function createSendService(deps: SendServiceDeps) {
     if (row.status !== "SCHEDULED") return { updated: false, reason: `not_scheduled:${row.status}` };
 
     const nextText = typeof input.text === "string" ? input.text : row.requestText;
-    if (nextText.length === 0) return { updated: false, reason: "empty_text" };
+    if (nextText.length === 0 && !row.attachmentsJson) {
+      return { updated: false, reason: "empty_text" };
+    }
     const nextScheduledFor = input.scheduledFor ?? row.scheduledFor;
     if (!nextScheduledFor) return { updated: false, reason: "no_scheduled_for" };
     if (Number.isNaN(nextScheduledFor.getTime())) return { updated: false, reason: "invalid_scheduled_for" };

@@ -10,13 +10,13 @@ const source = readFileSync(
 
 test("thread navigation snapshots the previous full intent and restores only the new thread", () => {
   const start = source.indexOf("useLayoutEffect(() => {");
-  const end = source.indexOf("}, [composerAttachmentStore, threadId]);", start);
+  const end = source.indexOf("}, [composerAttachmentStore, externalActionAttempts, threadId]);", start);
   assert.notEqual(start, -1);
   assert.notEqual(end, -1);
   const lifecycle = source.slice(start, end);
   assert.match(
     lifecycle,
-    /snapshotThreadComposerSession\(previousThreadId, composerIntentRef\.current\)/
+    /snapshotThreadComposerSession\(previousThreadId, currentIntent\)/
   );
   assert.match(lifecycle, /readThreadComposerSession\(threadId\)/);
   assert.match(lifecycle, /setComposer\(restoredIntent\.text\)/);
@@ -25,20 +25,16 @@ test("thread navigation snapshots the previous full intent and restores only the
   assert.match(lifecycle, /composerAttachmentStore[\s\S]*?\.read\(threadId, restoredIntent\.attachments\)/);
 });
 
-test("a scheduled reply carries files and reply context and clears only its captured revision", () => {
+test("a scheduled reply carries complete intent under the shared durable composer attempt", () => {
   const start = source.indexOf("const scheduleSend = useCallback(");
   const end = source.indexOf("const cancelScheduledSend", start);
   assert.notEqual(start, -1);
   assert.notEqual(end, -1);
   const schedule = source.slice(start, end);
   assert.match(schedule, /snapshotThreadComposerSession\(startThreadId, capturedIntent\)/);
-  assert.match(schedule, /buildScheduledSendRequest\(\{/);
-  assert.match(schedule, /attachments: composerAttachments/);
-  assert.match(schedule, /replyToMessageId: capturedIntent\.replyToMessageId \?\? undefined/);
-  assert.match(
-    schedule,
-    /consumeThreadComposerSession\(startThreadId, capturedSession\.revision\)/
-  );
+  assert.match(schedule, /kind: "scheduled"/);
+  assert.match(schedule, /threadComposerSendScope\(startThreadId\)/);
+  assert.match(schedule, /dispatchComposerSendAttempt\(attemptIntent, attemptValue, composerAttachments\)/);
   assert.match(schedule, /sameThreadComposerIntent\(composerIntentRef\.current, capturedIntent\)/);
 });
 
@@ -49,8 +45,9 @@ test("an immediate send preserves its full intent until the exact attempt is res
   assert.notEqual(end, -1);
   const send = source.slice(start, end);
   assert.match(send, /composerIntent: capturedIntent/);
-  assert.match(send, /replyToMessageId = capturedIntent\.replyToMessageId \?\? undefined/);
-  assert.match(send, /consumeThreadComposerSession\(startThreadId, capturedSession\.revision\)/);
+  assert.match(send, /threadComposerSendScope\(startThreadId\)/);
+  assert.match(send, /dispatchComposerSendAttempt\(attemptIntent, attemptValue, attachmentsToSend\)/);
+  assert.doesNotMatch(send, /consumeThreadComposerSession\(startThreadId, capturedSession\.revision\)/);
   assert.match(send, /sameThreadComposerIntent\(composerIntentRef\.current, clearedIntent\)/);
   assert.match(send, /routeThreadIdRef\.current === startThreadId/);
   assert.match(
@@ -78,8 +75,8 @@ test("navigating away cannot clear the reply parent before recovery captures it"
 });
 
 test("a still-pending send retains attachment bytes for a later definite failure", () => {
-  const start = source.indexOf('if (outcome.kind === "waiting")');
-  const end = source.indexOf('if (outcome.kind === "not_sent")', start);
+  const start = source.indexOf('if (disposition === "retain" || disposition === "scheduled")');
+  const end = source.indexOf('if (disposition === "replay_same_id")', start);
   assert.notEqual(start, -1);
   assert.notEqual(end, -1);
   const waiting = source.slice(start, end);

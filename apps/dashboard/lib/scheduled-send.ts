@@ -9,6 +9,8 @@ export type ScheduledSendRequest =
 export function buildScheduledSendRequest(input: {
   attachments: ScheduledSendAttachment[];
   clientSendId: string;
+  clientRequestedAt?: string;
+  draftRevision?: { text: string; updatedAt: string } | null;
   replyToMessageId?: string;
   scheduledFor: string;
   text: string;
@@ -18,6 +20,13 @@ export function buildScheduledSendRequest(input: {
       kind: "json",
       body: {
         clientSendId: input.clientSendId,
+        ...(input.clientRequestedAt ? { clientRequestedAt: input.clientRequestedAt } : {}),
+        ...(input.draftRevision
+          ? {
+              consumeDraftText: input.draftRevision.text,
+              consumeDraftUpdatedAt: input.draftRevision.updatedAt
+            }
+          : {}),
         ...(input.replyToMessageId ? { replyToMessageId: input.replyToMessageId } : {}),
         scheduledFor: input.scheduledFor,
         text: input.text
@@ -27,6 +36,11 @@ export function buildScheduledSendRequest(input: {
 
   const body = new FormData();
   body.append("clientSendId", input.clientSendId);
+  if (input.clientRequestedAt) body.append("clientRequestedAt", input.clientRequestedAt);
+  if (input.draftRevision) {
+    body.append("consumeDraftText", input.draftRevision.text);
+    body.append("consumeDraftUpdatedAt", input.draftRevision.updatedAt);
+  }
   if (input.replyToMessageId) body.append("replyToMessageId", input.replyToMessageId);
   body.append("scheduledFor", input.scheduledFor);
   body.append("text", input.text);

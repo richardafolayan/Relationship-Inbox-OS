@@ -342,9 +342,19 @@ export function createExternalActionAttemptStore(
     });
   }
 
+  function readScopedAttempt<TIntent, TValue>(scope: string):
+    | { intent: TIntent; value: TValue }
+    | undefined {
+    if (!storage) throw new ExternalActionAttemptStorageError();
+    const record = readRecord<TIntent, TValue>(valueStorageKey(scope));
+    if (!record || record.completed) return undefined;
+    return { intent: record.intent, value: record.value };
+  }
+
   return {
     getOrCreateScopedValue,
     replaceScopedValue,
-    completeScopedValue
+    completeScopedValue,
+    readScopedAttempt
   };
 }

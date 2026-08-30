@@ -18,7 +18,7 @@ const src = readFileSync(
 test("a thread-keyed layout effect restores intent and isolates pending sends", () => {
   const effectBodies = [
     ...src.matchAll(
-      /useLayoutEffect\(\(\)\s*=>\s*\{([\s\S]*?)\},\s*\[composerAttachmentStore, threadId\]\)/g
+      /useLayoutEffect\(\(\)\s*=>\s*\{([\s\S]*?)\},\s*\[composerAttachmentStore, externalActionAttempts, threadId\]\)/g
     )
   ].map((m) => m[1]);
   const reset = effectBodies.find(
@@ -67,10 +67,13 @@ test("the timeline scroller clips horizontal overflow and bubble text wraps anyw
 // enqueueing two distinct clientSendIds. A synchronous ref closes the gap.
 test("onSend has a synchronous sendingRef re-entrancy guard", () => {
   assert.match(src, /const sendingRef = useRef\(false\)/);
-  assert.match(
-    src,
-    /if \(!thread \|\| sending \|\| scheduling \|\| sendingRef\.current \|\| composerActionRef\.current\) return;/
-  );
+  const start = src.indexOf("const onSend = useCallback(async () => {");
+  const end = src.indexOf("if (!composer.trim()", start);
+  assert.notEqual(start, -1, "located onSend");
+  assert.notEqual(end, -1, "located the end of the onSend entry guard");
+  const guard = src.slice(start, end);
+  assert.match(guard, /sendingRef\.current/);
+  assert.match(guard, /composerActionRef\.current/);
   assert.match(src, /sendingRef\.current = true;/);
   assert.match(src, /sendingRef\.current = false;/);
 });

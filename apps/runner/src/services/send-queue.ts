@@ -61,6 +61,7 @@ export interface SendQueueService {
      * dashboard renders the new bubble inline under its parent.
      */
     replyToMessageId?: string;
+    consumeDraft?: { text: string; updatedAt: Date };
   }): Promise<{
     clientSendId: string;
     status: "PENDING" | "SENT" | "FAILED";
@@ -215,6 +216,7 @@ export function createSendQueue(deps: SendQueueDeps): SendQueueService {
      * dashboard renders the new bubble inline under its parent.
      */
     replyToMessageId?: string;
+    consumeDraft?: { text: string; updatedAt: Date };
   }): Promise<{
     clientSendId: string;
     status: "PENDING" | "SENT" | "FAILED";

@@ -14,8 +14,28 @@ function uniqueError() {
 
 function harness({ createRaceWinner } = {}) {
   const rows = [];
+  const drafts = [];
   let createCalls = 0;
   const prisma = {
+    async $transaction(work) {
+      return work(prisma);
+    },
+    draft: {
+      async deleteMany({ where }) {
+        const before = drafts.length;
+        for (let index = drafts.length - 1; index >= 0; index -= 1) {
+          const draft = drafts[index];
+          if (
+            draft.threadId === where.threadId &&
+            draft.text === where.text &&
+            draft.updatedAt.getTime() === where.updatedAt.getTime()
+          ) {
+            drafts.splice(index, 1);
+          }
+        }
+        return { count: before - drafts.length };
+      }
+    },
     thread: {
       async findUnique({ where }) {
         return { id: where.id, platform: "LINKEDIN" };
@@ -47,7 +67,7 @@ function harness({ createRaceWinner } = {}) {
     withPlatformLock: async (_platform, work) => work(),
     prisma
   });
-  return { service, rows, createCalls: () => createCalls };
+  return { service, rows, drafts, createCalls: () => createCalls };
 }
 
 const immediateInput = (overrides = {}) => ({
@@ -79,6 +99,43 @@ test("immediate clientSendId replay is bound to the complete immutable intent", 
     );
     assert.equal(h.rows.length, 1);
   }
+});
+
+test("creating a send consumes only the exact saved draft revision in the same transaction", async () => {
+  const h = harness();
+  const expectedUpdatedAt = new Date("2026-08-30T09:00:00.000Z");
+  h.drafts.push(
+    { threadId: "thread-1", text: "Original text", updatedAt: expectedUpdatedAt },
+    { threadId: "thread-2", text: "Keep me", updatedAt: expectedUpdatedAt }
+  );
+
+  await h.service.enqueueSend(
+    immediateInput({
+      consumeDraft: { text: "Original text", updatedAt: expectedUpdatedAt }
+    })
+  );
+
+  assert.deepEqual(h.drafts, [
+    { threadId: "thread-2", text: "Keep me", updatedAt: expectedUpdatedAt }
+  ]);
+  assert.equal(h.rows.length, 1);
+});
+
+test("a newer saved draft survives an older send's guarded consume", async () => {
+  const h = harness();
+  const oldUpdatedAt = new Date("2026-08-30T09:00:00.000Z");
+  const newUpdatedAt = new Date("2026-08-30T09:01:00.000Z");
+  h.drafts.push({ threadId: "thread-1", text: "Newer draft", updatedAt: newUpdatedAt });
+
+  await h.service.enqueueSend(
+    immediateInput({
+      consumeDraft: { text: "Original text", updatedAt: oldUpdatedAt }
+    })
+  );
+
+  assert.deepEqual(h.drafts, [
+    { threadId: "thread-1", text: "Newer draft", updatedAt: newUpdatedAt }
+  ]);
 });
 
 test("identical attachment content replays across different staging paths", async () => {
@@ -188,6 +245,23 @@ test("scheduled clientSendId replay is bound to text, time, attachments, and rep
     );
     assert.equal(h.rows.length, 1);
   }
+});
+
+test("creating a scheduled send atomically consumes only its captured draft revision", async () => {
+  const h = harness();
+  const updatedAt = new Date("2026-08-30T09:00:00.000Z");
+  h.drafts.push({ threadId: "thread-1", text: "Scheduled text", updatedAt });
+
+  await h.service.enqueueScheduledSend({
+    threadId: "thread-1",
+    text: "Scheduled text",
+    clientSendId: "7d7eed73-6437-42e3-9e51-769522640b2a",
+    scheduledFor: new Date(Date.now() + 3_600_000),
+    consumeDraft: { text: "Scheduled text", updatedAt }
+  });
+
+  assert.deepEqual(h.drafts, []);
+  assert.equal(h.rows[0].status, "SCHEDULED");
 });
 
 test("a concurrent scheduled-send uniqueness loser returns the authoritative timestamp only for identical intent", async () => {

@@ -94,7 +94,7 @@ function normalizeAttachment(value: unknown): ThreadComposerAttachmentDescriptor
   };
 }
 
-function normalizeIntent(value: unknown): ThreadComposerIntentDraft | null {
+export function normalizeThreadComposerIntent(value: unknown): ThreadComposerIntentDraft | null {
   if (!value || typeof value !== "object") return null;
   const raw = value as Record<string, unknown>;
   if (
@@ -130,7 +130,7 @@ export function sameThreadComposerIntent(
   left: ThreadComposerIntentDraft,
   right: ThreadComposerIntentDraft
 ): boolean {
-  return JSON.stringify(normalizeIntent(left)) === JSON.stringify(normalizeIntent(right));
+  return JSON.stringify(normalizeThreadComposerIntent(left)) === JSON.stringify(normalizeThreadComposerIntent(right));
 }
 
 export type SafeSendFailureDisposition =
@@ -159,7 +159,7 @@ export function readThreadComposerSession(
     const raw = storage.getItem(keyFor(threadId));
     if (!raw) return null;
     const parsed = JSON.parse(raw) as Record<string, unknown>;
-    const intent = normalizeIntent(parsed);
+    const intent = normalizeThreadComposerIntent(parsed);
     if (!intent || !Number.isInteger(parsed.revision) || (parsed.revision as number) < 1) {
       return null;
     }
@@ -175,7 +175,7 @@ export function snapshotThreadComposerSession(
   storage: StorageLike | null = defaultStorage()
 ): ThreadComposerSession | null {
   if (!storage || !threadId) return null;
-  const intent = normalizeIntent(draft);
+  const intent = normalizeThreadComposerIntent(draft);
   if (!intent) return null;
   try {
     if (isEmptyIntent(intent)) {
