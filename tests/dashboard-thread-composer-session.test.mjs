@@ -4,6 +4,7 @@ import test from "node:test";
 const {
   attachDraftRevisionToThreadComposerSession,
   consumeThreadComposerSession,
+  mergeThreadComposerAttachmentDescriptors,
   readThreadComposerSession,
   restoreThreadComposerSession,
   rotateThreadComposerSession,
@@ -59,6 +60,19 @@ test("composer sessions preserve the complete per-thread send intent", () => {
   });
   assert.equal(Number.isFinite(saved.createdAt), true);
   assert.match(saved.revisionId, /^[0-9a-f-]{36}$/i);
+});
+
+test("attachment hydration keeps unresolved originals alongside files added meanwhile", () => {
+  const added = { ...attachment, id: "attachment-2", name: "new-file.pdf" };
+
+  assert.deepEqual(
+    mergeThreadComposerAttachmentDescriptors([attachment], [added]),
+    [attachment, added]
+  );
+  assert.deepEqual(
+    mergeThreadComposerAttachmentDescriptors([attachment], [{ ...attachment, name: "resolved.pdf" }]),
+    [{ ...attachment, name: "resolved.pdf" }]
+  );
 });
 
 test("composer sessions preserve the exact saved draft revision they originated from", () => {

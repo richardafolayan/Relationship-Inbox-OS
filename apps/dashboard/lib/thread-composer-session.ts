@@ -174,6 +174,17 @@ export function sameThreadComposerIntent(
   return JSON.stringify(normalizeThreadComposerIntent(left)) === JSON.stringify(normalizeThreadComposerIntent(right));
 }
 
+export function mergeThreadComposerAttachmentDescriptors(
+  restoring: ThreadComposerAttachmentDescriptor[],
+  current: ThreadComposerAttachmentDescriptor[]
+): ThreadComposerAttachmentDescriptor[] {
+  const merged = new Map<string, ThreadComposerAttachmentDescriptor>();
+  for (const descriptor of [...restoring, ...current]) {
+    merged.set(descriptor.id, descriptor);
+  }
+  return [...merged.values()];
+}
+
 export type SafeSendFailureDisposition =
   | "restore_captured"
   | "keep_failed_attempt"

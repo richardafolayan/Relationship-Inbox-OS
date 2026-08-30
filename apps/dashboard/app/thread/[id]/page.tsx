@@ -156,6 +156,7 @@ import {
 import {
   attachDraftRevisionToThreadComposerSession,
   consumeThreadComposerSession,
+  mergeThreadComposerAttachmentDescriptors,
   readThreadComposerSession,
   restoreThreadComposerSession,
   safeSendFailureDisposition,
@@ -1408,12 +1409,18 @@ export default function ThreadPage() {
     composerRestoreRef.current?.threadId === composerOwnerThreadIdRef.current
       ? composerRestoreRef.current.intent.attachments
       : null;
+  const currentComposerAttachments = [
+    ...missingComposerAttachments,
+    ...composerAttachments.map(composerAttachmentDescriptor)
+  ];
   composerIntentRef.current = {
     attachments:
-      restoringComposerAttachments ?? [
-        ...missingComposerAttachments,
-        ...composerAttachments.map(composerAttachmentDescriptor)
-      ],
+      restoringComposerAttachments === null
+        ? currentComposerAttachments
+        : mergeThreadComposerAttachmentDescriptors(
+            restoringComposerAttachments,
+            currentComposerAttachments
+          ),
     customScheduleValue,
     ...(recoveredScheduledFor ? { recoveredScheduledFor } : {}),
     replyToMessageId: focusedThreadParentId,
@@ -2336,7 +2343,7 @@ export default function ThreadPage() {
     }
     const restoring = composerRestoreRef.current;
     if (restoring?.threadId === threadId) {
-      if (!sameThreadComposerIntent(restoring.intent, composerIntentRef.current)) return;
+      if (composerAttachmentsRestoringRef.current) return;
       composerRestoreRef.current = null;
     }
     const saved = persistComposerSession(

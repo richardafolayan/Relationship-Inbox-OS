@@ -138,8 +138,17 @@ test("navigation and pagehide preserve durable attachment descriptors while byte
 
   assert.match(intentRefUpdate, /composerAttachmentsRestoringRef\.current/);
   assert.match(intentRefUpdate, /composerRestoreRef\.current\.intent\.attachments/);
+  assert.match(intentRefUpdate, /mergeThreadComposerAttachmentDescriptors/);
   assert.match(intentRefUpdate, /composerOwnerThreadIdRef\.current/);
   assert.match(source, /pagehide[\s\S]*?composerIntentRef\.current/);
+  const persistStart = source.indexOf("const restoring = composerRestoreRef.current;");
+  const persistEnd = source.indexOf("const saved = persistComposerSession", persistStart);
+  const restoreGate = source.slice(persistStart, persistEnd);
+  assert.match(restoreGate, /composerAttachmentsRestoringRef\.current/);
+  assert.ok(
+    restoreGate.indexOf("composerAttachmentsRestoringRef.current") <
+      restoreGate.indexOf("composerRestoreRef.current = null")
+  );
 });
 
 test("attachment quarantine is swept again while a thread stays open", () => {
