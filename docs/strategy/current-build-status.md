@@ -1,6 +1,6 @@
 # Current Build Status
 
-_Volatile. Update this whenever branches, commits, or build state change. Last updated: 2026-08-29._
+_Volatile. Update this whenever branches, commits, or build state change. Last updated: 2026-08-30._
 
 This file holds fast-moving build state on purpose. Branch tips and commit
 hashes go stale quickly, so verify live refs before starting work rather than
@@ -63,7 +63,7 @@ wrong. Fetch first, then compare the live refs.
 
 - Active corrective branch: `fix/external-action-safety-final`.
 - Base: merged Instagram integration on `develop` at `905103e8`.
-- Latest corrective commit: `4d18dc7c`.
+- Latest verified code commit: `85b0ef20`.
 - The broad `chore/full-product-hardening` branch remains audit evidence and is
   not an integration branch.
 - The corrective branch prevents a focus acknowledgement from overtaking newer
@@ -76,12 +76,17 @@ wrong. Fetch first, then compare the live refs.
   completed edit.
 - Legacy database upgrade coverage verifies creation of the durable external
   action table alongside the existing deterministic Draft repair.
-- The focused safety corpus passes: 178 send, reset, scheduling, and action
-  tests; 21 database recovery and upgrade tests; and three real Chromium
-  LinkedIn fallback tests. Core, runner, and dashboard lint and production
-  builds pass.
-- The exact commit still requires the scheduled adversarial review, complete
-  repository test suite, pull request CI, and merged `develop` verification.
+- The third adversarial pass reopened pending focus replay, claimed auto-note,
+  policy-blocked recovery, and repeated completed-action semantics. Commit
+  `85b0ef20` preserves the original durable intent fence, keeps claimed automatic
+  acknowledgements out of the manual identity, allows only a fresh manual action
+  to re-arm a safely blocked note, and gives a later identical action a fresh ID
+  without duplicating a stale in-flight tab.
+- The complete repository suite passes under Node 20.20.0: 3,204 tests, zero
+  failures, zero skips, zero cancellations, and zero todos. Core, runner, and
+  dashboard type checks, documentation checks, and the whitespace check pass.
+- The exact commit still requires final adversarial confirmation, pull request
+  CI, and merged `develop` verification.
 - Verification did not send, edit, react to, vote on, scan, reconnect, or reset
   a live platform account.
 
