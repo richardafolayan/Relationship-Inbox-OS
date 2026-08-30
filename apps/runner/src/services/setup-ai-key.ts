@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { basename, dirname, resolve } from "node:path";
 
 // First-run setup: save a Gemini API key from the dashboard (#845).
 //
@@ -9,10 +9,9 @@ import { resolve } from "node:path";
 // restarting — the exact cliff pilot R-0109 flagged. This service gives the
 // setup wizard a safe write path:
 //
-//   validate (live, against the Gemini endpoint) → persist (atomic
-//   parse-and-update of the .env the runner actually reads) → apply
-//   (mutate runnerConfig + process.env so the lazily built AI client
-//   picks the key up on the next call, no restart).
+//   validate (live, against the Gemini endpoint) → stage outside the active
+//   config → commit authoritative setup state → promote atomically → apply
+//   to the live process.
 //
 // The key value must never be logged; errors carry calm operator-facing
 // messages only.
@@ -73,6 +72,47 @@ export function upsertEnvFile(filePath: string, key: string, value: string): voi
   renameSync(tempPath, filePath);
 }
 
+export interface StagedEnvFileValue {
+  commit(): void;
+  discard(): void;
+}
+
+export function stageEnvFileValue(
+  filePath: string,
+  key: string,
+  value: string
+): StagedEnvFileValue {
+  const current = existsSync(filePath) ? readFileSync(filePath, "utf8") : "";
+  const next = upsertEnvContent(current, key, value);
+  const tempPath = `${filePath}.${randomUUID()}.pending`;
+  writeFileSync(tempPath, next, { encoding: "utf8", mode: 0o600 });
+  let settled = false;
+
+  return {
+    commit: () => {
+      if (settled) throw new Error("Staged environment value already settled.");
+      renameSync(tempPath, filePath);
+      settled = true;
+    },
+    discard: () => {
+      if (settled) return;
+      rmSync(tempPath, { force: true });
+      settled = true;
+    }
+  };
+}
+
+export function discardStaleEnvFileStages(filePath: string): void {
+  const parent = dirname(filePath);
+  if (!existsSync(parent)) return;
+  const prefix = `${basename(filePath)}.`;
+  for (const name of readdirSync(parent)) {
+    if (name.startsWith(prefix) && name.endsWith(".pending")) {
+      rmSync(resolve(parent, name), { force: true });
+    }
+  }
+}
+
 export interface GeminiKeyCheck {
   ok: boolean;
   /** Calm operator-facing message on failure. Never contains the key. */
@@ -115,22 +155,21 @@ export async function validateGeminiKey(
   };
 }
 
-export interface ApplyGeminiKeyDeps {
+export interface ApplyGeminiKeyDeps<TState> {
   validate: (key: string) => Promise<GeminiKeyCheck>;
-  persist: (key: string) => void;
-  /** Applies the key to the live process (runnerConfig + process.env). */
+  stage: (key: string) => StagedEnvFileValue;
+  commitState: () => Promise<TState>;
   applyRuntime: (key: string) => void;
 }
 
-export type ApplyGeminiKeyResult =
-  | { ok: true }
-  | { ok: false; status: 400 | 502; message: string };
+export type ApplyGeminiKeyResult<TState> =
+  | { ok: true; state: TState }
+  | { ok: false; status: 400 | 502; message: string; state?: TState };
 
-/** Orchestrates the save: shape check → live validation → persist → apply. */
-export async function applyGeminiKey(
+export async function applyGeminiKey<TState>(
   rawKey: unknown,
-  deps: ApplyGeminiKeyDeps
-): Promise<ApplyGeminiKeyResult> {
+  deps: ApplyGeminiKeyDeps<TState>
+): Promise<ApplyGeminiKeyResult<TState>> {
   const key = typeof rawKey === "string" ? rawKey.trim() : "";
   if (!key || !isPlausibleApiKeyShape(key)) {
     return {
@@ -143,8 +182,9 @@ export async function applyGeminiKey(
   if (!check.ok) {
     return { ok: false, status: 400, message: check.message ?? "The key didn't validate." };
   }
+  let staged: StagedEnvFileValue;
   try {
-    deps.persist(key);
+    staged = deps.stage(key);
   } catch {
     return {
       ok: false,
@@ -152,6 +192,27 @@ export async function applyGeminiKey(
       message: "The key checked out but couldn't be saved. Quit and reopen Tovi, then run the setup assistant again. If it still fails, tell the person running the pilot."
     };
   }
+
+  let state: TState;
+  try {
+    state = await deps.commitState();
+  } catch (error) {
+    staged.discard();
+    throw error;
+  }
+
+  try {
+    staged.commit();
+  } catch {
+    staged.discard();
+    return {
+      ok: false,
+      status: 502,
+      message: "The key checked out but couldn't be saved. Quit and reopen Tovi, then run the setup assistant again. If it still fails, tell the person running the pilot.",
+      state
+    };
+  }
+
   deps.applyRuntime(key);
-  return { ok: true };
+  return { ok: true, state };
 }

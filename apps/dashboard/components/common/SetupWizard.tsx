@@ -33,8 +33,10 @@ import {
 } from "@/lib/feedback";
 import { InlineActionButton } from "@/components/common/inline-action-button";
 import {
+  completedPreferencesFromConflict,
   createSetupPreferenceWriteQueue,
-  persistCompletedSetup
+  persistCompletedSetup,
+  setupNavigationDisabled
 } from "@/lib/setup-preference-writes";
 
 type SetupPlatform =
@@ -223,7 +225,8 @@ export function SetupWizard() {
 
   const runSetupRequest = useCallback(
     async <T extends { preferences: SetupPreferences },>(
-      request: () => Promise<T>
+      request: () => Promise<T>,
+      options: { acceptCompletedConflict?: boolean } = {}
     ): Promise<T> => {
       pendingPreferenceWrites.current += 1;
       setSavingPreferences(true);
@@ -235,13 +238,25 @@ export function SetupWizard() {
         }
         return result;
       } catch (error) {
-        const conflict =
-          error instanceof ApiRequestError && error.status === 409 &&
+        const authoritative =
+          error instanceof ApiRequestError &&
           error.payload && typeof error.payload === "object"
             ? (error.payload as { preferences?: SetupPreferences }).preferences
             : undefined;
-        if (conflict && preferenceWriter.acceptSnapshot(conflict)) {
-          applyPreferences(conflict);
+        const conflict = error instanceof ApiRequestError && error.status === 409
+          ? authoritative
+          : undefined;
+        if (authoritative && preferenceWriter.acceptSnapshot(authoritative)) {
+          applyPreferences(authoritative);
+        }
+        const completed = options.acceptCompletedConflict
+          ? completedPreferencesFromConflict<SetupPreferences>(
+              error instanceof ApiRequestError ? error.status : 0,
+              error instanceof ApiRequestError ? error.payload : null
+            )
+          : null;
+        if (completed) {
+          return { preferences: completed } as T;
         }
         setPersistenceError(
           conflict
@@ -285,11 +300,13 @@ export function SetupWizard() {
       await persistCompletedSetup({
         completedAt: now,
         persistCompletion: async (completedAt) => {
-          const result = await runSetupRequest(() =>
-            apiPost<{ preferences: SetupPreferences }>("/runner/control/setup/complete", {
-              completedAt,
-              expectedRevision: preferenceWriter.latestRevision()
-            })
+          const result = await runSetupRequest(
+            () =>
+              apiPost<{ preferences: SetupPreferences }>("/runner/control/setup/complete", {
+                completedAt,
+                expectedRevision: preferenceWriter.latestRevision()
+              }),
+            { acceptCompletedConflict: true }
           );
           return result.preferences;
         },
@@ -518,12 +535,13 @@ function TranscriptionStep({ initial, onConfigure, onBack, onNext }: { initial?:
   useEffect(() => { if (status?.phase !== "downloading") return; const timer = window.setInterval(() => void refresh(), 1500); return () => window.clearInterval(timer); }, [status?.phase, refresh]);
   const choose = async (mode: TranscriptionMode, removeDownloadedModels = false) => { setBusy(true); const nextStatus = await onConfigure(mode, removeDownloadedModels).catch(() => null); if (nextStatus) setStatus(nextStatus); setBusy(false); };
   const downloading = status?.phase === "downloading";
+  const navigationDisabled = setupNavigationDisabled(busy, status?.phase);
   return <Card icon={<Mic2 />} eyebrow="Optional voice notes" title="Choose voice transcription." body="Transcription runs on this Mac. Audio does not need to go to an AI company. Models download only when you choose one.">
     <div className="mt-5 grid gap-3"><Choice disabled={busy || downloading} selected={status?.mode === "off"} title="Off" body="No model download. Voice notes can still be played." onClick={() => void choose("off")} /><Choice disabled={busy || downloading} selected={status?.mode === "standard"} title="Standard, about 150 MB" body="Good everyday English transcription using the local base model." onClick={() => void choose("standard")} /><Choice disabled={busy || downloading} selected={status?.mode === "enhanced"} title="Enhanced, about 500 MB" body="Better accuracy using a larger local model. Choose this only if you want it." onClick={() => void choose("enhanced")} /></div>
     {downloading ? <Notice><Download className="mr-2 inline h-4 w-4" />Downloading the chosen model. You can keep this screen open. It turns on only after the download finishes.</Notice> : null}
     {status?.phase === "error" ? <Notice>The download did not finish. Check your internet connection and choose the model again.</Notice> : null}
-    {status?.installedMode !== "off" && status?.mode === "off" ? <button type="button" onClick={() => void choose("off", true)} className="mt-4 text-[12.5px] text-ink-2 underline underline-offset-2">Remove the downloaded model from this Mac</button> : null}
-    <Actions><Back onClick={onBack} /><Primary disabled={busy || downloading} onClick={onNext}>{downloading ? "Downloading..." : "Continue"}</Primary></Actions>
+    {status?.installedMode !== "off" && status?.mode === "off" ? <button type="button" disabled={navigationDisabled} onClick={() => void choose("off", true)} className="mt-4 text-[12.5px] text-ink-2 underline underline-offset-2 disabled:opacity-50">Remove the downloaded model from this Mac</button> : null}
+    <Actions><Back disabled={navigationDisabled} onClick={onBack} /><Primary disabled={navigationDisabled} onClick={onNext}>{downloading ? "Downloading..." : "Continue"}</Primary></Actions>
   </Card>;
 }
 

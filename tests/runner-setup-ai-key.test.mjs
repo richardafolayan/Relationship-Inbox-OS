@@ -144,14 +144,18 @@ test("validateGeminiKey hits the models listing with a bearer header", async () 
   assert.equal(seenAuth, "Bearer secret-key-0123456789012345");
 });
 
-test("applyGeminiKey rejects a bad shape without validating or persisting", async () => {
+test("applyGeminiKey rejects a bad shape without validating, staging, or committing state", async () => {
   const calls = [];
   const result = await applyGeminiKey("   ", {
     validate: async () => {
       calls.push("validate");
       return { ok: true };
     },
-    persist: () => calls.push("persist"),
+    stage: () => {
+      calls.push("stage");
+      return { commit: () => calls.push("commit-key"), discard: () => calls.push("discard") };
+    },
+    commitState: async () => calls.push("commit-state"),
     applyRuntime: () => calls.push("apply")
   });
   assert.equal(result.ok, false);
@@ -159,11 +163,15 @@ test("applyGeminiKey rejects a bad shape without validating or persisting", asyn
   assert.deepEqual(calls, []);
 });
 
-test("applyGeminiKey stops before persisting when live validation fails", async () => {
+test("applyGeminiKey stops before staging when live validation fails", async () => {
   const calls = [];
   const result = await applyGeminiKey("k".repeat(30), {
     validate: async () => ({ ok: false, message: "nope" }),
-    persist: () => calls.push("persist"),
+    stage: () => {
+      calls.push("stage");
+      return { commit: () => undefined, discard: () => undefined };
+    },
+    commitState: async () => calls.push("commit-state"),
     applyRuntime: () => calls.push("apply")
   });
   assert.equal(result.ok, false);
@@ -172,31 +180,110 @@ test("applyGeminiKey stops before persisting when live validation fails", async 
   assert.deepEqual(calls, []);
 });
 
-test("applyGeminiKey persists the trimmed key then applies it to the runtime", async () => {
+test("applyGeminiKey stages the trimmed key, commits setup, then promotes and applies it", async () => {
   const calls = [];
   const result = await applyGeminiKey(`  ${"k".repeat(30)}  `, {
     validate: async (key) => {
       calls.push(["validate", key]);
       return { ok: true };
     },
-    persist: (key) => calls.push(["persist", key]),
+    stage: (key) => {
+      calls.push(["stage", key]);
+      return {
+        commit: () => calls.push(["commit-key", key]),
+        discard: () => calls.push(["discard", key])
+      };
+    },
+    commitState: async () => {
+      calls.push(["commit-state"]);
+      return { revision: 7 };
+    },
     applyRuntime: (key) => calls.push(["apply", key])
   });
-  assert.deepEqual(result, { ok: true });
+  assert.deepEqual(result, { ok: true, state: { revision: 7 } });
   assert.deepEqual(calls, [
     ["validate", "k".repeat(30)],
-    ["persist", "k".repeat(30)],
+    ["stage", "k".repeat(30)],
+    ["commit-state"],
+    ["commit-key", "k".repeat(30)],
     ["apply", "k".repeat(30)]
   ]);
 });
 
-test("applyGeminiKey reports a persist failure without applying to the runtime", async () => {
+test("a failed setup transaction discards the staged key without changing env or runtime", async () => {
+  const calls = [];
+  await assert.rejects(
+    applyGeminiKey("k".repeat(30), {
+      validate: async () => ({ ok: true }),
+      stage: () => ({
+        commit: () => calls.push("commit-key"),
+        discard: () => calls.push("discard")
+      }),
+      commitState: async () => {
+        calls.push("commit-state");
+        throw new Error("setup transaction failed");
+      },
+      applyRuntime: () => calls.push("apply")
+    }),
+    /setup transaction failed/
+  );
+  assert.deepEqual(calls, ["commit-state", "discard"]);
+});
+
+test("a staged-file promotion failure reports authoritative state without applying runtime", async () => {
   const calls = [];
   const result = await applyGeminiKey("k".repeat(30), {
     validate: async () => ({ ok: true }),
-    persist: () => {
+    stage: () => ({
+      commit: () => {
+        throw new Error("EACCES");
+      },
+      discard: () => calls.push("discard")
+    }),
+    commitState: async () => ({ revision: 9 }),
+    applyRuntime: () => calls.push("apply")
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.status, 502);
+  assert.deepEqual(result.state, { revision: 9 });
+  assert.deepEqual(calls, ["discard"]);
+});
+
+test("upsertEnvFile staging remains invisible until commit and can be discarded", async () => {
+  const {
+    discardStaleEnvFileStages,
+    stageEnvFileValue
+  } = await import("../apps/runner/dist/services/setup-ai-key.js");
+  const dir = mkdtempSync(join(tmpdir(), "rios-setup-ai-key-stage-"));
+  const file = join(dir, ".env");
+  writeFileSync(file, "GEMINI_API_KEY=old\n");
+  try {
+    const discarded = stageEnvFileValue(file, "GEMINI_API_KEY", "discarded");
+    assert.equal(readFileSync(file, "utf8"), "GEMINI_API_KEY=old\n");
+    discarded.discard();
+    assert.equal(readFileSync(file, "utf8"), "GEMINI_API_KEY=old\n");
+
+    const committed = stageEnvFileValue(file, "GEMINI_API_KEY", "new");
+    assert.equal(readFileSync(file, "utf8"), "GEMINI_API_KEY=old\n");
+    committed.commit();
+    assert.equal(readFileSync(file, "utf8"), "GEMINI_API_KEY=new\n");
+
+    writeFileSync(`${file}.crashed.pending`, "GEMINI_API_KEY=stale\n");
+    discardStaleEnvFileStages(file);
+    assert.throws(() => readFileSync(`${file}.crashed.pending`, "utf8"), /ENOENT/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("applyGeminiKey reports a staging failure before committing setup state", async () => {
+  const calls = [];
+  const result = await applyGeminiKey("k".repeat(30), {
+    validate: async () => ({ ok: true }),
+    stage: () => {
       throw new Error("EACCES");
     },
+    commitState: async () => calls.push("commit-state"),
     applyRuntime: () => calls.push("apply")
   });
   assert.equal(result.ok, false);

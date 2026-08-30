@@ -26,8 +26,9 @@ import {
 } from "./services/settings";
 import {
   applyGeminiKey,
+  discardStaleEnvFileStages,
   resolveEnvWritePath,
-  upsertEnvFile,
+  stageEnvFileValue,
   validateGeminiKey
 } from "./services/setup-ai-key";
 import {
@@ -37,8 +38,15 @@ import {
   SetupPreferencesConflictError,
   type SetupTranscriptionMode
 } from "./services/setup-preferences";
-import { createSetupPreferencesCoordinator } from "./services/setup-preferences-coordinator";
-import { createTranscriptionSetupManager } from "./services/transcription-setup";
+import {
+  createSetupPreferencesCoordinator,
+  parseSetupPreferencesRequest
+} from "./services/setup-preferences-coordinator";
+import {
+  applyPreparedTranscriptionSetup,
+  createTranscriptionSetupManager,
+  TranscriptionSetupBusyError
+} from "./services/transcription-setup";
 import { createAuditService } from "./services/audit";
 import { deleteDraftRevision } from "./services/draft";
 import { summarizeControlBody } from "./services/control-audit";
@@ -678,18 +686,19 @@ const {
       );
     });
     if (state === "connected") {
-      // Turn WhatsApp on for scheduled scans the moment a device links, then
-      // kick an initial scan so threads appear right away instead of waiting
-      // for the next tick. Both go through the normal paths, so the scan
-      // shows in the TopStatus ticker like any other.
-      void ensurePlatformEnabledInSettings("WHATSAPP").catch((error) => {
+      void settingsStore.getSettings().then((settings) => {
+        if (settings.enabledPlatforms.includes("WHATSAPP")) {
+          enqueueWhatsAppInitialScan?.();
+          return;
+        }
+        return reconcileWhatsAppSelection(settings.enabledPlatforms);
+      }).catch((error) => {
         console.warn(
-          `[whatsapp] could not enable in settings: ${
+          `[whatsapp] selection reconciliation failed: ${
             error instanceof Error ? error.message : String(error)
           }`
         );
       });
-      enqueueWhatsAppInitialScan?.();
     }
     eventBus.emit({ type: "WHATSAPP_STATE", jobId: uuid(), state });
   },
@@ -1232,13 +1241,6 @@ const transcriptionSetup = createTranscriptionSetupManager({
   downloadScript: resolve(projectRoot, "scripts", "fetch-whisper-model.mjs"),
   initialEnabled: () => transcriptionServiceConfig.enabled,
   initialModelId: () => runnerConfig.audioTranscription.transformers.modelId,
-  persist: (_mode, enabled, modelId) => {
-    const envPath = resolveEnvWritePath();
-    upsertEnvFile(envPath, "AUDIO_TRANSCRIPTION_ENABLED", String(enabled));
-    upsertEnvFile(envPath, "AUDIO_TRANSCRIPTION_PROVIDER", "transformers");
-    upsertEnvFile(envPath, "AUDIO_TRANSCRIPTION_LOCAL_MODEL", modelId);
-    upsertEnvFile(envPath, "AUDIO_TRANSCRIPTION_PROGRESSIVE_MODE", "false");
-  },
   applyRuntime: (_mode, enabled, modelId) => {
     process.env.AUDIO_TRANSCRIPTION_ENABLED = String(enabled);
     process.env.AUDIO_TRANSCRIPTION_PROVIDER = "transformers";
@@ -1291,18 +1293,21 @@ const scanQueue = createScanQueue({
 // Late-bind the initial-scan kick now that the scan queue exists (the
 // WhatsApp state-change hook above was wired before this point).
 enqueueWhatsAppInitialScan = () => {
-  const result = scanQueue.enqueueScan("WHATSAPP", {
-    respectCooldown: true,
-    coalesceWithPending: true
-  });
-  void auditService.log({
-    platform: "WHATSAPP",
-    stage: "Scan",
-    action: "WHATSAPP_CONNECT_INITIAL_SCAN",
-    status: result.ok ? "OK" : "FAIL",
-    details: result.ok
-      ? { jobId: result.jobId, status: result.status }
-      : { blocked: result.blocked, blockReason: result.reason }
+  void settingsStore.getSettings().then((settings) => {
+    if (!settings.enabledPlatforms.includes("WHATSAPP")) return;
+    const result = scanQueue.enqueueScan("WHATSAPP", {
+      respectCooldown: true,
+      coalesceWithPending: true
+    });
+    void auditService.log({
+      platform: "WHATSAPP",
+      stage: "Scan",
+      action: "WHATSAPP_CONNECT_INITIAL_SCAN",
+      status: result.ok ? "OK" : "FAIL",
+      details: result.ok
+        ? { jobId: result.jobId, status: result.status }
+        : { blocked: result.blocked, blockReason: result.reason }
+    });
   });
 };
 
@@ -1335,10 +1340,13 @@ const whatsappChangeTriggeredScan = createChangeTriggeredScan({
   log: (line) => console.log(line)
 });
 onWhatsAppMessageArrived = (input) => {
-  whatsappChangeTriggeredScan.notify({
-    reason: "message",
-    sourceChangedAt: input.sourceChangedAt,
-    platformThreadId: input.platformThreadId
+  void settingsStore.getSettings().then((settings) => {
+    if (!settings.enabledPlatforms.includes("WHATSAPP")) return;
+    whatsappChangeTriggeredScan.notify({
+      reason: "message",
+      sourceChangedAt: input.sourceChangedAt,
+      platformThreadId: input.platformThreadId
+    });
   });
 };
 
@@ -1414,6 +1422,10 @@ function startLinkedInRealtimeWatcher(): void {
 // runs for operators who never linked — no surprise Puppeteer.
 if (runnerConfig.whatsapp.enabled && adapters.WHATSAPP) {
   void (async () => {
+    const settings = await settingsStore.getSettings();
+    if (!settings.enabledPlatforms.includes("WHATSAPP")) {
+      return;
+    }
     const row = await prisma.platform.findUnique({ where: { name: "WHATSAPP" } });
     const shouldResume =
       Boolean(row?.connectedAt) ||
@@ -1770,6 +1782,31 @@ async function withWhatsAppSessionLocks<T>(
   return withExternalActionLock("WHATSAPP", () =>
     withPlatformControlLock("WHATSAPP", work)
   );
+}
+
+async function reconcileWhatsAppSelection(
+  selectedPlatforms: readonly PlatformName[]
+): Promise<void> {
+  if (selectedPlatforms.includes("WHATSAPP")) return;
+  if (scanQueue.getCurrentScanPlatform() === "WHATSAPP") {
+    scanQueue.requestAbort("platform_deselected");
+  }
+  if (whatsappConnect.state === "disconnected") return;
+  await withWhatsAppSessionLocks(async () => {
+    await adapters.WHATSAPP?.closeSession("disabled_by_settings");
+  });
+}
+
+function scheduleWhatsAppSelectionReconciliation(
+  selectedPlatforms: readonly PlatformName[]
+): void {
+  void reconcileWhatsAppSelection(selectedPlatforms).catch((error) => {
+    console.warn(
+      `[whatsapp] could not apply platform selection: ${
+        error instanceof Error ? error.message : String(error)
+      }`
+    );
+  });
 }
 
 const demoCleanupCoordinator = createDemoCleanupCoordinator({
@@ -2697,6 +2734,11 @@ app.post("/control/imessage/import-history", asyncRoute(async (req, res) => {
       dryRun: z.boolean().optional()
     })
     .parse(req.body ?? {});
+  const settings = await settingsStore.getSettings();
+  if (!settings.enabledPlatforms.includes("IMESSAGE")) {
+    res.status(409).json({ error: "iMessage is not selected in Settings.", reason: "platform_not_selected" });
+    return;
+  }
   const sinceDays = payload.sinceDays ?? 365;
   const cutoffMs = Date.now() - sinceDays * 24 * 60 * 60 * 1000;
 
@@ -2974,20 +3016,25 @@ app.get("/data/ai-status", asyncRoute(async (_req, res) => {
 // comments preserved), then applies it to the live process so AI calls use
 // it immediately — no restart. The key value is never logged.
 app.post("/control/setup/ai-key", asyncRoute(async (req, res) => {
-  const result = await applyGeminiKey(req.body?.key, {
-    validate: (key) => validateGeminiKey(key, runnerConfig.geminiBaseUrl),
-    persist: (key) => upsertEnvFile(resolveEnvWritePath(), "GEMINI_API_KEY", key),
-    applyRuntime: (key) => {
-      process.env.GEMINI_API_KEY = key;
-      runnerConfig.geminiApiKey = key;
-    }
-  });
+  const result = await operationMutex.runExclusive("setup:gemini-key", () =>
+    applyGeminiKey(req.body?.key, {
+      validate: (key) => validateGeminiKey(key, runnerConfig.geminiBaseUrl),
+      stage: (key) => stageEnvFileValue(resolveEnvWritePath(), "GEMINI_API_KEY", key),
+      commitState: () => setupPreferencesCoordinator.enableAiProvider("gemini"),
+      applyRuntime: (key) => {
+        process.env.GEMINI_API_KEY = key;
+        runnerConfig.geminiApiKey = key;
+      }
+    })
+  );
   if (!result.ok) {
-    res.status(result.status).json({ error: result.message });
+    res.status(result.status).json({
+      error: result.message,
+      ...(result.state ? { preferences: result.state } : {})
+    });
     return;
   }
-  const preferences = await setupPreferencesCoordinator.enableAiProvider("gemini");
-  res.json({ ok: true, provider: "gemini", preferences });
+  res.json({ ok: true, provider: "gemini", preferences: result.state });
 }));
 
 app.get("/data/setup/status", asyncRoute(async (_req, res) => {
@@ -3029,16 +3076,15 @@ app.get("/data/setup/status", asyncRoute(async (_req, res) => {
 }));
 
 app.post("/control/setup/preferences", asyncRoute(async (req, res) => {
-  const payload = z.object({
-    selectedPlatforms: z
-      .array(z.enum(["IMESSAGE", "LINKEDIN", "INSTAGRAM", "WHATSAPP", "GOOGLE_MESSAGES"]))
-      .optional(),
-    aiEnabled: z.boolean().optional(),
-    startedAt: z.string().max(100).optional(),
-    expectedRevision: z.number().int().nonnegative().optional()
-  }).parse(req.body);
+  const request = parseSetupPreferencesRequest(req.body);
   try {
-    const preferences = await setupPreferencesCoordinator.update(payload);
+    if (request.kind === "complete") {
+      const result = await setupPreferencesCoordinator.complete(request.payload);
+      res.json({ ok: true, ...result });
+      return;
+    }
+    const preferences = await setupPreferencesCoordinator.update(request.payload);
+    scheduleWhatsAppSelectionReconciliation(preferences.selectedPlatforms);
     res.json({ ok: true, preferences });
   } catch (error) {
     if (error instanceof SetupPreferencesConflictError) {
@@ -3081,14 +3127,29 @@ app.post("/control/setup/transcription", asyncRoute(async (req, res) => {
     mode: z.enum(["off", "standard", "enhanced"]),
     removeDownloadedModels: z.boolean().optional()
   }).parse(req.body) as { mode: SetupTranscriptionMode; removeDownloadedModels?: boolean };
-  const preferences = await setupPreferencesCoordinator.update({
-    transcriptionMode: payload.mode
-  });
-  const status = transcriptionSetup.configure(payload.mode, payload.removeDownloadedModels === true);
-  res.status(status.phase === "downloading" ? 202 : 200).json({
-    ...status,
-    preferences
-  });
+  try {
+    const result = await applyPreparedTranscriptionSetup({
+      manager: transcriptionSetup,
+      mode: payload.mode,
+      removeDownloadedModels: payload.removeDownloadedModels,
+      persistPreferences: () => setupPreferencesCoordinator.update({
+        transcriptionMode: payload.mode
+      })
+    });
+    res.status(result.status.phase === "downloading" ? 202 : 200).json({
+      ...result.status,
+      preferences: result.preferences
+    });
+  } catch (error) {
+    if (error instanceof TranscriptionSetupBusyError) {
+      res.status(409).json({
+        ...error.status,
+        error: error.message
+      });
+      return;
+    }
+    throw error;
+  }
 }));
 
 // ---- System / self-update -------------------------------------------------
@@ -3353,11 +3414,13 @@ app.post("/control/settings", asyncRoute(async (req, res) => {
     } else {
       next = await settingsStore.updateSettings(updatePayload);
     }
+    scheduleWhatsAppSelectionReconciliation(next.enabledPlatforms);
     res.json(next);
     return;
   }
 
   const next = await settingsStore.updateSettings(updatePayload);
+  scheduleWhatsAppSelectionReconciliation(next.enabledPlatforms);
 
   const isEnteringDemo = !previous.demoMode && next.demoMode;
   const seedMode = next.presenterDemoMode === "sandbox" ? "full-presenter-demo" : "generic";
@@ -3853,6 +3916,11 @@ app.post("/control/scan", asyncRoute(async (req, res) => {
 
   if (payload.platform && !runnerConfig.availablePlatforms.includes(payload.platform)) {
     res.status(404).json({ ok: false, reason: "platform_disabled" });
+    return;
+  }
+  const settings = await settingsStore.getSettings();
+  if (payload.platform && !settings.enabledPlatforms.includes(payload.platform)) {
+    res.status(409).json({ ok: false, reason: "platform_not_selected" });
     return;
   }
 
@@ -5141,6 +5209,10 @@ app.post("/control/thread/:threadId/rescan", asyncRoute(async (req, res) => {
   requireAdapter(target.platform);
   const requestId = getControlTrace(res)?.requestId ?? uuid();
   const settings = await settingsStore.getSettings();
+  if (!settings.enabledPlatforms.includes(target.platform)) {
+    res.status(409).json({ error: "This message source is not selected in Settings.", reason: "platform_not_selected" });
+    return;
+  }
 
   // For iMessage we render one row per Person but chat.db may have several
   // chats with that human (phone + email). Rescanning ONLY the canonical
@@ -7861,6 +7933,7 @@ app.post("/control/whatsapp/connect", asyncRoute(async (_req, res) => {
     res.status(500).json({ ok: false, reason: "no_adapter" });
     return;
   }
+  await ensurePlatformEnabledInSettings("WHATSAPP");
   if (whatsappConnect.state === "connected") {
     res.json({ ok: true, state: whatsappConnect.state });
     return;
@@ -7896,6 +7969,7 @@ app.post("/control/whatsapp/refresh-qr", asyncRoute(async (_req, res) => {
     res.status(500).json({ ok: false, reason: "no_adapter" });
     return;
   }
+  await ensurePlatformEnabledInSettings("WHATSAPP");
   whatsappConnect.qr = null;
   whatsappConnect.qrDataUrl = null;
   whatsappConnect.state = "connecting";
@@ -9219,13 +9293,24 @@ process.on("uncaughtException", (error) => {
 
 async function start(): Promise<void> {
   await ensureRuntimeDirs();
+  discardStaleEnvFileStages(resolveEnvWritePath());
   await sweepOutgoingAttachmentOrphansOnce();
   const outgoingAttachmentSweepTimer = setInterval(
     () => void sweepOutgoingAttachmentOrphansOnce(),
     OUTGOING_ATTACHMENT_ORPHAN_GRACE_MS
   );
   outgoingAttachmentSweepTimer.unref();
-  await settingsStore.getSettings();
+  const [, startupSetupPreferences] = await Promise.all([
+    settingsStore.getSettings(),
+    getSetupPreferences()
+  ]);
+  if (
+    startupSetupPreferences.revision > 0 ||
+    startupSetupPreferences.startedAt ||
+    startupSetupPreferences.completedAt
+  ) {
+    transcriptionSetup.restore(startupSetupPreferences.transcriptionMode);
+  }
   scanQueue.startScheduler();
 
   // iMessage connectivity = "can we read chat.db", not "has it
@@ -9263,13 +9348,16 @@ async function start(): Promise<void> {
       dbPath: runnerConfig.imessage.dbPath,
       debounceMs: runnerConfig.imessage.watchDebounceMs,
       onChange: ({ reason, sourceChangedAt }) => {
-        imessageChangeTriggeredScan.notify({ reason, sourceChangedAt });
-        void auditService.log({
-          platform: "IMESSAGE",
-          stage: "Scan",
-          action: "IMESSAGE_WATCH_TRIGGER",
-          status: "OK",
-          details: { reason, sourceChangedAt, status: "change_coalesced" }
+        void settingsStore.getSettings().then((settings) => {
+          if (!settings.enabledPlatforms.includes("IMESSAGE")) return;
+          imessageChangeTriggeredScan.notify({ reason, sourceChangedAt });
+          void auditService.log({
+            platform: "IMESSAGE",
+            stage: "Scan",
+            action: "IMESSAGE_WATCH_TRIGGER",
+            status: "OK",
+            details: { reason, sourceChangedAt, status: "change_coalesced" }
+          });
         });
       }
     });

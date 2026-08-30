@@ -1,7 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { createSetupPreferencesCoordinator } from "../apps/runner/dist/services/setup-preferences-coordinator.js";
+import {
+  createSetupPreferencesCoordinator,
+  parseSetupPreferencesRequest
+} from "../apps/runner/dist/services/setup-preferences-coordinator.js";
 import {
   createSetupPreferencesStore,
   SetupPreferencesConflictError
@@ -69,6 +72,12 @@ function createHarness({ failSetupTransaction = false, failCompletionTransaction
   return {
     coordinator,
     events,
+    connectPlatform: (platform) => {
+      settings = {
+        ...settings,
+        enabledPlatforms: [...new Set([...settings.enabledPlatforms, platform])]
+      };
+    },
     getStored: () => structuredClone(storedPreferences),
     getSettings: () => structuredClone(settings),
     getOperatorProfile: () => structuredClone(operatorProfile)
@@ -152,6 +161,26 @@ test("AI provider activation is one coherent setup revision", async () => {
   assert.deepEqual(harness.events, ["setup-transaction", "settings-cache"]);
 });
 
+test("side endpoints preserve platforms connected after setup started", async () => {
+  const harness = createHarness();
+  const started = await harness.coordinator.update({
+    expectedRevision: 0,
+    startedAt: "start",
+    selectedPlatforms: ["LINKEDIN"]
+  });
+  harness.connectPlatform("INSTAGRAM");
+
+  const transcription = await harness.coordinator.update({
+    expectedRevision: started.revision,
+    transcriptionMode: "standard"
+  });
+  const ai = await harness.coordinator.enableAiProvider("gemini");
+
+  assert.equal(transcription.transcriptionMode, "standard");
+  assert.equal(ai.aiEnabled, true);
+  assert.deepEqual(harness.getSettings().enabledPlatforms, ["LINKEDIN", "INSTAGRAM"]);
+});
+
 test("completion atomically stamps operator profile and setup preferences", async () => {
   const harness = createHarness();
   const started = await harness.coordinator.update({ expectedRevision: 0, startedAt: "start" });
@@ -199,4 +228,21 @@ test("a stale completion cannot stamp the operator profile", async () => {
   assert.deepEqual(harness.events, []);
   assert.equal(harness.getOperatorProfile().setupCompletedAt, "");
   assert.equal(harness.getStored().completedAt, "");
+});
+
+test("the predecessor completedAt request is routed to atomic completion instead of stripped", () => {
+  assert.deepEqual(
+    parseSetupPreferencesRequest({ completedAt: "2026-08-30T12:00:00.000Z", expectedRevision: 4 }),
+    {
+      kind: "complete",
+      payload: { completedAt: "2026-08-30T12:00:00.000Z", expectedRevision: 4 }
+    }
+  );
+});
+
+test("completion cannot be combined with another setup mutation", () => {
+  assert.throws(
+    () => parseSetupPreferencesRequest({ completedAt: "2026-08-30T12:00:00.000Z", aiEnabled: true }),
+    /completion request cannot include other setup changes/i
+  );
 });

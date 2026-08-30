@@ -264,6 +264,22 @@ const allPlatforms: PlatformName[] = [
   "GOOGLE_MESSAGES"
 ];
 
+export function resolveSelectedScanPlatforms(input: {
+  requestedPlatform?: PlatformName;
+  enabledPlatforms: readonly PlatformName[];
+  adapters: Partial<Record<PlatformName, unknown>>;
+  isPlatformScannable?: (platform: PlatformName) => boolean;
+}): PlatformName[] {
+  const enabled = new Set(input.enabledPlatforms);
+  const candidates = input.requestedPlatform ? [input.requestedPlatform] : allPlatforms;
+  return candidates.filter(
+    (platform) =>
+      enabled.has(platform) &&
+      Boolean(input.adapters[platform]) &&
+      (!input.isPlatformScannable || input.isPlatformScannable(platform))
+  );
+}
+
 type EnqueueScanOptions = {
   respectCooldown?: boolean;
   requestId?: string;
@@ -1302,11 +1318,12 @@ export function createScanQueue(deps: ScanQueueDeps) {
         // with active backoff (#403) are skipped this tick and picked
         // up on a later one. The queue serialises jobs so this never
         // produces parallel scans of different platforms.
-        const enabledPlatforms = allPlatforms.filter((platform) => Boolean(deps.adapters[platform]));
+        const enabledPlatforms = resolveSelectedScanPlatforms({
+          enabledPlatforms: settings.enabledPlatforms,
+          adapters: deps.adapters,
+          isPlatformScannable: deps.isPlatformScannable
+        });
         for (const platform of enabledPlatforms) {
-          if (deps.isPlatformScannable && !deps.isPlatformScannable(platform)) {
-            continue;
-          }
           if (!isPlatformDueForScheduledScan(platform, intervalMs, now)) {
             continue;
           }
@@ -1393,13 +1410,12 @@ export function createScanQueue(deps: ScanQueueDeps) {
 
     await ensurePlatformRows();
     const settings = await deps.settingsStore.getSettings();
-    const scanPlatforms = job.platform
-      ? [job.platform]
-      : allPlatforms.filter(
-          (platform) =>
-            Boolean(deps.adapters[platform]) &&
-            (!deps.isPlatformScannable || deps.isPlatformScannable(platform))
-        );
+    const scanPlatforms = resolveSelectedScanPlatforms({
+      requestedPlatform: job.platform,
+      enabledPlatforms: settings.enabledPlatforms,
+      adapters: deps.adapters,
+      isPlatformScannable: deps.isPlatformScannable
+    });
 
     let updatedThreads = 0;
     let aborted = false;

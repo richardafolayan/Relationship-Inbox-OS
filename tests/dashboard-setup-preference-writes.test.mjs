@@ -2,7 +2,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  completedPreferencesFromConflict,
   createSetupPreferenceWriteQueue,
+  setupNavigationDisabled,
   persistCompletedSetup
 } from "../apps/dashboard/lib/setup-preference-writes.ts";
 
@@ -122,6 +124,30 @@ test("a failed atomic completion leaves local setup incomplete", async () => {
     /offline/
   );
   assert.deepEqual(events, ["server"]);
+});
+
+test("local completion cache failure cannot undo authoritative server completion", async () => {
+  const preferences = await persistCompletedSetup({
+    completedAt: "done",
+    persistCompletion: async () => ({ revision: 8, completedAt: "done" }),
+    markComplete: () => {
+      throw new Error("storage denied");
+    }
+  });
+  assert.deepEqual(preferences, { revision: 8, completedAt: "done" });
+});
+
+test("an authoritative completed conflict is semantic completion success", () => {
+  const completed = { revision: 9, completedAt: "done" };
+  assert.deepEqual(completedPreferencesFromConflict(409, { preferences: completed }), completed);
+  assert.equal(completedPreferencesFromConflict(409, { preferences: { revision: 9, completedAt: "" } }), null);
+  assert.equal(completedPreferencesFromConflict(500, { preferences: completed }), null);
+});
+
+test("transcription navigation and removal stay disabled through writes and downloads", () => {
+  assert.equal(setupNavigationDisabled(false, "idle"), false);
+  assert.equal(setupNavigationDisabled(true, "idle"), true);
+  assert.equal(setupNavigationDisabled(false, "downloading"), true);
 });
 
 test("an authoritative side-endpoint snapshot rebases the next queued write", async () => {

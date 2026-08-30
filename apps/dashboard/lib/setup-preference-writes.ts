@@ -21,8 +21,27 @@ export async function persistCompletedSetup<TPreferences>(
   persistence: CompletedSetupPersistence<TPreferences>
 ): Promise<TPreferences> {
   const preferences = await persistence.persistCompletion(persistence.completedAt);
-  persistence.markComplete();
+  try {
+    persistence.markComplete();
+  } catch {
+    // Server completion is authoritative. The local marker is only a cache.
+  }
   return preferences;
+}
+
+export function completedPreferencesFromConflict<
+  TPreferences extends { completedAt: string }
+>(status: number, payload: unknown): TPreferences | null {
+  if (status !== 409 || !payload || typeof payload !== "object") return null;
+  const preferences = (payload as { preferences?: TPreferences }).preferences;
+  return preferences?.completedAt ? preferences : null;
+}
+
+export function setupNavigationDisabled(
+  busy: boolean,
+  phase: "idle" | "downloading" | "error" | undefined
+): boolean {
+  return busy || phase === "downloading";
 }
 
 function validRevision(value: unknown): value is number {

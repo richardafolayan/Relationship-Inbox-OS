@@ -1,4 +1,5 @@
 import type { AppSettings, PlatformName } from "@inbox-os/core";
+import { z } from "zod";
 import type { OperatorProfile, PersistedMutation } from "../types/runtime";
 import type {
   SetupPreferences,
@@ -14,6 +15,52 @@ export interface SetupPreferencesPayload extends SetupPreferencesUpdate {
 export interface CompleteSetupPayload {
   completedAt: string;
   expectedRevision?: number;
+}
+
+const setupPreferencesRequestSchema = z.object({
+  selectedPlatforms: z
+    .array(z.enum(["IMESSAGE", "LINKEDIN", "INSTAGRAM", "WHATSAPP", "GOOGLE_MESSAGES"]))
+    .optional(),
+  aiEnabled: z.boolean().optional(),
+  startedAt: z.string().max(100).optional(),
+  completedAt: z.string().datetime().optional(),
+  expectedRevision: z.number().int().nonnegative().optional()
+}).superRefine((payload, context) => {
+  if (
+    payload.completedAt !== undefined &&
+    (payload.selectedPlatforms !== undefined ||
+      payload.aiEnabled !== undefined ||
+      payload.startedAt !== undefined)
+  ) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "A completion request cannot include other setup changes."
+    });
+  }
+});
+
+export function parseSetupPreferencesRequest(body: unknown):
+  | { kind: "complete"; payload: CompleteSetupPayload }
+  | { kind: "update"; payload: SetupPreferencesPayload } {
+  const parsed = setupPreferencesRequestSchema.parse(body);
+  if (parsed.completedAt !== undefined) {
+    return {
+      kind: "complete",
+      payload: {
+        completedAt: parsed.completedAt,
+        expectedRevision: parsed.expectedRevision
+      }
+    };
+  }
+  return {
+    kind: "update",
+    payload: {
+      selectedPlatforms: parsed.selectedPlatforms,
+      aiEnabled: parsed.aiEnabled,
+      startedAt: parsed.startedAt,
+      expectedRevision: parsed.expectedRevision
+    }
+  };
 }
 
 interface SetupPreferencesCoordinatorDeps {
@@ -41,6 +88,7 @@ export function createSetupPreferencesCoordinator(deps: SetupPreferencesCoordina
     payload: SetupPreferencesPayload,
     additionalSettings: Partial<AppSettings> = {}
   ): Promise<SetupPreferences> {
+    let settingsUpdate: Partial<AppSettings> = { ...additionalSettings };
     return deps.mutateSettings(async (settingsMutation) =>
       deps.mutatePreferences(
         { expectedRevision: payload.expectedRevision },
@@ -60,6 +108,13 @@ export function createSetupPreferencesCoordinator(deps: SetupPreferencesCoordina
               ? current.aiEnabled
               : settingsMutation.current.aiEnabled !== false);
 
+          if (payload.selectedPlatforms !== undefined || !current.startedAt) {
+            settingsUpdate.enabledPlatforms = selectedPlatforms;
+          }
+          if (payload.aiEnabled !== undefined || !current.startedAt) {
+            settingsUpdate.aiEnabled = aiEnabled;
+          }
+
           return {
             ...payload,
             selectedPlatforms,
@@ -68,11 +123,7 @@ export function createSetupPreferencesCoordinator(deps: SetupPreferencesCoordina
         },
         async (preferences) => {
           await settingsMutation.commit(
-            {
-              enabledPlatforms: preferences.selectedPlatforms,
-              aiEnabled: preferences.aiEnabled,
-              ...additionalSettings
-            },
+            settingsUpdate,
             (settings) => deps.persistSetupState(settings, preferences)
           );
         }

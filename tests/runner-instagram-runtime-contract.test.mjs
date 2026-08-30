@@ -18,6 +18,13 @@ const scanQueueSource = await readFile(
   new URL("../apps/runner/src/services/scan-queue.ts", import.meta.url),
   "utf8"
 );
+const setupCoordinatorSource = await readFile(
+  new URL(
+    "../apps/runner/src/services/setup-preferences-coordinator.ts",
+    import.meta.url
+  ),
+  "utf8"
+);
 const resetCoordinatorSource = await readFile(
   new URL(
     "../apps/runner/src/services/platform-session-reset-coordinator.ts",
@@ -38,7 +45,7 @@ const selectors = JSON.parse(
 
 test("server setup validation and interactive connection include Instagram", () => {
   assert.match(
-    runnerSource,
+    setupCoordinatorSource,
     /z\.enum\(\["IMESSAGE", "LINKEDIN", "INSTAGRAM", "WHATSAPP", "GOOGLE_MESSAGES"\]\)/
   );
   assert.match(
