@@ -75,3 +75,24 @@ test("rich messages drop the message bubble chrome", () => {
   assert.match(src, /usesTransparentRichSurface\s*\?\s*"flex flex-col gap-2[^\"]*text-ink"/);
   assert.match(src, /bg-ink text-paper/); // bubble bg still exists for the non-image branch
 });
+
+// #885. Outgoing LinkedIn messages stay editable when they carry text plus
+// an attachment or inline link card. Those rich rows use a transparent
+// surface (no dark bubble), so Cancel/Save must not keep paper-on-accent
+// colours that vanish against the page.
+test("LinkedIn edit controls branch contrast on transparent rich surfaces", () => {
+  assert.match(
+    src,
+    /const canEdit\s*=\s*\n?\s*thread\.platform === "LINKEDIN" && message\.direction === "OUT" && showText/
+  );
+  // Cancel: ink on transparent, paper on bubble.
+  assert.match(
+    src,
+    /usesTransparentRichSurface\s*\?\s*"inline-flex h-\[30px\][^\"]*text-ink-2[^\"]*hover:bg-paper-2[^\"]*hover:text-ink[^\"]*"\s*:\s*"inline-flex h-\[30px\][^\"]*text-paper\/75[^\"]*hover:bg-paper\/10[^\"]*hover:text-paper/
+  );
+  // Save: ink fill + paper text on transparent, paper fill + ink text on bubble.
+  assert.match(
+    src,
+    /usesTransparentRichSurface\s*\?\s*"inline-flex h-\[30px\][^\"]*bg-ink[^\"]*text-paper[^\"]*"\s*:\s*"inline-flex h-\[30px\][^\"]*bg-paper[^\"]*text-ink/
+  );
+});

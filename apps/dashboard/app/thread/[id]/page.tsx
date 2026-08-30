@@ -4881,7 +4881,11 @@ export default function ThreadPage() {
                                       type="button"
                                       onClick={cancelMessageEdit}
                                       disabled={isSavingEdit}
-                                      className="inline-flex h-[30px] items-center gap-1 rounded-[6px] px-2 text-[12px] text-paper/75 transition-colors duration-calm hover:bg-paper/10 hover:text-paper disabled:cursor-not-allowed disabled:opacity-50"
+                                      className={
+                                        usesTransparentRichSurface
+                                          ? "inline-flex h-[30px] items-center gap-1 rounded-[6px] px-2 text-[12px] text-ink-2 transition-colors duration-calm hover:bg-paper-2 hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
+                                          : "inline-flex h-[30px] items-center gap-1 rounded-[6px] px-2 text-[12px] text-paper/75 transition-colors duration-calm hover:bg-paper/10 hover:text-paper disabled:cursor-not-allowed disabled:opacity-50"
+                                      }
                                     >
                                       <X className="h-[13px] w-[13px]" strokeWidth={1.8} />
                                       Cancel
@@ -4890,7 +4894,11 @@ export default function ThreadPage() {
                                       type="button"
                                       onClick={() => void saveMessageEdit(message.id)}
                                       disabled={isSavingEdit || isSavedEdit || editDraft.trim().length === 0}
-                                      className="inline-flex h-[30px] items-center gap-1 rounded-[6px] bg-paper px-2.5 text-[12px] font-medium text-ink transition-colors duration-calm hover:bg-paper-2 disabled:cursor-not-allowed disabled:opacity-70"
+                                      className={
+                                        usesTransparentRichSurface
+                                          ? "inline-flex h-[30px] items-center gap-1 rounded-[6px] border border-hairline-strong bg-ink px-2.5 text-[12px] font-medium text-paper transition-colors duration-calm hover:bg-ink/90 disabled:cursor-not-allowed disabled:opacity-70"
+                                          : "inline-flex h-[30px] items-center gap-1 rounded-[6px] bg-paper px-2.5 text-[12px] font-medium text-ink transition-colors duration-calm hover:bg-paper-2 disabled:cursor-not-allowed disabled:opacity-70"
+                                      }
                                     >
                                       {isSavingEdit ? (
                                         <Loader2 className="h-[13px] w-[13px] animate-spin" strokeWidth={1.8} />
