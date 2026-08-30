@@ -150,6 +150,7 @@ import { chooseDisplayBrief } from "@/lib/reply-brief";
 import {
   assertThreadComposerAttachmentsRecoverable,
   defaultThreadComposerAttachmentStore,
+  prepareThreadComposerAttachmentNamespaceHandoff,
   prepareThreadComposerAttachmentOwnershipHandoff,
   reconcileThreadComposerAttachmentOwnership,
   removableThreadComposerAttachmentIds,
@@ -158,6 +159,8 @@ import {
 } from "@/lib/thread-composer-attachments";
 import {
   attachDraftRevisionToThreadComposerSession,
+  compareAndReplaceThreadComposerSession,
+  compareAndRestoreThreadComposerSession,
   consumeThreadComposerSession,
   inspectThreadComposerSession,
   mergeThreadComposerAttachmentDescriptors,
@@ -759,7 +762,9 @@ export default function ThreadPage() {
   // leave them at a numerically-equal-but-visually-different scroll
   // position.
   const preFocusAnchorRef = useRef<{ anchorEl: HTMLElement; viewportOffset: number } | null>(null);
+  const composerRecoveryInProgressRef = useRef<string | null>(null);
   const focusOnParent = useCallback((parentId: string) => {
+    if (composerRecoveryInProgressRef.current === routeThreadIdRef.current) return;
     const el = timelineRef.current;
     if (el && preFocusAnchorRef.current === null) {
       // Only capture once per focus session — repeated chip clicks
@@ -777,6 +782,7 @@ export default function ThreadPage() {
     setFocusTrigger((n) => n + 1);
   }, []);
   const [composer, setComposer] = useState("");
+  const [composerRecoveryInProgress, setComposerRecoveryInProgress] = useState(false);
   const composerInputRef = useRef<HTMLTextAreaElement | null>(null);
   const [whatsAppPollOpen, setWhatsAppPollOpen] = useState(false);
   const [whatsAppPollQuestion, setWhatsAppPollQuestion] = useState("");
@@ -1331,6 +1337,12 @@ export default function ThreadPage() {
   const attachmentOwnershipRef = useRef(
     new Map<string, ThreadComposerAttachmentOwnership>()
   );
+  const retainedAttachmentOwnershipRef = useRef(
+    new Map<string, {
+      ownership: ThreadComposerAttachmentOwnership;
+      threadId: string;
+    }>()
+  );
   const attachmentOwnershipBarrierRef = useRef(new Map<string, {
     promise: Promise<void>;
     revisionId: string;
@@ -1454,11 +1466,25 @@ export default function ThreadPage() {
       ownerId,
       revisionId: saved.revisionId
     };
+    if (
+      previousOwnership &&
+      previousOwnership.ownerId !== ownerId &&
+      previousOwnership.ownerId === acceptedRevisionId
+    ) {
+      retainedAttachmentOwnershipRef.current.set(
+        previousOwnership.ownerId,
+        { ownership: previousOwnership, threadId: ownerThreadId }
+      );
+    }
     attachmentOwnershipRef.current.set(ownerThreadId, nextOwnership);
     const ownershipPromise = composerAttachmentStore
       .claimOwnership(ownerThreadId, attachmentIds, ownerId, namespace)
       .then(async () => {
-        if (!previousOwnership || previousOwnership.ownerId === ownerId) return;
+        if (
+          !previousOwnership ||
+          previousOwnership.ownerId === ownerId ||
+          previousOwnership.ownerId === acceptedRevisionId
+        ) return;
         await composerAttachmentStore.releaseOwnership(
           ownerThreadId,
           previousOwnership.ownerId,
@@ -1509,6 +1535,10 @@ export default function ThreadPage() {
     revisionId: string | null | undefined
   ) => {
     if (!revisionId) return;
+    const retainedOwnership = retainedAttachmentOwnershipRef.current.get(revisionId);
+    if (retainedOwnership?.threadId === targetThreadId) {
+      retainedAttachmentOwnershipRef.current.delete(revisionId);
+    }
     const ownership = attachmentOwnershipRef.current.get(targetThreadId);
     if (ownership?.revisionId === revisionId) {
       attachmentOwnershipRef.current.delete(targetThreadId);
@@ -1516,7 +1546,10 @@ export default function ThreadPage() {
     }
     const namespaces = new Set([
       composerAttachmentStore.namespace,
-      ...(ownership?.revisionId === revisionId ? [ownership.namespace] : [])
+      ...(ownership?.revisionId === revisionId ? [ownership.namespace] : []),
+      ...(retainedOwnership?.threadId === targetThreadId
+        ? [retainedOwnership.ownership.namespace]
+        : [])
     ]);
     await Promise.all(
       [...namespaces].map((namespace) =>
@@ -2040,6 +2073,26 @@ export default function ThreadPage() {
       );
     }
     if (pendingAttempt?.intent.threadId !== threadId) pendingAttempt = null;
+    if (
+      pendingAttempt?.value.sessionRevisionId &&
+      pendingAttempt.intent.composerIntent.attachments.length > 0
+    ) {
+      retainedAttachmentOwnershipRef.current.set(
+        pendingAttempt.value.sessionRevisionId,
+        {
+          ownership: {
+            attachmentIds: pendingAttempt.intent.composerIntent.attachments.map(
+              (attachment) => attachment.id
+            ),
+            namespace:
+              pendingAttempt.value.attachmentNamespace ?? composerAttachmentStore.namespace,
+            ownerId: pendingAttempt.value.sessionRevisionId,
+            revisionId: pendingAttempt.value.sessionRevisionId
+          },
+          threadId
+        }
+      );
+    }
     let completedValues: ThreadComposerSendAttemptValue[] = [];
     let completedPrunedBefore: number | undefined;
     let completedAttempt: ThreadComposerSendAttemptValue | undefined;
@@ -2388,6 +2441,44 @@ export default function ThreadPage() {
             attachmentOwnershipBarrierRef.current.delete(ownerThreadId);
           }
         }
+        const retainedOwnership = [...retainedAttachmentOwnershipRef.current.entries()];
+        for (const [ownerId, retained] of retainedOwnership) {
+          const { ownership: value, threadId: ownerThreadId } = retained;
+          let stillPending = true;
+          try {
+            const attempt = normalizeThreadComposerSendAttempt(
+              externalActionAttempts.readScopedAttempt(
+                threadComposerSendScope(ownerThreadId)
+              )
+            );
+            stillPending = Boolean(
+              attempt?.intent.threadId === ownerThreadId &&
+              attempt.value.sessionRevisionId === ownerId
+            );
+          } catch {
+            stillPending = true;
+          }
+          if (stillPending) {
+            await composerAttachmentStore.claimOwnership(
+              ownerThreadId,
+              value.attachmentIds,
+              ownerId,
+              value.namespace
+            );
+            continue;
+          }
+          retainedAttachmentOwnershipRef.current.delete(ownerId);
+          await composerAttachmentStore.releaseOwnership(
+            ownerThreadId,
+            ownerId,
+            value.namespace
+          );
+          await composerAttachmentStore.removeUnowned(
+            ownerThreadId,
+            value.attachmentIds,
+            value.namespace
+          );
+        }
         await composerAttachmentStore.purgeStale();
       })().catch(() => undefined);
     };
@@ -2406,7 +2497,7 @@ export default function ThreadPage() {
       window.removeEventListener("focus", purgeStaleAttachments);
       document.removeEventListener("visibilitychange", purgeWhenVisible);
     };
-  }, [composerAttachmentStore, composerSessionDisposition]);
+  }, [composerAttachmentStore, composerSessionDisposition, externalActionAttempts]);
 
   useEffect(() => {
     const preserveComposer = () => {
@@ -2722,19 +2813,6 @@ export default function ThreadPage() {
         showPendingError("Tovi could not safely reconstruct the failed send. Reload before trying again.");
         return;
       }
-      const recoveryIntent = composerIntentForRecovery(
-        pending.composerIntent,
-        pending.attemptKind ?? "immediate",
-        pending.scheduledFor
-      );
-      const predecessorSession = readThreadComposerSession(pending.threadId);
-      const scope = threadComposerSendScope(pending.threadId);
-      const proposedRevisionId = uuid();
-      const restoredTombstone: ThreadComposerSendAttemptValue = {
-        ...pendingValue,
-        resolution: "restored",
-        restoredSessionRevisionId: proposedRevisionId
-      };
       const attachmentIds = pending.composerIntent.attachments.map(
         (attachment) => attachment.id
       );
@@ -2744,121 +2822,189 @@ export default function ThreadPage() {
         );
         return;
       }
-      const predecessorOwnerId = pending.sessionRevisionId ?? proposedRevisionId;
-      const attachmentNamespace =
-        pending.attachmentNamespace ?? composerAttachmentStore.namespace;
-      let ownershipHandoff: Awaited<ReturnType<
-        typeof prepareThreadComposerAttachmentOwnershipHandoff
-      >> | null = null;
-      let preparedRecoverySession: ThreadComposerSession | null = null;
-      let restoredSession: ThreadComposerSession | null = null;
-      let recoverySessionRevisionId: string | null = null;
-      let releaseStateUnknown = false;
-      if (!options.recordAlreadyReleased) {
-        preparedRecoverySession = restoreThreadComposerSession(
-          pending.threadId,
-          recoveryIntent,
-          proposedRevisionId,
-          undefined,
-          pending.draftRevision ?? null,
-          pending.clientSendId
+      if (composerRecoveryInProgressRef.current) return;
+      composerRecoveryInProgressRef.current = pending.threadId;
+      setComposerRecoveryInProgress(true);
+      try {
+        const recoveryIntent = composerIntentForRecovery(
+          pending.composerIntent,
+          pending.attemptKind ?? "immediate",
+          pending.scheduledFor
         );
-        if (!preparedRecoverySession) {
+        const predecessorInspection = inspectThreadComposerSession(pending.threadId);
+        if (!predecessorInspection.readable) {
           showPendingError(
-            "Tovi could not safely preserve this failed reply before releasing it. Reload before trying again."
+            "Tovi could not safely read the saved reply before recovery. Reload before trying again."
           );
           return;
         }
-        acceptedComposerSessionIdsRef.current.set(
-          pending.threadId,
-          preparedRecoverySession.revisionId
-        );
-        try {
-          ownershipHandoff = await prepareThreadComposerAttachmentOwnershipHandoff(
-            composerAttachmentStore,
+        const predecessorSession = predecessorInspection.session;
+        if (
+          predecessorSession &&
+          !(
+            predecessorSession.revision === pending.sessionRevision &&
+            predecessorSession.revisionId === pending.sessionRevisionId
+          ) &&
+          predecessorSession.recoveryClientSendId !== pending.clientSendId
+        ) {
+          showPendingError(
+            "A newer reply is already saved. Clear it before recovering the earlier failed reply."
+          );
+          return;
+        }
+        const scope = threadComposerSendScope(pending.threadId);
+        const proposedRevisionId = uuid();
+        const restoredTombstone: ThreadComposerSendAttemptValue = {
+          ...pendingValue,
+          resolution: "restored",
+          restoredSessionRevisionId: proposedRevisionId
+        };
+        const predecessorOwnerId = pending.sessionRevisionId ?? proposedRevisionId;
+        const attachmentNamespace =
+          pending.attachmentNamespace ?? composerAttachmentStore.namespace;
+        let ownershipHandoff: Awaited<ReturnType<
+          typeof prepareThreadComposerAttachmentOwnershipHandoff
+        >> | null = null;
+        let preparedRecoverySession: ThreadComposerSession | null = null;
+        let restoredSession: ThreadComposerSession | null = null;
+        let releaseStateUnknown = false;
+
+        if (!options.recordAlreadyReleased) {
+          try {
+            ownershipHandoff = await prepareThreadComposerAttachmentOwnershipHandoff(
+              composerAttachmentStore,
+              pending.threadId,
+              attachmentIds,
+              predecessorOwnerId,
+              proposedRevisionId,
+              attachmentNamespace
+            );
+          } catch {
+            showPendingError(
+              "Tovi could not safely preserve this reply's attachments for recovery. Reload before trying again."
+            );
+            return;
+          }
+          if (
+            safeSendFailureDisposition(
+              pending.threadId,
+              routeThreadIdRef.current,
+              composerIntentRef.current,
+              emptyIntent
+            ) !== "restore_captured"
+          ) {
+            await ownershipHandoff.rollback().catch(() => undefined);
+            showPendingError(
+              "The conversation or reply changed during recovery. The earlier send remains unresolved."
+            );
+            return;
+          }
+          preparedRecoverySession = compareAndRestoreThreadComposerSession(
             pending.threadId,
-            attachmentIds,
-            predecessorOwnerId,
+            predecessorSession,
+            recoveryIntent,
             proposedRevisionId,
-            attachmentNamespace
+            undefined,
+            pending.draftRevision ?? null,
+            pending.clientSendId
           );
-        } catch {
-          showPendingError(
-            "Tovi could not safely preserve this reply's attachments for recovery. Reload before trying again."
-          );
-          return;
-        }
-        let released = false;
-        try {
-          released = await externalActionAttempts.compareAndCompleteScopedValue<ThreadComposerSendAttemptValue>(
-            scope,
-            (value) =>
-              value.clientSendId === pending.clientSendId &&
-              value.notFoundRecovery === pending.notFoundRecovery,
-            true,
-            restoredTombstone
-          );
-        } catch {
-          releaseStateUnknown = true;
-        }
-        if (released) {
-          recoverySessionRevisionId = proposedRevisionId;
-          restoredSession = preparedRecoverySession;
-          await ownershipHandoff.commit().catch(() => undefined);
-        }
-      }
-      if (!recoverySessionRevisionId) {
-        let resolution: ReturnType<typeof composerRecoveryResolution> = null;
-        let resolutionStateUnknown = false;
-        const readResolution = () => composerRecoveryResolution(
-          pendingValue,
-          externalActionAttempts.readCompletedScopedValues<ThreadComposerSendAttemptValue>(
-            scope
-          )
-        );
-        try {
-          resolution = readResolution();
-        } catch {
-          resolutionStateUnknown = true;
-        }
-        if (recoverySessionRevisionId) {
-          resolution = null;
-        } else if (resolution?.kind === "sent") {
-          if (preparedRecoverySession) {
-            consumeThreadComposerSession(
-              pending.threadId,
-              preparedRecoverySession.revision,
-              preparedRecoverySession.revisionId
+          if (!preparedRecoverySession) {
+            await ownershipHandoff.rollback().catch(() => undefined);
+            showPendingError(
+              "Tovi could not safely preserve this failed reply before releasing it. Reload before trying again."
             );
+            return;
           }
-          await ownershipHandoff?.rollback().catch(() => undefined);
-          const storedSession = readThreadComposerSession(pending.threadId);
-          if (
-            storedSession &&
-            (storedSession.revisionId === pending.sessionRevisionId ||
-              storedSession.revisionId === resolution.sessionRevisionId)
-          ) {
-            consumeThreadComposerSession(
-              pending.threadId,
-              storedSession.revision,
-              storedSession.revisionId
+          acceptedComposerSessionIdsRef.current.set(
+            pending.threadId,
+            preparedRecoverySession.revisionId
+          );
+          let released = false;
+          try {
+            released = await externalActionAttempts.compareAndCompleteScopedValue<ThreadComposerSendAttemptValue>(
+              scope,
+              (value) =>
+                value.clientSendId === pending.clientSendId &&
+                value.notFoundRecovery === pending.notFoundRecovery,
+              true,
+              restoredTombstone
             );
+          } catch {
+            releaseStateUnknown = true;
           }
-          if (
-            acceptedComposerSessionIdsRef.current.get(pending.threadId) ===
-              pending.sessionRevisionId ||
-            acceptedComposerSessionIdsRef.current.get(pending.threadId) ===
-              preparedRecoverySession?.revisionId
-          ) {
+          if (released) {
+            restoredSession = preparedRecoverySession;
+            await ownershipHandoff.commit().catch(() => undefined);
+          }
+        }
+
+        if (!restoredSession) {
+          let resolution: ReturnType<typeof composerRecoveryResolution> = null;
+          let resolutionStateUnknown = false;
+          try {
+            resolution = composerRecoveryResolution(
+              pendingValue,
+              externalActionAttempts.readCompletedScopedValues<ThreadComposerSendAttemptValue>(
+                scope
+              )
+            );
+          } catch {
+            resolutionStateUnknown = true;
+          }
+          if (resolution?.kind === "sent") {
+            if (preparedRecoverySession) {
+              compareAndReplaceThreadComposerSession(
+                pending.threadId,
+                preparedRecoverySession,
+                null
+              );
+            }
+            await ownershipHandoff?.rollback().catch(() => undefined);
+            const storedSession = readThreadComposerSession(pending.threadId);
+            if (
+              storedSession &&
+              (storedSession.revisionId === pending.sessionRevisionId ||
+                storedSession.revisionId === resolution.sessionRevisionId)
+            ) {
+              consumeThreadComposerSession(
+                pending.threadId,
+                storedSession.revision,
+                storedSession.revisionId
+              );
+            }
             acceptedComposerSessionIdsRef.current.delete(pending.threadId);
+            setPendingSends((current) =>
+              current.filter((item) => item.clientSendId !== pending.clientSendId)
+            );
+            showPendingError("This reply was already sent from another window.");
+            return;
           }
-          setPendingSends((current) =>
-            current.filter((item) => item.clientSendId !== pending.clientSendId)
-          );
-          showPendingError("This reply was already sent from another window.");
-          return;
-        } else if (resolution?.kind === "restore") {
-          recoverySessionRevisionId = resolution.sessionRevisionId;
+          if (resolution?.kind !== "restore") {
+            if (!releaseStateUnknown && !resolutionStateUnknown && preparedRecoverySession) {
+              const rolledBack = compareAndReplaceThreadComposerSession(
+                pending.threadId,
+                preparedRecoverySession,
+                predecessorSession
+              );
+              if (rolledBack) {
+                if (predecessorSession) {
+                  acceptedComposerSessionIdsRef.current.set(
+                    pending.threadId,
+                    predecessorSession.revisionId
+                  );
+                } else {
+                  acceptedComposerSessionIdsRef.current.delete(pending.threadId);
+                }
+                await ownershipHandoff?.rollback().catch(() => undefined);
+              }
+            }
+            showPendingError(
+              "Tovi could not safely release the failed send because it changed in another window. Reload before trying again."
+            );
+            return;
+          }
+
+          const recoverySessionRevisionId = resolution.sessionRevisionId;
           if (
             recoverySessionRevisionId === proposedRevisionId &&
             ownershipHandoff &&
@@ -2867,24 +3013,6 @@ export default function ThreadPage() {
             restoredSession = preparedRecoverySession;
             await ownershipHandoff.commit().catch(() => undefined);
           } else {
-            restoredSession = restoreThreadComposerSession(
-              pending.threadId,
-              recoveryIntent,
-              recoverySessionRevisionId,
-              undefined,
-              pending.draftRevision ?? null,
-              pending.clientSendId
-            );
-            if (!restoredSession) {
-              showPendingError(
-                "Tovi could not safely restore this failed reply for another attempt. Reload before trying again."
-              );
-              return;
-            }
-            acceptedComposerSessionIdsRef.current.set(
-              pending.threadId,
-              restoredSession.revisionId
-            );
             let resolvedHandoff: Awaited<ReturnType<
               typeof prepareThreadComposerAttachmentOwnershipHandoff
             >>;
@@ -2903,83 +3031,82 @@ export default function ThreadPage() {
               );
               return;
             }
+            restoredSession = compareAndRestoreThreadComposerSession(
+              pending.threadId,
+              preparedRecoverySession ?? predecessorSession,
+              recoveryIntent,
+              recoverySessionRevisionId,
+              undefined,
+              pending.draftRevision ?? null,
+              pending.clientSendId
+            );
+            if (!restoredSession) {
+              await resolvedHandoff.rollback().catch(() => undefined);
+              showPendingError(
+                "Tovi could not safely restore this failed reply for another attempt. Reload before trying again."
+              );
+              return;
+            }
+            acceptedComposerSessionIdsRef.current.set(
+              pending.threadId,
+              restoredSession.revisionId
+            );
             await resolvedHandoff.commit().catch(() => undefined);
             await ownershipHandoff?.rollback().catch(() => undefined);
             ownershipHandoff = resolvedHandoff;
           }
-        } else {
-          if (!releaseStateUnknown && !resolutionStateUnknown) {
-            let retainPreparedRecovery = false;
-            if (preparedRecoverySession) {
-              const currentSession = inspectThreadComposerSession(pending.threadId);
-              if (!currentSession.readable) {
-                retainPreparedRecovery = true;
-              } else if (
-                currentSession.session?.revision === preparedRecoverySession.revision &&
-                currentSession.session.revisionId === preparedRecoverySession.revisionId
-              ) {
-                const exactPredecessor =
-                  predecessorSession?.revisionId === pending.sessionRevisionId
-                    ? predecessorSession
-                    : null;
-                if (exactPredecessor) {
-                  const rolledBackSession = restoreThreadComposerSession(
-                    pending.threadId,
-                    exactPredecessor,
-                    exactPredecessor.revisionId,
-                    undefined,
-                    exactPredecessor.draftRevision,
-                    exactPredecessor.recoveryClientSendId
-                  );
-                  retainPreparedRecovery = !rolledBackSession;
-                  if (
-                    rolledBackSession &&
-                    acceptedComposerSessionIdsRef.current.get(pending.threadId) ===
-                      preparedRecoverySession.revisionId
-                  ) {
-                    acceptedComposerSessionIdsRef.current.set(
-                      pending.threadId,
-                      rolledBackSession.revisionId
-                    );
-                  }
-                } else {
-                  retainPreparedRecovery = true;
-                }
-              }
-            }
-            if (!retainPreparedRecovery) {
-              await ownershipHandoff?.rollback().catch(() => undefined);
-            }
-          }
-          showPendingError("Tovi could not safely release the failed send because it changed in another window. Reload before trying again.");
+        }
+
+        if (!restoredSession) {
+          showPendingError(
+            "Tovi could not safely restore this failed reply for another attempt. Reload before trying again."
+          );
           return;
         }
+        const finalDisposition = safeSendFailureDisposition(
+          pending.threadId,
+          routeThreadIdRef.current,
+          composerIntentRef.current,
+          emptyIntent
+        );
+        const storedRecovery = readThreadComposerSession(pending.threadId);
+        if (
+          finalDisposition !== "restore_captured" ||
+          storedRecovery?.revision !== restoredSession.revision ||
+          storedRecovery.revisionId !== restoredSession.revisionId
+        ) {
+          showPendingError(
+            "The conversation or reply changed during recovery. The failed reply is saved in its original conversation."
+          );
+          return;
+        }
+        acceptedComposerSessionIdsRef.current.delete(pending.threadId);
+        composerSessionPresentRef.current = true;
+        composerDraftRevisionRef.current = pending.draftRevision ?? null;
+        const missingAttachments = missingThreadComposerAttachments(
+          recoveryIntent,
+          pending.attachments.map((attachment) => attachment.id)
+        );
+        composerIntentRef.current = recoveryIntent;
+        missingComposerAttachmentsRef.current = missingAttachments;
+        composerAttachmentsRef.current = pending.attachments;
+        setComposer(recoveryIntent.text);
+        setComposerSource(recoveryIntent.source);
+        setComposerAttachments(pending.attachments);
+        setMissingComposerAttachments(missingAttachments);
+        setFocusedThreadParentId(recoveryIntent.replyToMessageId);
+        setCustomScheduleValue(recoveryIntent.customScheduleValue);
+        setRecoveredScheduledFor(recoveryIntent.recoveredScheduledFor ?? null);
+        setPendingSends((current) =>
+          current.filter((item) => item.clientSendId !== pending.clientSendId)
+        );
+        showPendingError(message);
+      } finally {
+        if (composerRecoveryInProgressRef.current === pending.threadId) {
+          composerRecoveryInProgressRef.current = null;
+          setComposerRecoveryInProgress(false);
+        }
       }
-      if (!restoredSession) {
-        showPendingError("Tovi could not safely restore this failed reply for another attempt. Reload before trying again.");
-        return;
-      }
-      acceptedComposerSessionIdsRef.current.delete(pending.threadId);
-      composerSessionPresentRef.current = true;
-      composerDraftRevisionRef.current = pending.draftRevision ?? null;
-      const missingAttachments = missingThreadComposerAttachments(
-        recoveryIntent,
-        pending.attachments.map((attachment) => attachment.id)
-      );
-      composerIntentRef.current = recoveryIntent;
-      missingComposerAttachmentsRef.current = missingAttachments;
-      composerAttachmentsRef.current = pending.attachments;
-      setComposer(recoveryIntent.text);
-      setComposerSource(recoveryIntent.source);
-      setComposerAttachments(pending.attachments);
-      setMissingComposerAttachments(missingAttachments);
-      setFocusedThreadParentId(recoveryIntent.replyToMessageId);
-      setCustomScheduleValue(recoveryIntent.customScheduleValue);
-      setRecoveredScheduledFor(recoveryIntent.recoveredScheduledFor ?? null);
-      setPendingSends((current) =>
-        current.filter((item) => item.clientSendId !== pending.clientSendId)
-      );
-      showPendingError(message);
     },
     [composerAttachmentStore, externalActionAttempts]
   );
@@ -3734,35 +3861,62 @@ export default function ThreadPage() {
       .then(async (recovered) => {
         if (cancelled) return;
         if (attachmentNamespace !== composerAttachmentStore.namespace) {
+          const migratedAttachmentIds =
+            attempt!.intent.composerIntent.attachments.map((attachment) => attachment.id);
+          const migrationOwnerId = attempt!.value.sessionRevisionId;
+          if (migratedAttachmentIds.length > 0 && !migrationOwnerId) {
+            throw new Error("This saved send has no verifiable attachment owner.");
+          }
           await Promise.all(
             recovered.map(({ descriptor, file }) =>
               composerAttachmentStore.put(threadId, descriptor, file)
             )
           );
+          const namespaceHandoff = migrationOwnerId
+            ? await prepareThreadComposerAttachmentNamespaceHandoff(
+                composerAttachmentStore,
+                threadId,
+                migratedAttachmentIds,
+                migrationOwnerId,
+                attachmentNamespace,
+                composerAttachmentStore.namespace
+              )
+            : null;
           const migratedValue: ThreadComposerSendAttemptValue = {
             ...attempt!.value,
             attachmentNamespace: composerAttachmentStore.namespace
           };
-          const migrated = await externalActionAttempts.compareAndReplaceScopedValue<ThreadComposerSendAttemptValue>(
-            threadComposerSendScope(threadId),
-            (value) =>
-              value.clientSendId === attempt!.value.clientSendId &&
-              (value.attachmentNamespace ?? attachmentNamespace) === attachmentNamespace,
-            migratedValue
-          );
+          let migrated = false;
+          try {
+            migrated = await externalActionAttempts.compareAndReplaceScopedValue<ThreadComposerSendAttemptValue>(
+              threadComposerSendScope(threadId),
+              (value) =>
+                value.clientSendId === attempt!.value.clientSendId &&
+                (value.attachmentNamespace ?? attachmentNamespace) === attachmentNamespace,
+              migratedValue
+            );
+          } catch (error) {
+            await namespaceHandoff?.rollback().catch(() => undefined);
+            throw error;
+          }
           if (!migrated) {
+            await namespaceHandoff?.rollback().catch(() => undefined);
             throw new Error("This saved send changed in another window.");
           }
           attempt!.value = migratedValue;
-          const previousAttachmentNamespace = attachmentNamespace;
           attachmentNamespace = composerAttachmentStore.namespace;
-          await composerAttachmentStore
-            .removeUnowned(
-              threadId,
-              attempt!.intent.composerIntent.attachments.map((attachment) => attachment.id),
-              previousAttachmentNamespace
-            )
-            .catch(() => undefined);
+          await namespaceHandoff?.commit().catch(() => undefined);
+          if (migrationOwnerId) {
+            retainedAttachmentOwnershipRef.current.set(migrationOwnerId, {
+              ownership: {
+                attachmentIds: migratedAttachmentIds,
+                namespace: composerAttachmentStore.namespace,
+                ownerId: migrationOwnerId,
+                revisionId: migrationOwnerId
+              },
+              threadId
+            });
+          }
         }
         const attachments = recovered.map(({ descriptor, file }) => ({
           file,
@@ -4186,8 +4340,9 @@ export default function ThreadPage() {
   ]);
 
   const addFiles = useCallback((files: FileList | File[]) => {
-    const list = Array.from(files);
     const ownerThreadId = routeThreadIdRef.current;
+    if (composerRecoveryInProgressRef.current === ownerThreadId) return;
+    const list = Array.from(files);
     const additions: ComposerAttachment[] = list.map((file) => ({
         id: uuid(),
         file,
@@ -4210,6 +4365,7 @@ export default function ThreadPage() {
 
   const removeAttachment = useCallback((id: string) => {
     const ownerThreadId = routeThreadIdRef.current;
+    if (composerRecoveryInProgressRef.current === ownerThreadId) return;
     setMissingComposerAttachments((prev) => prev.filter((attachment) => attachment.id !== id));
     setComposerAttachments((prev) => {
       const next = prev.filter((a) => a.id !== id);
@@ -6424,7 +6580,7 @@ export default function ThreadPage() {
     }
   ];
   const composerExternalActionBlocked =
-    composerAttachmentsRestoring || composerRecoveryBlocked;
+    composerAttachmentsRestoring || composerRecoveryBlocked || composerRecoveryInProgress;
   const mobileScheduleGroups: ActionSheetGroup[] = [
     {
       id: "presets",
@@ -8467,6 +8623,7 @@ export default function ThreadPage() {
               <textarea
                 placeholder={`Reply to ${firstName}…`}
                 value={composer}
+                disabled={composerRecoveryInProgress}
                 // #466 (pilot R-0065): native browser assists where supported
                 // (spellCheck underlines on desktop; autoCapitalize/autoCorrect
                 // on iOS/Safari). The JS layer below covers desktop Firefox.

@@ -87,7 +87,7 @@ test("a failed captured reply stays separate when the operator has typed newer t
   assert.match(restore, /item\.clientSendId === pending\.clientSendId/);
   assert.match(
     restore,
-    /restoreThreadComposerSession\([\s\S]*?pending\.threadId,[\s\S]*?recoveryIntent,[\s\S]*?recoverySessionRevisionId,[\s\S]*?pending\.draftRevision/
+    /compareAndRestoreThreadComposerSession\([\s\S]*?pending\.threadId,[\s\S]*?recoveryIntent,[\s\S]*?recoverySessionRevisionId,[\s\S]*?pending\.draftRevision/
   );
   assert.match(restore, /resolution: "restored"/);
   assert.match(restore, /composerRecoveryResolution\(/);
@@ -167,6 +167,26 @@ test("attachment quarantine is swept again while a thread stays open", () => {
   assert.match(source, /result === "released"/);
 });
 
+test("an unresolved accepted send keeps its exact attachment lease alive", () => {
+  assert.match(
+    source,
+    /retainedAttachmentOwnershipRef\.current\.set\([\s\S]*?\{ ownership: previousOwnership, threadId: ownerThreadId \}/
+  );
+  assert.match(source, /threadComposerSendScope\(ownerThreadId\)/);
+  assert.match(
+    source,
+    /attempt\?\.intent\.threadId === ownerThreadId[\s\S]*?attempt\.value\.sessionRevisionId === ownerId/
+  );
+  assert.match(
+    source,
+    /composerAttachmentStore\.claimOwnership\([\s\S]*?ownerThreadId,[\s\S]*?ownerId,[\s\S]*?value\.namespace/
+  );
+  assert.match(
+    source,
+    /attempt\.value\.sessionRevisionId[\s\S]*?retainedAttachmentOwnershipRef\.current\.set\(/
+  );
+});
+
 test("startup refreshes restored leases before the first stale purge", () => {
   assert.doesNotMatch(attachmentStoreSource, /void purgeStale\(\)\.catch/);
   const persistence = source.indexOf("const saved = persistComposerSession(", 0);
@@ -183,23 +203,55 @@ test("startup refreshes restored leases before the first stale purge", () => {
   assert.match(lifecycle, /pendingAttempt\?\.value\.attachmentNamespace/);
 });
 
-test("failed-send recovery claims the successor lease before publishing its tombstone", () => {
+test("failed-send recovery owns and CAS-persists the successor before publishing its tombstone", () => {
   const start = source.indexOf("const restorePendingComposerSend = useCallback(");
   const end = source.indexOf("const clearCapturedComposerAfterAcceptedAction", start);
   const restore = source.slice(start, end);
-  const persist = restore.indexOf("preparedRecoverySession = restoreThreadComposerSession(");
+  const persist = restore.indexOf("preparedRecoverySession = compareAndRestoreThreadComposerSession(");
   const prepare = restore.indexOf("prepareThreadComposerAttachmentOwnershipHandoff(");
   const publish = restore.indexOf("compareAndCompleteScopedValue<ThreadComposerSendAttemptValue>");
   const commit = restore.indexOf("ownershipHandoff.commit()");
-  assert.ok(persist !== -1 && persist < prepare);
-  assert.ok(prepare < publish);
+  assert.ok(prepare !== -1 && prepare < persist);
+  assert.ok(persist < publish);
   assert.ok(commit > publish);
   assert.match(
     restore.slice(persist, publish),
     /if \(!preparedRecoverySession\) \{[\s\S]*?return;/
   );
   assert.doesNotMatch(restore, /compareAndCompleteScopedValue<[\s\S]*?\.catch\(\(\) => false\)/);
-  assert.match(restore, /if \(!releaseStateUnknown && !resolutionStateUnknown\)/);
+  assert.match(
+    restore,
+    /if \(!releaseStateUnknown && !resolutionStateUnknown && preparedRecoverySession\)/
+  );
+});
+
+test("late failed-send recovery cannot write into another route or newer composer", () => {
+  const start = source.indexOf("const restorePendingComposerSend = useCallback(");
+  const end = source.indexOf("const clearCapturedComposerAfterAcceptedAction", start);
+  const restore = source.slice(start, end);
+  const publish = restore.indexOf("compareAndCompleteScopedValue<ThreadComposerSendAttemptValue>");
+  const finalDisposition = restore.lastIndexOf("const finalDisposition = safeSendFailureDisposition(");
+  const applyComposer = restore.lastIndexOf("setComposer(recoveryIntent.text)");
+
+  assert.ok(publish !== -1 && publish < finalDisposition);
+  assert.ok(finalDisposition < applyComposer);
+  assert.match(
+    restore.slice(finalDisposition, applyComposer),
+    /finalDisposition !== "restore_captured"[\s\S]*?return;/
+  );
+  assert.match(restore, /composerRecoveryInProgressRef\.current = pending\.threadId/);
+});
+
+test("a newer composer generation does not release an accepted pending attachment owner", () => {
+  const start = source.indexOf("const persistComposerSession = useCallback");
+  const end = source.indexOf("const awaitComposerAttachmentOwnership", start);
+  const persist = source.slice(start, end);
+
+  assert.match(persist, /previousOwnership\.ownerId === acceptedRevisionId/);
+  assert.match(
+    persist,
+    /previousOwnership\.ownerId === acceptedRevisionId[\s\S]*?\) return;[\s\S]*?releaseOwnership\(/
+  );
 });
 
 test("editing an unverifiable recovery clears its matching block notice", () => {
@@ -455,9 +507,12 @@ test("cross-tab attachment recovery migrates ownership before removing the old p
   const end = source.indexOf("const attachments = recovered.map", start);
   const migration = source.slice(start, end);
   assert.match(migration, /composerAttachmentStore\.put/);
+  assert.match(migration, /prepareThreadComposerAttachmentNamespaceHandoff/);
   assert.match(migration, /externalActionAttempts\.compareAndReplaceScopedValue/);
-  assert.match(migration, /composerAttachmentStore\s*\.removeUnowned/);
+  assert.match(migration, /namespaceHandoff\?\.commit/);
+  assert.match(migration, /namespaceHandoff\?\.rollback/);
   assert.ok(
-    migration.indexOf("compareAndReplaceScopedValue") < migration.indexOf(".removeUnowned(")
+    migration.indexOf("prepareThreadComposerAttachmentNamespaceHandoff") <
+      migration.indexOf("compareAndReplaceScopedValue")
   );
 });

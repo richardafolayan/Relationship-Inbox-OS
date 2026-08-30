@@ -385,6 +385,86 @@ export function restoreThreadComposerSession(
   }
 }
 
+function sameSessionGeneration(
+  current: ThreadComposerSession | null,
+  expected: ThreadComposerSession | null
+): boolean {
+  return expected
+    ? current?.revision === expected.revision &&
+        current.revisionId === expected.revisionId
+    : current === null;
+}
+
+export function compareAndRestoreThreadComposerSession(
+  threadId: string,
+  expected: ThreadComposerSession | null,
+  draft: ThreadComposerIntentDraft,
+  revisionId: string,
+  storage: StorageLike | null = defaultStorage(),
+  draftRevision?: ThreadComposerDraftRevision | null,
+  recoveryClientSendId?: string
+): ThreadComposerSession | null {
+  if (!storage || !threadId || !revisionId) return null;
+  const intent = normalizeThreadComposerIntent(draft);
+  if (!intent || isEmptyIntent(intent)) return null;
+  try {
+    const inspected = inspectThreadComposerSession(threadId, storage);
+    if (!inspected.readable || !sameSessionGeneration(inspected.session, expected)) {
+      return null;
+    }
+    const next: ThreadComposerSession = {
+      ...intent,
+      ...(draftRevision !== undefined
+        ? { draftRevision }
+        : expected && "draftRevision" in expected
+          ? { draftRevision: expected.draftRevision ?? null }
+          : {}),
+      ...(recoveryClientSendId ? { recoveryClientSendId } : {}),
+      createdAt: Date.now(),
+      revision: (expected?.revision ?? 0) + 1,
+      revisionId
+    };
+    storage.setItem(keyFor(threadId), JSON.stringify(next));
+    const verified = inspectThreadComposerSession(threadId, storage);
+    return verified.readable && JSON.stringify(verified.session) === JSON.stringify(next)
+      ? next
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+export function compareAndReplaceThreadComposerSession(
+  threadId: string,
+  expected: ThreadComposerSession,
+  replacement: ThreadComposerSession | null,
+  storage: StorageLike | null = defaultStorage()
+): boolean {
+  if (!storage || !threadId) return false;
+  try {
+    const inspected = inspectThreadComposerSession(threadId, storage);
+    if (!inspected.readable || !sameSessionGeneration(inspected.session, expected)) {
+      return false;
+    }
+    if (replacement) {
+      const intent = normalizeThreadComposerIntent(replacement);
+      if (!intent || isEmptyIntent(intent)) return false;
+      storage.setItem(keyFor(threadId), JSON.stringify(replacement));
+    } else {
+      storage.removeItem(keyFor(threadId));
+    }
+    const verified = inspectThreadComposerSession(threadId, storage);
+    return (
+      verified.readable &&
+      (replacement
+        ? JSON.stringify(verified.session) === JSON.stringify(replacement)
+        : verified.session === null)
+    );
+  } catch {
+    return false;
+  }
+}
+
 export function snapshotThreadComposerSessionAfterAcceptedAction(
   threadId: string,
   draft: ThreadComposerIntentDraft,

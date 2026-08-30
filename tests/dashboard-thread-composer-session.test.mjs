@@ -3,6 +3,8 @@ import test from "node:test";
 
 const {
   attachDraftRevisionToThreadComposerSession,
+  compareAndReplaceThreadComposerSession,
+  compareAndRestoreThreadComposerSession,
   consumeThreadComposerSession,
   inspectThreadComposerSession,
   mergeThreadComposerAttachmentDescriptors,
@@ -572,6 +574,82 @@ test("a failed recovery write leaves the complete predecessor session intact", (
 
   storage.setItem = originalSetItem;
   assert.equal(recovered, null);
+  assert.deepEqual(readThreadComposerSession("thread-a", storage), predecessor);
+});
+
+test("recovery compare-and-set cannot overwrite a newer composer generation", () => {
+  const storage = makeStorage();
+  const original = snapshotThreadComposerSession(
+    "thread-a",
+    {
+      attachments: [attachment],
+      customScheduleValue: "",
+      replyToMessageId: "message-1",
+      source: "user",
+      text: "Original pending reply"
+    },
+    storage
+  );
+  const newer = snapshotThreadComposerSession(
+    "thread-a",
+    {
+      attachments: [],
+      customScheduleValue: "",
+      replyToMessageId: null,
+      source: "user",
+      text: "Newer reply"
+    },
+    storage
+  );
+
+  const recovered = compareAndRestoreThreadComposerSession(
+    "thread-a",
+    original,
+    original,
+    "recovered-session",
+    storage,
+    original.draftRevision,
+    "send-attempt"
+  );
+
+  assert.equal(recovered, null);
+  assert.deepEqual(readThreadComposerSession("thread-a", storage), newer);
+});
+
+test("an exact recovery rollback restores the predecessor byte-for-byte", () => {
+  const storage = makeStorage();
+  const predecessor = snapshotThreadComposerSession(
+    "thread-a",
+    {
+      attachments: [attachment],
+      customScheduleValue: "2026-12-15T09:30",
+      replyToMessageId: "parent-message",
+      source: "user",
+      text: "Original pending reply"
+    },
+    storage,
+    { text: "Original pending reply", updatedAt: "2026-08-30T09:30:00.000Z" }
+  );
+  const prepared = compareAndRestoreThreadComposerSession(
+    "thread-a",
+    predecessor,
+    predecessor,
+    "recovered-session",
+    storage,
+    predecessor.draftRevision,
+    "send-attempt"
+  );
+
+  assert.ok(prepared);
+  assert.equal(
+    compareAndReplaceThreadComposerSession(
+      "thread-a",
+      prepared,
+      predecessor,
+      storage
+    ),
+    true
+  );
   assert.deepEqual(readThreadComposerSession("thread-a", storage), predecessor);
 });
 
