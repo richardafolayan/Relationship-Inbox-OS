@@ -54,8 +54,25 @@ test("an immediate send preserves its full intent until the exact attempt is res
     send,
     /assertThreadComposerAttachmentsRecoverable\([\s\S]*?startThreadId,[\s\S]*?capturedIntent\.attachments/
   );
-  assert.match(send, /safeSendFailureDisposition\(/);
+  assert.doesNotMatch(send, /completeScopedValue/);
+  assert.match(send, /checkPendingDelivery\(clientSendId\)/);
   assert.match(send, /snapshotThreadComposerSession\(ownerThreadId, composerIntentRef\.current\)/);
+});
+
+test("a failed captured reply stays separate when the operator has typed newer text", () => {
+  const start = source.indexOf("const restorePendingComposerSend = useCallback(");
+  const end = source.indexOf("const clearCapturedComposerAfterAcceptedAction", start);
+  const restore = source.slice(start, end);
+  assert.match(restore, /safeSendFailureDisposition\(/);
+  assert.match(restore, /recoveryDisposition !== "restore_captured"/);
+  assert.match(restore, /Your original reply is still kept above/);
+  assert.match(restore, /item\.clientSendId === pending\.clientSendId/);
+});
+
+test("completed composer generations suppress copied-tab duplicate sends", () => {
+  assert.match(source, /readCompletedScopedValues<ThreadComposerSendAttemptValue>/);
+  assert.match(source, /value\.sessionRevisionId === storedSession\?\.revisionId/);
+  assert.match(source, /value\.sessionRevisionId === capturedSession\.revisionId/);
 });
 
 test("late thread fetches cannot inject another conversation's draft", () => {

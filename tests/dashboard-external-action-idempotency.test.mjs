@@ -343,9 +343,19 @@ test("completing a stale generation does not overwrite the current shared genera
   const current = await first.getOrCreateScopedValue(scope, intent, create);
   await first.completeScopedValue(scope, () => true);
 
-  assert.equal(await stale.completeScopedValue(scope, (value) => value.clientSendId === "attempt-1"), true);
-  assert.equal(JSON.parse(values.get(key)).value.clientSendId, current.clientSendId);
-  assert.equal(JSON.parse(values.get(key)).completed, true);
+  assert.equal(
+    await stale.completeScopedValue(
+      scope,
+      (value) => value.clientSendId === "attempt-1",
+      true
+    ),
+    true
+  );
+  assert.equal(current.clientSendId, "attempt-2");
+  assert.equal(values.get(key), undefined);
+  assert.deepEqual(stale.readCompletedScopedValues(scope), [
+    { clientSendId: "attempt-1" }
+  ]);
 });
 
 test("a completed reconciled action can release its scope for a changed intent", async () => {
@@ -412,4 +422,52 @@ test("an unresolved scoped action can be read after remount and completed action
 
   await first.completeScopedValue(scope, (candidate) => candidate.clientSendId === "send-1");
   assert.equal(createExternalActionAttemptStore(storage).readScopedAttempt(scope), undefined);
+  assert.equal(
+    [...values.values()].some((persisted) => persisted.includes("Hello")),
+    false
+  );
+});
+
+test("a copied composer revision reuses its content-free completed send marker", async () => {
+  const values = new Map();
+  const storage = {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, value),
+    removeItem: (key) => values.delete(key)
+  };
+  const scope = "composer-send:thread-a";
+  const intent = { threadId: "thread-a", text: "Private copied reply" };
+  const value = {
+    clientSendId: "send-original",
+    sessionRevision: 1,
+    sessionRevisionId: "28d6bb4f-0fe9-4a94-8284-e5c166097c60"
+  };
+  const first = createExternalActionAttemptStore(storage);
+  await first.getOrCreateScopedValue(scope, intent, () => value);
+  await first.completeScopedValue(
+    scope,
+    (candidate) => candidate.clientSendId === value.clientSendId,
+    true
+  );
+
+  let allocations = 0;
+  const copiedTab = createExternalActionAttemptStore(storage);
+  const reused = await copiedTab.getOrCreateScopedValue(
+    scope,
+    intent,
+    () => {
+      allocations += 1;
+      return { ...value, clientSendId: "send-duplicate" };
+    },
+    async () => true,
+    (candidate) => candidate.sessionRevisionId === value.sessionRevisionId
+  );
+
+  assert.equal(reused.clientSendId, "send-original");
+  assert.equal(allocations, 0);
+  assert.equal(
+    [...values.values()].some((persisted) => persisted.includes("Private copied reply")),
+    false
+  );
+  assert.deepEqual(copiedTab.readCompletedScopedValues(scope), [value]);
 });

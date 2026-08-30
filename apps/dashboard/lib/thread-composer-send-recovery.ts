@@ -1,5 +1,6 @@
 import {
   normalizeThreadComposerIntent,
+  sameThreadComposerIntent,
   type ThreadComposerIntentDraft,
   type ThreadComposerSession
 } from "./thread-composer-session";
@@ -20,9 +21,12 @@ export interface ThreadComposerSendAttemptIntent {
 }
 
 export interface ThreadComposerSendAttemptValue {
+  attachmentNamespace?: string;
   clientSendId: string;
+  notFoundRecovery?: "replay" | "restore";
   requestedAt: string;
   sessionRevision: number;
+  sessionRevisionId?: string;
 }
 
 export interface ThreadComposerSendAttempt {
@@ -37,6 +41,10 @@ export type ComposerSendRecoveryDisposition =
   | "retain"
   | "retain_uncertain"
   | "scheduled";
+
+export type ComposerReplayPreflight =
+  | { ok: true }
+  | { ok: false; message: string };
 
 export function threadComposerSendScope(threadId: string): string {
   return `composer-send:${threadId}`;
@@ -77,11 +85,24 @@ export function normalizeThreadComposerSendAttempt(
     !rawIntent.threadId ||
     !(rawIntent.scheduledFor === null || validIsoDate(rawIntent.scheduledFor)) ||
     normalizedDraftRevision === undefined ||
+    !(
+      rawValue.attachmentNamespace === undefined ||
+      (typeof rawValue.attachmentNamespace === "string" && rawValue.attachmentNamespace)
+    ) ||
+    !(
+      rawValue.notFoundRecovery === undefined ||
+      rawValue.notFoundRecovery === "replay" ||
+      rawValue.notFoundRecovery === "restore"
+    ) ||
     typeof rawValue.clientSendId !== "string" ||
     !rawValue.clientSendId ||
     !validIsoDate(rawValue.requestedAt) ||
     !Number.isInteger(rawValue.sessionRevision) ||
-    (rawValue.sessionRevision as number) < 1
+    (rawValue.sessionRevision as number) < 1 ||
+    !(
+      rawValue.sessionRevisionId === undefined ||
+      (typeof rawValue.sessionRevisionId === "string" && rawValue.sessionRevisionId)
+    )
   ) {
     return null;
   }
@@ -96,9 +117,18 @@ export function normalizeThreadComposerSendAttempt(
       threadId: rawIntent.threadId
     },
     value: {
+      ...(typeof rawValue.attachmentNamespace === "string"
+        ? { attachmentNamespace: rawValue.attachmentNamespace }
+        : {}),
       clientSendId: rawValue.clientSendId,
+      ...(rawValue.notFoundRecovery === "replay" || rawValue.notFoundRecovery === "restore"
+        ? { notFoundRecovery: rawValue.notFoundRecovery }
+        : {}),
       requestedAt: rawValue.requestedAt,
-      sessionRevision: rawValue.sessionRevision as number
+      sessionRevision: rawValue.sessionRevision as number,
+      ...(typeof rawValue.sessionRevisionId === "string"
+        ? { sessionRevisionId: rawValue.sessionRevisionId }
+        : {})
     }
   };
 }
@@ -111,7 +141,10 @@ export function shouldHideComposerSessionForAttempt(
     session &&
       attempt &&
       session.revision === attempt.value.sessionRevision &&
-      attempt.intent.threadId.length > 0
+      Boolean(attempt.value.sessionRevisionId) &&
+      session.revisionId === attempt.value.sessionRevisionId &&
+      attempt.intent.threadId.length > 0 &&
+      sameThreadComposerIntent(session, attempt.intent.composerIntent)
   );
 }
 
@@ -121,6 +154,51 @@ export function missingThreadComposerAttachments(
 ) {
   const recovered = new Set(recoveredAttachmentIds);
   return intent.attachments.filter((attachment) => !recovered.has(attachment.id));
+}
+
+export function composerReplayPreflight(
+  attempt: ThreadComposerSendAttemptIntent,
+  recoveredAttachmentCount: number,
+  now = Date.now()
+): ComposerReplayPreflight {
+  if (
+    attempt.kind === "scheduled" &&
+    attempt.scheduledFor &&
+    Date.parse(attempt.scheduledFor) <= now
+  ) {
+    return {
+      ok: false,
+      message: "This scheduled time has passed. Your message was not queued, so choose a new time."
+    };
+  }
+  if (recoveredAttachmentCount !== attempt.composerIntent.attachments.length) {
+    return {
+      ok: false,
+      message: "The original attachment set is incomplete. Add the missing file again before retrying."
+    };
+  }
+  return { ok: true };
+}
+
+export function composerDispatchFailureIsAmbiguous(
+  error: unknown,
+  deliveryUncertain: boolean
+): boolean {
+  if (deliveryUncertain) return true;
+  if (!error || typeof error !== "object" || !("status" in error)) return false;
+  const status = (error as { status?: unknown }).status;
+  return (
+    typeof status === "number" &&
+    (status === 0 || status >= 500 || (status >= 200 && status < 300))
+  );
+}
+
+export function composerNotFoundRecoveryAfterDispatchFailure(
+  error: unknown
+): "replay" | "restore" {
+  if (!error || typeof error !== "object" || !("status" in error)) return "replay";
+  const status = (error as { status?: unknown }).status;
+  return typeof status === "number" && status > 0 ? "restore" : "replay";
 }
 
 export function composerSendRecoveryDisposition(status: {

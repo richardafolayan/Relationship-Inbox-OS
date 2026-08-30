@@ -79,6 +79,28 @@ test("external actions wait for a verified recoverable attachment copy", async (
   );
 });
 
+test("a shared attempt can recover attachment bytes from its originating namespace", async () => {
+  const store = createMemoryThreadComposerAttachmentStore("tab-b");
+  const file = new File(["pilot attachment"], descriptor.name, {
+    lastModified: descriptor.lastModified,
+    type: descriptor.type
+  });
+  await store.put("thread-a", descriptor, file, "attempt-from-tab-a");
+
+  assert.deepEqual(await store.read("thread-a", [descriptor]), []);
+  const recovered = await store.read(
+    "thread-a",
+    [descriptor],
+    "attempt-from-tab-a"
+  );
+  assert.equal(await recovered[0].file.text(), "pilot attachment");
+  await store.remove("thread-a", [descriptor.id], "attempt-from-tab-a");
+  assert.deepEqual(
+    await store.read("thread-a", [descriptor], "attempt-from-tab-a"),
+    []
+  );
+});
+
 test("a tab keeps its recovery namespace without sharing a generated id", () => {
   const data = new Map();
   const storage = {

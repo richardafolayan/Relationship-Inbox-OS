@@ -48,9 +48,11 @@ test("composer sessions preserve the complete per-thread send intent", () => {
     customScheduleValue: "2026-09-01T09:00",
     replyToMessageId: "message-parent",
     revision: 1,
+    revisionId: saved.revisionId,
     source: "user",
     text: "Reply for A"
   });
+  assert.match(saved.revisionId, /^[0-9a-f-]{36}$/i);
 });
 
 test("unchanged snapshots keep their revision while any intent change advances it", () => {
@@ -96,10 +98,51 @@ test("a late completion consumes only the exact captured revision", () => {
     storage
   );
 
-  assert.equal(consumeThreadComposerSession("thread-a", first.revision, storage), false);
+  assert.equal(
+    consumeThreadComposerSession("thread-a", first.revision, first.revisionId, storage),
+    false
+  );
   assert.deepEqual(readThreadComposerSession("thread-a", storage), newer);
-  assert.equal(consumeThreadComposerSession("thread-a", newer.revision, storage), true);
+  assert.equal(
+    consumeThreadComposerSession("thread-a", newer.revision, newer.revisionId, storage),
+    true
+  );
   assert.equal(readThreadComposerSession("thread-a", storage), null);
+});
+
+test("equal numeric revisions from different tabs cannot consume each other", () => {
+  const firstTab = makeStorage();
+  const secondTab = makeStorage();
+  const first = snapshotThreadComposerSession(
+    "thread-a",
+    {
+      attachments: [],
+      customScheduleValue: "",
+      replyToMessageId: null,
+      source: "user",
+      text: "First tab"
+    },
+    firstTab
+  );
+  const second = snapshotThreadComposerSession(
+    "thread-a",
+    {
+      attachments: [],
+      customScheduleValue: "",
+      replyToMessageId: null,
+      source: "user",
+      text: "Second tab"
+    },
+    secondTab
+  );
+
+  assert.equal(first.revision, second.revision);
+  assert.notEqual(first.revisionId, second.revisionId);
+  assert.equal(
+    consumeThreadComposerSession("thread-a", first.revision, first.revisionId, secondTab),
+    false
+  );
+  assert.equal(readThreadComposerSession("thread-a", secondTab)?.text, "Second tab");
 });
 
 test("thread sessions are isolated and malformed recovery data fails closed", () => {
@@ -126,7 +169,8 @@ test("thread sessions are isolated and malformed recovery data fails closed", ()
     },
     storage
   );
-  consumeThreadComposerSession("thread-a", 1, storage);
+  const threadA = readThreadComposerSession("thread-a", storage);
+  consumeThreadComposerSession("thread-a", 1, threadA.revisionId, storage);
   assert.equal(readThreadComposerSession("thread-a", storage), null);
   assert.equal(readThreadComposerSession("thread-b", storage)?.text, "B");
 

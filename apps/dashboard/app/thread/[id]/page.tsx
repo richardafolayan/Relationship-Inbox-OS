@@ -159,6 +159,9 @@ import {
   type ThreadComposerIntentDraft
 } from "@/lib/thread-composer-session";
 import {
+  composerDispatchFailureIsAmbiguous,
+  composerNotFoundRecoveryAfterDispatchFailure,
+  composerReplayPreflight,
   composerSendRecoveryDisposition,
   missingThreadComposerAttachments,
   normalizeThreadComposerSendAttempt,
@@ -177,6 +180,10 @@ import {
   recordMessageSyncLatency
 } from "@/lib/message-sync-latency";
 import { nextSendReconcileDelayMs } from "@/lib/send-reconcile";
+import {
+  mergeSavedDraftRevision,
+  type SaveDraftResponse
+} from "@/lib/saved-draft-revision";
 import { classifyConsumerFailure } from "@/lib/consumer-failure";
 import {
   resolveSendRecovery,
@@ -282,6 +289,7 @@ function composerAttachmentKind(
 }
 
 type PendingSend = {
+  attachmentNamespace?: string;
   clientSendId: string;
   threadId: string;
   text: string;
@@ -290,8 +298,10 @@ type PendingSend = {
   composerIntent?: ThreadComposerIntentDraft;
   attemptKind?: "immediate" | "scheduled";
   draftRevision?: ThreadComposerDraftRevision | null;
+  notFoundRecovery?: "replay" | "restore";
   scheduledFor?: string | null;
   sessionRevision?: number;
+  sessionRevisionId?: string;
   failed?: boolean;
   uncertain?: boolean;
   errorMessage?: string;
@@ -857,6 +867,7 @@ export default function ThreadPage() {
   // predraft (no DB row) or unsaved typing. Set on load from the fetched
   // draft, after a successful Save, and cleared after delete / on switch.
   const [hasSavedDraft, setHasSavedDraft] = useState(false);
+  const draftSaveTailRef = useRef<Promise<void>>(Promise.resolve());
   // Operator voice profile — its aiHelpLevel decides which AI affordances
   // this page surfaces. The ref mirror lets `refresh` (a useCallback that
   // must not depend on profile) read the latest value when deciding
@@ -1695,9 +1706,44 @@ export default function ThreadPage() {
       setError("Tovi could not safely read the previous send. Reload before trying again.");
     }
     if (pendingAttempt?.intent.threadId !== threadId) pendingAttempt = null;
+    let completedAttempt: ThreadComposerSendAttemptValue | undefined;
+    try {
+      completedAttempt = externalActionAttempts
+        .readCompletedScopedValues<ThreadComposerSendAttemptValue>(
+          threadComposerSendScope(threadId)
+        )
+        .find(
+          (value) =>
+            Boolean(value.sessionRevisionId) &&
+            value.sessionRevisionId === storedSession?.revisionId
+        );
+    } catch {
+      setError("Tovi could not safely read the previous send. Reload before trying again.");
+    }
+    const sessionHiddenByCompletedSend = Boolean(storedSession && completedAttempt);
+    if (storedSession && completedAttempt?.sessionRevisionId) {
+      consumeThreadComposerSession(
+        threadId,
+        storedSession.revision,
+        completedAttempt.sessionRevisionId
+      );
+      const attachmentIds = storedSession.attachments.map((attachment) => attachment.id);
+      const namespaces = new Set([
+        completedAttempt.attachmentNamespace ?? composerAttachmentStore.namespace,
+        composerAttachmentStore.namespace
+      ]);
+      void Promise.all(
+        [...namespaces].map((namespace) =>
+          composerAttachmentStore
+            .remove(threadId, attachmentIds, namespace)
+            .catch(() => undefined)
+        )
+      );
+    }
     const sessionHiddenBySend =
       activeAction?.threadId === threadId ||
-      shouldHideComposerSessionForAttempt(storedSession, pendingAttempt);
+      shouldHideComposerSessionForAttempt(storedSession, pendingAttempt) ||
+      sessionHiddenByCompletedSend;
     const visibleSession = sessionHiddenBySend ? null : storedSession;
     const restoredIntent: ThreadComposerIntentDraft = visibleSession ?? {
       attachments: [],
@@ -1706,7 +1752,9 @@ export default function ThreadPage() {
       source: "empty",
       text: ""
     };
-    composerSessionPresentRef.current = Boolean(storedSession);
+    composerSessionPresentRef.current = Boolean(
+      storedSession && !sessionHiddenByCompletedSend
+    );
     composerRestoreRef.current = { intent: restoredIntent, threadId };
     composerIntentRef.current = restoredIntent;
 
@@ -1913,21 +1961,34 @@ export default function ThreadPage() {
         );
         void (async () => {
           if (pending) {
-            if (pending.sessionRevision) {
-              consumeThreadComposerSession(pending.threadId, pending.sessionRevision);
+            if (pending.sessionRevision && pending.sessionRevisionId) {
+              consumeThreadComposerSession(
+                pending.threadId,
+                pending.sessionRevision,
+                pending.sessionRevisionId
+              );
             }
             if (pending.composerIntent) {
-              await composerAttachmentStore
-                .remove(
-                  pending.threadId,
-                  pending.composerIntent.attachments.map((attachment) => attachment.id)
+              const attachmentIds = pending.composerIntent.attachments.map(
+                (attachment) => attachment.id
+              );
+              const namespaces = new Set([
+                pending.attachmentNamespace ?? composerAttachmentStore.namespace,
+                composerAttachmentStore.namespace
+              ]);
+              await Promise.all(
+                [...namespaces].map((namespace) =>
+                  composerAttachmentStore
+                    .remove(pending.threadId, attachmentIds, namespace)
+                    .catch(() => undefined)
                 )
-                .catch(() => undefined);
+              );
             }
             await externalActionAttempts
               .completeScopedValue<ThreadComposerSendAttemptValue>(
                 threadComposerSendScope(pending.threadId),
-                (value) => value.clientSendId === pending.clientSendId
+                (value) => value.clientSendId === pending.clientSendId,
+                true
               )
               .catch(() => undefined);
             for (const attachment of pending.attachments) {
@@ -2003,20 +2064,33 @@ export default function ThreadPage() {
 
   const completePendingComposerSend = useCallback(
     async (pending: PendingSend) => {
-      if (pending.sessionRevision) {
-        consumeThreadComposerSession(pending.threadId, pending.sessionRevision);
+      if (pending.sessionRevision && pending.sessionRevisionId) {
+        consumeThreadComposerSession(
+          pending.threadId,
+          pending.sessionRevision,
+          pending.sessionRevisionId
+        );
       }
       if (pending.composerIntent && pending.sessionRevision) {
-        await composerAttachmentStore
-          .remove(
-            pending.threadId,
-            pending.composerIntent.attachments.map((attachment) => attachment.id)
+        const attachmentIds = pending.composerIntent.attachments.map(
+          (attachment) => attachment.id
+        );
+        const namespaces = new Set([
+          pending.attachmentNamespace ?? composerAttachmentStore.namespace,
+          composerAttachmentStore.namespace
+        ]);
+        await Promise.all(
+          [...namespaces].map((namespace) =>
+            composerAttachmentStore
+              .remove(pending.threadId, attachmentIds, namespace)
+              .catch(() => undefined)
           )
-          .catch(() => undefined);
+        );
         await externalActionAttempts
           .completeScopedValue<ThreadComposerSendAttemptValue>(
             threadComposerSendScope(pending.threadId),
-            (value) => value.clientSendId === pending.clientSendId
+            (value) => value.clientSendId === pending.clientSendId,
+            true
           )
           .catch(() => undefined);
       }
@@ -2050,6 +2124,37 @@ export default function ThreadPage() {
         setError(message);
         return;
       }
+      const emptyIntent: ThreadComposerIntentDraft = {
+        attachments: [],
+        customScheduleValue: "",
+        replyToMessageId: null,
+        source: "empty",
+        text: ""
+      };
+      const recoveryDisposition = safeSendFailureDisposition(
+        pending.threadId,
+        routeThreadIdRef.current,
+        composerIntentRef.current,
+        emptyIntent
+      );
+      if (recoveryDisposition !== "restore_captured") {
+        const retainedMessage = `${message} Your original reply is still kept above. Save or clear the newer reply before recovering it.`;
+        setPendingSends((current) =>
+          current.map((item) =>
+            item.clientSendId === pending.clientSendId
+              ? {
+                  ...item,
+                  errorKind: item.errorKind ?? "UNKNOWN",
+                  errorMessage: retainedMessage,
+                  failed: true,
+                  uncertain: false
+                }
+              : item
+          )
+        );
+        setError(retainedMessage);
+        return;
+      }
       await externalActionAttempts
         .completeScopedValue<ThreadComposerSendAttemptValue>(
           threadComposerSendScope(pending.threadId),
@@ -2060,18 +2165,7 @@ export default function ThreadPage() {
       if (recoveryIntent && !readThreadComposerSession(pending.threadId)) {
         snapshotThreadComposerSession(pending.threadId, recoveryIntent);
       }
-      const emptyIntent: ThreadComposerIntentDraft = {
-        attachments: [],
-        customScheduleValue: "",
-        replyToMessageId: null,
-        source: "empty",
-        text: ""
-      };
-      if (
-        recoveryIntent &&
-        routeThreadIdRef.current === pending.threadId &&
-        sameThreadComposerIntent(composerIntentRef.current, emptyIntent)
-      ) {
+      if (recoveryIntent) {
         const missingAttachments = missingThreadComposerAttachments(
           recoveryIntent,
           pending.attachments.map((attachment) => attachment.id)
@@ -2263,6 +2357,13 @@ export default function ThreadPage() {
           return;
         }
         if (disposition === "replay_same_id") {
+          if (pending.notFoundRecovery === "restore") {
+            await restorePendingComposerSend(
+              pending,
+              "The saved request was not queued. Your reply is ready to review and try again."
+            );
+            return;
+          }
           if (
             !pending.composerIntent ||
             !pending.attemptKind ||
@@ -2270,29 +2371,96 @@ export default function ThreadPage() {
           ) {
             throw new Error("The original send cannot be reconstructed safely. Check the conversation before trying again.");
           }
-          await assertThreadComposerAttachmentsRecoverable(
-            composerAttachmentStore,
-            pending.threadId,
-            pending.composerIntent.attachments
+          const replayIntent: ThreadComposerSendAttemptIntent = {
+            composerIntent: pending.composerIntent,
+            draftRevision: pending.draftRevision ?? null,
+            kind: pending.attemptKind,
+            scheduledFor: pending.scheduledFor ?? null,
+            threadId: pending.threadId
+          };
+          const preflight = composerReplayPreflight(
+            replayIntent,
+            pending.attachments.length
           );
-          if (pending.attachments.length !== pending.composerIntent.attachments.length) {
-            throw new Error("The original attachment set is incomplete. Check the conversation before trying again.");
+          if (!preflight.ok) {
+            await restorePendingComposerSend(pending, preflight.message);
+            return;
           }
-          await dispatchComposerSendAttempt(
-            {
-              composerIntent: pending.composerIntent,
-              draftRevision: pending.draftRevision ?? null,
-              kind: pending.attemptKind,
-              scheduledFor: pending.scheduledFor ?? null,
-              threadId: pending.threadId
-            },
-            {
-              clientSendId: pending.clientSendId,
-              requestedAt: pending.sentAt,
-              sessionRevision: pending.sessionRevision
-            },
-            pending.attachments
-          );
+          try {
+            await assertThreadComposerAttachmentsRecoverable(
+              composerAttachmentStore,
+              pending.threadId,
+              pending.composerIntent.attachments,
+              pending.attachmentNamespace
+            );
+            await dispatchComposerSendAttempt(
+              replayIntent,
+              {
+                ...(pending.attachmentNamespace
+                  ? { attachmentNamespace: pending.attachmentNamespace }
+                  : {}),
+                clientSendId: pending.clientSendId,
+                requestedAt: pending.sentAt,
+                sessionRevision: pending.sessionRevision,
+                ...(pending.sessionRevisionId
+                  ? { sessionRevisionId: pending.sessionRevisionId }
+                  : {})
+              },
+              pending.attachments
+            );
+          } catch (replayError) {
+            const failure = classifyConsumerFailure(replayError, {
+              path: `/runner/control/thread/${pending.threadId}/send`,
+              method: "POST"
+            });
+            if (composerDispatchFailureIsAmbiguous(replayError, failure.deliveryUncertain)) {
+              const notFoundRecovery = composerNotFoundRecoveryAfterDispatchFailure(
+                replayError
+              );
+              if (notFoundRecovery === "restore") {
+                const nextValue: ThreadComposerSendAttemptValue = {
+                  ...(pending.attachmentNamespace
+                    ? { attachmentNamespace: pending.attachmentNamespace }
+                    : {}),
+                  clientSendId: pending.clientSendId,
+                  notFoundRecovery,
+                  requestedAt: pending.sentAt,
+                  sessionRevision: pending.sessionRevision,
+                  ...(pending.sessionRevisionId
+                    ? { sessionRevisionId: pending.sessionRevisionId }
+                    : {})
+                };
+                await externalActionAttempts
+                  .replaceScopedValue<ThreadComposerSendAttemptValue>(
+                    threadComposerSendScope(pending.threadId),
+                    (value) => value.clientSendId === pending.clientSendId,
+                    nextValue
+                  )
+                  .catch(() => undefined);
+                setPendingSends((current) =>
+                  current.map((item) =>
+                    item.clientSendId === pending.clientSendId
+                      ? {
+                          ...item,
+                          errorKind: "DELIVERY_UNCERTAIN",
+                          errorMessage: "Tovi is checking whether the saved request was created.",
+                          notFoundRecovery,
+                          uncertain: true
+                        }
+                      : item
+                  )
+                );
+                window.setTimeout(
+                  () => void checkPendingDeliveryRef.current(pending.clientSendId),
+                  750
+                );
+                return;
+              }
+              throw replayError;
+            }
+            await restorePendingComposerSend(pending, failure.message);
+            return;
+          }
           setPendingSends((current) =>
             current.map((item) =>
               item.clientSendId === clientSendId
@@ -2387,10 +2555,19 @@ export default function ThreadPage() {
       return undefined;
     }
 
+    const attachmentNamespace =
+      attempt.value.attachmentNamespace ?? composerAttachmentStore.namespace;
     void composerAttachmentStore
-      .read(threadId, attempt.intent.composerIntent.attachments)
-      .then((recovered) => {
+      .read(threadId, attempt.intent.composerIntent.attachments, attachmentNamespace)
+      .then(async (recovered) => {
         if (cancelled) return;
+        if (attachmentNamespace !== composerAttachmentStore.namespace) {
+          await Promise.all(
+            recovered.map(({ descriptor, file }) =>
+              composerAttachmentStore.put(threadId, descriptor, file)
+            )
+          );
+        }
         const attachments = recovered.map(({ descriptor, file }) => ({
           file,
           id: descriptor.id,
@@ -2400,6 +2577,7 @@ export default function ThreadPage() {
         const incomplete =
           attachments.length !== attempt!.intent.composerIntent.attachments.length;
         const pending: PendingSend = {
+          attachmentNamespace,
           attemptKind: attempt!.intent.kind,
           attachments,
           clientSendId: attempt!.value.clientSendId,
@@ -2410,9 +2588,11 @@ export default function ThreadPage() {
             ? "The saved attachment set is incomplete. Check delivery before trying again."
             : undefined,
           failed: incomplete,
+          notFoundRecovery: attempt!.value.notFoundRecovery,
           scheduledFor: attempt!.intent.scheduledFor,
           sentAt: attempt!.value.requestedAt,
           sessionRevision: attempt!.value.sessionRevision,
+          sessionRevisionId: attempt!.value.sessionRevisionId,
           text: attempt!.intent.composerIntent.text,
           threadId,
           uncertain: incomplete
@@ -2429,6 +2609,7 @@ export default function ThreadPage() {
       .catch(() => {
         if (cancelled) return;
         const pending: PendingSend = {
+          attachmentNamespace,
           attemptKind: attempt!.intent.kind,
           attachments: [],
           clientSendId: attempt!.value.clientSendId,
@@ -2437,9 +2618,11 @@ export default function ThreadPage() {
           errorKind: "DELIVERY_UNCERTAIN",
           errorMessage: "The saved attachment set could not be read. Check delivery before trying again.",
           failed: true,
+          notFoundRecovery: attempt!.value.notFoundRecovery,
           scheduledFor: attempt!.intent.scheduledFor,
           sentAt: attempt!.value.requestedAt,
           sessionRevision: attempt!.value.sessionRevision,
+          sessionRevisionId: attempt!.value.sessionRevisionId,
           text: attempt!.intent.composerIntent.text,
           threadId,
           uncertain: true
@@ -2580,11 +2763,16 @@ export default function ThreadPage() {
         threadComposerSendScope(startThreadId),
         attemptIntent,
         () => ({
+          attachmentNamespace: composerAttachmentStore.namespace,
           clientSendId: uuid(),
           requestedAt: sentAt,
-          sessionRevision: capturedSession.revision
+          sessionRevision: capturedSession.revision,
+          sessionRevisionId: capturedSession.revisionId
         }),
-        canReplaceExternalActionAttempt
+        canReplaceExternalActionAttempt,
+        (value) =>
+          Boolean(value.sessionRevisionId) &&
+          value.sessionRevisionId === capturedSession.revisionId
       );
     } catch (attemptError) {
       setError(attemptError instanceof Error ? attemptError.message : "This send could not be preserved safely.");
@@ -2595,6 +2783,7 @@ export default function ThreadPage() {
     setPendingSends((prev) => [
       ...prev.filter((pending) => pending.clientSendId !== clientSendId),
       {
+        attachmentNamespace: attemptValue.attachmentNamespace,
         attemptKind: "immediate",
         attachments: attachmentsToSend,
         clientSendId,
@@ -2603,6 +2792,7 @@ export default function ThreadPage() {
         scheduledFor: null,
         sentAt: attemptValue.requestedAt,
         sessionRevision: attemptValue.sessionRevision,
+        sessionRevisionId: attemptValue.sessionRevisionId,
         text,
         threadId: startThreadId
       }
@@ -2627,63 +2817,31 @@ export default function ThreadPage() {
       await dispatchComposerSendAttempt(attemptIntent, attemptValue, attachmentsToSend);
       window.setTimeout(() => void checkPendingDelivery(clientSendId), 250);
     } catch (sendError) {
-      const failure = classifyConsumerFailure(sendError, {
-        path: `/runner/control/thread/${startThreadId}/send`,
-        method: "POST"
-      });
-      if (failure.deliveryUncertain) {
-        const message = "Delivery is not confirmed. Check the conversation before sending again.";
-        setPendingSends((prev) =>
-          prev.map((p) =>
-            p.clientSendId === clientSendId
-              ? {
-                  ...p,
-                  uncertain: true,
-                  errorMessage: message,
-                  errorKind: "DELIVERY_UNCERTAIN"
-                }
-              : p
-          )
-        );
-        setError(message);
-        window.setTimeout(() => void checkPendingDelivery(clientSendId), 750);
-      } else {
-        await externalActionAttempts
-          .completeScopedValue<ThreadComposerSendAttemptValue>(
-            threadComposerSendScope(startThreadId),
-            (value) => value.clientSendId === clientSendId
-          )
-          .catch(() => undefined);
-        const disposition = safeSendFailureDisposition(
-          startThreadId,
-          routeThreadIdRef.current,
-          composerIntentRef.current,
-          clearedIntent
-        );
-        setPendingSends((prev) =>
-          disposition === "keep_failed_attempt"
-            ? prev.map((pending) =>
-                pending.clientSendId === clientSendId
-                  ? {
-                      ...pending,
-                      failed: true,
-                      uncertain: false,
-                      errorMessage: failure.message
-                    }
-                  : pending
-              )
-            : prev.filter((pending) => pending.clientSendId !== clientSendId)
-        );
-        setError(failure.message);
-        if (disposition === "restore_captured") {
-          composerIntentRef.current = capturedIntent;
-          setComposer(capturedIntent.text);
-          setComposerSource(capturedIntent.source);
-          setComposerAttachments(attachmentsToSend);
-          setFocusedThreadParentId(capturedIntent.replyToMessageId);
-          setCustomScheduleValue(capturedIntent.customScheduleValue);
-        }
-      }
+      const notFoundRecovery = composerNotFoundRecoveryAfterDispatchFailure(sendError);
+      const nextValue = { ...attemptValue, notFoundRecovery };
+      await externalActionAttempts
+        .replaceScopedValue<ThreadComposerSendAttemptValue>(
+          threadComposerSendScope(startThreadId),
+          (value) => value.clientSendId === clientSendId,
+          nextValue
+        )
+        .catch(() => undefined);
+      const message = "Delivery is not confirmed. Tovi is checking the saved request before another send is allowed.";
+      setPendingSends((prev) =>
+        prev.map((p) =>
+          p.clientSendId === clientSendId
+            ? {
+                ...p,
+                uncertain: true,
+                errorMessage: message,
+                errorKind: "DELIVERY_UNCERTAIN",
+                notFoundRecovery
+              }
+            : p
+        )
+      );
+      setError(message);
+      window.setTimeout(() => void checkPendingDelivery(clientSendId), 750);
     } finally {
       finishComposerAction();
     }
@@ -3397,6 +3555,7 @@ export default function ThreadPage() {
       setScheduling(true);
       setError(null);
       let attemptClientSendId: string | null = null;
+      let attemptValueForRecovery: ThreadComposerSendAttemptValue | null = null;
       try {
         await assertThreadComposerAttachmentsRecoverable(
           composerAttachmentStore,
@@ -3420,14 +3579,21 @@ export default function ThreadPage() {
           threadComposerSendScope(startThreadId),
           attemptIntent,
           () => ({
+            attachmentNamespace: composerAttachmentStore.namespace,
             clientSendId: uuid(),
             requestedAt,
-            sessionRevision: capturedSession.revision
+            sessionRevision: capturedSession.revision,
+            sessionRevisionId: capturedSession.revisionId
           }),
-          canReplaceExternalActionAttempt
+          canReplaceExternalActionAttempt,
+          (value) =>
+            Boolean(value.sessionRevisionId) &&
+            value.sessionRevisionId === capturedSession.revisionId
         );
         attemptClientSendId = attemptValue.clientSendId;
+        attemptValueForRecovery = attemptValue;
         const pending: PendingSend = {
+          attachmentNamespace: attemptValue.attachmentNamespace,
           attemptKind: "scheduled",
           attachments: composerAttachments,
           clientSendId: attemptValue.clientSendId,
@@ -3436,6 +3602,7 @@ export default function ThreadPage() {
           scheduledFor,
           sentAt: attemptValue.requestedAt,
           sessionRevision: attemptValue.sessionRevision,
+          sessionRevisionId: attemptValue.sessionRevisionId,
           text: capturedIntent.text,
           threadId: startThreadId
         };
@@ -3454,20 +3621,46 @@ export default function ThreadPage() {
           method: "POST"
         });
         setError(failure.message);
-        if (attemptClientSendId && failure.deliveryUncertain) {
+        if (attemptClientSendId) {
+          const notFoundRecovery = composerNotFoundRecoveryAfterDispatchFailure(sendError);
+          if (attemptValueForRecovery) {
+            await externalActionAttempts
+              .replaceScopedValue<ThreadComposerSendAttemptValue>(
+                threadComposerSendScope(startThreadId),
+                (value) => value.clientSendId === attemptClientSendId,
+                {
+                  ...(attemptValueForRecovery.attachmentNamespace
+                    ? { attachmentNamespace: attemptValueForRecovery.attachmentNamespace }
+                    : {}),
+                  clientSendId: attemptClientSendId,
+                  notFoundRecovery,
+                  requestedAt: attemptValueForRecovery.requestedAt,
+                  sessionRevision: attemptValueForRecovery.sessionRevision,
+                  ...(attemptValueForRecovery.sessionRevisionId
+                    ? { sessionRevisionId: attemptValueForRecovery.sessionRevisionId }
+                    : {})
+                }
+              )
+              .catch(() => undefined);
+          }
+          const message = "Scheduling is not confirmed. Tovi is checking the saved request before another send is allowed.";
+          setPendingSends((current) =>
+            current.map((pending) =>
+              pending.clientSendId === attemptClientSendId
+                ? {
+                    ...pending,
+                    errorKind: "DELIVERY_UNCERTAIN",
+                    errorMessage: message,
+                    notFoundRecovery,
+                    uncertain: true
+                  }
+                : pending
+            )
+          );
+          setError(message);
           window.setTimeout(
             () => void checkPendingDeliveryRef.current(attemptClientSendId!),
             750
-          );
-        } else if (attemptClientSendId) {
-          await externalActionAttempts
-            .completeScopedValue<ThreadComposerSendAttemptValue>(
-              threadComposerSendScope(startThreadId),
-              (value) => value.clientSendId === attemptClientSendId
-            )
-            .catch(() => undefined);
-          setPendingSends((current) =>
-            current.filter((pending) => pending.clientSendId !== attemptClientSendId)
           );
         }
       } finally {
@@ -4816,18 +5009,37 @@ export default function ThreadPage() {
   //                      it answers from the thread, it doesn't draft)
   const platformLabel = PLATFORM_LABEL[thread.platform];
 
+  const saveCurrentDraft = () => {
+    const targetThreadId = thread.id;
+    const text = composer;
+    const request = draftSaveTailRef.current.then(async () => {
+      const saved = await apiPost<SaveDraftResponse>(
+        `/runner/control/thread/${targetThreadId}/draft`,
+        { text }
+      );
+      setThread((current) =>
+        mergeSavedDraftRevision(current, targetThreadId, saved.draft)
+      );
+      if (routeThreadIdRef.current === targetThreadId) {
+        setHasSavedDraft(saved.draft.text.trim().length > 0);
+      }
+    });
+    draftSaveTailRef.current = request.catch(() => undefined);
+    return request;
+  };
+
   // Overflow actions shared by the phone action sheet (#901) and the desktop
   // popover Menu. Grouping only applies on phone; desktop stays a flat list.
   const saveDraftAction = {
     label: "Save draft",
     onSelect: () =>
       runActionWithFeedback(
-        apiPost(`/runner/control/thread/${thread.id}/draft`, { text: composer }),
+        saveCurrentDraft(),
         {
           pending: "Saving draft…",
           success: "Draft saved",
           setError,
-          onDone: () => setHasSavedDraft(composer.trim().length > 0)
+          onDone: () => undefined
         }
       )
   };
@@ -5324,9 +5536,8 @@ export default function ThreadPage() {
                 doneLabel="Saved"
                 onError={setError}
                 action={() =>
-                  apiPost(`/runner/control/thread/${thread.id}/draft`, { text: composer })
+                  saveCurrentDraft()
                 }
-                onSuccess={() => setHasSavedDraft(composer.trim().length > 0)}
                 title="Save draft"
                 className="hidden px-2 py-1.5 text-[12px] sm:inline-flex 2xl:px-3"
               >

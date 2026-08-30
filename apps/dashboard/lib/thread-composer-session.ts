@@ -29,6 +29,7 @@ export interface ThreadComposerIntentDraft {
 
 export interface ThreadComposerSession extends ThreadComposerIntentDraft {
   revision: number;
+  revisionId: string;
 }
 
 interface StorageLike {
@@ -60,6 +61,14 @@ function defaultStorage(): StorageLike | null {
 
 function keyFor(threadId: string): string {
   return `${KEY_PREFIX}${encodeURIComponent(threadId)}`;
+}
+
+function createRevisionId(): string | null {
+  try {
+    return globalThis.crypto?.randomUUID?.() ?? null;
+  } catch {
+    return null;
+  }
 }
 
 function validSource(value: unknown): value is ThreadComposerSource {
@@ -163,7 +172,16 @@ export function readThreadComposerSession(
     if (!intent || !Number.isInteger(parsed.revision) || (parsed.revision as number) < 1) {
       return null;
     }
-    return { ...intent, revision: parsed.revision as number };
+    const revisionId =
+      typeof parsed.revisionId === "string" && parsed.revisionId
+        ? parsed.revisionId
+        : createRevisionId();
+    if (!revisionId) return null;
+    const session = { ...intent, revision: parsed.revision as number, revisionId };
+    if (parsed.revisionId !== revisionId) {
+      storage.setItem(keyFor(threadId), JSON.stringify(session));
+    }
+    return session;
   } catch {
     return null;
   }
@@ -183,12 +201,13 @@ export function snapshotThreadComposerSession(
       return null;
     }
     const current = readThreadComposerSession(threadId, storage);
+    const unchanged = current && sameThreadComposerIntent(current, intent);
+    const revisionId = unchanged ? current.revisionId : createRevisionId();
+    if (!revisionId) return null;
     const next: ThreadComposerSession = {
       ...intent,
-      revision:
-        current && sameThreadComposerIntent(current, intent)
-          ? current.revision
-          : (current?.revision ?? 0) + 1
+      revision: unchanged ? current.revision : (current?.revision ?? 0) + 1,
+      revisionId
     };
     storage.setItem(keyFor(threadId), JSON.stringify(next));
     return next;
@@ -200,12 +219,22 @@ export function snapshotThreadComposerSession(
 export function consumeThreadComposerSession(
   threadId: string,
   expectedRevision: number,
+  expectedRevisionId: string,
   storage: StorageLike | null = defaultStorage()
 ): boolean {
-  if (!storage || !threadId || !Number.isInteger(expectedRevision)) return false;
+  if (
+    !storage ||
+    !threadId ||
+    !Number.isInteger(expectedRevision) ||
+    !expectedRevisionId
+  ) return false;
   try {
     const current = readThreadComposerSession(threadId, storage);
-    if (!current || current.revision !== expectedRevision) return false;
+    if (
+      !current ||
+      current.revision !== expectedRevision ||
+      current.revisionId !== expectedRevisionId
+    ) return false;
     storage.removeItem(keyFor(threadId));
     return true;
   } catch {

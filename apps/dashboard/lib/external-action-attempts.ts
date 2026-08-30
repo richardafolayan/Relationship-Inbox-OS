@@ -110,6 +110,48 @@ export function createExternalActionAttemptStore(
     return `${STORAGE_PREFIX}pin:scoped:${scope}`;
   }
 
+  function completedStorageKey(scope: string): string {
+    return `${STORAGE_PREFIX}completed:scoped:${scope}`;
+  }
+
+  function readCompletedScopedValues<TValue>(scope: string): TValue[] {
+    if (!storage) throw new ExternalActionAttemptStorageError();
+    try {
+      const persisted = storage.getItem(completedStorageKey(scope));
+      if (!persisted) return [];
+      const parsed = JSON.parse(persisted) as
+        | { version?: unknown; values?: unknown }
+        | null;
+      if (!parsed || parsed.version !== 1 || !Array.isArray(parsed.values)) {
+        throw new ExternalActionAttemptStorageError();
+      }
+      return parsed.values as TValue[];
+    } catch (error) {
+      if (error instanceof ExternalActionAttemptStorageError) throw error;
+      throw new ExternalActionAttemptStorageError();
+    }
+  }
+
+  function appendCompletedScopedValue<TValue>(scope: string, value: TValue): void {
+    if (!storage) throw new ExternalActionAttemptStorageError();
+    const current = readCompletedScopedValues<TValue>(scope);
+    const serializedValue = canonicalJson(value);
+    const values = [
+      ...current.filter((candidate) => canonicalJson(candidate) !== serializedValue),
+      value
+    ].slice(-100);
+    const serialized = JSON.stringify({ version: 1, values });
+    try {
+      storage.setItem(completedStorageKey(scope), serialized);
+      if (storage.getItem(completedStorageKey(scope)) !== serialized) {
+        throw new ExternalActionAttemptStorageError();
+      }
+    } catch (error) {
+      if (error instanceof ExternalActionAttemptStorageError) throw error;
+      throw new ExternalActionAttemptStorageError();
+    }
+  }
+
   function readPinnedOperation(scope: string): {
     intentJson: string;
     value: unknown;
@@ -248,12 +290,23 @@ export function createExternalActionAttemptStore(
     scope: string,
     intent: TIntent,
     create: () => TValue,
-    canReplace?: (value: TValue) => Promise<boolean>
+    canReplace?: (value: TValue) => Promise<boolean>,
+    reuseCompleted?: (value: TValue) => boolean
   ): Promise<TValue> {
     return withScopeLock(scope, async () => {
       const key = valueStorageKey(scope);
       let record = readRecord<TIntent, TValue>(key);
       const expectedIntent = canonicalJson(intent);
+      const completed = reuseCompleted
+        ? readCompletedScopedValues<TValue>(scope).find(reuseCompleted)
+        : undefined;
+      if (completed) {
+        writePinnedOperation(scope, {
+          intentJson: expectedIntent,
+          value: completed
+        });
+        return completed;
+      }
       const pinned = readPinnedOperation(scope);
       if (pinned) {
         if (pinned.intentJson === expectedIntent) {
@@ -323,21 +376,26 @@ export function createExternalActionAttemptStore(
 
   async function completeScopedValue<TValue>(
     scope: string,
-    matches: (value: TValue) => boolean
+    matches: (value: TValue) => boolean,
+    retainCompletedValue = false
   ): Promise<boolean> {
     return withScopeLock(scope, async () => {
       const key = valueStorageKey(scope);
       const record = readRecord<unknown, TValue>(key);
       const pinned = readPinnedOperation(scope);
       if (pinned && matches(pinned.value as TValue)) {
+        if (retainCompletedValue) {
+          appendCompletedScopedValue(scope, pinned.value as TValue);
+        }
         if (record && canonicalJson(record.value) === canonicalJson(pinned.value)) {
-          writeRecord(key, { ...record, completed: true });
+          removeRecord(key);
         }
         removePinnedOperation(scope);
         return true;
       }
       if (!record || !matches(record.value)) return false;
-      writeRecord(key, { ...record, completed: true });
+      if (retainCompletedValue) appendCompletedScopedValue(scope, record.value);
+      removeRecord(key);
       return true;
     });
   }
@@ -355,6 +413,7 @@ export function createExternalActionAttemptStore(
     getOrCreateScopedValue,
     replaceScopedValue,
     completeScopedValue,
-    readScopedAttempt
+    readScopedAttempt,
+    readCompletedScopedValues
   };
 }

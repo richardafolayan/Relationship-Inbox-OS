@@ -6,25 +6,29 @@ export interface RecoveredThreadComposerAttachment {
 }
 
 export interface ThreadComposerAttachmentStore {
+  readonly namespace: string;
   put(
     threadId: string,
     descriptor: ThreadComposerAttachmentDescriptor,
-    file: File
+    file: File,
+    namespace?: string
   ): Promise<void>;
   read(
     threadId: string,
-    descriptors: ThreadComposerAttachmentDescriptor[]
+    descriptors: ThreadComposerAttachmentDescriptor[],
+    namespace?: string
   ): Promise<RecoveredThreadComposerAttachment[]>;
-  remove(threadId: string, attachmentIds: string[]): Promise<void>;
+  remove(threadId: string, attachmentIds: string[], namespace?: string): Promise<void>;
 }
 
 export async function assertThreadComposerAttachmentsRecoverable(
   store: ThreadComposerAttachmentStore,
   threadId: string,
-  descriptors: ThreadComposerAttachmentDescriptor[]
+  descriptors: ThreadComposerAttachmentDescriptor[],
+  namespace?: string
 ): Promise<void> {
   if (descriptors.length === 0) return;
-  const recovered = await store.read(threadId, descriptors);
+  const recovered = await store.read(threadId, descriptors, namespace);
   if (recovered.length !== descriptors.length) {
     throw new Error(
       "This attachment could not be saved for recovery. Remove it or add it again before sending."
@@ -164,8 +168,9 @@ export function createIndexedDbThreadComposerAttachmentStore(
   void purgeStale().catch(() => undefined);
 
   return {
-    async put(threadId, descriptor, file) {
-      const key = attachmentKey(tabId, threadId, descriptor.id);
+    namespace: tabId,
+    async put(threadId, descriptor, file, namespace = tabId) {
+      const key = attachmentKey(namespace, threadId, descriptor.id);
       await runPending(key, async () => {
         const db = await database();
         const transaction = db.transaction(ATTACHMENTS_STORE, "readwrite");
@@ -173,16 +178,16 @@ export function createIndexedDbThreadComposerAttachmentStore(
           ...descriptor,
           blob: file,
           key,
-          tabId,
+          tabId: namespace,
           threadId,
           updatedAt: now()
         } satisfies PersistedAttachmentRecord);
         await transactionComplete(transaction);
       });
     },
-    async read(threadId, descriptors) {
+    async read(threadId, descriptors, namespace = tabId) {
       const keys = descriptors.map((descriptor) =>
-        attachmentKey(tabId, threadId, descriptor.id)
+        attachmentKey(namespace, threadId, descriptor.id)
       );
       await Promise.all(keys.map((key) => pending.get(key)?.catch(() => undefined)));
       const db = await database();
@@ -201,8 +206,8 @@ export function createIndexedDbThreadComposerAttachmentStore(
           : [];
       });
     },
-    async remove(threadId, attachmentIds) {
-      const keys = attachmentIds.map((id) => attachmentKey(tabId, threadId, id));
+    async remove(threadId, attachmentIds, namespace = tabId) {
+      const keys = attachmentIds.map((id) => attachmentKey(namespace, threadId, id));
       await Promise.all(
         keys.map((key) =>
           runPending(key, async () => {
@@ -217,31 +222,35 @@ export function createIndexedDbThreadComposerAttachmentStore(
   };
 }
 
-export function createMemoryThreadComposerAttachmentStore(): ThreadComposerAttachmentStore {
+export function createMemoryThreadComposerAttachmentStore(
+  namespace = "memory"
+): ThreadComposerAttachmentStore {
   const records = new Map<string, PersistedAttachmentRecord>();
-  const tabId = "memory";
   return {
-    async put(threadId, descriptor, file) {
-      records.set(attachmentKey(tabId, threadId, descriptor.id), {
+    namespace,
+    async put(threadId, descriptor, file, targetNamespace = namespace) {
+      records.set(attachmentKey(targetNamespace, threadId, descriptor.id), {
         ...descriptor,
         blob: file,
-        key: attachmentKey(tabId, threadId, descriptor.id),
-        tabId,
+        key: attachmentKey(targetNamespace, threadId, descriptor.id),
+        tabId: targetNamespace,
         threadId,
         updatedAt: Date.now()
       });
     },
-    async read(threadId, descriptors) {
+    async read(threadId, descriptors, targetNamespace = namespace) {
       return descriptors.flatMap((descriptor) => {
-        const record = records.get(attachmentKey(tabId, threadId, descriptor.id));
+        const record = records.get(
+          attachmentKey(targetNamespace, threadId, descriptor.id)
+        );
         return record && descriptorMatches(record, descriptor)
           ? [recoveredAttachment(record, descriptor)]
           : [];
       });
     },
-    async remove(threadId, attachmentIds) {
+    async remove(threadId, attachmentIds, targetNamespace = namespace) {
       for (const attachmentId of attachmentIds) {
-        records.delete(attachmentKey(tabId, threadId, attachmentId));
+        records.delete(attachmentKey(targetNamespace, threadId, attachmentId));
       }
     }
   };

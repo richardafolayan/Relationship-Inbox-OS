@@ -2,6 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  composerDispatchFailureIsAmbiguous,
+  composerNotFoundRecoveryAfterDispatchFailure,
+  composerReplayPreflight,
   composerSendRecoveryDisposition,
   missingThreadComposerAttachments,
   normalizeThreadComposerSendAttempt,
@@ -38,9 +41,11 @@ const attempt = {
     threadId: "thread-a"
   },
   value: {
+    attachmentNamespace: "tab-a",
     clientSendId: "44c44306-517c-484b-9076-9915fa21163e",
     requestedAt: "2026-08-30T09:01:00.000Z",
-    sessionRevision: 3
+    sessionRevision: 3,
+    sessionRevisionId: "ae5926d5-3ec7-48b0-bb35-047d8eb2a431"
   }
 };
 
@@ -62,11 +67,26 @@ test("malformed or cross-thread attempt state fails closed", () => {
 
 test("only the exact captured composer revision is hidden while delivery is unresolved", () => {
   assert.equal(
-    shouldHideComposerSessionForAttempt({ ...composerIntent, revision: 3 }, attempt),
+    shouldHideComposerSessionForAttempt(
+      {
+        ...composerIntent,
+        revision: 3,
+        revisionId: "ae5926d5-3ec7-48b0-bb35-047d8eb2a431"
+      },
+      attempt
+    ),
     true
   );
   assert.equal(
-    shouldHideComposerSessionForAttempt({ ...composerIntent, revision: 4, text: "New reply" }, attempt),
+    shouldHideComposerSessionForAttempt(
+      {
+        ...composerIntent,
+        revision: 3,
+        revisionId: "9b35961d-a8fc-441d-986f-a2f366bcc9e3",
+        text: "New reply"
+      },
+      attempt
+    ),
     false
   );
 });
@@ -82,6 +102,44 @@ test("failed recovery keeps descriptors for attachment files that could not be r
     ),
     [{ ...attachment, id: "attachment-2", name: "photo.jpg" }]
   );
+});
+
+test("NOT_FOUND replay restores expired schedules and incomplete attachment sets", () => {
+  assert.deepEqual(
+    composerReplayPreflight(
+      {
+        ...attempt.intent,
+        kind: "scheduled",
+        scheduledFor: "2026-08-30T09:05:00.000Z"
+      },
+      1,
+      Date.parse("2026-08-30T09:05:00.001Z")
+    ),
+    {
+      ok: false,
+      message: "This scheduled time has passed. Your message was not queued, so choose a new time."
+    }
+  );
+  assert.equal(composerReplayPreflight(attempt.intent, 0).ok, false);
+  assert.deepEqual(composerReplayPreflight(attempt.intent, 1), { ok: true });
+});
+
+test("dispatch failures stay unresolved when the response can follow durable insertion", () => {
+  assert.equal(composerDispatchFailureIsAmbiguous({ status: 500 }, false), true);
+  assert.equal(composerDispatchFailureIsAmbiguous({ status: 200 }, false), true);
+  assert.equal(composerDispatchFailureIsAmbiguous({ status: 400 }, false), false);
+  assert.equal(composerDispatchFailureIsAmbiguous(new Error("local preflight"), false), false);
+  assert.equal(composerDispatchFailureIsAmbiguous(new Error("network"), true), true);
+  assert.equal(
+    composerNotFoundRecoveryAfterDispatchFailure({ status: 500 }),
+    "restore"
+  );
+  assert.equal(
+    composerNotFoundRecoveryAfterDispatchFailure({ status: 200 }),
+    "restore"
+  );
+  assert.equal(composerNotFoundRecoveryAfterDispatchFailure({ status: 0 }), "replay");
+  assert.equal(composerNotFoundRecoveryAfterDispatchFailure(new Error("network")), "replay");
 });
 
 test("delivery recovery retains ambiguity, replays missing status with the same id, and cleans only sent", () => {

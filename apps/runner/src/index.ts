@@ -8601,16 +8601,20 @@ app.post("/control/thread/:threadId/draft", asyncRoute(async (req, res) => {
   if (await checkPresenterGuard(res, settingsStore, { threadId, action: "save a draft", kind: "thread-mutation" })) return;
   const payload = z.object({ text: z.string().max(5000) }).parse(req.body);
 
-  await prisma.draft.upsert({
+  const draft = await prisma.draft.upsert({
     where: { threadId },
     update: { text: payload.text },
     create: {
       threadId,
       text: payload.text
-    }
+    },
+    select: { text: true, updatedAt: true }
   });
 
-  res.json({ status: "ok" });
+  res.json({
+    status: "ok",
+    draft: { text: draft.text, updatedAt: draft.updatedAt.toISOString() }
+  });
 }));
 
 app.post("/control/thread/:threadId/delete-draft", asyncRoute(async (req, res) => {
