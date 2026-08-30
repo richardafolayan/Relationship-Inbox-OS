@@ -150,12 +150,15 @@ import { chooseDisplayBrief } from "@/lib/reply-brief";
 import {
   assertThreadComposerAttachmentsRecoverable,
   defaultThreadComposerAttachmentStore,
+  reconcileThreadComposerAttachmentOwnership,
   removableThreadComposerAttachmentIds,
+  type ThreadComposerAttachmentOwnership,
   type ThreadComposerAttachmentStore
 } from "@/lib/thread-composer-attachments";
 import {
   attachDraftRevisionToThreadComposerSession,
   consumeThreadComposerSession,
+  inspectThreadComposerSession,
   mergeThreadComposerAttachmentDescriptors,
   readThreadComposerSession,
   restoreThreadComposerSession,
@@ -1324,54 +1327,13 @@ export default function ThreadPage() {
     () => defaultThreadComposerAttachmentStore(),
     []
   );
-  const attachmentOwnershipRef = useRef(new Map<string, {
-    attachmentIds: string[];
-    namespace: string;
-    ownerId: string;
-    revisionId: string;
-  }>());
+  const attachmentOwnershipRef = useRef(
+    new Map<string, ThreadComposerAttachmentOwnership>()
+  );
   const attachmentOwnershipBarrierRef = useRef(new Map<string, {
     promise: Promise<void>;
     revisionId: string;
   }>());
-  useEffect(() => {
-    const purgeStaleAttachments = () => {
-      void (async () => {
-        const ownership = [...attachmentOwnershipRef.current.entries()];
-        for (const [ownerThreadId, value] of ownership) {
-          await composerAttachmentStore.claimOwnership(
-            ownerThreadId,
-            value.attachmentIds,
-            value.ownerId,
-            value.namespace
-          );
-          if (attachmentOwnershipRef.current.get(ownerThreadId)?.ownerId !== value.ownerId) {
-            await composerAttachmentStore.releaseOwnership(
-              ownerThreadId,
-              value.ownerId,
-              value.namespace
-            );
-          }
-        }
-        await composerAttachmentStore.purgeStale();
-      })().catch(() => undefined);
-    };
-    const purgeWhenVisible = () => {
-      if (document.visibilityState === "visible") purgeStaleAttachments();
-    };
-    purgeStaleAttachments();
-    const interval = window.setInterval(
-      purgeStaleAttachments,
-      6 * 60 * 60 * 1000
-    );
-    window.addEventListener("focus", purgeStaleAttachments);
-    document.addEventListener("visibilitychange", purgeWhenVisible);
-    return () => {
-      window.clearInterval(interval);
-      window.removeEventListener("focus", purgeStaleAttachments);
-      document.removeEventListener("visibilitychange", purgeWhenVisible);
-    };
-  }, [composerAttachmentStore]);
   const composerOwnerThreadIdRef = useRef(threadId);
   const composerSessionPresentRef = useRef(false);
   const composerDraftRevisionRef = useRef<SavedDraftRevision | null>(null);
@@ -1444,6 +1406,46 @@ export default function ThreadPage() {
       return "blocked" as const;
     }
   }, [externalActionAttempts]);
+  useEffect(() => {
+    const purgeStaleAttachments = () => {
+      void (async () => {
+        const ownership = [...attachmentOwnershipRef.current.entries()];
+        for (const [ownerThreadId, value] of ownership) {
+          const result = await reconcileThreadComposerAttachmentOwnership(
+            composerAttachmentStore,
+            ownerThreadId,
+            value,
+            () => inspectThreadComposerSession(ownerThreadId),
+            (session) => composerSessionDisposition(ownerThreadId, session),
+            () => attachmentOwnershipRef.current.get(ownerThreadId)?.ownerId === value.ownerId
+          );
+          if (
+            result === "released" &&
+            attachmentOwnershipRef.current.get(ownerThreadId)?.ownerId === value.ownerId
+          ) {
+            attachmentOwnershipRef.current.delete(ownerThreadId);
+            attachmentOwnershipBarrierRef.current.delete(ownerThreadId);
+          }
+        }
+        await composerAttachmentStore.purgeStale();
+      })().catch(() => undefined);
+    };
+    const purgeWhenVisible = () => {
+      if (document.visibilityState === "visible") purgeStaleAttachments();
+    };
+    purgeStaleAttachments();
+    const interval = window.setInterval(
+      purgeStaleAttachments,
+      6 * 60 * 60 * 1000
+    );
+    window.addEventListener("focus", purgeStaleAttachments);
+    document.addEventListener("visibilitychange", purgeWhenVisible);
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener("focus", purgeStaleAttachments);
+      document.removeEventListener("visibilitychange", purgeWhenVisible);
+    };
+  }, [composerAttachmentStore, composerSessionDisposition]);
   const persistComposerSession = useCallback((
     ownerThreadId: string,
     intent: ThreadComposerIntentDraft,
@@ -2342,8 +2344,10 @@ export default function ThreadPage() {
       return;
     }
     const restoring = composerRestoreRef.current;
-    if (restoring?.threadId === threadId) {
-      if (composerAttachmentsRestoringRef.current) return;
+    if (
+      restoring?.threadId === threadId &&
+      !composerAttachmentsRestoringRef.current
+    ) {
       composerRestoreRef.current = null;
     }
     const saved = persistComposerSession(

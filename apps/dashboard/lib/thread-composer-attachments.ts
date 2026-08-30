@@ -1,4 +1,9 @@
-import type { ThreadComposerAttachmentDescriptor } from "./thread-composer-session";
+import {
+  shouldRefreshThreadComposerAttachmentOwnership,
+  type ThreadComposerAttachmentDescriptor,
+  type ThreadComposerSession,
+  type ThreadComposerSessionInspection
+} from "./thread-composer-session";
 
 export interface RecoveredThreadComposerAttachment {
   descriptor: ThreadComposerAttachmentDescriptor;
@@ -28,6 +33,55 @@ export interface ThreadComposerAttachmentStore {
   remove(threadId: string, attachmentIds: string[], namespace?: string): Promise<void>;
   removeUnowned(threadId: string, attachmentIds: string[], namespace?: string): Promise<void>;
   releaseOwnership(threadId: string, ownerId: string, namespace?: string): Promise<void>;
+}
+
+export interface ThreadComposerAttachmentOwnership {
+  attachmentIds: string[];
+  namespace: string;
+  ownerId: string;
+  revisionId: string;
+}
+
+type ThreadComposerSessionDisposition = "active" | "blocked" | "sent" | "superseded";
+
+export async function reconcileThreadComposerAttachmentOwnership(
+  store: ThreadComposerAttachmentStore,
+  threadId: string,
+  ownership: ThreadComposerAttachmentOwnership,
+  inspectSession: () => ThreadComposerSessionInspection,
+  sessionDisposition: (session: ThreadComposerSession) => ThreadComposerSessionDisposition,
+  ownershipIsCurrent: () => boolean = () => true
+): Promise<"retained" | "released"> {
+  const shouldRetain = (): boolean | null => {
+    if (!ownershipIsCurrent()) return false;
+    const sessionRead = inspectSession();
+    if (!sessionRead.readable) return null;
+    if (!sessionRead.session) return false;
+    try {
+      return shouldRefreshThreadComposerAttachmentOwnership(
+        sessionRead.session,
+        ownership.revisionId,
+        sessionDisposition(sessionRead.session)
+      );
+    } catch {
+      return null;
+    }
+  };
+
+  let retain = shouldRetain();
+  if (retain === false) retain = shouldRetain();
+  if (retain !== false) {
+    await store.claimOwnership(
+      threadId,
+      ownership.attachmentIds,
+      ownership.ownerId,
+      ownership.namespace
+    );
+    retain = shouldRetain();
+  }
+  if (retain !== false) return "retained";
+  await store.releaseOwnership(threadId, ownership.ownerId, ownership.namespace);
+  return "released";
 }
 
 export async function assertThreadComposerAttachmentsRecoverable(

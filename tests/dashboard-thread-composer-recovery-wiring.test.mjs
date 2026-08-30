@@ -149,6 +149,7 @@ test("navigation and pagehide preserve durable attachment descriptors while byte
     restoreGate.indexOf("composerAttachmentsRestoringRef.current") <
       restoreGate.indexOf("composerRestoreRef.current = null")
   );
+  assert.doesNotMatch(restoreGate, /composerAttachmentsRestoringRef\.current\) return/);
 });
 
 test("attachment quarantine is swept again while a thread stays open", () => {
@@ -156,6 +157,10 @@ test("attachment quarantine is swept again while a thread stays open", () => {
   assert.match(source, /window\.setInterval\([\s\S]*?purgeStaleAttachments/);
   assert.match(source, /visibilitychange/);
   assert.match(source, /window\.addEventListener\("focus", purgeStaleAttachments\)/);
+  assert.match(source, /reconcileThreadComposerAttachmentOwnership\(/);
+  assert.match(source, /inspectThreadComposerSession\(ownerThreadId\)/);
+  assert.match(source, /attachmentOwnershipRef\.current\.delete\(ownerThreadId\)/);
+  assert.match(source, /result === "released"/);
 });
 
 test("editing an unverifiable recovery clears its matching block notice", () => {

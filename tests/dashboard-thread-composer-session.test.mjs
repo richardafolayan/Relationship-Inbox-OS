@@ -4,11 +4,13 @@ import test from "node:test";
 const {
   attachDraftRevisionToThreadComposerSession,
   consumeThreadComposerSession,
+  inspectThreadComposerSession,
   mergeThreadComposerAttachmentDescriptors,
   readThreadComposerSession,
   restoreThreadComposerSession,
   rotateThreadComposerSession,
   safeSendFailureDisposition,
+  shouldRefreshThreadComposerAttachmentOwnership,
   snapshotThreadComposerSessionAfterAcceptedAction,
   snapshotThreadComposerSession,
   __test
@@ -73,6 +75,88 @@ test("attachment hydration keeps unresolved originals alongside files added mean
     mergeThreadComposerAttachmentDescriptors([attachment], [{ ...attachment, name: "resolved.pdf" }]),
     [{ ...attachment, name: "resolved.pdf" }]
   );
+});
+
+test("a crash during attachment hydration recovers edits and both attachment generations", () => {
+  const storage = makeStorage();
+  const added = { ...attachment, id: "attachment-2", name: "new-file.pdf" };
+  const pendingHydrationIntent = {
+    attachments: mergeThreadComposerAttachmentDescriptors([attachment], [added]),
+    customScheduleValue: "2026-10-01T09:30",
+    recoveredScheduledFor: "2026-10-01T08:30:00.000Z",
+    replyToMessageId: "new-parent",
+    source: "user",
+    text: "Edited while the original file was restoring"
+  };
+
+  snapshotThreadComposerSession("thread-a", pendingHydrationIntent, storage);
+  const recovered = readThreadComposerSession("thread-a", storage);
+  assert.ok(recovered);
+
+  assert.deepEqual(recovered, {
+    ...pendingHydrationIntent,
+    createdAt: recovered.createdAt,
+    revision: 1,
+    revisionId: recovered.revisionId
+  });
+});
+
+test("stale cleanup never refreshes ownership for a completed or replaced session", () => {
+  const session = {
+    attachments: [attachment],
+    createdAt: 100,
+    customScheduleValue: "",
+    replyToMessageId: null,
+    revision: 1,
+    revisionId: "session-x",
+    source: "user",
+    text: "Reply"
+  };
+
+  assert.equal(
+    shouldRefreshThreadComposerAttachmentOwnership(session, "session-x", "active"),
+    true
+  );
+  assert.equal(
+    shouldRefreshThreadComposerAttachmentOwnership(session, "session-x", "blocked"),
+    true
+  );
+  assert.equal(
+    shouldRefreshThreadComposerAttachmentOwnership(session, "session-x", "sent"),
+    false
+  );
+  assert.equal(
+    shouldRefreshThreadComposerAttachmentOwnership(session, "session-y", "active"),
+    false
+  );
+  assert.equal(
+    shouldRefreshThreadComposerAttachmentOwnership(session, "session-x", "superseded"),
+    false
+  );
+  assert.equal(
+    shouldRefreshThreadComposerAttachmentOwnership(null, "session-x", "active"),
+    false
+  );
+});
+
+test("session inspection distinguishes an absent session from unreadable storage", () => {
+  const storage = makeStorage();
+  assert.deepEqual(inspectThreadComposerSession("thread-a", storage), {
+    readable: true,
+    session: null
+  });
+
+  const unreadableStorage = {
+    getItem() {
+      throw new Error("blocked");
+    },
+    removeItem() {},
+    setItem() {}
+  };
+  assert.deepEqual(inspectThreadComposerSession("thread-a", unreadableStorage), {
+    readable: false,
+    session: null
+  });
 });
 
 test("composer sessions preserve the exact saved draft revision they originated from", () => {

@@ -41,6 +41,11 @@ export interface ThreadComposerSession extends ThreadComposerIntentDraft {
   revisionId: string;
 }
 
+export interface ThreadComposerSessionInspection {
+  readable: boolean;
+  session: ThreadComposerSession | null;
+}
+
 interface StorageLike {
   getItem(key: string): string | null;
   setItem(key: string, value: string): void;
@@ -185,6 +190,18 @@ export function mergeThreadComposerAttachmentDescriptors(
   return [...merged.values()];
 }
 
+export function shouldRefreshThreadComposerAttachmentOwnership(
+  session: ThreadComposerSession | null,
+  ownerRevisionId: string,
+  disposition: "active" | "blocked" | "sent" | "superseded"
+): boolean {
+  return Boolean(
+    session &&
+      session.revisionId === ownerRevisionId &&
+      (disposition === "active" || disposition === "blocked")
+  );
+}
+
 export type SafeSendFailureDisposition =
   | "restore_captured"
   | "keep_failed_attempt"
@@ -202,34 +219,36 @@ export function safeSendFailureDisposition(
     : "keep_failed_attempt";
 }
 
-export function readThreadComposerSession(
+export function inspectThreadComposerSession(
   threadId: string,
   storage: StorageLike | null = defaultStorage()
-): ThreadComposerSession | null {
-  if (!storage || !threadId) return null;
+): ThreadComposerSessionInspection {
+  if (!storage || !threadId) return { readable: false, session: null };
   try {
     const raw = storage.getItem(keyFor(threadId));
-    if (!raw) return null;
+    if (!raw) return { readable: true, session: null };
     const parsed = JSON.parse(raw) as Record<string, unknown>;
     const intent = normalizeThreadComposerIntent(parsed);
     if (!intent || !Number.isInteger(parsed.revision) || (parsed.revision as number) < 1) {
-      return null;
+      return { readable: false, session: null };
     }
     const revisionId =
       typeof parsed.revisionId === "string" && parsed.revisionId
         ? parsed.revisionId
         : createRevisionId();
-    if (!revisionId) return null;
+    if (!revisionId) return { readable: false, session: null };
     const draftRevision = normalizeDraftRevision(parsed.draftRevision);
-    if (parsed.draftRevision !== undefined && draftRevision === undefined) return null;
+    if (parsed.draftRevision !== undefined && draftRevision === undefined) {
+      return { readable: false, session: null };
+    }
     if (
       parsed.recoveryClientSendId !== undefined &&
       (typeof parsed.recoveryClientSendId !== "string" || !parsed.recoveryClientSendId)
-    ) return null;
+    ) return { readable: false, session: null };
     if (
       parsed.createdAt !== undefined &&
       (typeof parsed.createdAt !== "number" || !Number.isFinite(parsed.createdAt))
-    ) return null;
+    ) return { readable: false, session: null };
     const session: ThreadComposerSession = {
       ...intent,
       ...(parsed.draftRevision !== undefined ? { draftRevision: draftRevision ?? null } : {}),
@@ -243,10 +262,17 @@ export function readThreadComposerSession(
     if (parsed.revisionId !== revisionId) {
       storage.setItem(keyFor(threadId), JSON.stringify(session));
     }
-    return session;
+    return { readable: true, session };
   } catch {
-    return null;
+    return { readable: false, session: null };
   }
+}
+
+export function readThreadComposerSession(
+  threadId: string,
+  storage: StorageLike | null = defaultStorage()
+): ThreadComposerSession | null {
+  return inspectThreadComposerSession(threadId, storage).session;
 }
 
 export function snapshotThreadComposerSession(

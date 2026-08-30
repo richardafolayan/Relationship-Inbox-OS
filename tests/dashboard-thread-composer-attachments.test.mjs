@@ -5,6 +5,7 @@ const {
   assertThreadComposerAttachmentsRecoverable,
   createMemoryThreadComposerAttachmentStore,
   getOrCreateThreadComposerTabId,
+  reconcileThreadComposerAttachmentOwnership,
   removableThreadComposerAttachmentIds,
   __test
 } = await import("../apps/dashboard/lib/thread-composer-attachments.ts");
@@ -152,6 +153,92 @@ test("the stale sweep revisits a released blob after its quarantine expires", as
   await store.purgeStale();
 
   assert.deepEqual(await store.read("thread-a", [descriptor]), []);
+});
+
+test("an inactive copied-tab lease is released after its shared send completes", async () => {
+  let now = 1_000;
+  const store = createMemoryThreadComposerAttachmentStore("tab-a", () => now);
+  const file = new File(["pilot attachment"], descriptor.name, {
+    lastModified: descriptor.lastModified,
+    type: descriptor.type
+  });
+  const session = {
+    attachments: [descriptor],
+    createdAt: now,
+    customScheduleValue: "",
+    replyToMessageId: null,
+    revision: 1,
+    revisionId: "session-x",
+    source: "user",
+    text: "Reply"
+  };
+  const ownership = {
+    attachmentIds: [descriptor.id],
+    namespace: "tab-a",
+    ownerId: "session-x",
+    revisionId: "session-x"
+  };
+  await store.put("thread-a", descriptor, file);
+  await store.claimOwnership("thread-a", [descriptor.id], ownership.ownerId);
+
+  now += __test.STALE_AFTER_MS + 1;
+  assert.equal(
+    await reconcileThreadComposerAttachmentOwnership(
+      store,
+      "thread-a",
+      ownership,
+      () => ({ readable: true, session }),
+      () => "sent"
+    ),
+    "released"
+  );
+  await store.purgeStale();
+
+  assert.deepEqual(await store.read("thread-a", [descriptor]), []);
+});
+
+test("unreadable shared completion state retains a copied-tab lease", async () => {
+  let now = 1_000;
+  const store = createMemoryThreadComposerAttachmentStore("tab-a", () => now);
+  const file = new File(["pilot attachment"], descriptor.name, {
+    lastModified: descriptor.lastModified,
+    type: descriptor.type
+  });
+  const ownership = {
+    attachmentIds: [descriptor.id],
+    namespace: "tab-a",
+    ownerId: "session-x",
+    revisionId: "session-x"
+  };
+  const session = {
+    attachments: [descriptor],
+    createdAt: now,
+    customScheduleValue: "",
+    replyToMessageId: null,
+    revision: 1,
+    revisionId: "session-x",
+    source: "user",
+    text: "Reply"
+  };
+  await store.put("thread-a", descriptor, file);
+  await store.claimOwnership("thread-a", [descriptor.id], ownership.ownerId);
+
+  now += __test.STALE_AFTER_MS + 1;
+  assert.equal(
+    await reconcileThreadComposerAttachmentOwnership(
+      store,
+      "thread-a",
+      ownership,
+      () => ({ readable: true, session }),
+      () => {
+        throw new Error("shared completion state unavailable");
+      }
+    ),
+    "retained"
+  );
+  await store.purgeStale();
+
+  assert.equal((await store.read("thread-a", [descriptor])).length, 1);
 });
 
 test("a blocked IndexedDB upgrade rejects instead of hanging attachment recovery", async () => {
