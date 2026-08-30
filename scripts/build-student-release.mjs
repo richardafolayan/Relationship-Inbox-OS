@@ -44,10 +44,16 @@
 //                       derived from the git origin; or RIOS_DEV_UPDATE_FEED_URL)
 //   --notes <line>      a release-note line (repeatable)
 //   --notes-file <path> read release notes from a file (one per line)
-//   --min-installer <v> minimumInstallerVersion in latest.json (default: the channel
-//                       floor — 0.1.0 student / 0.0.1 dev — the oldest installer that
-//                       can apply updates, NOT the release version)
-//   --manifest-only     do not rebuild the zip; just (re)write latest.json from an existing zip
+//   --min-installer <v> minimumInstallerVersion in latest.json (default on full build:
+//                       the channel floor — 0.1.0 student / 0.0.1 dev — the oldest
+//                       installer that can apply updates, NOT the release version).
+//                       Baked into the ZIP's release.json so --manifest-only can
+//                       recover it without re-passing the flag.
+//   --manifest-only     do not rebuild the zip; just (re)write latest.json from an existing zip.
+//                       Reads version/build/commit/notes/minimumInstallerVersion from the
+//                       ZIP's release.json. Pass --min-installer only to override; if the
+//                       ZIP lacks the field and the flag is omitted, the script fails loud
+//                       rather than silently resetting the floor.
 //   --zip <path>        which zip to checksum in --manifest-only mode (default: the -latest zip)
 
 import { execFileSync } from "node:child_process";
@@ -59,7 +65,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  bakePilotEnv, findEnvExampleSecretLeaks, findForbiddenEntries, sha256File
+  bakePilotEnv, findEnvExampleSecretLeaks, findForbiddenEntries, parseVersion, sha256File
 } from "./lib/release-manifest.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -225,7 +231,42 @@ function readNotes(version, commit) {
   return [`Student pilot build ${version}.`];
 }
 
-function writeManifest({ version, build, commit, zipPath, sha256, releaseNotes = readNotes(version, commit) }) {
+function channelMinInstallerFloor() {
+  return CHANNEL === "dev" ? DEV_MIN_INSTALLER : STUDENT_MIN_INSTALLER;
+}
+
+// Full-build floor: explicit --min-installer wins, else the channel default.
+// Always baked into the ZIP's release.json so --manifest-only can recover it.
+function resolveBuildMinInstaller() {
+  return args.minInstaller || channelMinInstallerFloor();
+}
+
+// Manifest-only floor: CLI override, else the value baked into the ZIP.
+// Fail loud if neither is available so a raised floor cannot silently drop
+// back to the channel default during the documented two-step publish flow.
+function resolveManifestMinInstaller(bakedFromZip) {
+  if (args.minInstaller) return args.minInstaller;
+  if (typeof bakedFromZip === "string" && bakedFromZip.trim()) {
+    const v = bakedFromZip.trim();
+    if (!parseVersion(v)) {
+      die(
+        `ZIP release.json has an invalid minimumInstallerVersion (${JSON.stringify(bakedFromZip)}).\n` +
+        `   Pass a valid --min-installer <semver> to override, or rebuild the zip.`
+      );
+    }
+    return v;
+  }
+  die(
+    `Cannot recover minimumInstallerVersion: the ZIP's release.json does not carry it and\n` +
+    `   --min-installer was not passed. Rebuild the zip (new builds bake the floor into\n` +
+    `   release.json), or pass --min-installer <semver> explicitly.`
+  );
+}
+
+function writeManifest({
+  version, build, commit, zipPath, sha256, minimumInstallerVersion,
+  releaseNotes = readNotes(version, commit)
+}) {
   const zipUrl = args.zipUrl || PLACEHOLDER_URL;
   const manifest = {
     version,
@@ -235,7 +276,7 @@ function writeManifest({ version, build, commit, zipPath, sha256, releaseNotes =
     zipUrl,
     sha256,
     releaseNotes,
-    minimumInstallerVersion: args.minInstaller || (CHANNEL === "dev" ? DEV_MIN_INSTALLER : STUDENT_MIN_INSTALLER)
+    minimumInstallerVersion
   };
   const manifestPath = join(OUT_DIR, "latest.json");
   writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
@@ -253,12 +294,13 @@ async function manifestOnly() {
   if (!existsSync(zipPath)) die(`No zip to checksum at ${zipPath}. Build a release first, or pass --zip.`);
   const sha256 = await sha256File(zipPath);
 
-  // Describe the ACTUAL zip: read the version/build/commit baked into its
-  // release.json so re-stamping the Dropbox URL never drifts the metadata.
+  // Describe the ACTUAL zip: read the version/build/commit/min-installer baked
+  // into its release.json so re-stamping the Dropbox URL never drifts metadata.
   let version = pkgVersion();
   let build = new Date().toISOString();
   let commit = "";
   let releaseNotes;
+  let bakedMinInstaller;
   try {
     const baked = JSON.parse(
       execFileSync("unzip", ["-p", zipPath, `${APP_FOLDER_NAME}/release.json`], { encoding: "utf8" })
@@ -269,10 +311,14 @@ async function manifestOnly() {
     if (!args.notesFile && args.notes.length === 0 && Array.isArray(baked.releaseNotes)) {
       releaseNotes = baked.releaseNotes.filter((note) => typeof note === "string");
     }
+    if ("minimumInstallerVersion" in baked) bakedMinInstaller = baked.minimumInstallerVersion;
   } catch {
     try { commit = git("rev-parse", "--short", REF); } catch { /* not a git checkout */ }
   }
-  const { manifestPath, zipUrl } = writeManifest({ version, build, commit, zipPath, sha256, releaseNotes });
+  const minimumInstallerVersion = resolveManifestMinInstaller(bakedMinInstaller);
+  const { manifestPath, zipUrl } = writeManifest({
+    version, build, commit, zipPath, sha256, releaseNotes, minimumInstallerVersion
+  });
 
   process.stdout.write(`\n  Regenerated manifest only.\n`);
   process.stdout.write(`  latest.json : ${manifestPath}\n`);
@@ -291,6 +337,7 @@ async function build() {
   const commit = git("rev-parse", "--short", REF);
   const fullCommit = git("rev-parse", REF);
   const releaseNotes = readNotes(version, commit);
+  const minimumInstallerVersion = resolveBuildMinInstaller();
 
   process.stdout.write(`\n  Building ${CHANNEL} release ${version} (${commit}) from ${REF}\n`);
 
@@ -308,8 +355,16 @@ async function build() {
 
     // 2. Bake a release.json so the installed app knows what it is. Dev builds
     // also carry the feed they self-update from, so the pointer survives each
-    // in-place update (see devUpdateFeedUrl).
-    const releaseInfo = { version, build, commit: fullCommit, channel: CHANNEL, releaseNotes };
+    // in-place update (see devUpdateFeedUrl). minimumInstallerVersion travels
+    // with the ZIP so the documented --manifest-only re-stamp keeps the floor.
+    const releaseInfo = {
+      version,
+      build,
+      commit: fullCommit,
+      channel: CHANNEL,
+      releaseNotes,
+      minimumInstallerVersion
+    };
     if (CHANNEL === "dev") releaseInfo.updateFeedUrl = devUpdateFeedUrl();
     writeFileSync(
       join(appDir, "release.json"),
@@ -350,7 +405,9 @@ async function build() {
     // 6. latest copy + checksum + manifest.
     cpSync(versionedZip, latestZip);
     const sha256 = await sha256File(versionedZip);
-    const { manifestPath, shaPath, zipUrl } = writeManifest({ version, build, commit, zipPath: versionedZip, sha256, releaseNotes });
+    const { manifestPath, shaPath, zipUrl } = writeManifest({
+      version, build, commit, zipPath: versionedZip, sha256, releaseNotes, minimumInstallerVersion
+    });
 
     const sizeMb = (statSync(versionedZip).size / (1024 * 1024)).toFixed(1);
     process.stdout.write(`\n  Built (${sizeMb} MB, ${zipEntries.length} files):\n`);
