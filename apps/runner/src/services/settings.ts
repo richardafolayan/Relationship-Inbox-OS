@@ -215,15 +215,23 @@ export function mergePersistedAppSettings(value: unknown): {
   const isRecognizedSettingsRow =
     isObject &&
     typeof raw.scanIntervalSeconds === "number" &&
-    Number.isFinite(raw.scanIntervalSeconds) &&
-    typeof raw.automaticUpdates === "boolean" &&
+    Number.isInteger(raw.scanIntervalSeconds) &&
+    raw.scanIntervalSeconds >= 10 &&
+    raw.scanIntervalSeconds <= 3600 &&
+    (raw.automaticUpdates === undefined || typeof raw.automaticUpdates === "boolean") &&
     typeof raw.amberHours === "number" &&
-    Number.isFinite(raw.amberHours) &&
+    Number.isInteger(raw.amberHours) &&
+    raw.amberHours >= 1 &&
+    raw.amberHours <= 72 &&
     typeof raw.redHours === "number" &&
-    Number.isFinite(raw.redHours) &&
+    Number.isInteger(raw.redHours) &&
+    raw.redHours >= 1 &&
+    raw.redHours <= 168 &&
     typeof raw.headless === "boolean" &&
     typeof raw.maxMessagesPerThread === "number" &&
-    Number.isFinite(raw.maxMessagesPerThread);
+    Number.isInteger(raw.maxMessagesPerThread) &&
+    raw.maxMessagesPerThread >= 5 &&
+    raw.maxMessagesPerThread <= 100;
   if (!isRecognizedSettingsRow) {
     return {
       settings: cloneSettings(defaultSettings),
@@ -257,6 +265,7 @@ export function mergePersistedAppSettings(value: unknown): {
           : true
     },
     shouldPersistUpgrade:
+      raw.automaticUpdates === undefined ||
       !hasEnabledPlatforms ||
       !hasAiEnabled ||
       !enabledPlatformsAreValid ||

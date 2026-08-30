@@ -512,7 +512,7 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
         return await runProgressiveManual({
           message,
           attachments: audioAttachments
-        });
+        }, options.shouldContinue);
       } finally {
         for (const tier of configuredManualTiers) {
           clearPending(messageId, tier);
@@ -630,7 +630,7 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
       direction: "IN" | "OUT" | string;
     };
     attachments: Array<{ attachment: AttachmentPlaceholder; index: number }>;
-  }): Promise<TranscribeMessageOutcome> {
+  }, shouldContinue: () => boolean = () => true): Promise<TranscribeMessageOutcome> {
     const { message, attachments } = input;
     let ok = 0;
     let failed = 0;
@@ -639,17 +639,21 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
     let selection: SelectedTranscript | null = null;
 
     for (const tier of configuredManualTiers) {
-      const result = await runOneProgressiveTier(message.id, tier);
+      if (!shouldContinue()) break;
+      const result = await runOneProgressiveTier(message.id, tier, shouldContinue);
       if (result === "ok") ok += 1;
       else if (result === "failed") failed += 1;
       else skipped += 1;
+    }
+    if (!shouldContinue()) {
+      return { kind: "processed", attachments: attachments.length, ok, failed, skipped };
     }
     // Re-read attempt rows to drive refinement context.
     const parent = await deps.prisma.messageAudioTranscription.findUnique({
       where: { messageId: message.id },
       select: { id: true, transcript: true, selectedTier: true, selectedProvider: true, selectedModel: true }
     });
-    if (parent) {
+    if (parent && shouldContinue()) {
       const attemptRows = await deps.prisma.messageAudioTranscriptionAttempt.findMany({
         where: { transcriptionId: parent.id }
       });
@@ -684,9 +688,13 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
       deps.refinementEnabled &&
       deps.refiner &&
       parent &&
+      shouldContinue() &&
       liveAttempts.some((a) => a.tier === "standard" || a.tier === "max")
     ) {
-      await runProgressiveRefinement({ message, parentId: parent.id, attempts: liveAttempts });
+      await runProgressiveRefinement(
+        { message, parentId: parent.id, attempts: liveAttempts },
+        shouldContinue
+      );
     }
 
     return {
@@ -890,8 +898,8 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
     message: { id: string; threadId: string; direction: "IN" | "OUT" | string };
     parentId: string;
     attempts: SelectorAttempt[];
-  }): Promise<void> {
-    if (!deps.refiner) return;
+  }, shouldContinue: () => boolean = () => true): Promise<void> {
+    if (!deps.refiner || !shouldContinue()) return;
     const nearby = deps.nearbyMessages
       ? await safeFetchNearby(deps.nearbyMessages, {
           messageId: input.message.id,
@@ -899,6 +907,7 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
           radius: 8
         })
       : [];
+    if (!shouldContinue()) return;
     const refinementContext: RefinementContext = {
       messageId: input.message.id,
       threadId: input.message.threadId,
@@ -912,7 +921,7 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
       nearbyMessages: nearby
     };
     const startedAt = Date.now();
-    const outcome = await deps.refiner.refine(refinementContext);
+    const outcome = await deps.refiner.refine(refinementContext, shouldContinue);
     const elapsed = Date.now() - startedAt;
 
     const attemptBase = {

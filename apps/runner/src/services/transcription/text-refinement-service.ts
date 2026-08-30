@@ -105,7 +105,10 @@ export interface RefinementCorrection {
 }
 
 export interface TextRefinementService {
-  refine(context: RefinementContext): Promise<RefinementOutcome>;
+  refine(
+    context: RefinementContext,
+    shouldContinue?: () => boolean
+  ): Promise<RefinementOutcome>;
 }
 
 /**
@@ -141,12 +144,13 @@ export interface RefinementServiceConfig {
  */
 export function createTextRefinementService(input: {
   client: ChatCompletionsClient | null;
+  canDispatch?: () => Promise<boolean>;
   config: RefinementServiceConfig;
 }): TextRefinementService {
   const { client, config } = input;
 
   return {
-    async refine(context) {
+    async refine(context, shouldContinue = () => true) {
       if (!client) {
         return { kind: "skipped", reason: "refinement_no_client" };
       }
@@ -162,6 +166,15 @@ export function createTextRefinementService(input: {
 
       let response;
       try {
+        if (!shouldContinue()) {
+          return { kind: "skipped", reason: "refinement_not_allowed" };
+        }
+        const dispatchAllowed = input.canDispatch
+          ? await input.canDispatch()
+          : true;
+        if (!dispatchAllowed || !shouldContinue()) {
+          return { kind: "skipped", reason: "refinement_not_allowed" };
+        }
         response = await withTimeout(
           client.chat.completions.create({
             model: config.model,

@@ -104,6 +104,95 @@ test("cancelling an older reservation cannot overwrite a newer desired selection
   await newer.run(async () => undefined);
 });
 
+test("a stale durable read cannot overwrite a newer platform opt-out", async () => {
+  const entered = deferred();
+  const release = deferred();
+  const coordinator = createPlatformSelectionCoordinator({
+    platforms: ["LINKEDIN"],
+    getEnabledPlatforms: async () => {
+      entered.resolve();
+      await release.promise;
+      return ["LINKEDIN"];
+    },
+    requestAbort: () => undefined,
+    withPlatformLocks: async (_platform, work) => work()
+  });
+
+  const older = coordinator.reserveMutation(["LINKEDIN"]);
+  const cancelling = older.cancel();
+  await entered.promise;
+  coordinator.reserveMutation([]);
+  release.resolve();
+  await cancelling;
+
+  assert.equal(coordinator.isPlatformSelectedForNewWork("LINKEDIN"), false);
+});
+
+test("cancel waits for older platform persistence before restoring durable state", async () => {
+  let enabled = [];
+  let lockTail = Promise.resolve();
+  const olderEntered = deferred();
+  const releaseOlder = deferred();
+  const coordinator = createPlatformSelectionCoordinator({
+    platforms: ["LINKEDIN"],
+    getEnabledPlatforms: async () => enabled,
+    requestAbort: () => undefined,
+    withPlatformLocks: async (_platform, work) => {
+      const previous = lockTail;
+      const release = deferred();
+      lockTail = previous.then(() => release.promise);
+      await previous;
+      try {
+        return await work();
+      } finally {
+        release.resolve();
+      }
+    }
+  });
+
+  const older = coordinator.reserveMutation(["LINKEDIN"]);
+  const olderRun = older.run(async () => {
+    olderEntered.resolve();
+    await releaseOlder.promise;
+    enabled = ["LINKEDIN"];
+  });
+  await olderEntered.promise;
+
+  const newer = coordinator.reserveMutation([]);
+  const cancelling = newer.cancel();
+  releaseOlder.resolve();
+  await Promise.all([olderRun, cancelling]);
+
+  assert.equal(coordinator.isPlatformSelectedForNewWork("LINKEDIN"), true);
+});
+
+test("a failed platform restore cannot publish a stale read over a newer opt-out", async () => {
+  const restoreEntered = deferred();
+  const releaseRestore = deferred();
+  const coordinator = createPlatformSelectionCoordinator({
+    platforms: ["LINKEDIN"],
+    getEnabledPlatforms: async () => {
+      restoreEntered.resolve();
+      await releaseRestore.promise;
+      return ["LINKEDIN"];
+    },
+    requestAbort: () => undefined,
+    withPlatformLocks: async (_platform, work) => work()
+  });
+  const older = coordinator.reserveMutation([]);
+  const olderRun = older.run(async () => {
+    throw new Error("write failed");
+  });
+  await restoreEntered.promise;
+
+  const newer = coordinator.reserveMutation([]);
+  releaseRestore.resolve();
+  await assert.rejects(olderRun, /write failed/);
+
+  assert.equal(coordinator.isPlatformSelectedForNewWork("LINKEDIN"), false);
+  await newer.run(async () => undefined);
+});
+
 test("a connect queued behind a newer deselection cannot reopen or reselect the source", async () => {
   let enabled = ["LINKEDIN"];
   const locked = deferred();

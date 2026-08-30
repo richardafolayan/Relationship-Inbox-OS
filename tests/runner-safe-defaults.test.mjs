@@ -31,6 +31,24 @@ test("a predecessor settings row keeps the compatibility defaults during upgrade
   assert.equal(upgraded.shouldPersistUpgrade, true);
 });
 
+test("a valid settings row from before automatic updates preserves user choices", () => {
+  const upgraded = mergePersistedAppSettings({
+    scanIntervalSeconds: 120,
+    amberHours: 9,
+    redHours: 30,
+    headless: true,
+    maxMessagesPerThread: 40,
+    enabledPlatforms: ["INSTAGRAM"],
+    aiEnabled: false
+  });
+
+  assert.equal(upgraded.settings.scanIntervalSeconds, 120);
+  assert.deepEqual(upgraded.settings.enabledPlatforms, ["INSTAGRAM"]);
+  assert.equal(upgraded.settings.aiEnabled, false);
+  assert.equal(upgraded.settings.automaticUpdates, true);
+  assert.equal(upgraded.shouldPersistUpgrade, true);
+});
+
 test("explicit legacy opt-outs are never overwritten by compatibility migration", () => {
   const upgraded = mergePersistedAppSettings({
     ...defaultSettings,
@@ -56,7 +74,15 @@ test("corrupt explicit safety fields are repaired to safe values", () => {
 for (const invalid of [
   {},
   { garbage: true },
-  { scanIntervalSeconds: "bad" }
+  { scanIntervalSeconds: "bad" },
+  {
+    scanIntervalSeconds: -1,
+    automaticUpdates: true,
+    amberHours: 0,
+    redHours: 999,
+    headless: false,
+    maxMessagesPerThread: 0
+  }
 ]) {
   test(`schema-invalid settings ${JSON.stringify(invalid)} fail closed`, () => {
     const upgraded = mergePersistedAppSettings(invalid);

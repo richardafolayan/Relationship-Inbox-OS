@@ -47,6 +47,16 @@ export function createPlatformSelectionCoordinator(
     return enter(0);
   }
 
+  async function restoreDurableSelection(version: number): Promise<void> {
+    await withAllPlatformLocks(async () => {
+      if (version !== latestMutationVersion) return;
+      const enabledPlatforms = await deps.getEnabledPlatforms().catch(() => []);
+      if (version === latestMutationVersion) {
+        desiredSelection = new Set(enabledPlatforms);
+      }
+    });
+  }
+
   function reserveMutation(
     selectedPlatforms: readonly PlatformName[]
   ): ReservedPlatformSelectionMutation {
@@ -68,9 +78,7 @@ export function createPlatformSelectionCoordinator(
             return work();
           });
         } catch (error) {
-          if (version === latestMutationVersion) {
-            desiredSelection = new Set(await deps.getEnabledPlatforms().catch(() => []));
-          }
+          await restoreDurableSelection(version);
           throw error;
         } finally {
           state = "settled";
@@ -79,9 +87,7 @@ export function createPlatformSelectionCoordinator(
       async cancel(): Promise<void> {
         if (state !== "reserved") return;
         state = "settled";
-        if (version === latestMutationVersion) {
-          desiredSelection = new Set(await deps.getEnabledPlatforms().catch(() => []));
-        }
+        await restoreDurableSelection(version);
       }
     };
   }

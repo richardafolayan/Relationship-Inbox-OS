@@ -17,6 +17,19 @@ export interface ReservedAiConsentMutation {
 export function createAiConsentCoordinator(deps: AiConsentCoordinatorDeps) {
   let latestMutationVersion = 0;
   let desiredEnabled: boolean | null = null;
+  let mutationTail: Promise<void> = Promise.resolve();
+
+  async function withMutationLock<T>(work: () => Promise<T>): Promise<T> {
+    const previous = mutationTail;
+    let release!: () => void;
+    mutationTail = new Promise<void>((resolve) => { release = resolve; });
+    await previous.catch(() => undefined);
+    try {
+      return await work();
+    } finally {
+      release();
+    }
+  }
 
   function isEnabledForNewWork(): boolean {
     return desiredEnabled ?? true;
@@ -28,9 +41,9 @@ export function createAiConsentCoordinator(deps: AiConsentCoordinatorDeps) {
     desiredEnabled = enabled;
 
     async function restoreDurableConsent(): Promise<void> {
-      if (version === latestMutationVersion) {
-        desiredEnabled = await deps.getEnabled().catch(() => false);
-      }
+      if (version !== latestMutationVersion) return;
+      const durableEnabled = await deps.getEnabled().catch(() => false);
+      if (version === latestMutationVersion) desiredEnabled = durableEnabled;
     }
 
     return {
@@ -40,10 +53,17 @@ export function createAiConsentCoordinator(deps: AiConsentCoordinatorDeps) {
         }
         state = "running";
         try {
-          return await work();
-        } catch (error) {
-          await restoreDurableConsent();
-          throw error;
+          return await withMutationLock(async () => {
+            if (version !== latestMutationVersion) {
+              throw new AiConsentMutationSupersededError();
+            }
+            try {
+              return await work();
+            } catch (error) {
+              await restoreDurableConsent();
+              throw error;
+            }
+          });
         } finally {
           state = "settled";
         }
@@ -51,7 +71,7 @@ export function createAiConsentCoordinator(deps: AiConsentCoordinatorDeps) {
       async cancel(): Promise<void> {
         if (state !== "reserved") return;
         state = "settled";
-        await restoreDurableConsent();
+        await withMutationLock(restoreDurableConsent);
       }
     };
   }

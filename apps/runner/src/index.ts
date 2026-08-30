@@ -1068,6 +1068,14 @@ const refinementClient =
 const textRefinementService = refinementConfig.enabled
   ? createTextRefinementService({
       client: refinementClient,
+      canDispatch: async () => {
+        if (!aiConsentCoordinator.isEnabledForNewWork()) return false;
+        const settings = await settingsStore.getSettings();
+        return (
+          aiConsentCoordinator.isEnabledForNewWork() &&
+          settings.aiEnabled !== false
+        );
+      },
       config: {
         model: refinementConfig.model,
         timeoutMs: refinementConfig.timeoutMs
@@ -5773,11 +5781,27 @@ app.post("/control/message/:messageId/transcribe", asyncRoute(async (req, res) =
   const { messageId } = z.object({ messageId: z.string().min(1) }).parse(req.params);
   if (await checkPresenterGuard(res, settingsStore, { action: "transcribe a voice message", kind: "external-action" })) return;
 
+  const message = await prisma.message.findUnique({
+    where: { id: messageId },
+    select: { thread: { select: { platform: true } } }
+  });
+  if (!message) {
+    res.status(404).json({ ok: false, reason: "missing_message", message: "Message not found." });
+    return;
+  }
+  const platform = message.thread.platform;
+
   // Manual clicks always force a fresh attempt. Auto-scan keeps
   // fingerprint dedup; the operator's deliberate "Try again" should
   // re-check the disk state (e.g. when a missing_file row was written
   // before iCloud finished downloading the audio).
-  const outcome = await transcriptionService.transcribeMessage(messageId, { force: true });
+  const outcome = await platformSelectionCoordinator.withSelectedPlatform(
+    platform,
+    () => transcriptionService.transcribeMessage(messageId, {
+      force: true,
+      shouldContinue: () => platformSelectionAllowsNewWork(platform)
+    })
+  );
 
   if (outcome.kind === "disabled") {
     res.status(409).json({
@@ -5788,16 +5812,16 @@ app.post("/control/message/:messageId/transcribe", asyncRoute(async (req, res) =
     });
     return;
   }
-  if (outcome.kind === "missing_message") {
-    res.status(404).json({ ok: false, reason: "missing_message", message: "Message not found." });
-    return;
-  }
   if (outcome.kind === "no_audio") {
     res.status(422).json({
       ok: false,
       reason: "no_audio",
       message: "This message has no voice or audio attachment."
     });
+    return;
+  }
+  if (outcome.kind === "missing_message") {
+    res.status(404).json({ ok: false, reason: "missing_message", message: "Message not found." });
     return;
   }
 

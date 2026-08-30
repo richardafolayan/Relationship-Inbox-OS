@@ -398,6 +398,44 @@ test("progressive: refinement enabled + standard success → refiner runs and wi
   assert.ok(prisma.attemptRows.find((a) => a.tier === "refinement"));
 });
 
+test("progressive: revocation after a local tier stops later providers and refinement", async () => {
+  const audioPath = makeAudioFile();
+  const prisma = makeFakePrisma();
+  prisma.message._messages.push(makeMessage("m1", "k1"));
+  let allowed = true;
+  const fast = makeProvider("local-whisper", "fast.bin", () => {
+    allowed = false;
+    return { kind: "ok", result: { text: "fast text", model: "fast.bin" } };
+  });
+  const standard = makeProvider("local-whisper", "standard.bin", () => ({
+    kind: "ok",
+    result: { text: "standard text", model: "standard.bin" }
+  }));
+  let refinerCalls = 0;
+  const service = createTranscriptionService({
+    prisma,
+    provider: null,
+    providers: { fast: fast.provider, standard: standard.provider },
+    refiner: {
+      async refine() {
+        refinerCalls += 1;
+        return { kind: "skipped", reason: "blocked" };
+      }
+    },
+    refinementEnabled: true,
+    nearbyMessages: { async fetch() { return []; } },
+    attachmentResolver: makeResolver(audioPath),
+    config: baseConfig,
+    warn: () => {}
+  });
+
+  await service.transcribeMessage("m1", { shouldContinue: () => allowed });
+
+  assert.equal(fast.calls.length, 1);
+  assert.equal(standard.calls.length, 0);
+  assert.equal(refinerCalls, 0);
+});
+
 test("progressive: refinement failure does not erase the local selected transcript", async () => {
   const audioPath = makeAudioFile();
   const prisma = makeFakePrisma();
