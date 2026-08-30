@@ -72,6 +72,15 @@ function browserStorage(): AttemptStorage | undefined {
   }
 }
 
+function browserPinStorage(): AttemptStorage | undefined {
+  if (typeof window === "undefined") return undefined;
+  try {
+    return window.sessionStorage;
+  } catch {
+    return undefined;
+  }
+}
+
 function browserLocks(): AttemptLockManager | undefined {
   if (typeof navigator === "undefined") return undefined;
   return navigator.locks as AttemptLockManager | undefined;
@@ -79,17 +88,90 @@ function browserLocks(): AttemptLockManager | undefined {
 
 export function createExternalActionAttemptStore(
   storageOverride?: AttemptStorage,
-  lockOverride?: AttemptLockManager
+  lockOverride?: AttemptLockManager,
+  pinStorageOverride?: AttemptStorage
 ) {
   const storage = storageOverride ?? browserStorage();
+  const pinStorage = pinStorageOverride ?? browserPinStorage();
   const locks =
     lockOverride ??
     browserLocks() ??
     (typeof window === "undefined" && storageOverride ? testLockManager : undefined);
-  const observedScopedValues = new Map<string, string>();
+  const pinnedScopedOperations = new Map<string, {
+    intentJson: string;
+    value: unknown;
+  }>();
 
   function valueStorageKey(scope: string): string {
     return `${STORAGE_PREFIX}value:scoped:${scope}`;
+  }
+
+  function pinStorageKey(scope: string): string {
+    return `${STORAGE_PREFIX}pin:scoped:${scope}`;
+  }
+
+  function readPinnedOperation(scope: string): {
+    intentJson: string;
+    value: unknown;
+  } | undefined {
+    const memoryValue = pinnedScopedOperations.get(scope);
+    if (memoryValue) return memoryValue;
+    if (!pinStorage) return undefined;
+    try {
+      const persisted = pinStorage.getItem(pinStorageKey(scope));
+      if (!persisted) return undefined;
+      const parsed = JSON.parse(persisted) as
+        | { version?: unknown; intentJson?: unknown; value?: unknown }
+        | null;
+      if (
+        !parsed ||
+        parsed.version !== 1 ||
+        typeof parsed.intentJson !== "string" ||
+        !("value" in parsed)
+      ) {
+        throw new ExternalActionAttemptStorageError();
+      }
+      const operation = { intentJson: parsed.intentJson, value: parsed.value };
+      pinnedScopedOperations.set(scope, operation);
+      return operation;
+    } catch (error) {
+      if (error instanceof ExternalActionAttemptStorageError) throw error;
+      throw new ExternalActionAttemptStorageError();
+    }
+  }
+
+  function writePinnedOperation(
+    scope: string,
+    operation: { intentJson: string; value: unknown }
+  ): void {
+    pinnedScopedOperations.set(scope, operation);
+    if (!pinStorage) return;
+    const serialized = JSON.stringify({ version: 1, ...operation });
+    try {
+      pinStorage.setItem(pinStorageKey(scope), serialized);
+      if (pinStorage.getItem(pinStorageKey(scope)) !== serialized) {
+        throw new ExternalActionAttemptStorageError();
+      }
+    } catch (error) {
+      pinnedScopedOperations.delete(scope);
+      if (error instanceof ExternalActionAttemptStorageError) throw error;
+      throw new ExternalActionAttemptStorageError();
+    }
+  }
+
+  function removePinnedOperation(scope: string): void {
+    if (pinStorage) {
+      try {
+        pinStorage.removeItem(pinStorageKey(scope));
+        if (pinStorage.getItem(pinStorageKey(scope)) !== null) {
+          throw new ExternalActionAttemptStorageError();
+        }
+      } catch (error) {
+        if (error instanceof ExternalActionAttemptStorageError) throw error;
+        throw new ExternalActionAttemptStorageError();
+      }
+    }
+    pinnedScopedOperations.delete(scope);
   }
 
   async function withScopeLock<T>(scope: string, work: () => Promise<T>): Promise<T> {
@@ -172,6 +254,16 @@ export function createExternalActionAttemptStore(
       const key = valueStorageKey(scope);
       let record = readRecord<TIntent, TValue>(key);
       const expectedIntent = canonicalJson(intent);
+      const pinned = readPinnedOperation(scope);
+      if (pinned) {
+        if (pinned.intentJson === expectedIntent) {
+          return pinned.value as TValue;
+        }
+        if (!canReplace || !(await canReplace(pinned.value as TValue))) {
+          throw new ExternalActionAttemptConflictError();
+        }
+        removePinnedOperation(scope);
+      }
       if (record && canonicalJson(record.intent) !== expectedIntent) {
         if (!canReplace || !(await canReplace(record.value))) {
           throw new ExternalActionAttemptConflictError();
@@ -179,20 +271,23 @@ export function createExternalActionAttemptStore(
         removeRecord(key);
         record = undefined;
       }
-      if (
-        record?.completed &&
-        observedScopedValues.get(scope) !== canonicalJson(record.value)
-      ) {
+      if (record?.completed) {
         removeRecord(key);
         record = undefined;
       }
       if (record) {
-        observedScopedValues.set(scope, canonicalJson(record.value));
+        writePinnedOperation(scope, {
+          intentJson: expectedIntent,
+          value: record.value
+        });
         return record.value;
       }
       const created = { version: 1 as const, intent, value: create() };
       writeRecord(key, created);
-      observedScopedValues.set(scope, canonicalJson(created.value));
+      writePinnedOperation(scope, {
+        intentJson: expectedIntent,
+        value: created.value
+      });
       return created.value;
     });
   }
@@ -205,9 +300,23 @@ export function createExternalActionAttemptStore(
     return withScopeLock(scope, async () => {
       const key = valueStorageKey(scope);
       const record = readRecord<unknown, TValue>(key);
+      const pinned = readPinnedOperation(scope);
+      if (pinned && matches(pinned.value as TValue)) {
+        if (record && canonicalJson(record.value) === canonicalJson(pinned.value)) {
+          writeRecord(key, { ...record, value: nextValue });
+        }
+        writePinnedOperation(scope, {
+          intentJson: pinned.intentJson,
+          value: nextValue
+        });
+        return true;
+      }
       if (!record || !matches(record.value)) return false;
       writeRecord(key, { ...record, value: nextValue });
-      observedScopedValues.set(scope, canonicalJson(nextValue));
+      writePinnedOperation(scope, {
+        intentJson: canonicalJson(record.intent),
+        value: nextValue
+      });
       return true;
     });
   }
@@ -219,9 +328,16 @@ export function createExternalActionAttemptStore(
     return withScopeLock(scope, async () => {
       const key = valueStorageKey(scope);
       const record = readRecord<unknown, TValue>(key);
+      const pinned = readPinnedOperation(scope);
+      if (pinned && matches(pinned.value as TValue)) {
+        if (record && canonicalJson(record.value) === canonicalJson(pinned.value)) {
+          writeRecord(key, { ...record, completed: true });
+        }
+        removePinnedOperation(scope);
+        return true;
+      }
       if (!record || !matches(record.value)) return false;
       writeRecord(key, { ...record, completed: true });
-      observedScopedValues.delete(scope);
       return true;
     });
   }

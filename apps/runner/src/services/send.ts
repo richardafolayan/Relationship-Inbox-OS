@@ -286,7 +286,7 @@ function assertExistingSendIntent(
   }
 }
 
-class SendPolicyError extends Error {
+export class SendPolicyError extends Error {
   constructor(
     readonly reasonCode: string,
     message: string
@@ -694,6 +694,18 @@ export function createSendService(deps: SendServiceDeps) {
           throw new SendPolicyError(
             "focus_auto_ack_in_progress",
             "An automatic focus acknowledgement is already being processed"
+          );
+        }
+        if (
+          winner &&
+          winner.clientSendId !== input.clientSendId &&
+          source === "focus_ack" &&
+          winner.source === "focus_auto_ack" &&
+          winner.status === "FAILED"
+        ) {
+          throw new SendPolicyError(
+            "focus_auto_ack_delivery_unconfirmed",
+            "Automatic focus acknowledgement delivery could not be confirmed"
           );
         }
         if (winner && winner.clientSendId !== input.clientSendId) {

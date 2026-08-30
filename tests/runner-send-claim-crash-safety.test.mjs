@@ -727,6 +727,39 @@ test("manual focus acknowledgement does not adopt a claimed automatic row", asyn
   assert.equal(h.rows[0].status, "PENDING");
 });
 
+test("manual focus acknowledgement does not adopt an in-doubt automatic row", async () => {
+  const automaticId = focusAutoAckClientSendId("focus-1", "p1");
+  const manualId = focusManualAckClientSendId("focus-1", "p1");
+  const h = makeHarness([
+    focusAutoAckRow({
+      id: "uncertain-auto",
+      clientSendId: automaticId,
+      status: "FAILED",
+      receiptJson: SEND_CLAIM_MARKER,
+      errorJson: JSON.stringify({
+        errorKind: "DELIVERY_UNCERTAIN",
+        message: "Delivery could not be confirmed"
+      })
+    })
+  ]);
+
+  await assert.rejects(
+    h.svc.enqueueSend({
+      threadId: "t1",
+      text: "I am focusing until 2:00pm.",
+      clientSendId: manualId,
+      source: "focus_ack",
+      focusWindowId: "focus-1",
+      focusIntentVersion: 0
+    }),
+    /could not be confirmed/
+  );
+
+  assert.equal(h.rows.length, 1);
+  assert.equal(h.rows[0].clientSendId, automaticId);
+  assert.equal(h.rows[0].status, "FAILED");
+});
+
 test("a cancelled automatic row cannot shadow the manual acknowledgement on replay", async () => {
   const h = makeHarness([]);
   const automaticId = focusAutoAckClientSendId("focus-1", "p1");

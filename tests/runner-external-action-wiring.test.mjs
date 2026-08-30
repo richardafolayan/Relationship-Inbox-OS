@@ -148,6 +148,10 @@ test("a fresh manual focus action may re-arm only its policy-blocked acknowledge
   );
 });
 
+test("send policy conflicts are returned as HTTP 409", () => {
+  assert.match(source, /error instanceof SendPolicyError\s*\?\s*409/);
+});
+
 test("the queue summary excludes durable non-message action rows", () => {
   const start = source.indexOf('app.get("/data/send-queue"');
   const end = source.indexOf('app.get("/data/send-status/:clientSendId"', start);

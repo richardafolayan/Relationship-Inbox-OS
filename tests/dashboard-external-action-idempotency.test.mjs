@@ -275,6 +275,72 @@ test("the completing tab allocates a new id for a later identical operation", as
   assert.equal(created, 2);
 });
 
+test("a stale tab keeps its first id after another tab completes a later identical action", async () => {
+  const values = new Map();
+  const storage = {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, value),
+    removeItem: (key) => values.delete(key)
+  };
+  const firstPins = new Map();
+  const stalePins = new Map();
+  const pinStorage = (pins) => ({
+    getItem: (key) => pins.get(key) ?? null,
+    setItem: (key, value) => pins.set(key, value),
+    removeItem: (key) => pins.delete(key)
+  });
+  const first = createExternalActionAttemptStore(storage, undefined, pinStorage(firstPins));
+  const stale = createExternalActionAttemptStore(storage, undefined, pinStorage(stalePins));
+  const scope = "interleaved-identical-poll";
+  const intent = { question: "Lunch?", options: ["Yes", "No"] };
+  let created = 0;
+  const create = () => ({ clientSendId: `attempt-${++created}` });
+
+  const original = await first.getOrCreateScopedValue(scope, intent, create);
+  assert.deepEqual(await stale.getOrCreateScopedValue(scope, intent, create), original);
+  assert.equal(await first.completeScopedValue(scope, () => true), true);
+  const second = await first.getOrCreateScopedValue(scope, intent, create);
+  assert.equal(await first.completeScopedValue(scope, () => true), true);
+
+  const staleAfterRemount = createExternalActionAttemptStore(
+    storage,
+    undefined,
+    pinStorage(stalePins)
+  );
+  const staleRetry = await staleAfterRemount.getOrCreateScopedValue(scope, intent, create);
+
+  assert.equal(original.clientSendId, "attempt-1");
+  assert.equal(second.clientSendId, "attempt-2");
+  assert.equal(staleRetry.clientSendId, "attempt-1");
+  assert.equal(created, 2);
+});
+
+test("completing a stale generation does not overwrite the current shared generation", async () => {
+  const values = new Map();
+  const storage = {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, value),
+    removeItem: (key) => values.delete(key)
+  };
+  const first = createExternalActionAttemptStore(storage);
+  const stale = createExternalActionAttemptStore(storage);
+  const scope = "stale-completion-after-new-generation";
+  const key = `rios.external-action-attempt.v1:value:scoped:${scope}`;
+  const intent = { question: "Lunch?", options: ["Yes", "No"] };
+  let created = 0;
+  const create = () => ({ clientSendId: `attempt-${++created}` });
+
+  await first.getOrCreateScopedValue(scope, intent, create);
+  await stale.getOrCreateScopedValue(scope, intent, create);
+  await first.completeScopedValue(scope, () => true);
+  const current = await first.getOrCreateScopedValue(scope, intent, create);
+  await first.completeScopedValue(scope, () => true);
+
+  assert.equal(await stale.completeScopedValue(scope, (value) => value.clientSendId === "attempt-1"), true);
+  assert.equal(JSON.parse(values.get(key)).value.clientSendId, current.clientSendId);
+  assert.equal(JSON.parse(values.get(key)).completed, true);
+});
+
 test("a completed reconciled action can release its scope for a changed intent", async () => {
   const values = new Map();
   const storage = {

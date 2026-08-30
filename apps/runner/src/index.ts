@@ -113,7 +113,8 @@ import {
 import {
   createSendService,
   needsLocalReconciliation,
-  parsePersistedSendSource
+  parsePersistedSendSource,
+  SendPolicyError
 } from "./services/send";
 import {
   abandonUnstartedUserTriggeredIntent,
@@ -8916,7 +8917,11 @@ app.use((error: unknown, req: express.Request, res: express.Response, _next: exp
   abandonUnstartedUserTriggeredIntent(res);
   const path = normalizeControlPath(req.path);
   const trace = getControlTrace(res);
-  const statusCode = error instanceof z.ZodError ? 400 : 500;
+  const statusCode = error instanceof z.ZodError
+    ? 400
+    : error instanceof SendPolicyError
+      ? 409
+      : 500;
   const message =
     error instanceof z.ZodError
       ? error.issues
