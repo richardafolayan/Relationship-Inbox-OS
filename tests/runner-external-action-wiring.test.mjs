@@ -67,6 +67,7 @@ test("every user-triggered outbound message request registers intent before body
   assert.notEqual(registration, -1);
   assert.ok(registration < source.indexOf("const jsonSmall"));
   assert.match(source, /createUserTriggeredIntentMiddleware\([\s\S]*?resolveUserTriggeredIntentThreadId/);
+  assert.match(source, /sendService\.registerDurableUserTriggeredIntent\(threadId\)/);
 
   for (const [path, nextPath] of [
     ["/control/thread/:threadId/send", "/control/thread/:threadId/send-poll"],
@@ -87,6 +88,16 @@ test("every user-triggered outbound message request registers intent before body
   );
   assert.match(profileRoute, /beginUserTriggeredIntentOperation\(res\)/);
   assert.match(profileRoute, /finally\s*\{\s*completeFocusPolicyMutation\(\)/);
+});
+
+test("external action status invokes the poll reconciler for manual poll rows", () => {
+  const start = source.indexOf('app.get("/data/external-action-status/:clientId"');
+  const end = source.indexOf('app.get("/data/people"', start + 1);
+  assert.notEqual(start, -1);
+  assert.notEqual(end, -1);
+  const block = source.slice(start, end);
+  assert.match(block, /sendRequest\.source === "manual_poll"/);
+  assert.match(block, /pollSendService\.reconcileSentProjections\(\)/);
 });
 
 test("durable external actions reconcile local projections during runner startup", () => {

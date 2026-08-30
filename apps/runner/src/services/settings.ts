@@ -184,7 +184,7 @@ function asFocusSettings(value: unknown): FocusSettings {
   const raw = value && typeof value === "object" ? (value as Record<string, unknown>) : {};
   return {
     reasonLabel: asBoolean(raw.reasonLabel, defaultFocusSettings.reasonLabel),
-    oneNotePerPerson: asBoolean(raw.oneNotePerPerson, defaultFocusSettings.oneNotePerPerson),
+    oneNotePerPerson: true,
     audience: asFocusAudience(raw.audience)
   };
 }

@@ -320,6 +320,7 @@ export function createSendService(deps: SendServiceDeps) {
   const prisma = deps.prisma ?? defaultPrisma;
   const userTriggeredIntentCounts = new Map<string, number>();
   const userTriggeredIntentEpochs = new Map<string, number>();
+  const durableUserIntentVersionMutex = createKeyedMutex();
   let focusPolicyMutationIntentCount = 0;
   let focusPolicyMutationIntentEpoch = 0;
   const focusAcknowledgementEnqueueMutex = createKeyedMutex();
@@ -349,6 +350,27 @@ export function createSendService(deps: SendServiceDeps) {
         userTriggeredIntentCounts.delete(threadId);
       }
     };
+  }
+
+  function registerDurableUserTriggeredIntent(threadId: string): {
+    release: () => void;
+    ready: Promise<number | undefined>;
+  } {
+    const release = registerUserTriggeredIntent(threadId);
+    const ready = durableUserIntentVersionMutex.runExclusive(threadId, async () => {
+      const updated = await prisma.thread.updateMany({
+        where: { id: threadId },
+        data: { userIntentVersion: { increment: 1 } }
+      });
+      if (updated.count !== 1) return undefined;
+      const thread = await prisma.thread.findUnique({
+        where: { id: threadId },
+        select: { userIntentVersion: true }
+      });
+      if (!thread) return undefined;
+      return thread.userIntentVersion;
+    });
+    return { release, ready };
   }
 
   function registerFocusPolicyMutationIntent(): () => void {
@@ -400,7 +422,7 @@ export function createSendService(deps: SendServiceDeps) {
       receipt.platformMessageKey ??
       stableHash(`${thread.id}|${receipt.sentAt}|OUT|${sendRequest.requestText}`);
 
-    await prisma.message.upsert({
+    const projectedMessage = await prisma.message.upsert({
       where: {
         threadId_platformMessageKey: {
           threadId: thread.id,
@@ -420,7 +442,8 @@ export function createSendService(deps: SendServiceDeps) {
         attachmentsJson,
         rawJson,
         replyToMessageId: sendRequest.replyToMessageId ?? null
-      }
+      },
+      select: { text: true }
     });
 
     const lastOutboundAt =
@@ -448,7 +471,7 @@ export function createSendService(deps: SendServiceDeps) {
               lastMessageAt: sentAt,
               unreadCount: 0,
               lastMessageDirection: "OUT" as const,
-              lastMessageText: sendRequest.requestText
+              lastMessageText: projectedMessage.text
             }
           : {})
       }
@@ -538,6 +561,8 @@ export function createSendService(deps: SendServiceDeps) {
     attachments?: SendAttachment[];
     source?: SendSource;
     focusWindowId?: string;
+    focusIntentVersion?: number;
+    retryFailedFocusAcknowledgement?: boolean;
     /**
      * App-level threading: when set, the resulting Message row links back
      * to the parent (a Message.id cuid in the same thread). The send still
@@ -555,6 +580,7 @@ export function createSendService(deps: SendServiceDeps) {
     const source = input.source ?? "manual";
 
     const enqueue = async (): Promise<EnqueueSendResult> => {
+      let focusIntentVersion: number | undefined;
       const existing = await prisma.sendRequest.findUnique({
         where: { clientSendId: input.clientSendId }
       });
@@ -584,6 +610,14 @@ export function createSendService(deps: SendServiceDeps) {
             "Focus acknowledgement identity does not match this window and person"
           );
         }
+        focusIntentVersion =
+          source === "focus_ack" ? input.focusIntentVersion : thread.userIntentVersion;
+        if (!Number.isInteger(focusIntentVersion) || focusIntentVersion! < 0) {
+          throw new SendPolicyError(
+            "focus_ack_intent_baseline_required",
+            "Focus acknowledgement safety state is unavailable"
+          );
+        }
 
         const deliveryIds = focusAcknowledgementClientSendIds(
           input.focusWindowId,
@@ -593,6 +627,15 @@ export function createSendService(deps: SendServiceDeps) {
           where: { clientSendId: { in: deliveryIds } },
           orderBy: [{ createdAt: "asc" }, { id: "asc" }]
         });
+        if (
+          winner &&
+          winner.clientSendId !== input.clientSendId &&
+          source === "focus_ack" &&
+          winner.source === "focus_auto_ack" &&
+          winner.status === "CANCELLED"
+        ) {
+          winner = existing;
+        }
         if (winner && winner.clientSendId !== input.clientSendId) {
           if (
             source === "focus_ack" &&
@@ -609,7 +652,7 @@ export function createSendService(deps: SendServiceDeps) {
               },
               data: { status: "CANCELLED" }
             });
-            if (cancelled.count === 1) winner = null;
+            if (cancelled.count === 1) winner = existing;
           } else if (
             source === "focus_ack" &&
             winner.source === "focus_auto_ack" &&
@@ -619,7 +662,7 @@ export function createSendService(deps: SendServiceDeps) {
               winner.errorJson ?? ""
             )
           ) {
-            winner = null;
+            winner = existing;
           }
         }
         if (winner && winner.clientSendId !== input.clientSendId) {
@@ -667,15 +710,27 @@ export function createSendService(deps: SendServiceDeps) {
             "This focus acknowledgement is no longer eligible"
           );
         }
-        focusAcknowledgementDispatchBaselines.set(input.clientSendId, {
-          threadIntentEpoch: userTriggeredIntentEpochs.get(thread.id) ?? 0,
-          focusPolicyIntentEpoch: focusPolicyMutationIntentEpoch,
-          selfIntentAllowance:
-            source === "focus_ack" &&
-            (userTriggeredIntentCounts.get(thread.id) ?? 0) > 0
-              ? 1
-              : 0
-        });
+        if (existing && source === "focus_ack" && existing.status === "PENDING") {
+          const refreshed = await prisma.sendRequest.updateMany({
+            where: {
+              id: existing.id,
+              status: "PENDING",
+              receiptJson: null
+            },
+            data: { focusIntentVersion }
+          });
+          if (refreshed.count !== 1) {
+            throw new SendPolicyError(
+              "focus_ack_replay_state_changed",
+              "The focus acknowledgement changed while it was being replayed"
+            );
+          }
+          focusAcknowledgementDispatchBaselines.set(input.clientSendId, {
+            threadIntentEpoch: userTriggeredIntentEpochs.get(thread.id) ?? 0,
+            focusPolicyIntentEpoch: focusPolicyMutationIntentEpoch,
+            selfIntentAllowance: 1
+          });
+        }
       }
 
       if (existing) {
@@ -689,6 +744,40 @@ export function createSendService(deps: SendServiceDeps) {
           };
         }
         if (existing.status === "FAILED") {
+          if (
+            source === "focus_ack" &&
+            input.retryFailedFocusAcknowledgement &&
+            existing.receiptJson === null
+          ) {
+            const reset = await prisma.sendRequest.updateMany({
+              where: {
+                id: existing.id,
+                status: "FAILED",
+                receiptJson: null
+              },
+              data: {
+                status: "PENDING",
+                errorJson: null,
+                focusIntentVersion
+              }
+            });
+            if (reset.count !== 1) {
+              throw new SendPolicyError(
+                "focus_ack_retry_state_changed",
+                "The focus acknowledgement changed while it was being retried"
+              );
+            }
+            focusAcknowledgementDispatchBaselines.set(input.clientSendId, {
+              threadIntentEpoch: userTriggeredIntentEpochs.get(thread.id) ?? 0,
+              focusPolicyIntentEpoch: focusPolicyMutationIntentEpoch,
+              selfIntentAllowance: 1
+            });
+            return {
+              clientSendId: input.clientSendId,
+              status: "PENDING",
+              replayed: true
+            };
+          }
           return {
             clientSendId: input.clientSendId,
             status: "FAILED",
@@ -716,6 +805,7 @@ export function createSendService(deps: SendServiceDeps) {
             requestText: input.text,
             status: "PENDING",
             source,
+            focusIntentVersion,
             attachmentsJson: normalizedAttachmentsJson(input.attachments),
             replyToMessageId: input.replyToMessageId ?? null
           }
@@ -752,6 +842,18 @@ export function createSendService(deps: SendServiceDeps) {
           );
         }
         return { clientSendId: input.clientSendId, status: "PENDING", replayed: true };
+      }
+
+      if (source === "focus_ack" || source === "focus_auto_ack") {
+        focusAcknowledgementDispatchBaselines.set(input.clientSendId, {
+          threadIntentEpoch: userTriggeredIntentEpochs.get(thread.id) ?? 0,
+          focusPolicyIntentEpoch: focusPolicyMutationIntentEpoch,
+          selfIntentAllowance:
+            source === "focus_ack" &&
+            (userTriggeredIntentCounts.get(thread.id) ?? 0) > 0
+              ? 1
+              : 0
+        });
       }
 
       return { clientSendId: input.clientSendId, status: "PENDING", replayed: false };
@@ -1017,6 +1119,7 @@ export function createSendService(deps: SendServiceDeps) {
                     platform: true,
                     category: true,
                     isGroup: true,
+                    userIntentVersion: true,
                     lastInboundAt: true,
                     lastOutboundAt: true,
                     person: {
@@ -1071,6 +1174,9 @@ export function createSendService(deps: SendServiceDeps) {
               if (
                 supersedingUserRequest ||
                 unresolvedSentProjection ||
+                !Number.isInteger(sendRequest.focusIntentVersion) ||
+                authoritativeThread?.userIntentVersion !==
+                  sendRequest.focusIntentVersion ||
                 (userTriggeredIntentCounts.get(thread.id) ?? 0) >
                   selfIntentAllowance ||
                 (userTriggeredIntentEpochs.get(thread.id) ?? 0) !== expectedThreadIntentEpoch ||
@@ -1197,9 +1303,11 @@ export function createSendService(deps: SendServiceDeps) {
       // Map the (often opaque) error to a coarse kind the dashboard can
       // turn into a one-tap recovery action ("Open browser to sign in",
       // "Run selector tests", "Reset session", "Retry now").
-      const errorKind = dispatchStarted
-        ? "DELIVERY_UNCERTAIN"
-        : classifySendFailureKind({
+      const errorKind = error instanceof SendPolicyError
+        ? "POLICY_BLOCKED"
+        : dispatchStarted
+          ? "DELIVERY_UNCERTAIN"
+          : classifySendFailureKind({
             message: errorMessage,
             adapterKind: adapterError?.kind
           });
@@ -1580,6 +1688,7 @@ export function createSendService(deps: SendServiceDeps) {
     reconcileSentProjections,
     withUserTriggeredIntent,
     registerUserTriggeredIntent,
+    registerDurableUserTriggeredIntent,
     registerFocusPolicyMutationIntent
   };
 }

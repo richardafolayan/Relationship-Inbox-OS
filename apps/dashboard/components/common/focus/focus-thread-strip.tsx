@@ -32,7 +32,7 @@ function focusRowFromThread(thread: ThreadResponse): FocusRow {
     personBirthday: thread.personBirthday,
     isGroup: thread.isGroup,
     platform: thread.platform,
-    category: null,
+    category: thread.category ?? null,
     needsReply: thread.needsReply,
     lastInboundAt: lastIn,
     lastOutboundAt: lastOut

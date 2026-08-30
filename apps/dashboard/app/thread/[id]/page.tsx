@@ -230,7 +230,7 @@ type PendingSend = {
   failed?: boolean;
   uncertain?: boolean;
   errorMessage?: string;
-  errorKind?: "AUTH_REQUIRED" | "SELECTOR_FAIL" | "PROFILE_LOCKED" | "TRANSIENT" | "DELIVERY_UNCERTAIN" | "UNKNOWN";
+  errorKind?: "AUTH_REQUIRED" | "SELECTOR_FAIL" | "PROFILE_LOCKED" | "TRANSIENT" | "POLICY_BLOCKED" | "DELIVERY_UNCERTAIN" | "UNKNOWN";
 };
 
 // Picks the topmost visible message bubble to anchor scroll preservation
@@ -1585,7 +1585,7 @@ export default function ThreadPage() {
         threadId?: string;
         clientSendId?: string;
         errorMessage?: string;
-        errorKind?: "AUTH_REQUIRED" | "SELECTOR_FAIL" | "PROFILE_LOCKED" | "TRANSIENT" | "DELIVERY_UNCERTAIN" | "UNKNOWN";
+        errorKind?: "AUTH_REQUIRED" | "SELECTOR_FAIL" | "PROFILE_LOCKED" | "TRANSIENT" | "POLICY_BLOCKED" | "DELIVERY_UNCERTAIN" | "UNKNOWN";
         stage?: string;
         platform?: "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE" | "WHATSAPP" | "GOOGLE_MESSAGES";
         syncTiming?: {
@@ -2096,7 +2096,9 @@ export default function ThreadPage() {
   const sendWhatsAppPoll = useCallback(async () => {
     if (!thread || whatsAppPollSending) return;
     const question = whatsAppPollQuestion.trim();
-    const options = whatsAppPollOptions.map((option) => option.trim()).filter(Boolean);
+    const options = [
+      ...new Set(whatsAppPollOptions.map((option) => option.trim()).filter(Boolean))
+    ];
     if (!question) {
       setError("Add a poll question.");
       return;
@@ -5378,6 +5380,8 @@ export default function ThreadPage() {
                             ? "selector failed"
                             : pending.errorKind === "PROFILE_LOCKED"
                               ? "profile locked"
+                              : pending.errorKind === "POLICY_BLOCKED"
+                                ? "no longer eligible"
                               : "failed"}
                       </span>
                       {pending.uncertain ? (
@@ -5401,7 +5405,7 @@ export default function ThreadPage() {
                           </button>
                         ) : null;
                       })()}
-                      {!pending.uncertain ? (
+                      {!pending.uncertain && pending.errorKind !== "POLICY_BLOCKED" ? (
                         <button
                           type="button"
                           onClick={() => retryPendingSend(pending.clientSendId)}

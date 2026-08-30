@@ -78,7 +78,15 @@ function matchesWhere(row, where) {
 }
 
 function makeHarness(initialRows, opts = {}) {
-  const rows = initialRows.map((r) => ({ ...r }));
+  let userIntentVersion = opts.userIntentVersion ?? 0;
+  const rows = initialRows.map((r) => ({
+    focusIntentVersion:
+      r.focusIntentVersion ??
+      (r.source === "focus_ack" || r.source === "focus_auto_ack"
+        ? userIntentVersion
+        : null),
+    ...r
+  }));
   const sends = []; // every physical adapter.sendMessage call
   const sentStubs = [];
   const messages = []; // every Message upsert (one per actual persisted send)
@@ -179,6 +187,7 @@ function makeHarness(initialRows, opts = {}) {
           lastInboundAt:
             opts.latestInboundAt ?? new Date("2026-08-24T12:00:00.000Z"),
           lastOutboundAt: opts.latestOutboundAt ?? null,
+          userIntentVersion,
           person: {
             id: opts.personId ?? "p1",
             displayName: "Test Person",
@@ -187,10 +196,17 @@ function makeHarness(initialRows, opts = {}) {
           }
         };
       },
-      async update() {
+      async update({ data }) {
         if (opts.threadPersistError) throw new Error(opts.threadPersistError);
-        opts.onThreadUpdate?.();
+        opts.onThreadUpdate?.(data);
         return {};
+      },
+      async updateMany({ where, data }) {
+        if (where.id !== "t1") return { count: 0 };
+        if (data.userIntentVersion?.increment) {
+          userIntentVersion += data.userIntentVersion.increment;
+        }
+        return { count: 1 };
       }
     },
     message: {
@@ -207,7 +223,7 @@ function makeHarness(initialRows, opts = {}) {
           return { ...existing };
         }
         messages.push(create);
-        return {};
+        return { ...create };
       }
     }
   };
@@ -630,7 +646,8 @@ test("manual focus acknowledgements require deterministic window and person iden
       text: "I am focusing until 2:00pm.",
       clientSendId: "00000000-0000-4000-8000-000000000000",
       source: "focus_ack",
-      focusWindowId: "focus-1"
+      focusWindowId: "focus-1",
+      focusIntentVersion: 0
     }),
     /identity does not match/
   );
@@ -646,7 +663,8 @@ test("manual focus acknowledgements reject a stale focus window", async () => {
       text: "I am focusing until 2:00pm.",
       clientSendId: focusManualAckClientSendId("focus-stale", "p1"),
       source: "focus_ack",
-      focusWindowId: "focus-stale"
+      focusWindowId: "focus-stale",
+      focusIntentVersion: 0
     }),
     /no longer eligible/
   );
@@ -670,11 +688,82 @@ test("manual focus acknowledgement supersedes an unclaimed automatic row", async
     text: "I am focusing until 2:00pm.",
     clientSendId: manualId,
     source: "focus_ack",
-    focusWindowId: "focus-1"
+    focusWindowId: "focus-1",
+    focusIntentVersion: 0
   });
 
   assert.equal(h.rows.find((row) => row.clientSendId === automaticId)?.status, "CANCELLED");
   assert.equal(h.rows.find((row) => row.clientSendId === manualId)?.status, "PENDING");
+  assert.equal(h.rows.filter((row) => row.status === "PENDING").length, 1);
+});
+
+test("a cancelled automatic row cannot shadow the manual acknowledgement on replay", async () => {
+  const h = makeHarness([]);
+  const automaticId = focusAutoAckClientSendId("focus-1", "p1");
+  const manualId = focusManualAckClientSendId("focus-1", "p1");
+  const automatic = {
+    threadId: "t1",
+    text: "I am focusing until 2:00pm.",
+    clientSendId: automaticId,
+    source: "focus_auto_ack",
+    focusWindowId: "focus-1"
+  };
+  const manual = {
+    ...automatic,
+    clientSendId: manualId,
+    source: "focus_ack",
+    focusIntentVersion: 0
+  };
+  await h.svc.enqueueSend(automatic);
+  await h.svc.enqueueSend(manual);
+
+  const pendingReplay = await h.svc.enqueueSend(manual);
+  assert.equal(pendingReplay.clientSendId, manualId);
+  assert.equal(pendingReplay.status, "PENDING");
+  const manualRow = h.rows.find((row) => row.clientSendId === manualId);
+  manualRow.status = "SENT";
+  manualRow.receiptJson = JSON.stringify({
+    sentAt: "2026-08-24T12:01:00.000Z",
+    verifiedBy: "best_effort"
+  });
+
+  const sentReplay = await h.svc.enqueueSend(manual);
+  assert.equal(sentReplay.clientSendId, manualId);
+  assert.equal(sentReplay.status, "SENT");
+});
+
+test("focus retry validates and re-arms the failed manual row without a pending leak", async () => {
+  const automaticId = focusAutoAckClientSendId("focus-1", "p1");
+  const manualId = focusManualAckClientSendId("focus-1", "p1");
+  const h = makeHarness([
+    focusAutoAckRow({
+      id: "auto",
+      clientSendId: automaticId,
+      status: "CANCELLED",
+      createdAt: new Date("2026-08-24T11:59:00.000Z")
+    }),
+    pendingRow({
+      id: "manual",
+      clientSendId: manualId,
+      source: "focus_ack",
+      status: "FAILED",
+      errorJson: JSON.stringify({ errorKind: "TRANSIENT", message: "timeout" }),
+      createdAt: new Date("2026-08-24T12:00:00.000Z")
+    })
+  ]);
+
+  const retried = await h.svc.enqueueSend({
+    threadId: "t1",
+    text: "hello there",
+    clientSendId: manualId,
+    source: "focus_ack",
+    focusWindowId: "focus-1",
+    focusIntentVersion: 0,
+    retryFailedFocusAcknowledgement: true
+  });
+
+  assert.equal(retried.status, "PENDING");
+  assert.equal(h.rows.find((row) => row.id === "manual").status, "PENDING");
   assert.equal(h.rows.filter((row) => row.status === "PENDING").length, 1);
 });
 
@@ -687,7 +776,8 @@ test("a manual focus acknowledgement does not supersede itself while its request
     text: "I am focusing until 2:00pm.",
     clientSendId,
     source: "focus_ack",
-    focusWindowId: "focus-1"
+    focusWindowId: "focus-1",
+    focusIntentVersion: 0
   });
 
   await h.svc.processSendRequest(h.rows[0].id);
@@ -715,6 +805,78 @@ test("an intent completed after auto-ack enqueue still blocks later dispatch", a
   assert.equal(h.sends.length, 0);
   assert.equal(h.rows[0].status, "FAILED");
   assert.equal(JSON.parse(h.rows[0].errorJson).reasonCode, "focus_auto_ack_superseded");
+});
+
+test("replaying an existing auto-ack cannot adopt a newer durable intent version", async () => {
+  const h = makeHarness([]);
+  const input = {
+    threadId: "t1",
+    text: "I am focusing until 2:00pm.",
+    clientSendId: focusAutoAckClientSendId("focus-1", "p1"),
+    source: "focus_auto_ack",
+    focusWindowId: "focus-1"
+  };
+  await h.svc.enqueueSend(input);
+  const laterIntent = h.svc.registerDurableUserTriggeredIntent("t1");
+  assert.equal(await laterIntent.ready, 1);
+  laterIntent.release();
+
+  await h.svc.enqueueSend(input);
+  assert.equal(h.rows[0].focusIntentVersion, 0);
+  await h.svc.processSendRequest(h.rows[0].id);
+
+  assert.equal(h.sends.length, 0);
+  assert.equal(h.rows[0].status, "FAILED");
+  assert.equal(JSON.parse(h.rows[0].errorJson).reasonCode, "focus_auto_ack_superseded");
+});
+
+test("a later durable intent supersedes an older focus request regardless of enqueue order", async () => {
+  const h = makeHarness([]);
+  const focusIntent = h.svc.registerDurableUserTriggeredIntent("t1");
+  assert.equal(await focusIntent.ready, 1);
+  const laterIntent = h.svc.registerDurableUserTriggeredIntent("t1");
+  assert.equal(await laterIntent.ready, 2);
+  laterIntent.release();
+
+  const clientSendId = focusManualAckClientSendId("focus-1", "p1");
+  await h.svc.enqueueSend({
+    threadId: "t1",
+    text: "I am focusing until 2:00pm.",
+    clientSendId,
+    source: "focus_ack",
+    focusWindowId: "focus-1",
+    focusIntentVersion: 1
+  });
+  focusIntent.release();
+  await h.svc.processSendRequest(h.rows[0].id);
+
+  assert.equal(h.sends.length, 0);
+  assert.equal(h.rows[0].status, "FAILED");
+  assert.equal(JSON.parse(h.rows[0].errorJson).reasonCode, "focus_ack_superseded");
+});
+
+test("a restarted service rejects a pending focus row with an older durable intent version", async () => {
+  const beforeRestart = makeHarness([]);
+  await beforeRestart.svc.enqueueSend({
+    threadId: "t1",
+    text: "I am focusing until 2:00pm.",
+    clientSendId: focusAutoAckClientSendId("focus-1", "p1"),
+    source: "focus_auto_ack",
+    focusWindowId: "focus-1"
+  });
+  const laterIntent = beforeRestart.svc.registerDurableUserTriggeredIntent("t1");
+  assert.equal(await laterIntent.ready, 1);
+  laterIntent.release();
+
+  const afterRestart = makeHarness(beforeRestart.rows, { userIntentVersion: 1 });
+  await afterRestart.svc.processSendRequest(afterRestart.rows[0].id);
+
+  assert.equal(afterRestart.sends.length, 0);
+  assert.equal(afterRestart.rows[0].status, "FAILED");
+  assert.equal(
+    JSON.parse(afterRestart.rows[0].errorJson).reasonCode,
+    "focus_auto_ack_superseded"
+  );
 });
 
 test("focus-policy intent leases are counted and each release is idempotent", async () => {
@@ -947,12 +1109,17 @@ test("startup send repair preserves a newer edit and reaction projection", async
   messages[0].text = "Edited after send";
   messages[0].rawJson = JSON.stringify({ reactions: [{ emoji: "heart" }] });
   delete options.threadPersistError;
+  let repairedThread;
+  options.onThreadUpdate = (data) => {
+    repairedThread = data;
+  };
 
   assert.equal(await svc.reconcileSentProjections(), 1);
   assert.equal(messages[0].text, "Edited after send");
   assert.deepEqual(JSON.parse(messages[0].rawJson), {
     reactions: [{ emoji: "heart" }]
   });
+  assert.equal(repairedThread.lastMessageText, "Edited after send");
   assert.equal(rows[0].errorJson, null);
 });
 

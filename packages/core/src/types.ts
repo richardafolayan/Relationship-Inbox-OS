@@ -284,7 +284,7 @@ export type RunnerEvent =
       // Coarse classification of the failure so the dashboard can offer
       // a one-tap recovery action without parsing the error message.
       // Mirrors the categories in the README's troubleshooting table.
-      errorKind?: "AUTH_REQUIRED" | "SELECTOR_FAIL" | "PROFILE_LOCKED" | "TRANSIENT" | "DELIVERY_UNCERTAIN" | "UNKNOWN";
+      errorKind?: "AUTH_REQUIRED" | "SELECTOR_FAIL" | "PROFILE_LOCKED" | "TRANSIENT" | "POLICY_BLOCKED" | "DELIVERY_UNCERTAIN" | "UNKNOWN";
       platformResultAt?: string;
     })
   | (RunnerEventBase & {

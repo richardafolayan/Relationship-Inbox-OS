@@ -63,7 +63,7 @@ export interface InboxRow {
   identityWarning?: "unresolved_id" | null;
   messageCount?: number;
   /** "outreach" | "genuine" | null (Phase 3 categorization). */
-  category?: string | null;
+  category?: "outreach" | "genuine" | null;
   /**
    * AI one-line context, what would deepen this conversation or what
    * the contact is waiting on. Rendered as a proactive nudge on Today +
@@ -585,6 +585,7 @@ export interface ThreadResponse {
   /** Birth year if known; lets the rail render "turns 30" when surfacing the birthday pill. */
   personBirthYear?: number | null;
   platform: PlatformName;
+  category?: "outreach" | "genuine" | null;
   /**
    * Thread ids in this Person's sibling cohort. For an iMessage contact split
    * across handle-specific chats (phone + Apple-ID email) this lists every

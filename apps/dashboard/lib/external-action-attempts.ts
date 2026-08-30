@@ -110,6 +110,7 @@ export function createExternalActionAttemptStore(
     version: 1;
     intent: TIntent;
     value: TValue;
+    completed?: boolean;
   } | undefined {
     try {
       const persisted = storage?.getItem(key);
@@ -125,7 +126,12 @@ export function createExternalActionAttemptStore(
       ) {
         throw new ExternalActionAttemptStorageError();
       }
-      return parsed as { version: 1; intent: TIntent; value: TValue };
+      return parsed as {
+        version: 1;
+        intent: TIntent;
+        value: TValue;
+        completed?: boolean;
+      };
     } catch (error) {
       if (error instanceof ExternalActionAttemptStorageError) throw error;
       throw new ExternalActionAttemptStorageError();
@@ -201,7 +207,7 @@ export function createExternalActionAttemptStore(
       const key = valueStorageKey(scope);
       const record = readRecord<unknown, TValue>(key);
       if (!record || !matches(record.value)) return false;
-      removeRecord(key);
+      writeRecord(key, { ...record, completed: true });
       return true;
     });
   }

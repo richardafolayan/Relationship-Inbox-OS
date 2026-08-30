@@ -3,6 +3,7 @@ import type { NextFunction, Request, Response } from "express";
 type RegisteredUserTriggeredIntent = {
   operationStarted: boolean;
   release: () => void;
+  intentVersion?: number;
 };
 
 const registeredIntents = new WeakMap<Response, RegisteredUserTriggeredIntent>();
@@ -40,13 +41,22 @@ export function beginUserTriggeredIntentOperation(res: Response): () => void {
   return intent.release;
 }
 
+export function userTriggeredIntentVersion(res: Response): number | undefined {
+  return registeredIntents.get(res)?.intentVersion;
+}
+
 export function abandonUnstartedUserTriggeredIntent(res: Response): void {
   const intent = registeredIntents.get(res);
   if (intent && !intent.operationStarted) intent.release();
 }
 
 export function createUserTriggeredIntentMiddleware(
-  register: (threadId: string) => () => void,
+  register: (threadId: string) =>
+    | (() => void)
+    | {
+        release: () => void;
+        ready: Promise<number | undefined>;
+      },
   resolveThreadId: (req: Request) => string | undefined = (req) =>
     typeof req.params.threadId === "string" ? req.params.threadId : undefined
 ) {
@@ -56,7 +66,9 @@ export function createUserTriggeredIntentMiddleware(
       next();
       return;
     }
-    const release = register(threadId);
+    const registration = register(threadId);
+    const release =
+      typeof registration === "function" ? registration : registration.release;
     let released = false;
     const releaseOnce = () => {
       if (released) return;
@@ -64,13 +76,32 @@ export function createUserTriggeredIntentMiddleware(
       registeredIntents.delete(res);
       release();
     };
-    const intent = { operationStarted: false, release: releaseOnce };
+    const intent: RegisteredUserTriggeredIntent = {
+      operationStarted: false,
+      release: releaseOnce
+    };
     registeredIntents.set(res, intent);
-    try {
-      next();
-    } catch (error) {
-      releaseOnce();
-      throw error;
+    const continueRequest = () => {
+      try {
+        next();
+      } catch (error) {
+        releaseOnce();
+        throw error;
+      }
+    };
+    if (typeof registration === "function") {
+      continueRequest();
+      return;
     }
+    void registration.ready.then(
+      (intentVersion) => {
+        intent.intentVersion = intentVersion;
+        continueRequest();
+      },
+      (error) => {
+        releaseOnce();
+        next(error);
+      }
+    );
   };
 }

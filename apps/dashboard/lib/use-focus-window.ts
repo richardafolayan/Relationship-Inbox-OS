@@ -139,7 +139,10 @@ export async function sendAcknowledgement(
     () => ({ clientSendId: expectedClientSendId }),
     canReplaceFocusAcknowledgementAttempt
   );
-  const queued = await apiPost<{ clientSendId: string }>(`/runner/control/thread/${threadId}/send`, {
+  const queued = await apiPost<{
+    clientSendId: string;
+    status: "PENDING" | "SENT" | "FAILED";
+  }>(`/runner/control/thread/${threadId}/send`, {
     text,
     clientSendId,
     source: "focus_ack",
@@ -157,7 +160,11 @@ export async function sendAcknowledgement(
   try {
     await waitForFocusAcknowledgementDelivery(clientSendId);
   } catch (error) {
-    if (!(error instanceof FocusAcknowledgementDeliveryError) || !error.status.retrySafe) {
+    if (
+      queued.status !== "FAILED" ||
+      !(error instanceof FocusAcknowledgementDeliveryError) ||
+      !error.status.retrySafe
+    ) {
       throw error;
     }
     const retry = await apiPost<{ clientSendId: string }>(

@@ -120,7 +120,8 @@ import {
   beginUserTriggeredIntentOperation,
   createUserTriggeredIntentMiddleware,
   resolveFocusPolicyMutationIntentKey,
-  resolveUserTriggeredIntentThreadId
+  resolveUserTriggeredIntentThreadId,
+  userTriggeredIntentVersion
 } from "./services/user-triggered-intent-middleware";
 import { createSendQueue, QUEUED_MESSAGE_SOURCES } from "./services/send-queue";
 import { createPlatformSessionResetCoordinator } from "./services/platform-session-reset-coordinator";
@@ -242,7 +243,11 @@ import {
 import type { OverdueDigestRowInput } from "@inbox-os/core";
 
 const app = express();
-let registerUserTriggeredIntentForRequest = (_threadId: string): (() => void) => () => {};
+let registerUserTriggeredIntentForRequest = (
+  _threadId: string
+):
+  | (() => void)
+  | { release: () => void; ready: Promise<number | undefined> } => () => {};
 let registerFocusPolicyMutationForRequest = (): (() => void) => () => {};
 const registerUserTriggeredSendIntent = createUserTriggeredIntentMiddleware(
   (threadId) => registerUserTriggeredIntentForRequest(threadId),
@@ -1300,7 +1305,7 @@ const sendService = createSendService({
   withExternalActionLock
 });
 registerUserTriggeredIntentForRequest = (threadId) =>
-  sendService.registerUserTriggeredIntent(threadId);
+  sendService.registerDurableUserTriggeredIntent(threadId);
 registerFocusPolicyMutationForRequest = () =>
   sendService.registerFocusPolicyMutationIntent();
 const pollSendService = createPollSendService({
@@ -4075,6 +4080,7 @@ app.post("/control/platform/test-selectors", asyncRoute(async (req, res) => {
 // surface, never inline here.
 app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req, res) => {
   const completeUserTriggeredIntent = beginUserTriggeredIntentOperation(res);
+  const requestIntentVersion = userTriggeredIntentVersion(res);
   try {
   const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
   if (await checkPresenterGuard(res, settingsStore, { threadId, action: "send", kind: "thread-mutation" })) return;
@@ -4193,6 +4199,8 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
       attachments: stagedAttachments,
       source: payload.source ?? "manual",
       focusWindowId: payload.focusWindowId,
+      focusIntentVersion:
+        payload.source === "focus_ack" ? requestIntentVersion : undefined,
       replyToMessageId: payload.replyToMessageId
     });
     if (queueResult.replayed) {
@@ -4374,6 +4382,7 @@ app.post("/control/thread/:threadId/cancel-send", asyncRoute(async (req, res) =>
 
 app.post("/control/thread/:threadId/retry-send", asyncRoute(async (req, res) => {
   const completeUserTriggeredIntent = beginUserTriggeredIntentOperation(res);
+  const requestIntentVersion = userTriggeredIntentVersion(res);
   try {
   const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
   if (await checkPresenterGuard(res, settingsStore, { threadId, action: "retry a send", kind: "thread-mutation" })) return;
@@ -4441,28 +4450,14 @@ app.post("/control/thread/:threadId/retry-send", asyncRoute(async (req, res) => 
       res.status(409).json({ error: "focus_window_changed" });
       return;
     }
-    const reset = await prisma.sendRequest.updateMany({
-      where: {
-        id: original.id,
-        status: "FAILED",
-        receiptJson: null
-      },
-      data: {
-        status: "PENDING",
-        receiptJson: null,
-        errorJson: null
-      }
-    });
-    if (reset.count !== 1) {
-      res.status(409).json({ error: "focus_ack_retry_state_changed" });
-      return;
-    }
     const queueResult = await sendQueue.enqueueAndKick({
       threadId,
       text: original.requestText,
       clientSendId: original.clientSendId,
       source: "focus_ack",
       focusWindowId: profile.focusWindow.windowId,
+      focusIntentVersion: requestIntentVersion,
+      retryFailedFocusAcknowledgement: true,
       attachments: retryAttachments,
       replyToMessageId: original.replyToMessageId ?? undefined
     });
@@ -6537,6 +6532,7 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
     isGroup: thread.isGroup,
     groupName: thread.groupName ?? null,
     platform: thread.platform,
+    category: (thread.category as "outreach" | "genuine" | null) ?? null,
     // Sibling cohort for this Person (iMessage phone + email handle rows; a
     // single-element [thread.id] for everything else). The thread page matches
     // SSE THREAD_UPDATED / SUGGESTED_REPLIES_UPDATED / SCAN_THREAD_* events on
@@ -6994,7 +6990,7 @@ app.get("/data/external-action-status/:clientId", asyncRoute(async (req, res) =>
   let [sendRequest, actionRequest] = await Promise.all([
     prisma.sendRequest.findUnique({
       where: { clientSendId: clientId },
-      select: { status: true, errorJson: true }
+      select: { status: true, errorJson: true, source: true }
     }),
     prisma.externalActionRequest.findUnique({
       where: { clientActionId: clientId },
@@ -7003,7 +6999,11 @@ app.get("/data/external-action-status/:clientId", asyncRoute(async (req, res) =>
   ]);
 
   if (sendRequest?.status === "SENT" && needsLocalReconciliation(sendRequest.errorJson)) {
-    await sendService.reconcileSentProjections().catch(() => undefined);
+    if (sendRequest.source === "manual_poll") {
+      await pollSendService.reconcileSentProjections().catch(() => undefined);
+    } else {
+      await sendService.reconcileSentProjections().catch(() => undefined);
+    }
   }
   if (
     actionRequest?.status === "SENT" &&
@@ -7015,7 +7015,7 @@ app.get("/data/external-action-status/:clientId", asyncRoute(async (req, res) =>
     [sendRequest, actionRequest] = await Promise.all([
       prisma.sendRequest.findUnique({
         where: { clientSendId: clientId },
-        select: { status: true, errorJson: true }
+        select: { status: true, errorJson: true, source: true }
       }),
       prisma.externalActionRequest.findUnique({
         where: { clientActionId: clientId },

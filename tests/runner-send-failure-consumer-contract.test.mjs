@@ -103,6 +103,17 @@ test("the server-side retry gate rejects in-doubt and non-failed sends", () => {
     persistedSendRetryEligibility(
       "FAILED",
       JSON.stringify({
+        message: "A newer user action superseded this note",
+        errorKind: "POLICY_BLOCKED",
+        reasonCode: "focus_ack_superseded"
+      })
+    ),
+    { allowed: false, reason: "policy_blocked" }
+  );
+  assert.deepEqual(
+    persistedSendRetryEligibility(
+      "FAILED",
+      JSON.stringify({
         message: "Instagram submitted message not observed",
         errorKind: "DELIVERY_UNCERTAIN"
       })

@@ -63,7 +63,7 @@ export function FocusSettingsSection() {
     }
   };
 
-  const toggle = (key: "reasonLabel" | "oneNotePerPerson") => {
+  const toggle = (key: "reasonLabel") => {
     const next = { ...local, [key]: !local[key] };
     setLocal(next);
     void persistSettings(next);
@@ -123,12 +123,6 @@ export function FocusSettingsSection() {
           desc='Add a short word like "deep work" or "lecture" to your note, so people know it is a real block and not a brush-off. You pick the word each time.'
           on={local.reasonLabel}
           onChange={() => toggle("reasonLabel")}
-        />
-        <ToggleRow
-          name="One note per person, per block"
-          desc="If someone messages twice in the same window, only acknowledge once. No-one gets the same note back to back."
-          on={local.oneNotePerPerson}
-          onChange={() => toggle("oneNotePerPerson")}
         />
       </div>
 

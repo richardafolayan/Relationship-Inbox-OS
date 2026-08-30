@@ -44,7 +44,12 @@ test("enqueue persists auto-ack provenance for the worker safety boundary", asyn
     withPlatformLock: async (_platform, work) => work(),
     prisma: {
       thread: {
-        findUnique: async () => ({ id: "thread-1", personId, platform: "LINKEDIN" })
+        findUnique: async () => ({
+          id: "thread-1",
+          personId,
+          platform: "LINKEDIN",
+          userIntentVersion: 0
+        })
       },
       sendRequest: {
         findUnique: async () => null,
@@ -66,6 +71,7 @@ test("enqueue persists auto-ack provenance for the worker safety boundary", asyn
   });
 
   assert.equal(created.source, "focus_auto_ack");
+  assert.equal(created.focusIntentVersion, 0);
 });
 
 test("enqueue persists user-triggered focus provenance instead of disguising it as manual", async () => {
@@ -79,7 +85,12 @@ test("enqueue persists user-triggered focus provenance instead of disguising it 
     withPlatformLock: async (_platform, work) => work(),
     prisma: {
       thread: {
-        findUnique: async () => ({ id: "thread-1", personId, platform: "LINKEDIN" })
+        findUnique: async () => ({
+          id: "thread-1",
+          personId,
+          platform: "LINKEDIN",
+          userIntentVersion: 0
+        })
       },
       sendRequest: {
         findUnique: async () => null,
@@ -97,10 +108,12 @@ test("enqueue persists user-triggered focus provenance instead of disguising it 
     text: "Saved focus note",
     clientSendId: focusManualAckClientSendId(focusWindowId, personId),
     source: "focus_ack",
-    focusWindowId
+    focusWindowId,
+    focusIntentVersion: 0
   });
 
   assert.equal(created.source, "focus_ack");
+  assert.equal(created.focusIntentVersion, 0);
 });
 
 test("Instagram rejects user-triggered focus provenance at enqueue", async () => {

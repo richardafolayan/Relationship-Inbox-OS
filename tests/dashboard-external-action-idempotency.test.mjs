@@ -60,6 +60,18 @@ test("a pending poll response preserves the form and attempt identity", () => {
   assert.match(source.slice(pendingGuard, completion), /return;/);
 });
 
+test("poll options are deduplicated before validation, identity, and dispatch", () => {
+  const poll = source.slice(
+    source.indexOf("const sendWhatsAppPoll"),
+    source.indexOf("const composerAttachmentsRef", source.indexOf("const sendWhatsAppPoll"))
+  );
+  const dedupe = poll.indexOf("...new Set(");
+  assert.notEqual(dedupe, -1);
+  assert.ok(dedupe < poll.indexOf("if (options.length < 2)"));
+  assert.ok(dedupe < poll.indexOf("const intent ="));
+  assert.match(poll, /question,\s*options,\s*allowMultipleAnswers/);
+});
+
 test("an unresolved client action id survives a complete component remount", async () => {
   const values = new Map();
   const storage = {
@@ -95,8 +107,9 @@ test("an unresolved client action id survives a complete component remount", asy
   const afterCompletion = createExternalActionAttemptStore(storage);
   assert.equal(
     (await afterCompletion.getOrCreateScopedValue(scope, intent, createValue)).clientActionId,
-    "attempt-2"
+    "attempt-1"
   );
+  assert.equal(created, 1);
 });
 
 test("a scoped attempt reuses its id only for the same canonical intent", async () => {
@@ -189,7 +202,8 @@ test("scoped operations serialize allocation and completion across stores", asyn
   const replacement = secondStore.getOrCreateScopedValue(
     scope,
     { text: "second" },
-    () => ({ clientSendId: "attempt-2" })
+    () => ({ clientSendId: "attempt-2" }),
+    async (value) => value.clientSendId === "attempt-1"
   );
   const [completed, replacementValue] = await Promise.all([completion, replacement]);
   assert.equal(completed, true);
@@ -212,6 +226,28 @@ test("two stores allocate one id for the same scope and intent", async () => {
     second.getOrCreateScopedValue("cross-tab", { text: "hello" }, () => ({ clientSendId: `attempt-${++created}` }))
   ]);
   assert.deepEqual(a, b);
+  assert.equal(created, 1);
+});
+
+test("one tab completing an action leaves the shared id for a stale tab", async () => {
+  const values = new Map();
+  const storage = {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, value),
+    removeItem: (key) => values.delete(key)
+  };
+  const first = createExternalActionAttemptStore(storage);
+  const stale = createExternalActionAttemptStore(storage);
+  const scope = "completed-cross-tab-action";
+  const intent = { question: "Lunch?", options: ["Yes", "No"] };
+  let created = 0;
+  const create = () => ({ clientSendId: `attempt-${++created}` });
+
+  const original = await first.getOrCreateScopedValue(scope, intent, create);
+  assert.equal(await first.completeScopedValue(scope, () => true), true);
+  const replay = await stale.getOrCreateScopedValue(scope, intent, create);
+
+  assert.deepEqual(replay, original);
   assert.equal(created, 1);
 });
 

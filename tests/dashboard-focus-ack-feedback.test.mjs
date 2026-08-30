@@ -13,6 +13,10 @@ const files = await Promise.all([
     "utf8"
   )
 })));
+const focusHookSource = await readFile(
+  new URL("../apps/dashboard/lib/use-focus-window.ts", import.meta.url),
+  "utf8"
+);
 
 test("every manual focus-note surface shows delivery failures inline", () => {
   for (const { name, source } of files) {
@@ -23,4 +27,13 @@ test("every manual focus-note surface shows delivery failures inline", () => {
     assert.match(source, /text-risk-overdue/,
       `${name} must visibly distinguish the failure`);
   }
+});
+
+test("a focus note that fails after queueing is not silently retried", () => {
+  const retryGuard = focusHookSource.slice(
+    focusHookSource.indexOf("catch (error)"),
+    focusHookSource.indexOf("const retry =", focusHookSource.indexOf("catch (error)"))
+  );
+  assert.match(retryGuard, /queued\.status !== "FAILED"/);
+  assert.match(retryGuard, /!error\.status\.retrySafe/);
 });

@@ -6,7 +6,8 @@ import {
   beginUserTriggeredIntentOperation,
   createUserTriggeredIntentMiddleware,
   resolveFocusPolicyMutationIntentKey,
-  resolveUserTriggeredIntentThreadId
+  resolveUserTriggeredIntentThreadId,
+  userTriggeredIntentVersion
 } from "../apps/runner/src/services/user-triggered-intent-middleware.ts";
 
 test("the resolver covers every path shape accepted by the Express send routes", () => {
@@ -73,6 +74,31 @@ test("user intent is registered before the next route middleware starts", () => 
   assert.deepEqual(calls, ["register:thread-1", "next"]);
   completeOperation();
   assert.deepEqual(calls, ["register:thread-1", "next", "release:thread-1"]);
+});
+
+test("durable intent registration completes before body parsing continues", async () => {
+  const calls = [];
+  const response = new EventEmitter();
+  let persist;
+  const ready = new Promise((resolve) => {
+    persist = resolve;
+  });
+  const middleware = createUserTriggeredIntentMiddleware(() => ({
+    release: () => calls.push("release"),
+    ready
+  }));
+
+  middleware({ params: { threadId: "thread-1" } }, response, () => {
+    calls.push("next");
+    assert.equal(userTriggeredIntentVersion(response), 7);
+  });
+  assert.deepEqual(calls, []);
+  persist(7);
+  await ready;
+  await Promise.resolve();
+  assert.deepEqual(calls, ["next"]);
+  beginUserTriggeredIntentOperation(response)();
+  assert.deepEqual(calls, ["next", "release"]);
 });
 
 test("a synchronous downstream failure releases the user intent", () => {
