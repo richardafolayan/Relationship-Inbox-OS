@@ -884,6 +884,7 @@ export default function ThreadPage() {
   missingComposerAttachmentsRef.current = missingComposerAttachments;
   const [composerRecoveryBlocked, setComposerRecoveryBlocked] = useState(false);
   const composerRecoveryBlockedRef = useRef(false);
+  const composerRecoveryNoticeRef = useRef<string | null>(null);
   const [dropActive, setDropActive] = useState(false);
   const dragDepthRef = useRef(0);
   const [recording, setRecording] = useState(false);
@@ -1332,6 +1333,44 @@ export default function ThreadPage() {
     promise: Promise<void>;
     revisionId: string;
   }>());
+  useEffect(() => {
+    const purgeStaleAttachments = () => {
+      void (async () => {
+        const ownership = [...attachmentOwnershipRef.current.entries()];
+        for (const [ownerThreadId, value] of ownership) {
+          await composerAttachmentStore.claimOwnership(
+            ownerThreadId,
+            value.attachmentIds,
+            value.ownerId,
+            value.namespace
+          );
+          if (attachmentOwnershipRef.current.get(ownerThreadId)?.ownerId !== value.ownerId) {
+            await composerAttachmentStore.releaseOwnership(
+              ownerThreadId,
+              value.ownerId,
+              value.namespace
+            );
+          }
+        }
+        await composerAttachmentStore.purgeStale();
+      })().catch(() => undefined);
+    };
+    const purgeWhenVisible = () => {
+      if (document.visibilityState === "visible") purgeStaleAttachments();
+    };
+    purgeStaleAttachments();
+    const interval = window.setInterval(
+      purgeStaleAttachments,
+      6 * 60 * 60 * 1000
+    );
+    window.addEventListener("focus", purgeStaleAttachments);
+    document.addEventListener("visibilitychange", purgeWhenVisible);
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener("focus", purgeStaleAttachments);
+      document.removeEventListener("visibilitychange", purgeWhenVisible);
+    };
+  }, [composerAttachmentStore]);
   const composerOwnerThreadIdRef = useRef(threadId);
   const composerSessionPresentRef = useRef(false);
   const composerDraftRevisionRef = useRef<SavedDraftRevision | null>(null);
@@ -1349,11 +1388,32 @@ export default function ThreadPage() {
     source: "empty",
     text: ""
   });
+  const applyComposerRecoveryBlock = useCallback((message: string) => {
+    composerRecoveryNoticeRef.current = message;
+    composerRecoveryBlockedRef.current = true;
+    setComposerRecoveryBlocked(true);
+    setError(message);
+  }, []);
+  const clearComposerRecoveryBlock = useCallback(() => {
+    const recoveryNotice = composerRecoveryNoticeRef.current;
+    composerRecoveryNoticeRef.current = null;
+    composerRecoveryBlockedRef.current = false;
+    setComposerRecoveryBlocked(false);
+    if (recoveryNotice) {
+      setError((current) => (current === recoveryNotice ? null : current));
+    }
+  }, []);
+  const restoringComposerAttachments =
+    composerAttachmentsRestoringRef.current &&
+    composerRestoreRef.current?.threadId === composerOwnerThreadIdRef.current
+      ? composerRestoreRef.current.intent.attachments
+      : null;
   composerIntentRef.current = {
-    attachments: [
-      ...missingComposerAttachments,
-      ...composerAttachments.map(composerAttachmentDescriptor)
-    ],
+    attachments:
+      restoringComposerAttachments ?? [
+        ...missingComposerAttachments,
+        ...composerAttachments.map(composerAttachmentDescriptor)
+      ],
     customScheduleValue,
     ...(recoveredScheduledFor ? { recoveredScheduledFor } : {}),
     replyToMessageId: focusedThreadParentId,
@@ -1447,11 +1507,18 @@ export default function ThreadPage() {
     void ownershipPromise.catch(() => undefined);
     if (routeThreadIdRef.current === ownerThreadId) {
       const blocked = composerSessionDisposition(ownerThreadId, saved) !== "active";
-      composerRecoveryBlockedRef.current = blocked;
-      setComposerRecoveryBlocked(blocked);
+      if (blocked) {
+        composerRecoveryBlockedRef.current = true;
+        setComposerRecoveryBlocked(true);
+      } else if (
+        composerRecoveryBlockedRef.current ||
+        composerRecoveryNoticeRef.current
+      ) {
+        clearComposerRecoveryBlock();
+      }
     }
     return saved;
-  }, [composerAttachmentStore, composerSessionDisposition]);
+  }, [clearComposerRecoveryBlock, composerAttachmentStore, composerSessionDisposition]);
   const awaitComposerAttachmentOwnership = useCallback(async (
     targetThreadId: string,
     session: ThreadComposerSession
@@ -1998,7 +2065,9 @@ export default function ThreadPage() {
       );
     } catch {
       recoveryBlocked = true;
-      setError("Tovi could not safely read the previous send. Reload before trying again.");
+      applyComposerRecoveryBlock(
+        "Tovi could not safely read the previous send. Reload before trying again."
+      );
     }
     if (pendingAttempt?.intent.threadId !== threadId) pendingAttempt = null;
     let completedValues: ThreadComposerSendAttemptValue[] = [];
@@ -2050,7 +2119,9 @@ export default function ThreadPage() {
           );
         } else if (storedSession.recoveryClientSendId) {
           recoveryBlocked = true;
-          setError("Tovi can no longer verify this recovered reply. Check the conversation before trying again.");
+          applyComposerRecoveryBlock(
+            "Tovi can no longer verify this recovered reply. Edit it before trying again."
+          );
         }
       }
       completedAttempt = completedValues.find(
@@ -2068,11 +2139,15 @@ export default function ThreadPage() {
         ) === "blocked"
       ) {
         recoveryBlocked = true;
-        setError("Tovi can no longer verify this recovered reply. Check the conversation before trying again.");
+        applyComposerRecoveryBlock(
+          "Tovi can no longer verify this recovered reply. Edit it before trying again."
+        );
       }
     } catch {
       recoveryBlocked = true;
-      setError("Tovi could not safely read the previous send. Reload before trying again.");
+      applyComposerRecoveryBlock(
+        "Tovi could not safely read the previous send. Reload before trying again."
+      );
     }
     const sessionHiddenByCompletedSend = Boolean(storedSession && completedAttempt);
     if (storedSession && completedAttempt?.sessionRevisionId) {
@@ -2120,8 +2195,7 @@ export default function ThreadPage() {
     );
     composerRestoreRef.current = { intent: restoredIntent, threadId };
     composerIntentRef.current = restoredIntent;
-    composerRecoveryBlockedRef.current = recoveryBlocked;
-    setComposerRecoveryBlocked(recoveryBlocked);
+    if (!recoveryBlocked) clearComposerRecoveryBlock();
 
     setComposer(restoredIntent.text);
     setComposerSource(restoredIntent.source);
@@ -2241,6 +2315,8 @@ export default function ThreadPage() {
     }
   }, [
     composerAttachmentStore,
+    applyComposerRecoveryBlock,
+    clearComposerRecoveryBlock,
     externalActionAttempts,
     persistComposerSession,
     releaseComposerAttachmentOwnership,
@@ -2748,10 +2824,8 @@ export default function ThreadPage() {
     message: string
   ) => {
     if (routeThreadIdRef.current !== targetThreadId) return;
-    composerRecoveryBlockedRef.current = true;
-    setComposerRecoveryBlocked(true);
-    setError(message);
-  }, []);
+    applyComposerRecoveryBlock(message);
+  }, [applyComposerRecoveryBlock]);
 
   const suppressComposerSession = useCallback((
     targetThreadId: string,
@@ -2815,8 +2889,7 @@ export default function ThreadPage() {
       composerRestoreRef.current = null;
       composerAttachmentsRestoringRef.current = false;
       setComposerAttachmentsRestoring(false);
-      composerRecoveryBlockedRef.current = false;
-      setComposerRecoveryBlocked(false);
+      clearComposerRecoveryBlock();
     }
     if (consumed) {
       const attachmentIds = session.attachments.map((attachment) => attachment.id);
@@ -2829,6 +2902,7 @@ export default function ThreadPage() {
     if (routeThreadIdRef.current === targetThreadId) setError(message);
   }, [
     awaitComposerAttachmentOwnership,
+    clearComposerRecoveryBlock,
     composerAttachmentStore,
     persistComposerSession,
     releaseComposerAttachmentOwnership
@@ -2872,14 +2946,13 @@ export default function ThreadPage() {
       if (!saved) return false;
       composerSessionPresentRef.current = true;
       if (routeThreadIdRef.current === targetThreadId) {
-        composerRecoveryBlockedRef.current = false;
-        setComposerRecoveryBlocked(false);
+        clearComposerRecoveryBlock();
       }
       return true;
     } catch {
       return false;
     }
-  }, [externalActionAttempts, persistComposerSession]);
+  }, [clearComposerRecoveryBlock, externalActionAttempts, persistComposerSession]);
 
   useEffect(() => {
     const completedKey = externalActionCompletedStorageKey(
@@ -2888,14 +2961,12 @@ export default function ThreadPage() {
     const reconcileCompletedSession = () => {
       const storedSession = readThreadComposerSession(threadId);
       if (!storedSession) {
-        composerRecoveryBlockedRef.current = false;
-        setComposerRecoveryBlocked(false);
+        clearComposerRecoveryBlock();
         return;
       }
       const disposition = composerSessionDisposition(threadId, storedSession);
       if (disposition === "active") {
-        composerRecoveryBlockedRef.current = false;
-        setComposerRecoveryBlocked(false);
+        clearComposerRecoveryBlock();
         return;
       }
       if (disposition === "sent") {
@@ -2912,7 +2983,7 @@ export default function ThreadPage() {
       ) return;
       blockComposerSession(
         threadId,
-        "Tovi cannot verify this recovered reply. Your content is preserved, but sending is blocked until you review or edit it."
+        "Tovi cannot verify this recovered reply. Your content is preserved, but sending is blocked until you edit it."
       );
     };
     const onStorage = (event: StorageEvent) => {
@@ -2923,6 +2994,7 @@ export default function ThreadPage() {
     return () => window.removeEventListener("storage", onStorage);
   }, [
     blockComposerSession,
+    clearComposerRecoveryBlock,
     composerSessionDisposition,
     restoreSupersededComposerSession,
     suppressComposerSession,
@@ -3589,7 +3661,9 @@ export default function ThreadPage() {
       return;
     }
     if (composerRecoveryBlockedRef.current) {
-      setError("Tovi cannot verify this recovered reply yet. Review or edit it before sending.");
+      applyComposerRecoveryBlock(
+        "Tovi cannot verify this recovered reply yet. Edit it before sending."
+      );
       return;
     }
     if (missingComposerAttachmentsRef.current.length > 0) {
@@ -3627,7 +3701,7 @@ export default function ThreadPage() {
       } else {
         blockComposerSession(
           startThreadId,
-          "Tovi cannot verify this recovered reply. Your content is preserved, but sending is blocked until you review or edit it."
+          "Tovi cannot verify this recovered reply. Your content is preserved, but sending is blocked until you edit it."
         );
       }
       sendingRef.current = false;
@@ -3877,6 +3951,7 @@ export default function ThreadPage() {
       finishComposerAction();
     }
   }, [
+    applyComposerRecoveryBlock,
     awaitComposerAttachmentOwnership,
     blockComposerSession,
     checkPendingDelivery,
@@ -4563,7 +4638,9 @@ export default function ThreadPage() {
         return;
       }
       if (composerRecoveryBlockedRef.current) {
-        setError("Tovi cannot verify this recovered reply yet. Review or edit it before scheduling.");
+        applyComposerRecoveryBlock(
+          "Tovi cannot verify this recovered reply yet. Edit it before scheduling."
+        );
         return;
       }
       const startThreadId = threadId;
@@ -4595,7 +4672,7 @@ export default function ThreadPage() {
         } else {
           blockComposerSession(
             startThreadId,
-            "Tovi cannot verify this recovered reply. Your content is preserved, but scheduling is blocked until you review or edit it."
+            "Tovi cannot verify this recovered reply. Your content is preserved, but scheduling is blocked until you edit it."
           );
         }
         return;
@@ -4828,6 +4905,7 @@ export default function ThreadPage() {
       }
     },
     [
+      applyComposerRecoveryBlock,
       awaitComposerAttachmentOwnership,
       blockComposerSession,
       composer,

@@ -266,7 +266,9 @@ export function snapshotThreadComposerSession(
       ...(unchanged && current.recoveryClientSendId
         ? { recoveryClientSendId: current.recoveryClientSendId }
         : {}),
-      createdAt: unchanged ? current.createdAt ?? Date.now() : Date.now(),
+      ...(unchanged && current.createdAt === undefined
+        ? {}
+        : { createdAt: unchanged ? current.createdAt : Date.now() }),
       revision: unchanged ? current.revision : (current?.revision ?? 0) + 1,
       revisionId
     };

@@ -189,6 +189,26 @@ test("unchanged snapshots keep their revision while any intent change advances i
   );
 });
 
+test("an automatic unchanged snapshot cannot make a legacy session look newer than pruned send evidence", () => {
+  const storage = makeStorage();
+  const legacy = {
+    attachments: [],
+    customScheduleValue: "",
+    replyToMessageId: null,
+    revision: 1,
+    revisionId: "legacy-session",
+    source: "user",
+    text: "Review this before sending"
+  };
+  storage.data.set(__test.keyFor("thread-a"), JSON.stringify(legacy));
+
+  const unchanged = snapshotThreadComposerSession("thread-a", legacy, storage);
+
+  assert.equal(unchanged.revisionId, legacy.revisionId);
+  assert.equal(unchanged.createdAt, undefined);
+  assert.deepEqual(readThreadComposerSession("thread-a", storage), unchanged);
+});
+
 test("a late completion consumes only the exact captured revision", () => {
   const storage = makeStorage();
   const first = snapshotThreadComposerSession(

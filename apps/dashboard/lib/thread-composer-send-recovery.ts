@@ -283,7 +283,7 @@ export function recoveredComposerSessionDisposition(
   if (!predecessor) {
     if (
       prunedBefore !== undefined &&
-      session.createdAt === undefined
+      (session.createdAt === undefined || session.createdAt <= prunedBefore)
     ) {
       return "blocked";
     }

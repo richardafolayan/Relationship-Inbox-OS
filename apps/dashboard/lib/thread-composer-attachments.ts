@@ -24,6 +24,7 @@ export interface ThreadComposerAttachmentStore {
     descriptors: ThreadComposerAttachmentDescriptor[],
     namespace?: string
   ): Promise<RecoveredThreadComposerAttachment[]>;
+  purgeStale(): Promise<void>;
   remove(threadId: string, attachmentIds: string[], namespace?: string): Promise<void>;
   removeUnowned(threadId: string, attachmentIds: string[], namespace?: string): Promise<void>;
   releaseOwnership(threadId: string, ownerId: string, namespace?: string): Promise<void>;
@@ -256,6 +257,7 @@ export function createIndexedDbThreadComposerAttachmentStore(
 
   return {
     namespace: tabId,
+    purgeStale,
     async claimOwnership(threadId, attachmentIds, ownerId, namespace = tabId) {
       if (attachmentIds.length === 0) return;
       const db = await database();
@@ -371,8 +373,17 @@ export function createMemoryThreadComposerAttachmentStore(
 ): ThreadComposerAttachmentStore {
   const records = new Map<string, PersistedAttachmentRecord>();
   const owners = new Map<string, Set<string>>();
+  const purgeStale = async () => {
+    const staleBefore = now() - STALE_AFTER_MS;
+    for (const [key, record] of records) {
+      if (record.updatedAt < staleBefore && (owners.get(key)?.size ?? 0) === 0) {
+        records.delete(key);
+      }
+    }
+  };
   return {
     namespace,
+    purgeStale,
     async claimOwnership(threadId, attachmentIds, ownerId, targetNamespace = namespace) {
       for (const attachmentId of attachmentIds) {
         const key = attachmentKey(targetNamespace, threadId, attachmentId);

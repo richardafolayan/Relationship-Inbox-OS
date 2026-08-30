@@ -297,7 +297,7 @@ test("an edited successor stays active and expired restoration proof fails close
   assert.equal(recoveredComposerSessionDisposition(edited, []), "active");
 });
 
-test("truncated completion evidence preserves ordinary drafts and blocks unverifiable recovery", () => {
+test("truncated completion evidence blocks every pre-prune session until a meaningful edit", () => {
   const ordinaryOldSession = {
     ...composerIntent,
     createdAt: 100,
@@ -314,10 +314,18 @@ test("truncated completion evidence preserves ordinary drafts and blocks unverif
     recoveryClientSendId: "pruned-predecessor",
     revisionId: "recovered-session"
   };
+  const reviewedAfterPrune = {
+    ...ordinaryOldSession,
+    createdAt: 201,
+    revision: 2,
+    revisionId: "reviewed-session",
+    text: "Reviewed after pruning"
+  };
 
-  assert.equal(recoveredComposerSessionDisposition(ordinaryOldSession, [], 200), "active");
+  assert.equal(recoveredComposerSessionDisposition(ordinaryOldSession, [], 200), "blocked");
   assert.equal(recoveredComposerSessionDisposition(legacySession, [], 200), "blocked");
   assert.equal(recoveredComposerSessionDisposition(recoveredSession, [], 200), "blocked");
+  assert.equal(recoveredComposerSessionDisposition(reviewedAfterPrune, [], 200), "active");
 });
 
 test("dispatch failures stay unresolved when the response can follow durable insertion", () => {

@@ -131,6 +131,36 @@ test("attachment restoration blocks send and schedule until every intended file 
   assert.match(source, /disabled=\{[\s\S]*?composerAttachmentsRestoring/);
 });
 
+test("navigation and pagehide preserve durable attachment descriptors while bytes are restoring", () => {
+  const intentRefStart = source.indexOf("const restoringComposerAttachments =");
+  const intentRefEnd = source.indexOf("const composerSessionDisposition", intentRefStart);
+  const intentRefUpdate = source.slice(intentRefStart, intentRefEnd);
+
+  assert.match(intentRefUpdate, /composerAttachmentsRestoringRef\.current/);
+  assert.match(intentRefUpdate, /composerRestoreRef\.current\.intent\.attachments/);
+  assert.match(intentRefUpdate, /composerOwnerThreadIdRef\.current/);
+  assert.match(source, /pagehide[\s\S]*?composerIntentRef\.current/);
+});
+
+test("attachment quarantine is swept again while a thread stays open", () => {
+  assert.match(source, /composerAttachmentStore\.purgeStale\(\)/);
+  assert.match(source, /window\.setInterval\([\s\S]*?purgeStaleAttachments/);
+  assert.match(source, /visibilitychange/);
+  assert.match(source, /window\.addEventListener\("focus", purgeStaleAttachments\)/);
+});
+
+test("editing an unverifiable recovery clears its matching block notice", () => {
+  const persistStart = source.indexOf("const persistComposerSession = useCallback");
+  const persistEnd = source.indexOf("const awaitComposerAttachmentOwnership", persistStart);
+  const persist = source.slice(persistStart, persistEnd);
+
+  assert.match(persist, /composerSessionDisposition\(ownerThreadId, saved\)/);
+  assert.match(persist, /clearComposerRecoveryBlock\(\)/);
+  assert.match(source, /current === recoveryNotice \? null : current/);
+  assert.doesNotMatch(source, /review or edit it/i);
+  assert.match(source, /blocked until you edit it/);
+});
+
 test("unverifiable recovery quarantines content and a live successor is restored instead of erased", () => {
   const blockStart = source.indexOf("const blockComposerSession = useCallback");
   const blockEnd = source.indexOf("const suppressComposerSession = useCallback", blockStart);

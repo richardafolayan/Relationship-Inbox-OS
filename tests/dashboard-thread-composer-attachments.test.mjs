@@ -137,6 +137,23 @@ test("one tab cannot delete attachment bytes still owned by another tab", async 
   assert.deepEqual(await store.read("thread-a", [descriptor]), []);
 });
 
+test("the stale sweep revisits a released blob after its quarantine expires", async () => {
+  let now = 1_000;
+  const store = createMemoryThreadComposerAttachmentStore("shared-namespace", () => now);
+  const file = new File(["pilot attachment"], descriptor.name, {
+    lastModified: descriptor.lastModified,
+    type: descriptor.type
+  });
+  await store.put("thread-a", descriptor, file);
+  await store.claimOwnership("thread-a", [descriptor.id], "session-x");
+  await store.releaseOwnership("thread-a", "session-x");
+
+  now += __test.STALE_AFTER_MS + 1;
+  await store.purgeStale();
+
+  assert.deepEqual(await store.read("thread-a", [descriptor]), []);
+});
+
 test("a blocked IndexedDB upgrade rejects instead of hanging attachment recovery", async () => {
   const request = {};
   const opening = __test.openDatabase({
