@@ -1,0 +1,733 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import {
+  composerClientSendId,
+  composerDispatchFailureIsAmbiguous,
+  composerNotFoundRecoveryAfterDispatchFailure,
+  composerNotFoundRecoveryOnResume,
+  composerIntentForRecovery,
+  composerRecoveryLineageConflict,
+  composerRecoveryLineageConflictPendingState,
+  composerRecoveryResolution,
+  composerReplayPreflight,
+  composerSendRecoveryDisposition,
+  recoveredComposerAuthoritativeDisposition,
+  resolvedComposerScheduleInstant,
+  recoveredComposerSessionDisposition,
+  createSerializedComposerRecoveryState,
+  runComposerReplayRouteFence,
+  runRecoveredSuccessorDispatchFence,
+  runSerializedComposerRecovery,
+  missingThreadComposerAttachments,
+  normalizeThreadComposerSendAttempt,
+  shouldHideComposerSessionForAttempt,
+  terminalComposerReceiptRetention,
+  threadComposerSendScope
+} from "../apps/dashboard/lib/thread-composer-send-recovery.ts";
+
+const attachment = {
+  id: "attachment-1",
+  kind: "pdf",
+  lastModified: 123,
+  name: "pilot-notes.pdf",
+  size: 42,
+  type: "application/pdf"
+};
+
+const composerIntent = {
+  attachments: [attachment],
+  customScheduleValue: "2026-09-01T09:00",
+  replyToMessageId: "message-parent",
+  source: "user",
+  text: "Reply for A"
+};
+
+const attempt = {
+  intent: {
+    composerIntent,
+    draftRevision: {
+      text: "Saved draft",
+      updatedAt: "2026-08-30T09:00:00.000Z"
+    },
+    kind: "immediate",
+    scheduledFor: null,
+    threadId: "thread-a"
+  },
+  value: {
+    attachmentNamespace: "tab-a",
+    clientSendId: "44c44306-517c-484b-9076-9915fa21163e",
+    lineageWinnerClientSendId: "550c8686-984a-4ddf-99ab-d2cdd7678c62",
+    notFoundRecovery: "blocked",
+    requestedAt: "2026-08-30T09:01:00.000Z",
+    sessionRevision: 3,
+    sessionRevisionId: "ae5926d5-3ec7-48b0-bb35-047d8eb2a431"
+  }
+};
+
+test("composer send attempts preserve one identity and the complete intent", () => {
+  assert.equal(threadComposerSendScope("thread/a"), "composer-send:thread/a");
+  assert.deepEqual(normalizeThreadComposerSendAttempt(attempt), attempt);
+});
+
+test("malformed or cross-thread attempt state fails closed", () => {
+  assert.equal(normalizeThreadComposerSendAttempt({ ...attempt, value: {} }), null);
+  assert.equal(
+    normalizeThreadComposerSendAttempt({
+      ...attempt,
+      intent: { ...attempt.intent, kind: "unknown" }
+    }),
+    null
+  );
+});
+
+test("a predecessor uniqueness conflict exposes its authoritative winner", () => {
+  assert.deepEqual(
+    composerRecoveryLineageConflict({
+      payload: {
+        reasonCode: "recovery_predecessor_already_claimed",
+        winningClientSendId: "550c8686-984a-4ddf-99ab-d2cdd7678c62",
+        winningStatus: "PENDING"
+      }
+    }),
+    {
+      winningClientSendId: "550c8686-984a-4ddf-99ab-d2cdd7678c62",
+      winningStatus: "PENDING"
+    }
+  );
+  assert.equal(
+    composerRecoveryLineageConflict({
+      payload: { reasonCode: "another_policy" }
+    }),
+    null
+  );
+});
+
+test("a NOT_FOUND replay that loses its lineage stays blocked until the winner sends", () => {
+  const replayStatus = composerSendRecoveryDisposition({
+    status: "NOT_FOUND",
+    errorKind: null,
+    errorJson: null
+  });
+  assert.equal(replayStatus, "replay_same_id");
+
+  const conflict = composerRecoveryLineageConflict({
+    payload: {
+      reasonCode: "recovery_predecessor_already_claimed",
+      winningClientSendId: "550c8686-984a-4ddf-99ab-d2cdd7678c62",
+      winningStatus: "PENDING"
+    }
+  });
+  assert.ok(conflict);
+  const loser = composerRecoveryLineageConflictPendingState(conflict);
+  assert.deepEqual(loser, {
+    errorKind: "POLICY_BLOCKED",
+    failed: false,
+    lineageWinnerClientSendId: conflict.winningClientSendId,
+    notFoundRecovery: "blocked",
+    uncertain: false
+  });
+
+  assert.equal(
+    composerSendRecoveryDisposition({
+      status: conflict.winningStatus,
+      errorKind: null,
+      errorJson: null
+    }),
+    "retain"
+  );
+  assert.equal(loser.notFoundRecovery, "blocked");
+  assert.equal(loser.errorKind, "POLICY_BLOCKED");
+
+  assert.equal(
+    composerSendRecoveryDisposition({
+      status: "SENT",
+      errorKind: null,
+      errorJson: null
+    }),
+    "cleanup"
+  );
+  assert.equal(loser.notFoundRecovery, "blocked");
+  assert.equal(loser.errorKind, "POLICY_BLOCKED");
+});
+
+test("only the exact captured composer revision is hidden while delivery is unresolved", () => {
+  assert.equal(
+    shouldHideComposerSessionForAttempt(
+      {
+        ...composerIntent,
+        revision: 3,
+        revisionId: "ae5926d5-3ec7-48b0-bb35-047d8eb2a431"
+      },
+      attempt
+    ),
+    true
+  );
+  assert.equal(
+    shouldHideComposerSessionForAttempt(
+      {
+        ...composerIntent,
+        revision: 3,
+        revisionId: "9b35961d-a8fc-441d-986f-a2f366bcc9e3",
+        text: "New reply"
+      },
+      attempt
+    ),
+    false
+  );
+});
+
+test("failed recovery keeps descriptors for attachment files that could not be restored", () => {
+  assert.deepEqual(
+    missingThreadComposerAttachments(
+      {
+        ...composerIntent,
+        attachments: [attachment, { ...attachment, id: "attachment-2", name: "photo.jpg" }]
+      },
+      ["attachment-1"]
+    ),
+    [{ ...attachment, id: "attachment-2", name: "photo.jpg" }]
+  );
+});
+
+test("NOT_FOUND replay restores expired schedules and incomplete attachment sets", () => {
+  assert.deepEqual(
+    composerReplayPreflight(
+      {
+        ...attempt.intent,
+        kind: "scheduled",
+        scheduledFor: "2026-08-30T09:05:00.000Z"
+      },
+      1,
+      Date.parse("2026-08-30T09:05:00.001Z")
+    ),
+    {
+      ok: false,
+      message: "This scheduled time has passed. Your message was not queued, so choose a new time."
+    }
+  );
+  assert.equal(composerReplayPreflight(attempt.intent, 0).ok, false);
+  assert.deepEqual(composerReplayPreflight(attempt.intent, 1), { ok: true });
+});
+
+test("a future quick-preset schedule restores its exact visible local time", () => {
+  const scheduledFor = "2026-12-15T09:30:00.000Z";
+  const recovered = composerIntentForRecovery(
+    { ...composerIntent, customScheduleValue: "" },
+    "scheduled",
+    scheduledFor,
+    Date.parse("2026-12-15T09:00:00.000Z")
+  );
+  const date = new Date(scheduledFor);
+  const pad = (value) => String(value).padStart(2, "0");
+  const expected = `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+
+  assert.equal(recovered.customScheduleValue, expected);
+  assert.equal(recovered.recoveredScheduledFor, scheduledFor);
+});
+
+test("a recovered schedule preserves the exact instant across a DST overlap", () => {
+  const scheduledFor = "2026-10-25T01:30:00.000Z";
+  const recovered = composerIntentForRecovery(
+    { ...composerIntent, customScheduleValue: "" },
+    "scheduled",
+    scheduledFor,
+    Date.parse("2026-10-25T00:00:00.000Z")
+  );
+
+  assert.equal(
+    resolvedComposerScheduleInstant(
+      recovered.customScheduleValue,
+      recovered.recoveredScheduledFor
+    ).toISOString(),
+    scheduledFor
+  );
+});
+
+test("a recovered schedule keeps its exact instant after the local timezone changes", () => {
+  const scheduledFor = "2026-12-15T09:30:00.000Z";
+
+  assert.equal(
+    resolvedComposerScheduleInstant(
+      "2026-12-15T04:30",
+      scheduledFor
+    ).toISOString(),
+    scheduledFor
+  );
+});
+
+test("a restored predecessor shares one successor generation and is suppressed after it sends", () => {
+  const restored = {
+    ...attempt.value,
+    resolution: "restored",
+    restoredSessionRevisionId: "successor-session"
+  };
+  assert.deepEqual(
+    composerRecoveryResolution(attempt.value, [restored]),
+    { kind: "restore", sessionRevisionId: "successor-session" }
+  );
+  assert.deepEqual(
+    composerRecoveryResolution(attempt.value, [
+      restored,
+      {
+        ...attempt.value,
+        clientSendId: "successor-send",
+        resolution: "sent",
+        sessionRevisionId: "successor-session"
+      }
+    ]),
+    { kind: "sent", sessionRevisionId: "successor-session" }
+  );
+  assert.deepEqual(
+    composerRecoveryResolution(attempt.value, [
+      restored,
+      { ...attempt.value, resolution: "sent" }
+    ]),
+    { kind: "sent", sessionRevisionId: attempt.value.sessionRevisionId }
+  );
+});
+
+test("restoration resolution follows every successor before deciding it was sent", () => {
+  const restoredY = {
+    ...attempt.value,
+    resolution: "restored",
+    restoredSessionRevisionId: "session-y"
+  };
+  const restoredZ = {
+    ...attempt.value,
+    clientSendId: "send-y",
+    resolution: "restored",
+    restoredSessionRevisionId: "session-z",
+    sessionRevisionId: "session-y"
+  };
+  const sentZ = {
+    ...attempt.value,
+    clientSendId: "send-z",
+    resolution: "sent",
+    sessionRevisionId: "session-z"
+  };
+
+  assert.deepEqual(
+    composerRecoveryResolution(attempt.value, [restoredY, restoredZ, sentZ]),
+    { kind: "sent", sessionRevisionId: "session-z" }
+  );
+});
+
+test("malformed or ambiguous restoration lineage fails closed", () => {
+  const restoredY = {
+    ...attempt.value,
+    resolution: "restored",
+    restoredSessionRevisionId: "session-y"
+  };
+  const conflictingY = {
+    ...restoredY,
+    restoredSessionRevisionId: "session-other"
+  };
+
+  assert.equal(
+    composerRecoveryResolution(attempt.value, [restoredY, conflictingY]),
+    null
+  );
+});
+
+test("another tab suppresses the exact restored session after immediate or scheduled acceptance", () => {
+  const session = {
+    ...composerIntent,
+    recoveryClientSendId: attempt.value.clientSendId,
+    revision: 4,
+    revisionId: "session-y"
+  };
+  const restored = {
+    ...attempt.value,
+    resolution: "restored",
+    restoredSessionRevisionId: "session-y"
+  };
+
+  for (const attemptKind of ["immediate", "scheduled"]) {
+    const accepted = {
+      ...attempt.value,
+      attemptKind,
+      clientSendId: `accepted-${attemptKind}`,
+      resolution: "sent",
+      sessionRevisionId: "session-y"
+    };
+    assert.equal(
+      recoveredComposerSessionDisposition(session, [restored, accepted]),
+      "sent"
+    );
+  }
+});
+
+test("a local terminal fence suppresses a recovered session when durable completion fails", () => {
+  const recovered = {
+    ...composerIntent,
+    recoveryClientSendId: attempt.value.clientSendId,
+    revision: 4,
+    revisionId: "session-y"
+  };
+  const restored = {
+    ...attempt.value,
+    resolution: "restored",
+    restoredSessionRevisionId: "session-y"
+  };
+
+  assert.equal(
+    recoveredComposerSessionDisposition(
+      recovered,
+      [restored],
+      undefined,
+      new Set([attempt.value.clientSendId])
+    ),
+    "sent"
+  );
+});
+
+test("recovered replies require an authoritative definite failure before another send", () => {
+  assert.equal(recoveredComposerAuthoritativeDisposition({ status: "SENT" }), "sent");
+  assert.equal(recoveredComposerAuthoritativeDisposition({ status: "SCHEDULED" }), "sent");
+  assert.equal(recoveredComposerAuthoritativeDisposition({ status: "FAILED" }), "retryable");
+  assert.equal(recoveredComposerAuthoritativeDisposition({ status: "CANCELLED" }), "retryable");
+  assert.equal(
+    recoveredComposerAuthoritativeDisposition({
+      status: "CANCELLED",
+      errorKind: "POLICY_BLOCKED"
+    }),
+    "blocked"
+  );
+  assert.equal(
+    recoveredComposerAuthoritativeDisposition({
+      status: "FAILED",
+      errorKind: "POLICY_BLOCKED"
+    }),
+    "blocked"
+  );
+  assert.equal(recoveredComposerAuthoritativeDisposition({ status: "NOT_FOUND" }), "blocked");
+  assert.equal(recoveredComposerAuthoritativeDisposition({ status: "PENDING" }), "blocked");
+  assert.equal(
+    recoveredComposerAuthoritativeDisposition({
+      status: "FAILED",
+      deliveryUncertain: true,
+      errorKind: "DELIVERY_UNCERTAIN"
+    }),
+    "blocked"
+  );
+});
+
+test("a held replay cannot dispatch after its conversation loses the active route", async () => {
+  let activeThreadId = "thread-a";
+  let releaseClaim;
+  const claimed = new Promise((resolve) => {
+    releaseClaim = resolve;
+  });
+  const events = [];
+  const resultPromise = runComposerReplayRouteFence({
+    claim: () => claimed,
+    dispatch: async () => events.push("dispatch"),
+    getActiveThreadId: () => activeThreadId,
+    moveToReview: async (value) => events.push(`review:${value ?? "unclaimed"}`),
+    prepare: async () => events.push("prepare"),
+    threadId: "thread-a"
+  });
+
+  activeThreadId = "thread-b";
+  releaseClaim("claimed-a");
+
+  assert.deepEqual(await resultPromise, { kind: "off_route" });
+  assert.deepEqual(events, ["review:claimed-a"]);
+});
+
+test("replay rechecks the live route after attachment preparation and before dispatch", async () => {
+  let activeThreadId = "thread-a";
+  const events = [];
+  const result = await runComposerReplayRouteFence({
+    claim: async () => "claimed-a",
+    dispatch: async () => events.push("dispatch"),
+    getActiveThreadId: () => activeThreadId,
+    moveToReview: async (value) => events.push(`review:${value ?? "unclaimed"}`),
+    prepare: async () => {
+      events.push("prepare");
+      activeThreadId = "thread-b";
+    },
+    threadId: "thread-a"
+  });
+
+  assert.deepEqual(result, { kind: "off_route" });
+  assert.deepEqual(events, ["prepare", "review:claimed-a"]);
+});
+
+test("replay refuses a claim revoked while attachments are prepared", async () => {
+  let claimCurrent = true;
+  const events = [];
+  const result = await runComposerReplayRouteFence({
+    claim: async () => "claim-a",
+    dispatch: async () => events.push("dispatch"),
+    getActiveThreadId: () => "thread-a",
+    moveToReview: async () => events.push("review"),
+    prepare: async () => {
+      events.push("prepare");
+      claimCurrent = false;
+    },
+    threadId: "thread-a",
+    validateClaim: async () => claimCurrent
+  });
+
+  assert.deepEqual(result, { claimed: "claim-a", kind: "revoked" });
+  assert.deepEqual(events, ["prepare"]);
+});
+
+test("serialized recovery drains a skipped queued item before restoring the next", async () => {
+  const state = createSerializedComposerRecoveryState();
+  const events = [];
+  let releaseA;
+  const heldA = new Promise((resolve) => {
+    releaseA = resolve;
+  });
+  const run = async (value, wasQueued) => {
+    events.push(`start:${value}:${wasQueued}`);
+    if (value === "A") await heldA;
+    if (value !== "B") events.push(`restore:${value}`);
+  };
+
+  const a = runSerializedComposerRecovery({ key: "A", run, state, value: "A" });
+  await Promise.resolve();
+  const b = runSerializedComposerRecovery({ key: "B", run, state, value: "B" });
+  const c = runSerializedComposerRecovery({ key: "C", run, state, value: "C" });
+  releaseA();
+
+  assert.equal(await a, "processed");
+  assert.equal(await b, "queued");
+  assert.equal(await c, "queued");
+  assert.deepEqual(events, [
+    "start:A:false",
+    "restore:A",
+    "start:B:true",
+    "start:C:true",
+    "restore:C"
+  ]);
+  assert.equal(state.active, false);
+  assert.equal(state.queued.size, 0);
+});
+
+test("serialized recovery cannot let a duplicate active key strand a later item", async () => {
+  const state = createSerializedComposerRecoveryState();
+  const events = [];
+  let releaseA;
+  const heldA = new Promise((resolve) => {
+    releaseA = resolve;
+  });
+  const run = async (value, wasQueued) => {
+    events.push(`${value}:${wasQueued}`);
+    if (value === "A-first") await heldA;
+  };
+
+  const a = runSerializedComposerRecovery({ key: "A", run, state, value: "A-first" });
+  await Promise.resolve();
+  const duplicate = runSerializedComposerRecovery({
+    key: "A",
+    run,
+    state,
+    value: "A-duplicate"
+  });
+  const c = runSerializedComposerRecovery({ key: "C", run, state, value: "C" });
+  releaseA();
+  await a;
+  assert.equal(await duplicate, "queued");
+  assert.equal(await c, "queued");
+
+  assert.deepEqual(events, ["A-first:false", "A-duplicate:true", "C:true"]);
+  assert.equal(state.active, false);
+  assert.equal(state.queued.size, 0);
+});
+
+test("serialized recovery drains later work after a queued recovery throws", async () => {
+  const state = createSerializedComposerRecoveryState();
+  const events = [];
+  let releaseA;
+  const heldA = new Promise((resolve) => {
+    releaseA = resolve;
+  });
+  const run = async (value) => {
+    events.push(value);
+    if (value === "A") await heldA;
+    if (value === "B") throw new Error("B failed");
+  };
+
+  const a = runSerializedComposerRecovery({ key: "A", run, state, value: "A" });
+  await Promise.resolve();
+  const b = runSerializedComposerRecovery({ key: "B", run, state, value: "B" });
+  const c = runSerializedComposerRecovery({ key: "C", run, state, value: "C" });
+  releaseA();
+
+  assert.equal(await a, "processed");
+  await assert.rejects(b, /B failed/);
+  assert.equal(await c, "queued");
+  assert.deepEqual(events, ["A", "B", "C"]);
+  assert.equal(state.active, false);
+  assert.equal(state.queued.size, 0);
+});
+
+test("scheduled acceptance retains truthful local-record recovery copy", () => {
+  const scheduled = terminalComposerReceiptRetention("SCHEDULED");
+  assert.equal(scheduled.terminalStatus, "SCHEDULED");
+  assert.match(scheduled.message, /scheduled/i);
+  assert.doesNotMatch(scheduled.message, /was sent|delivery not confirmed/i);
+
+  const sent = terminalComposerReceiptRetention("SENT");
+  assert.equal(sent.terminalStatus, "SENT");
+  assert.match(sent.message, /was sent/i);
+});
+
+for (const kind of ["immediate", "scheduled"]) {
+  test(`a late terminal predecessor blocks ${kind} successor dispatch`, async () => {
+    let predecessorTerminal = false;
+    let dispatched = 0;
+    let released = 0;
+    const successorAllocated = Promise.resolve().then(() => {
+      predecessorTerminal = true;
+    });
+    await successorAllocated;
+
+    const result = await runRecoveredSuccessorDispatchFence({
+      canDispatch: () => !predecessorTerminal,
+      dispatch: async () => {
+        dispatched += 1;
+        return "accepted";
+      },
+      release: async () => {
+        released += 1;
+      }
+    });
+
+    assert.deepEqual(result, { kind: "superseded" });
+    assert.equal(dispatched, 0);
+    assert.equal(released, 1);
+  });
+}
+
+test("an edited successor stays active and expired restoration proof fails closed", () => {
+  const recovered = {
+    ...composerIntent,
+    recoveryClientSendId: attempt.value.clientSendId,
+    revision: 4,
+    revisionId: "session-y"
+  };
+  const edited = {
+    ...composerIntent,
+    text: "Edited successor",
+    revision: 5,
+    revisionId: "session-z"
+  };
+
+  assert.equal(recoveredComposerSessionDisposition(recovered, []), "blocked");
+  assert.equal(recoveredComposerSessionDisposition(edited, []), "active");
+});
+
+test("truncated completion evidence blocks every pre-prune session until a meaningful edit", () => {
+  const ordinaryOldSession = {
+    ...composerIntent,
+    createdAt: 100,
+    revision: 1,
+    revisionId: "old-session"
+  };
+  const legacySession = {
+    ...composerIntent,
+    revision: 1,
+    revisionId: "legacy-session"
+  };
+  const recoveredSession = {
+    ...ordinaryOldSession,
+    recoveryClientSendId: "pruned-predecessor",
+    revisionId: "recovered-session"
+  };
+  const reviewedAfterPrune = {
+    ...ordinaryOldSession,
+    createdAt: 201,
+    revision: 2,
+    revisionId: "reviewed-session",
+    text: "Reviewed after pruning"
+  };
+
+  assert.equal(recoveredComposerSessionDisposition(ordinaryOldSession, [], 200), "blocked");
+  assert.equal(recoveredComposerSessionDisposition(legacySession, [], 200), "blocked");
+  assert.equal(recoveredComposerSessionDisposition(recoveredSession, [], 200), "blocked");
+  assert.equal(recoveredComposerSessionDisposition(reviewedAfterPrune, [], 200), "active");
+});
+
+test("dispatch failures stay unresolved when the response can follow durable insertion", () => {
+  assert.equal(composerDispatchFailureIsAmbiguous({ status: 500 }, false), true);
+  assert.equal(composerDispatchFailureIsAmbiguous({ status: 200 }, false), true);
+  assert.equal(composerDispatchFailureIsAmbiguous({ status: 400 }, false), false);
+  assert.equal(composerDispatchFailureIsAmbiguous(new Error("local preflight"), false), false);
+  assert.equal(composerDispatchFailureIsAmbiguous(new Error("network"), true), true);
+  assert.equal(
+    composerNotFoundRecoveryAfterDispatchFailure({ status: 500 }),
+    "replay"
+  );
+  assert.equal(
+    composerNotFoundRecoveryAfterDispatchFailure({ status: 200 }),
+    "replay"
+  );
+  assert.equal(composerNotFoundRecoveryAfterDispatchFailure({ status: 400 }), "restore");
+  assert.equal(composerNotFoundRecoveryAfterDispatchFailure({ status: 0 }), "replay");
+  assert.equal(composerNotFoundRecoveryAfterDispatchFailure(new Error("network")), "replay");
+});
+
+test("a persisted pre-dispatch attempt resumes with the same replay-safe id", () => {
+  assert.equal(composerNotFoundRecoveryOnResume("replay"), "replay");
+  assert.equal(composerNotFoundRecoveryOnResume("restore"), "restore");
+  assert.equal(composerNotFoundRecoveryOnResume("blocked"), "replay");
+  assert.equal(composerNotFoundRecoveryOnResume(undefined), "replay");
+});
+
+test("a composer revision has one durable send id even after finite completion history expires", () => {
+  const first = composerClientSendId("ae5926d5-3ec7-48b0-bb35-047d8eb2a431");
+  const copiedTab = composerClientSendId("ae5926d5-3ec7-48b0-bb35-047d8eb2a431");
+  const laterRevision = composerClientSendId("9b35961d-a8fc-441d-986f-a2f366bcc9e3");
+  const scheduled = composerClientSendId(
+    "ae5926d5-3ec7-48b0-bb35-047d8eb2a431",
+    "scheduled",
+    "2026-08-31T09:00:00.000Z"
+  );
+  const scheduledLater = composerClientSendId(
+    "ae5926d5-3ec7-48b0-bb35-047d8eb2a431",
+    "scheduled",
+    "2026-08-31T10:00:00.000Z"
+  );
+
+  assert.equal(copiedTab, first);
+  assert.notEqual(laterRevision, first);
+  assert.notEqual(scheduled, first);
+  assert.notEqual(scheduledLater, scheduled);
+  assert.match(first, /^[0-9a-f-]{36}$/i);
+});
+
+test("delivery recovery retains ambiguity, replays missing status with the same id, and cleans only sent", () => {
+  assert.equal(composerSendRecoveryDisposition({ status: "PENDING" }), "retain");
+  assert.equal(composerSendRecoveryDisposition({ status: "SCHEDULED" }), "scheduled");
+  assert.equal(composerSendRecoveryDisposition({ status: "NOT_FOUND" }), "replay_same_id");
+  assert.equal(composerSendRecoveryDisposition({ status: "SENT" }), "cleanup");
+  assert.equal(
+    composerSendRecoveryDisposition({
+      status: "FAILED",
+      deliveryUncertain: true,
+      errorKind: "DELIVERY_UNCERTAIN"
+    }),
+    "retain_uncertain"
+  );
+  assert.equal(composerSendRecoveryDisposition({ status: "FAILED" }), "restore");
+  assert.equal(composerSendRecoveryDisposition({ status: "CANCELLED" }), "restore");
+  assert.equal(
+    composerSendRecoveryDisposition({
+      status: "CANCELLED",
+      errorKind: "POLICY_BLOCKED"
+    }),
+    "retain_uncertain"
+  );
+  assert.equal(
+    composerSendRecoveryDisposition({
+      status: "FAILED",
+      errorKind: "POLICY_BLOCKED"
+    }),
+    "retain_uncertain"
+  );
+});

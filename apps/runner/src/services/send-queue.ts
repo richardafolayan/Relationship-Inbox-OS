@@ -61,10 +61,13 @@ export interface SendQueueService {
      * dashboard renders the new bubble inline under its parent.
      */
     replyToMessageId?: string;
+    recoveryPredecessorClientSendId?: string;
+    consumeDraft?: { text: string; updatedAt: Date };
   }): Promise<{
     clientSendId: string;
     status: "PENDING" | "SENT" | "FAILED";
     replayed: boolean;
+    draftConsumed?: boolean;
     queuePosition: number;
     activeCount: number;
     errorMessage?: string;
@@ -215,10 +218,13 @@ export function createSendQueue(deps: SendQueueDeps): SendQueueService {
      * dashboard renders the new bubble inline under its parent.
      */
     replyToMessageId?: string;
+    recoveryPredecessorClientSendId?: string;
+    consumeDraft?: { text: string; updatedAt: Date };
   }): Promise<{
     clientSendId: string;
     status: "PENDING" | "SENT" | "FAILED";
     replayed: boolean;
+    draftConsumed?: boolean;
     queuePosition: number;
     activeCount: number;
     errorMessage?: string;
@@ -242,6 +248,7 @@ export function createSendQueue(deps: SendQueueDeps): SendQueueService {
       clientSendId: result.clientSendId,
       status: result.status,
       replayed: result.replayed,
+      draftConsumed: result.draftConsumed,
       // -1 if the row is already SENT/FAILED; the dashboard treats that as
       // "no longer in queue" and shows the recent-completed banner.
       queuePosition,

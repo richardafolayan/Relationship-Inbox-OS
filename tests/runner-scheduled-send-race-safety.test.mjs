@@ -224,6 +224,25 @@ test("update: a still-scheduled send is updated", async () => {
   assert.equal(rows[0].scheduledFor.getTime(), newTime.getTime());
 });
 
+test("update: an attachment-only scheduled send can change time without inventing text", async () => {
+  const { svc, rows } = makeSendHarness([
+    scheduledRow({
+      attachmentsJson: JSON.stringify([{ displayName: "notes.pdf" }]),
+      requestText: ""
+    })
+  ]);
+  const newTime = future(7_200_000);
+  const res = await svc.updateScheduledSend({
+    clientSendId: "c1",
+    threadId: "t1",
+    scheduledFor: newTime
+  });
+
+  assert.equal(res.updated, true);
+  assert.equal(rows[0].requestText, "");
+  assert.equal(rows[0].scheduledFor.getTime(), newTime.getTime());
+});
+
 test("update: promoted during the read window -> refused, content NOT rewritten", async () => {
   const { svc, rows } = makeSendHarness([scheduledRow()], {
     raceAfterRead: (r) => { r.status = "PENDING"; }

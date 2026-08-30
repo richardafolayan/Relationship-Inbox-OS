@@ -5,7 +5,9 @@ import assert from "node:assert/strict";
 // import directly (same pattern as dashboard-horizon.test.mjs). It backs the
 // People page's loadDetail stale-response guard: when switching people
 // quickly, only the latest detail fetch may write to state.
-const { createLatestRequestGate } = await import("../apps/dashboard/lib/latest-request.ts");
+const { createLatestRequestGate, createLatestKeyedRequestGate } = await import(
+  "../apps/dashboard/lib/latest-request.ts"
+);
 
 test("the most recent token is the latest", () => {
   const gate = createLatestRequestGate();
@@ -51,4 +53,38 @@ test("a same-person re-fetch (enrich/starters) supersedes the earlier read", () 
   const refetch = gate.next(); // refresh-enrichment / fetch-starters re-read
   assert.equal(gate.isLatest(initial), false, "the slower initial read is superseded");
   assert.equal(gate.isLatest(refetch), true, "the fresh re-fetch wins");
+});
+
+test("a later request for another key cannot supersede an in-flight route", () => {
+  const gate = createLatestKeyedRequestGate();
+  const threadB = gate.next("thread-b");
+  gate.next("thread-a");
+
+  assert.equal(
+    gate.isLatest("thread-b", threadB),
+    true,
+    "a late Thread A refresh must not invalidate Thread B's navigation response"
+  );
+});
+
+test("a newer request for the same key supersedes the earlier request", () => {
+  const gate = createLatestKeyedRequestGate();
+  const firstThreadB = gate.next("thread-b");
+  const secondThreadB = gate.next("thread-b");
+
+  assert.equal(gate.isLatest("thread-b", firstThreadB), false);
+  assert.equal(gate.isLatest("thread-b", secondThreadB), true);
+});
+
+test("re-entering a route invalidates its previous visit before the new fetch starts", () => {
+  const gate = createLatestKeyedRequestGate();
+  const firstVisitA = gate.next("thread-a");
+  gate.next("thread-b");
+
+  const enteringA = gate.next("thread-a");
+  assert.equal(gate.isLatest("thread-a", firstVisitA), false);
+
+  const secondVisitA = gate.next("thread-a");
+  assert.equal(gate.isLatest("thread-a", enteringA), false);
+  assert.equal(gate.isLatest("thread-a", secondVisitA), true);
 });

@@ -16,6 +16,10 @@ test("send status recovery distinguishes waiting, sent, failed, missing and unce
   );
   assert.equal(
     resolveSendRecovery({ clientSendId: "1", status: "NOT_FOUND" }).kind,
+    "retry_same_id"
+  );
+  assert.equal(
+    resolveSendRecovery({ clientSendId: "1", status: "CANCELLED" }).kind,
     "not_sent"
   );
   assert.equal(

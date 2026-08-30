@@ -590,6 +590,7 @@ model SendRequest {
   threadId     String
   status       SendRequestStatus @default(PENDING)
   requestText  String
+  draftConsumed Boolean          @default(false)
   // Durable dispatch provenance. The worker rechecks this at the final safety
   // boundary so an automated row cannot become manual merely by restarting.
   source       String
@@ -617,6 +618,9 @@ model SendRequest {
    * next refresh. Null on regular standalone sends.
    */
   replyToMessageId String?
+  // A recovered successor may dispatch only while this earlier request is
+  // still authoritatively and definitely unsent.
+  recoveryPredecessorClientSendId String? @unique
   createdAt    DateTime          @default(now())
   updatedAt    DateTime          @updatedAt
 

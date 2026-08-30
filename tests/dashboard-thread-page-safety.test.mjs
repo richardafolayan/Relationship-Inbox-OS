@@ -13,23 +13,28 @@ const src = readFileSync(
 );
 
 // A: the page does NOT remount when navigating /thread/A -> /thread/B (same
-// App Router dynamic segment), so thread-local composer + AI state must reset
-// on threadId change or it leaks across threads — risking a reply typed for A
-// being sent to B, phantom "sending" bubbles, and A's snooze durations on B.
-test("a [threadId]-keyed effect resets the composer cluster, pending sends, and snooze suggestions", () => {
+// App Router dynamic segment), so thread-local intent must be saved/restored
+// on threadId change and pending sends must be filtered to their owner thread.
+test("a thread-keyed layout effect restores intent and isolates pending sends", () => {
   const effectBodies = [
-    ...src.matchAll(/useEffect\(\(\)\s*=>\s*\{([\s\S]*?)\},\s*\[threadId\]\)/g)
+    ...src.matchAll(
+      /useLayoutEffect\(\(\)\s*=>\s*\{([\s\S]*?)\},\s*\[composerAttachmentStore, externalActionAttempts, threadId\]\)/g
+    )
   ].map((m) => m[1]);
   const reset = effectBodies.find(
     (body) =>
-      body.includes('setComposer("")') &&
-      body.includes("setPendingSends([])") &&
+      body.includes("readThreadComposerSession(threadId)") &&
+      body.includes("setComposer(restoredIntent.text)") &&
       body.includes("setSnoozeSuggestions(null)") &&
       body.includes("setComposerAttachments(")
   );
-  assert.ok(reset, "expected a [threadId] reset effect clearing composer + pending sends + snooze");
-  // Staged attachment object URLs must be revoked on the reset, not leaked.
+  assert.ok(reset, "expected per-thread composer restoration and local UI reset");
   assert.match(reset, /URL\.revokeObjectURL\(a\.previewUrl\)/);
+  assert.doesNotMatch(reset, /setPendingSends\(\[\]\)/);
+  assert.match(
+    src,
+    /const activePendingSends = pendingSends\.filter\(\(pending\) => pending\.threadId === threadId\)/
+  );
 });
 
 // The timeline must never scroll horizontally. overflow-y-auto alone makes
@@ -62,7 +67,13 @@ test("the timeline scroller clips horizontal overflow and bubble text wraps anyw
 // enqueueing two distinct clientSendIds. A synchronous ref closes the gap.
 test("onSend has a synchronous sendingRef re-entrancy guard", () => {
   assert.match(src, /const sendingRef = useRef\(false\)/);
-  assert.match(src, /if \(!thread \|\| sending \|\| sendingRef\.current\) return;/);
+  const start = src.indexOf("const onSend = useCallback(async () => {");
+  const end = src.indexOf("if (!composer.trim()", start);
+  assert.notEqual(start, -1, "located onSend");
+  assert.notEqual(end, -1, "located the end of the onSend entry guard");
+  const guard = src.slice(start, end);
+  assert.match(guard, /sendingRef\.current/);
+  assert.match(guard, /composerActionRef\.current/);
   assert.match(src, /sendingRef\.current = true;/);
   assert.match(src, /sendingRef\.current = false;/);
 });

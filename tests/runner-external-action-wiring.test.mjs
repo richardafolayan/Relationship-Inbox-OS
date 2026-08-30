@@ -76,7 +76,7 @@ test("every user-triggered outbound message request registers intent before body
   ]) {
     const block = route(path, nextPath);
     assert.match(block, /beginUserTriggeredIntentOperation\(res\)/);
-    assert.match(block, /finally\s*\{\s*completeUserTriggeredIntent\(\)/);
+    assert.match(block, /finally\s*\{[\s\S]*?completeUserTriggeredIntent\(\)/);
   }
 
   const profileRegistration = source.indexOf("app.use(registerFocusPolicyMutationIntent)");
@@ -137,6 +137,18 @@ test("retry-safe manual focus acknowledgements reuse the deterministic send id",
   assert.match(block, /focusWindowId: profile\.focusWindow\.windowId/);
 });
 
+test("ordinary retry rows claim the failed request as their recovery predecessor", () => {
+  const block = route(
+    "/control/thread/:threadId/retry-send",
+    "/control/thread/:threadId/focus-ack/complete"
+  );
+  const manualRetry = block.slice(block.indexOf("const newClientSendId"));
+  assert.match(
+    manualRetry,
+    /recoveryPredecessorClientSendId:\s*original\.clientSendId/
+  );
+});
+
 test("a fresh manual focus action may re-arm only its policy-blocked acknowledgement", () => {
   const block = route(
     "/control/thread/:threadId/send",
@@ -150,6 +162,10 @@ test("a fresh manual focus action may re-arm only its policy-blocked acknowledge
 
 test("send policy conflicts are returned as HTTP 409", () => {
   assert.match(source, /error instanceof SendPolicyError\s*\?\s*409/);
+  assert.match(
+    source,
+    /reasonCode:\s*error\.reasonCode,\s*\.\.\.error\.details/
+  );
 });
 
 test("the queue summary excludes durable non-message action rows", () => {

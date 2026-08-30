@@ -6,6 +6,10 @@ import {
   ExternalActionAttemptConflictError,
   ExternalActionAttemptStorageError
 } from "../apps/dashboard/lib/external-action-attempts.ts";
+import {
+  composerRecoveryResolution,
+  terminalThreadComposerSendAttemptValue
+} from "../apps/dashboard/lib/thread-composer-send-recovery.ts";
 
 const source = await readFile(
   new URL("../apps/dashboard/app/thread/[id]/page.tsx", import.meta.url),
@@ -18,12 +22,20 @@ const focusSource = await readFile(
 
 test("message mutations keep one client action id across an uncertain retry", () => {
   assert.match(source, /createExternalActionAttemptStore\(\)/);
-  for (const action of ["send-poll", "dictation-send", "schedule-send", "reaction", "poll-vote", "edit"]) {
+  for (const action of ["send-poll", "dictation-send", "reaction", "poll-vote", "edit"]) {
     assert.match(source, new RegExp("scope = `" + action + ":"));
   }
-  assert.equal((source.match(/externalActionAttempts\.getOrCreateScopedValue\(/g) ?? []).length, 6);
+  assert.match(source, /threadComposerSendScope\(startThreadId\)/);
+  assert.equal(
+    (source.match(/externalActionAttempts\.getOrCreateScopedValue/g) ?? []).length >= 7,
+    true
+  );
   assert.equal((source.match(/\{ clientActionId,/g) ?? []).length >= 3, true);
-  assert.equal((source.match(/externalActionAttempts\.completeScopedValue/g) ?? []).length, 6);
+  assert.equal(
+    (source.match(/externalActionAttempts\.completeScopedValue/g) ?? []).length >= 6,
+    true
+  );
+  assert.equal((source.match(/recordTerminalComposerSend\(/g) ?? []).length >= 2, true);
   const dictation = source.slice(
     source.indexOf("const sendDictationMessage"),
     source.indexOf("// Cmd/Ctrl-Enter sends.")
@@ -110,6 +122,60 @@ test("an unresolved client action id survives a complete component remount", asy
     "attempt-2"
   );
   assert.equal(created, 2);
+});
+
+test("durable attempt inventory finds unresolved composer sends across routes", async () => {
+  const values = new Map();
+  const storage = {
+    get length() {
+      return values.size;
+    },
+    getItem: (key) => values.get(key) ?? null,
+    key: (index) => [...values.keys()][index] ?? null,
+    setItem: (key, value) => values.set(key, value),
+    removeItem: (key) => values.delete(key)
+  };
+  const store = createExternalActionAttemptStore(storage);
+  await store.getOrCreateScopedValue(
+    "composer-send:thread-a",
+    { threadId: "thread-a" },
+    () => ({ clientSendId: "send-a" })
+  );
+  await store.getOrCreateScopedValue(
+    "composer-send:thread-b",
+    { threadId: "thread-b" },
+    () => ({ clientSendId: "send-b" })
+  );
+  await store.getOrCreateScopedValue(
+    "reaction:thread-c",
+    { threadId: "thread-c" },
+    () => ({ clientActionId: "reaction-c" })
+  );
+
+  assert.deepEqual(
+    store
+      .listScopedAttempts("composer-send:")
+      .map(({ scope, value }) => [scope, value.clientSendId])
+      .sort(),
+    [
+      ["composer-send:thread-a", "send-a"],
+      ["composer-send:thread-b", "send-b"]
+    ]
+  );
+});
+
+test("durable attempt inventory fails closed when storage cannot enumerate", () => {
+  const values = new Map();
+  const storage = {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, value),
+    removeItem: (key) => values.delete(key)
+  };
+
+  assert.throws(
+    () => createExternalActionAttemptStore(storage).listScopedAttempts("composer-send:"),
+    ExternalActionAttemptStorageError
+  );
 });
 
 test("a scoped attempt reuses its id only for the same canonical intent", async () => {
@@ -253,6 +319,364 @@ test("one tab completing an action leaves the shared id for a stale tab", async 
   assert.equal(created, 1);
 });
 
+test("a stale tab cannot claim a generation after another tab definitively releases it", async () => {
+  const values = new Map();
+  const storage = {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, value),
+    removeItem: (key) => values.delete(key)
+  };
+  const firstPins = new Map();
+  const stalePins = new Map();
+  const pinStorage = (pins) => ({
+    getItem: (key) => pins.get(key) ?? null,
+    setItem: (key, value) => pins.set(key, value),
+    removeItem: (key) => pins.delete(key)
+  });
+  const first = createExternalActionAttemptStore(storage, undefined, pinStorage(firstPins));
+  const stale = createExternalActionAttemptStore(storage, undefined, pinStorage(stalePins));
+  const scope = "revoked-composer-send";
+  const intent = { text: "Do not replay after revocation" };
+  const value = { clientSendId: "send-1", notFoundRecovery: "replay" };
+
+  await first.getOrCreateScopedValue(scope, intent, () => value);
+  await stale.getOrCreateScopedValue(scope, intent, () => value);
+  assert.equal(
+    await first.completeScopedValue(
+      scope,
+      (candidate) => candidate.clientSendId === value.clientSendId
+    ),
+    true
+  );
+
+  assert.equal(
+    await stale.compareAndReplaceScopedValue(
+      scope,
+      (candidate) =>
+        candidate.clientSendId === value.clientSendId &&
+        candidate.notFoundRecovery === "replay",
+      { ...value, notFoundRecovery: "blocked" }
+    ),
+    false
+  );
+  assert.equal(stale.readScopedAttempt(scope), undefined);
+});
+
+test("a released generation retains an explicit recovery tombstone", async () => {
+  const values = new Map();
+  const storage = {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, value),
+    removeItem: (key) => values.delete(key)
+  };
+  const store = createExternalActionAttemptStore(storage);
+  const scope = "restored-composer-generation";
+  const original = { clientSendId: "send-x", notFoundRecovery: "restore" };
+  const tombstone = {
+    ...original,
+    resolution: "restored",
+    restoredSessionRevisionId: "session-y"
+  };
+
+  await store.getOrCreateScopedValue(scope, { text: "preserved" }, () => original);
+  assert.equal(
+    await store.compareAndCompleteScopedValue(
+      scope,
+      (value) => value.clientSendId === "send-x",
+      true,
+      tombstone
+    ),
+    true
+  );
+  assert.deepEqual(store.readCompletedScopedValues(scope), [tombstone]);
+});
+
+test("a late terminal result advances restored lineage to its successor session", async () => {
+  const values = new Map();
+  const storage = {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, value),
+    removeItem: (key) => values.delete(key)
+  };
+  const store = createExternalActionAttemptStore(storage);
+  const scope = "composer-send:late-terminal";
+  const original = {
+    clientSendId: "send-x",
+    notFoundRecovery: "restore",
+    requestedAt: "2026-08-30T09:00:00.000Z",
+    sessionRevision: 1,
+    sessionRevisionId: "session-x"
+  };
+  const restored = {
+    ...original,
+    resolution: "restored",
+    restoredSessionRevisionId: "session-y"
+  };
+  await store.getOrCreateScopedValue(scope, { text: "preserved" }, () => original);
+  assert.equal(
+    await store.compareAndCompleteScopedValue(scope, () => true, true, restored),
+    true
+  );
+  assert.equal(
+    await store.completeScopedValueWithLineage(
+      scope,
+      (value) => value.clientSendId === "send-x",
+      (value) => value.clientSendId === "send-x" && value.resolution === "restored",
+      terminalThreadComposerSendAttemptValue
+    ),
+    true
+  );
+
+  assert.deepEqual(
+    composerRecoveryResolution(
+      original,
+      store.readCompletedScopedValues(scope)
+    ),
+    { kind: "sent", sessionRevisionId: "session-y" }
+  );
+});
+
+test("a failed terminal tombstone write leaves restored lineage non-terminal", async () => {
+  const values = new Map();
+  let failTerminalWrite = false;
+  const storage = {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => {
+      if (failTerminalWrite && key.includes("completed:scoped:")) {
+        throw new Error("quota");
+      }
+      values.set(key, value);
+    },
+    removeItem: (key) => values.delete(key)
+  };
+  const store = createExternalActionAttemptStore(storage);
+  const scope = "composer-send:terminal-write-failure";
+  const original = {
+    clientSendId: "send-x",
+    notFoundRecovery: "restore",
+    requestedAt: "2026-08-30T09:00:00.000Z",
+    sessionRevision: 1,
+    sessionRevisionId: "session-x"
+  };
+  const restored = {
+    ...original,
+    resolution: "restored",
+    restoredSessionRevisionId: "session-y"
+  };
+  await store.getOrCreateScopedValue(scope, { text: "preserved" }, () => original);
+  assert.equal(
+    await store.compareAndCompleteScopedValue(scope, () => true, true, restored),
+    true
+  );
+  failTerminalWrite = true;
+
+  await assert.rejects(
+    store.completeScopedValueWithLineage(
+      scope,
+      (value) => value.clientSendId === "send-x",
+      (value) => value.clientSendId === "send-x" && value.resolution === "restored",
+      terminalThreadComposerSendAttemptValue
+    ),
+    ExternalActionAttemptStorageError
+  );
+  assert.deepEqual(
+    composerRecoveryResolution(original, store.readCompletedScopedValues(scope)),
+    { kind: "restore", sessionRevisionId: "session-y" }
+  );
+});
+
+test("atomic value transforms preserve replay arbitration through namespace migration", async () => {
+  const values = new Map();
+  const storage = {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, value),
+    removeItem: (key) => values.delete(key)
+  };
+  const store = createExternalActionAttemptStore(storage);
+  const original = {
+    attachmentNamespace: "old",
+    clientSendId: "send-x",
+    notFoundRecovery: "replay"
+  };
+
+  for (const [scope, first, second] of [
+    ["claim-then-migrate", "claim", "migrate"],
+    ["migrate-then-claim", "migrate", "claim"]
+  ]) {
+    await store.getOrCreateScopedValue(scope, { text: scope }, () => original);
+    const apply = async (operation) =>
+      store.compareAndUpdateScopedValue(
+        scope,
+        (value) =>
+          value.clientSendId === "send-x" &&
+          (operation === "claim"
+            ? value.notFoundRecovery === "replay"
+            : value.attachmentNamespace === "old"),
+        (value) => operation === "claim"
+          ? { ...value, notFoundRecovery: "blocked" }
+          : { ...value, attachmentNamespace: "new" }
+      );
+    await apply(first);
+    await apply(second);
+    assert.deepEqual(store.readScopedAttempt(scope)?.value, {
+      attachmentNamespace: "new",
+      clientSendId: "send-x",
+      notFoundRecovery: "blocked"
+    });
+  }
+});
+
+test("a completed successor suppresses its restored predecessor after a stale-tab remount", async () => {
+  const values = new Map();
+  const storage = {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, value),
+    removeItem: (key) => values.delete(key)
+  };
+  const store = createExternalActionAttemptStore(storage);
+  const scope = "composer-predecessor-lineage";
+  const predecessor = {
+    attemptKind: "immediate",
+    clientSendId: "send-x",
+    notFoundRecovery: "restore",
+    requestedAt: "2026-08-30T09:00:00.000Z",
+    scheduledFor: null,
+    sessionRevision: 1,
+    sessionRevisionId: "session-x"
+  };
+  const restored = {
+    ...predecessor,
+    resolution: "restored",
+    restoredSessionRevisionId: "session-y"
+  };
+
+  await store.getOrCreateScopedValue(scope, { session: "x" }, () => predecessor);
+  await store.compareAndCompleteScopedValue(scope, () => true, true, restored);
+  const successor = {
+    ...predecessor,
+    clientSendId: "send-y",
+    resolution: "sent",
+    sessionRevision: 2,
+    sessionRevisionId: "session-y"
+  };
+  await store.getOrCreateScopedValue(scope, { session: "y" }, () => successor);
+  await store.completeScopedValue(scope, () => true, true, successor);
+
+  const remounted = createExternalActionAttemptStore(storage);
+  assert.deepEqual(
+    composerRecoveryResolution(
+      predecessor,
+      remounted.readCompletedScopedValues(scope)
+    ),
+    { kind: "sent", sessionRevisionId: "session-y" }
+  );
+  assert.equal(remounted.readScopedAttempt(scope), undefined);
+});
+
+test("restoration lineage is bounded and an expired predecessor fails closed", async () => {
+  const values = new Map();
+  const storage = {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, value),
+    removeItem: (key) => values.delete(key)
+  };
+  const store = createExternalActionAttemptStore(storage);
+  const scope = "durable-restoration-lineage";
+  const restored = {
+    clientSendId: "restored-x",
+    resolution: "restored",
+    restoredSessionRevisionId: "session-y"
+  };
+  await store.getOrCreateScopedValue(scope, { generation: "x" }, () => restored);
+  await store.completeScopedValue(scope, () => true, true, restored);
+
+  for (let index = 0; index < 101; index += 1) {
+    const sent = { clientSendId: `sent-${index}`, resolution: "sent" };
+    await store.getOrCreateScopedValue(scope, { generation: index }, () => sent);
+    await store.completeScopedValue(scope, () => true, true, sent);
+  }
+
+  const completed = store.readCompletedScopedValues(scope);
+  assert.equal(completed.length, 100);
+  assert.equal(completed.some((value) => value.clientSendId === restored.clientSendId), false);
+  assert.equal(composerRecoveryResolution(restored, completed), null);
+  assert.equal(typeof store.readCompletedScopedState(scope).prunedBefore, "number");
+});
+
+test("a torn completion record dominates the surviving active record", async () => {
+  const values = new Map();
+  let rejectActiveRemoval = true;
+  const storage = {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, value),
+    removeItem: (key) => {
+      if (rejectActiveRemoval && key.includes(":value:scoped:")) {
+        rejectActiveRemoval = false;
+        throw new Error("simulated crash before active cleanup");
+      }
+      values.delete(key);
+    }
+  };
+  const scope = "torn-composer-completion";
+  const store = createExternalActionAttemptStore(storage);
+  const active = { clientSendId: "send-x", notFoundRecovery: "blocked" };
+  const tombstone = {
+    ...active,
+    resolution: "restored",
+    restoredSessionRevisionId: "session-y"
+  };
+
+  await store.getOrCreateScopedValue(scope, { generation: "x" }, () => active);
+  await assert.rejects(
+    store.compareAndCompleteScopedValue(scope, () => true, true, tombstone)
+  );
+
+  assert.deepEqual(store.readCompletedScopedValues(scope), [tombstone]);
+  assert.equal(store.readScopedAttempt(scope), undefined);
+});
+
+test("a recovery claim must compare against shared state rather than a stale tab pin", async () => {
+  const values = new Map();
+  const storage = {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, value),
+    removeItem: (key) => values.delete(key)
+  };
+  const firstPins = new Map();
+  const stalePins = new Map();
+  const pinStorage = (pins) => ({
+    getItem: (key) => pins.get(key) ?? null,
+    setItem: (key, value) => pins.set(key, value),
+    removeItem: (key) => pins.delete(key)
+  });
+  const first = createExternalActionAttemptStore(storage, undefined, pinStorage(firstPins));
+  const stale = createExternalActionAttemptStore(storage, undefined, pinStorage(stalePins));
+  const scope = "changed-composer-recovery";
+  const intent = { text: "Preserved reply" };
+  const replay = { clientSendId: "send-1", notFoundRecovery: "replay" };
+  const restore = { ...replay, notFoundRecovery: "restore" };
+
+  await first.getOrCreateScopedValue(scope, intent, () => replay);
+  await stale.getOrCreateScopedValue(scope, intent, () => replay);
+  assert.equal(
+    await first.compareAndReplaceScopedValue(
+      scope,
+      (candidate) => candidate.clientSendId === "send-1",
+      restore
+    ),
+    true
+  );
+  assert.equal(
+    await stale.compareAndReplaceScopedValue(
+      scope,
+      (candidate) => candidate.notFoundRecovery === "replay",
+      { ...replay, notFoundRecovery: "blocked" }
+    ),
+    false
+  );
+  assert.deepEqual(stale.readScopedAttempt(scope)?.value, restore);
+});
+
 test("the completing tab allocates a new id for a later identical operation", async () => {
   const values = new Map();
   const storage = {
@@ -336,9 +760,19 @@ test("completing a stale generation does not overwrite the current shared genera
   const current = await first.getOrCreateScopedValue(scope, intent, create);
   await first.completeScopedValue(scope, () => true);
 
-  assert.equal(await stale.completeScopedValue(scope, (value) => value.clientSendId === "attempt-1"), true);
-  assert.equal(JSON.parse(values.get(key)).value.clientSendId, current.clientSendId);
-  assert.equal(JSON.parse(values.get(key)).completed, true);
+  assert.equal(
+    await stale.completeScopedValue(
+      scope,
+      (value) => value.clientSendId === "attempt-1",
+      true
+    ),
+    true
+  );
+  assert.equal(current.clientSendId, "attempt-2");
+  assert.equal(values.get(key), undefined);
+  assert.deepEqual(stale.readCompletedScopedValues(scope), [
+    { clientSendId: "attempt-1" }
+  ]);
 });
 
 test("a completed reconciled action can release its scope for a changed intent", async () => {
@@ -383,4 +817,175 @@ test("unavailable durable storage fails closed", async () => {
     ),
     ExternalActionAttemptStorageError
   );
+});
+
+test("an unresolved scoped action can be read after remount and completed actions stay hidden", async () => {
+  const values = new Map();
+  const storage = {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, value),
+    removeItem: (key) => values.delete(key)
+  };
+  const scope = "composer-send:thread-a";
+  const intent = { kind: "immediate", threadId: "thread-a", text: "Hello" };
+  const value = { clientSendId: "send-1", sessionRevision: 1 };
+  const first = createExternalActionAttemptStore(storage);
+  await first.getOrCreateScopedValue(scope, intent, () => value);
+
+  assert.deepEqual(createExternalActionAttemptStore(storage).readScopedAttempt(scope), {
+    intent,
+    value
+  });
+
+  await first.completeScopedValue(scope, (candidate) => candidate.clientSendId === "send-1");
+  assert.equal(createExternalActionAttemptStore(storage).readScopedAttempt(scope), undefined);
+  assert.equal(
+    [...values.values()].some((persisted) => persisted.includes("Hello")),
+    false
+  );
+});
+
+test("a copied composer revision reuses its content-free completed send marker", async () => {
+  const values = new Map();
+  const storage = {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, value),
+    removeItem: (key) => values.delete(key)
+  };
+  const scope = "composer-send:thread-a";
+  const intent = { threadId: "thread-a", text: "Private copied reply" };
+  const value = {
+    clientSendId: "send-original",
+    sessionRevision: 1,
+    sessionRevisionId: "28d6bb4f-0fe9-4a94-8284-e5c166097c60"
+  };
+  const first = createExternalActionAttemptStore(storage);
+  await first.getOrCreateScopedValue(scope, intent, () => value);
+  await first.completeScopedValue(
+    scope,
+    (candidate) => candidate.clientSendId === value.clientSendId,
+    true
+  );
+
+  let allocations = 0;
+  const copiedTab = createExternalActionAttemptStore(storage);
+  const reused = await copiedTab.getOrCreateScopedValue(
+    scope,
+    intent,
+    () => {
+      allocations += 1;
+      return { ...value, clientSendId: "send-duplicate" };
+    },
+    async () => true,
+    (candidate) => candidate.sessionRevisionId === value.sessionRevisionId
+  );
+
+  assert.equal(reused.clientSendId, "send-original");
+  assert.equal(allocations, 0);
+  assert.equal(
+    [...values.values()].some((persisted) => persisted.includes("Private copied reply")),
+    false
+  );
+  assert.deepEqual(copiedTab.readCompletedScopedValues(scope), [value]);
+});
+
+test("a completed composer marker is reused only for the same action semantics", async () => {
+  const values = new Map();
+  const storage = {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, value),
+    removeItem: (key) => values.delete(key)
+  };
+  const scope = "composer-send:thread-semantics";
+  const revisionId = "28d6bb4f-0fe9-4a94-8284-e5c166097c60";
+  const immediateValue = {
+    attemptKind: "immediate",
+    clientSendId: "send-immediate",
+    scheduledFor: null,
+    sessionRevisionId: revisionId
+  };
+  const first = createExternalActionAttemptStore(storage);
+  await first.getOrCreateScopedValue(
+    scope,
+    { kind: "immediate", scheduledFor: null, sessionRevisionId: revisionId },
+    () => immediateValue
+  );
+  await first.completeScopedValue(scope, () => true, true);
+
+  let allocations = 0;
+  const scheduledFor = "2026-08-31T09:00:00.000Z";
+  const scheduled = await createExternalActionAttemptStore(storage).getOrCreateScopedValue(
+    scope,
+    { kind: "scheduled", scheduledFor, sessionRevisionId: revisionId },
+    () => {
+      allocations += 1;
+      return {
+        attemptKind: "scheduled",
+        clientSendId: "send-scheduled",
+        scheduledFor,
+        sessionRevisionId: revisionId
+      };
+    },
+    async () => true,
+    (candidate) =>
+      candidate.sessionRevisionId === revisionId &&
+      candidate.attemptKind === "scheduled" &&
+      candidate.scheduledFor === scheduledFor
+  );
+
+  assert.equal(scheduled.clientSendId, "send-scheduled");
+  assert.equal(allocations, 1);
+});
+
+test("a copied stale pin cannot suppress a later identical composer intent with a new revision", async () => {
+  const values = new Map();
+  const firstPins = new Map();
+  const copiedPins = new Map();
+  const storage = {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, value),
+    removeItem: (key) => values.delete(key)
+  };
+  const pinStorage = (pins) => ({
+    getItem: (key) => pins.get(key) ?? null,
+    setItem: (key, value) => pins.set(key, value),
+    removeItem: (key) => pins.delete(key)
+  });
+  const scope = "composer-send:thread-a";
+  const oldIntent = {
+    composerIntent: { text: "Same words" },
+    sessionRevisionId: "28d6bb4f-0fe9-4a94-8284-e5c166097c60"
+  };
+  const oldValue = {
+    clientSendId: "send-original",
+    sessionRevisionId: oldIntent.sessionRevisionId
+  };
+  const first = createExternalActionAttemptStore(
+    storage,
+    undefined,
+    pinStorage(firstPins)
+  );
+  const copied = createExternalActionAttemptStore(
+    storage,
+    undefined,
+    pinStorage(copiedPins)
+  );
+
+  await first.getOrCreateScopedValue(scope, oldIntent, () => oldValue);
+  await copied.getOrCreateScopedValue(scope, oldIntent, () => oldValue);
+  await first.completeScopedValue(scope, () => true, true);
+
+  const newRevisionId = "9b35961d-a8fc-441d-986f-a2f366bcc9e3";
+  const next = await copied.getOrCreateScopedValue(
+    scope,
+    {
+      composerIntent: { text: "Same words" },
+      sessionRevisionId: newRevisionId
+    },
+    () => ({ clientSendId: "send-new", sessionRevisionId: newRevisionId }),
+    async () => true,
+    (candidate) => candidate.sessionRevisionId === newRevisionId
+  );
+
+  assert.equal(next.clientSendId, "send-new");
 });

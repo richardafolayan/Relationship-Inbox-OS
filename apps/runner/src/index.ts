@@ -33,8 +33,19 @@ import {
 } from "./services/setup-preferences";
 import { createTranscriptionSetupManager } from "./services/transcription-setup";
 import { createAuditService } from "./services/audit";
+import { deleteDraftRevision } from "./services/draft";
 import { summarizeControlBody } from "./services/control-audit";
 import { createEventBus } from "./services/event-bus";
+import type { StagedAttachmentOwnership } from "./services/staged-attachment-cleanup";
+import {
+  createStagedAttachmentRequestLifecycle,
+  multipartOnly
+} from "./services/staged-attachment-request";
+import {
+  createOutgoingAttachmentActivityTracker,
+  OUTGOING_ATTACHMENT_ORPHAN_GRACE_MS,
+  sweepOutgoingAttachmentOrphans
+} from "./services/outgoing-attachment-orphan-sweep";
 import {
   createAiService,
   contactSnapshotFingerprint,
@@ -303,6 +314,49 @@ app.use((req, res, next) => {
 // can reference them by absolute path when shelling out to osascript.
 const outgoingAttachmentsRoot = resolve(dataDir, "outgoing-attachments");
 mkdirSync(outgoingAttachmentsRoot, { recursive: true });
+const outgoingAttachmentActivity = createOutgoingAttachmentActivityTracker();
+const outgoingAttachmentRequestActivity = new WeakMap<
+  express.Request,
+  Array<{ directory: string; release: () => void }>
+>();
+function registerOutgoingAttachmentRequestDirectory(
+  req: express.Request,
+  directory: string
+): () => void {
+  const releaseActivity = outgoingAttachmentActivity.activate(directory);
+  const records = outgoingAttachmentRequestActivity.get(req) ?? [];
+  const record = { directory, release: releaseActivity };
+  records.push(record);
+  outgoingAttachmentRequestActivity.set(req, records);
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    releaseActivity();
+    const current = outgoingAttachmentRequestActivity.get(req);
+    if (!current) return;
+    const next = current.filter((item) => item !== record);
+    if (next.length > 0) outgoingAttachmentRequestActivity.set(req, next);
+    else outgoingAttachmentRequestActivity.delete(req);
+  };
+}
+function releaseOutgoingAttachmentRequestActivity(req: express.Request): void {
+  const records = outgoingAttachmentRequestActivity.get(req) ?? [];
+  for (const record of records) record.release();
+  outgoingAttachmentRequestActivity.delete(req);
+}
+async function discardFailedAttachmentUpload(req: express.Request): Promise<void> {
+  const records = [...(outgoingAttachmentRequestActivity.get(req) ?? [])];
+  try {
+    await Promise.all(
+      records.map((record) =>
+        rm(record.directory, { recursive: true, force: true })
+      )
+    );
+  } finally {
+    releaseOutgoingAttachmentRequestActivity(req);
+  }
+}
 async function discardStagedAttachments(
   attachments: Array<{ absolutePath: string }>
 ): Promise<void> {
@@ -316,12 +370,64 @@ async function discardStagedAttachments(
       .map((directory) => rm(directory, { recursive: true, force: true }))
   );
 }
+async function sendRequestOwnsStagedAttachments(
+  clientSendId: string | undefined,
+  attachments: Array<{ absolutePath: string }>
+): Promise<StagedAttachmentOwnership> {
+  if (!clientSendId || attachments.length === 0) return "unowned";
+  const row = await prisma.sendRequest.findUnique({
+    where: { clientSendId },
+    select: { attachmentsJson: true }
+  });
+  if (!row?.attachmentsJson) return "unowned";
+  try {
+    const persisted = JSON.parse(row.attachmentsJson) as Array<{
+      absolutePath?: unknown;
+    }>;
+    const persistedPaths = new Set(
+      persisted
+        .map((attachment) => attachment.absolutePath)
+        .filter((path): path is string => typeof path === "string")
+    );
+    return attachments.every((attachment) =>
+      persistedPaths.has(attachment.absolutePath)
+    )
+      ? "owned"
+      : "unowned";
+  } catch {
+    return "unknown";
+  }
+}
+let outgoingAttachmentSweepRunning = false;
+async function sweepOutgoingAttachmentOrphansOnce(): Promise<void> {
+  if (outgoingAttachmentSweepRunning) return;
+  outgoingAttachmentSweepRunning = true;
+  try {
+    await sweepOutgoingAttachmentOrphans({
+      activity: outgoingAttachmentActivity,
+      outgoingAttachmentsRoot,
+      graceMs: OUTGOING_ATTACHMENT_ORPHAN_GRACE_MS,
+      loadRows: () => prisma.sendRequest.findMany({
+        select: { attachmentsJson: true }
+      })
+    });
+  } finally {
+    outgoingAttachmentSweepRunning = false;
+  }
+}
 const uploadAttachments = multer({
   storage: multer.diskStorage({
-    destination: (_req, _file, cb) => {
+    destination: (req, _file, cb) => {
       const dir = resolve(outgoingAttachmentsRoot, uuid());
-      mkdirSync(dir, { recursive: true });
-      cb(null, dir);
+      let releaseActivity: (() => void) | undefined;
+      try {
+        releaseActivity = registerOutgoingAttachmentRequestDirectory(req, dir);
+        mkdirSync(dir, { recursive: true });
+        cb(null, dir);
+      } catch (error) {
+        releaseActivity?.();
+        cb(error instanceof Error ? error : new Error(String(error)), dir);
+      }
     },
     filename: (_req, file, cb) => {
       // Keep extension so Messages.app can sniff the right file type, but never
@@ -334,14 +440,9 @@ const uploadAttachments = multer({
   limits: { fileSize: 50 * 1024 * 1024 } // 50MB per file
 }).array("attachments", 10);
 
-function maybeMultipart(req: express.Request, res: express.Response, next: express.NextFunction): void {
-  const ct = (req.headers["content-type"] ?? "").toLowerCase();
-  if (ct.startsWith("multipart/form-data")) {
-    uploadAttachments(req, res, next);
-  } else {
-    next();
-  }
-}
+const maybeMultipart = multipartOnly(uploadAttachments, {
+  onUploadError: discardFailedAttachmentUpload
+});
 
 async function sha256File(path: string): Promise<string> {
   return new Promise((resolveHash, rejectHash) => {
@@ -4082,6 +4183,19 @@ app.post("/control/platform/test-selectors", asyncRoute(async (req, res) => {
 app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req, res) => {
   const completeUserTriggeredIntent = beginUserTriggeredIntentOperation(res);
   const requestIntentVersion = userTriggeredIntentVersion(res);
+  const stagedAttachmentRequest = createStagedAttachmentRequestLifecycle(req, {
+    discard: discardStagedAttachments,
+    releaseActivity: () => releaseOutgoingAttachmentRequestActivity(req),
+    resolveOwnership: sendRequestOwnsStagedAttachments
+  });
+  let stagedAttachments: Array<{
+    absolutePath: string;
+    contentDigest: string;
+    displayName: string;
+    kind: ReturnType<typeof kindFromMime>;
+    mimeType: string;
+  }> = [];
+  const uploadedFiles = (req.files as Express.Multer.File[] | undefined) ?? [];
   try {
   const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
   if (await checkPresenterGuard(res, settingsStore, { threadId, action: "send", kind: "thread-mutation" })) return;
@@ -4093,6 +4207,8 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
       text: z.string(),
       clientSendId: z.string().uuid(),
       clientRequestedAt: z.string().datetime().optional(),
+      consumeDraftText: z.string().max(5000).optional(),
+      consumeDraftUpdatedAt: z.string().datetime().optional(),
       // Optional ISO 8601 timestamp. When present, the send is persisted
       // as SCHEDULED and the scheduled-send promoter flips it to PENDING
       // when the time elapses. When absent, the send is enqueued
@@ -4104,11 +4220,17 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
       // sends a reply, it includes the parent Message.id here. The send
       // itself still goes out as a regular text bubble — the threading is
       // only persisted on our side and rendered by the dashboard.
-      replyToMessageId: z.string().min(1).optional()
+      replyToMessageId: z.string().min(1).optional(),
+      recoveryPredecessorClientSendId: z.string().uuid().optional()
     })
+    .refine(
+      (value) =>
+        (value.consumeDraftText === undefined) ===
+        (value.consumeDraftUpdatedAt === undefined),
+      { message: "consumeDraftText and consumeDraftUpdatedAt must be provided together" }
+    )
     .parse(req.body);
-  const uploadedFiles = (req.files as Express.Multer.File[] | undefined) ?? [];
-  const stagedAttachments = await Promise.all(
+  stagedAttachments = await Promise.all(
     uploadedFiles.map(async (f) => ({
       absolutePath: f.path,
       displayName: f.originalname,
@@ -4143,22 +4265,34 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
   // over from there.
   if (payload.scheduledFor) {
     try {
+      stagedAttachmentRequest.markPersistenceAttempted(payload.clientSendId);
       const scheduleResult = await sendService.enqueueScheduledSend({
         threadId,
         text: payload.text,
         clientSendId: payload.clientSendId,
         scheduledFor: new Date(payload.scheduledFor),
         attachments: stagedAttachments,
-        replyToMessageId: payload.replyToMessageId
+        replyToMessageId: payload.replyToMessageId,
+        recoveryPredecessorClientSendId:
+          payload.recoveryPredecessorClientSendId,
+        consumeDraft:
+          payload.consumeDraftText !== undefined && payload.consumeDraftUpdatedAt
+            ? {
+                text: payload.consumeDraftText,
+                updatedAt: new Date(payload.consumeDraftUpdatedAt)
+              }
+            : undefined
       });
       if (scheduleResult.replayed) {
         await discardStagedAttachments(stagedAttachments);
       }
+      stagedAttachmentRequest.markHandled();
       res.json({
         clientSendId: scheduleResult.clientSendId,
         status: scheduleResult.status,
         scheduledFor: scheduleResult.scheduledFor,
         replayed: scheduleResult.replayed,
+        draftConsumed: scheduleResult.draftConsumed,
         // Surfaced for parity with enqueueAndKick's response shape so the
         // dashboard doesn't need a separate fetch to refresh the bar.
         activeCount: await sendQueue.getActiveCount(),
@@ -4193,6 +4327,7 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
       payload.clientSendId,
       payload.clientRequestedAt ?? new Date().toISOString()
     );
+    stagedAttachmentRequest.markPersistenceAttempted(payload.clientSendId);
     const queueResult = await sendQueue.enqueueAndKick({
       threadId,
       text: payload.text,
@@ -4203,11 +4338,21 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
       focusIntentVersion:
         payload.source === "focus_ack" ? requestIntentVersion : undefined,
       rearmPolicyBlockedFocusAcknowledgement: payload.source === "focus_ack",
-      replyToMessageId: payload.replyToMessageId
+      replyToMessageId: payload.replyToMessageId,
+      recoveryPredecessorClientSendId:
+        payload.recoveryPredecessorClientSendId,
+      consumeDraft:
+        payload.consumeDraftText !== undefined && payload.consumeDraftUpdatedAt
+          ? {
+              text: payload.consumeDraftText,
+              updatedAt: new Date(payload.consumeDraftUpdatedAt)
+            }
+          : undefined
     });
     if (queueResult.replayed) {
       await discardStagedAttachments(stagedAttachments);
     }
+    stagedAttachmentRequest.markHandled();
     res.json(queueResult);
   } catch (error) {
     await auditService.log({
@@ -4224,6 +4369,7 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
     throw error;
   }
   } finally {
+    await stagedAttachmentRequest.finalize();
     completeUserTriggeredIntent();
   }
 }));
@@ -4320,7 +4466,7 @@ app.post("/control/thread/:threadId/update-send", asyncRoute(async (req, res) =>
   const payload = z
     .object({
       clientSendId: z.string().uuid(),
-      text: z.string().min(1).max(5000).optional(),
+      text: z.string().max(5000).optional(),
       scheduledFor: z.string().datetime().optional()
     })
     .refine((v) => v.text !== undefined || v.scheduledFor !== undefined, {
@@ -4474,7 +4620,8 @@ app.post("/control/thread/:threadId/retry-send", asyncRoute(async (req, res) => 
       clientSendId: newClientSendId,
       source: originalSource,
       attachments: retryAttachments,
-      replyToMessageId: original.replyToMessageId ?? undefined
+      replyToMessageId: original.replyToMessageId ?? undefined,
+      recoveryPredecessorClientSendId: original.clientSendId
     });
     res.json({ ...queueResult, clientSendId: newClientSendId });
   } catch (error) {
@@ -6569,6 +6716,7 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
     remember: safeJsonParse<RememberItem[]>(aiThread.rememberJson, []),
     replyBrief: replyBriefResponse,
     draft: thread.drafts[0]?.text ?? "",
+    draftUpdatedAt: thread.drafts[0]?.updatedAt.toISOString() ?? null,
     contextUpdatedAt: thread.updatedAt.toISOString(),
     relationshipMemory,
     messages: pageMessages
@@ -6640,7 +6788,21 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
     suggestedReplies: suggested,
     suggestedRepliesStatus,
     scheduledSends: scheduledSendRows.map((row) => ({
+      attachments: safeJsonParse<Array<Record<string, unknown>>>(
+        row.attachmentsJson,
+        []
+      ).flatMap((attachment) =>
+        typeof attachment.displayName === "string"
+          ? [{
+              displayName: attachment.displayName,
+              kind: typeof attachment.kind === "string" ? attachment.kind : null,
+              mimeType:
+                typeof attachment.mimeType === "string" ? attachment.mimeType : null
+            }]
+          : []
+      ),
       clientSendId: row.clientSendId,
+      replyToMessageId: row.replyToMessageId,
       text: row.requestText,
       scheduledFor: row.scheduledFor?.toISOString() ?? null,
       createdAt: row.createdAt.toISOString()
@@ -6916,6 +7078,7 @@ app.get("/data/send-queue", asyncRoute(async (_req, res) => {
         personName: row.thread.person.displayName,
         platform: row.thread.platform,
         status: row.status,
+        draftConsumed: row.draftConsumed,
         completedAt: row.updatedAt.toISOString(),
         errorMessage: failure?.message,
         errorKind: failure?.errorKind,
@@ -6961,6 +7124,7 @@ app.get("/data/send-status/:clientSendId", asyncRoute(async (req, res) => {
       clientSendId: true,
       threadId: true,
       status: true,
+      draftConsumed: true,
       errorJson: true,
       updatedAt: true
     }
@@ -6974,11 +7138,15 @@ app.get("/data/send-status/:clientSendId", asyncRoute(async (req, res) => {
     });
     return;
   }
-  const failure = row.status === "FAILED" ? parsePersistedSendFailure(row.errorJson) : null;
+  const failure =
+    row.status === "FAILED" || row.status === "CANCELLED"
+      ? parsePersistedSendFailure(row.errorJson)
+      : null;
   res.json({
     clientSendId: row.clientSendId,
     threadId: row.threadId,
     status: row.status,
+    draftConsumed: row.draftConsumed,
     updatedAt: row.updatedAt.toISOString(),
     errorMessage: failure?.message,
     errorKind: failure?.errorKind,
@@ -8564,25 +8732,35 @@ app.post("/control/thread/:threadId/draft", asyncRoute(async (req, res) => {
   if (await checkPresenterGuard(res, settingsStore, { threadId, action: "save a draft", kind: "thread-mutation" })) return;
   const payload = z.object({ text: z.string().max(5000) }).parse(req.body);
 
-  await prisma.draft.upsert({
+  const draft = await prisma.draft.upsert({
     where: { threadId },
     update: { text: payload.text },
     create: {
       threadId,
       text: payload.text
-    }
+    },
+    select: { text: true, updatedAt: true }
   });
 
-  res.json({ status: "ok" });
+  res.json({
+    status: "ok",
+    draft: { text: draft.text, updatedAt: draft.updatedAt.toISOString() }
+  });
 }));
 
 app.post("/control/thread/:threadId/delete-draft", asyncRoute(async (req, res) => {
   const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
   if (await checkPresenterGuard(res, settingsStore, { threadId, action: "delete a draft", kind: "thread-mutation" })) return;
+  const payload = z.object({
+    draft: z.object({
+      text: z.string().max(5000),
+      updatedAt: z.string().datetime()
+    })
+  }).parse(req.body);
 
-  await prisma.draft.deleteMany({ where: { threadId } });
+  const deleted = await deleteDraftRevision(prisma, threadId, payload.draft);
 
-  res.json({ status: "ok" });
+  res.json({ status: "ok", deleted });
 }));
 
 app.post("/control/thread/:threadId/mark-done", asyncRoute(async (req, res) => {
@@ -8958,7 +9136,12 @@ app.use((error: unknown, req: express.Request, res: express.Response, _next: exp
 
   // eslint-disable-next-line no-console
   console.error(`[runner:error] ${req.method} ${path} -> ${statusCode}: ${message}`);
-  res.status(statusCode).json({ error: message });
+  res.status(statusCode).json({
+    error: message,
+    ...(error instanceof SendPolicyError
+      ? { reasonCode: error.reasonCode, ...error.details }
+      : {})
+  });
 });
 
 process.on("unhandledRejection", (reason) => {
@@ -8995,6 +9178,12 @@ process.on("uncaughtException", (error) => {
 
 async function start(): Promise<void> {
   await ensureRuntimeDirs();
+  await sweepOutgoingAttachmentOrphansOnce();
+  const outgoingAttachmentSweepTimer = setInterval(
+    () => void sweepOutgoingAttachmentOrphansOnce(),
+    OUTGOING_ATTACHMENT_ORPHAN_GRACE_MS
+  );
+  outgoingAttachmentSweepTimer.unref();
   await settingsStore.getSettings();
   scanQueue.startScheduler();
 

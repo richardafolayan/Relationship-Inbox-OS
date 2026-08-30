@@ -83,14 +83,15 @@ test("sending an AI predraft on the same thread drops the predraft badge", () =>
 // and scheduleSend MUST reset composerSource right after clearing the text.
 // These fail before the fix (the reset line is absent) and pass after.
 
-const RESET = /setComposerSource\(composerSourceAfterClear\(\)\)|setComposerSource\("empty"\)/;
+const RESET =
+  /setComposerSource\(composerSourceAfterClear\(\)\)|setComposerSource\("empty"\)|setComposerSource\(clearedIntent\.source\)/;
 
 test("onSend resets composerSource after clearing the composer", () => {
   // The optimistic clear sits just before setComposerAttachments([]) (the only
   // occurrence in the file), so scan the window leading up to it.
   const anchor = SRC.indexOf("setComposerAttachments([]);");
   assert.notEqual(anchor, -1, "located the onSend optimistic-clear block");
-  const block = SRC.slice(anchor - 420, anchor + 30);
+  const block = SRC.slice(anchor - 700, anchor + 30);
   assert.match(block, /setComposer\(""\);/, "onSend clears the composer text");
   assert.match(
     block,
@@ -99,16 +100,21 @@ test("onSend resets composerSource after clearing the composer", () => {
   );
 });
 
-test("scheduleSend resets composerSource after clearing the composer", () => {
-  // scheduleSend's success block clears the composer then closes the schedule
-  // menu and the custom value field. Anchor on that unique pair.
-  const anchor = SRC.indexOf("setCustomScheduleValue(\"\");\n        await refresh();");
-  assert.notEqual(anchor, -1, "located the scheduleSend success block");
-  const block = SRC.slice(anchor - 320, anchor + 40);
-  assert.match(block, /setComposer\(""\);/, "scheduleSend clears the composer text");
+test("an accepted scheduled send resets composerSource when it clears the composer", () => {
+  const start = SRC.indexOf("const clearCapturedComposerAfterAcceptedAction = useCallback(");
+  const end = SRC.indexOf("// Send-queue polling fallback", start);
+  assert.notEqual(start, -1, "located accepted-action composer cleanup");
+  assert.notEqual(end, -1, "located the end of accepted-action composer cleanup");
+  const block = SRC.slice(start, end);
+  assert.match(block, /setComposer\(""\);/, "accepted scheduled send clears the composer text");
   assert.match(
     block,
     RESET,
-    "scheduleSend must reset composerSource so the predraft badge does not frame an empty composer"
+    "accepted scheduled send must reset composerSource so the predraft badge does not frame an empty composer"
+  );
+  assert.match(
+    SRC,
+    /disposition === "scheduled" && pending\.attemptKind === "scheduled"[\s\S]*?clearCapturedComposerAfterAcceptedAction\(pending\)/,
+    "the scheduled status path must use the accepted-action cleanup"
   );
 });

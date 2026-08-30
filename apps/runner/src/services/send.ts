@@ -9,7 +9,8 @@ import { buildDemoSendReceipt } from "./demo-send";
 import {
   classifySendFailureKind,
   consumerSendFailure,
-  parsePersistedSendFailure
+  parsePersistedSendFailure,
+  persistedSendRetryEligibility
 } from "./send-failure";
 import {
   focusAcknowledgementClientSendIds,
@@ -171,6 +172,7 @@ export interface EnqueueSendResult {
   clientSendId: string;
   status: "PENDING" | "SENT" | "FAILED";
   replayed: boolean;
+  draftConsumed?: boolean;
   result?: SendResult;
   errorMessage?: string;
 }
@@ -180,6 +182,7 @@ export interface ScheduleSendResult {
   status: "SCHEDULED";
   scheduledFor: string;
   replayed: boolean;
+  draftConsumed?: boolean;
 }
 
 export type SendSource = "manual" | "focus_ack" | "focus_auto_ack";
@@ -199,6 +202,7 @@ type PersistedSendIntent = {
   attachmentsJson: string | null;
   replyToMessageId: string | null;
   scheduledFor: Date | null;
+  recoveryPredecessorClientSendId: string | null;
 };
 
 function normalizedAttachmentsJson(attachments?: SendAttachment[]): string | null {
@@ -267,6 +271,7 @@ function assertExistingSendIntent(
     source: SendSource;
     attachments?: SendAttachment[];
     replyToMessageId?: string;
+    recoveryPredecessorClientSendId?: string;
     scheduledFor?: Date;
   },
   options: { allowRequestTextChange?: boolean } = {}
@@ -280,7 +285,9 @@ function assertExistingSendIntent(
     normalizePersistedAttachmentsJson(existing.attachmentsJson) !==
       attachmentIntentJson(expected.attachments) ||
     (existing.replyToMessageId ?? null) !== (expected.replyToMessageId ?? null) ||
-    existingScheduledFor !== expectedScheduledFor
+    existingScheduledFor !== expectedScheduledFor ||
+    (existing.recoveryPredecessorClientSendId ?? null) !==
+      (expected.recoveryPredecessorClientSendId ?? null)
   ) {
     throw new Error("clientSendId is already linked to a different send intent");
   }
@@ -289,7 +296,8 @@ function assertExistingSendIntent(
 export class SendPolicyError extends Error {
   constructor(
     readonly reasonCode: string,
-    message: string
+    message: string,
+    readonly details?: Record<string, string>
   ) {
     super(message);
     this.name = "SendPolicyError";
@@ -319,6 +327,16 @@ export function assertInstagramManualTextSend(input: {
   }
 }
 
+export function recoveryPredecessorIsDefinitelyUnsent(
+  status: string,
+  errorJson?: string | null
+): boolean {
+  if (status === "CANCELLED") {
+    return parsePersistedSendFailure(errorJson).errorKind !== "POLICY_BLOCKED";
+  }
+  return persistedSendRetryEligibility(status, errorJson).allowed;
+}
+
 export function createSendService(deps: SendServiceDeps) {
   // Default to the runner's singleton; tests inject a fake to exercise the
   // scheduled-send race guards without a real database.
@@ -334,6 +352,44 @@ export function createSendService(deps: SendServiceDeps) {
     focusPolicyIntentEpoch: number;
     selfIntentAllowance: number;
   }>();
+
+  async function assertRecoveryPredecessorEligible(
+    database: Prisma.TransactionClient,
+    input: {
+      clientSendId: string;
+      recoveryPredecessorClientSendId?: string;
+      threadId: string;
+    }
+  ): Promise<void> {
+    let predecessorId = input.recoveryPredecessorClientSendId;
+    const visited = new Set([input.clientSendId]);
+    while (predecessorId) {
+      if (visited.has(predecessorId)) {
+        throw new SendPolicyError(
+          "recovery_predecessor_cycle",
+          "Recovered send lineage is cyclic"
+        );
+      }
+      visited.add(predecessorId);
+      const predecessor = await database.sendRequest.findUnique({
+        where: { clientSendId: predecessorId }
+      });
+      if (
+        !predecessor ||
+        predecessor.threadId !== input.threadId ||
+        !recoveryPredecessorIsDefinitelyUnsent(
+          predecessor.status,
+          predecessor.errorJson
+        )
+      ) {
+        throw new SendPolicyError(
+          "recovery_predecessor_not_retryable",
+          "The earlier send is no longer definitely unsent"
+        );
+      }
+      predecessorId = predecessor.recoveryPredecessorClientSendId ?? undefined;
+    }
+  }
 
   function registerUserTriggeredIntent(threadId: string): () => void {
     userTriggeredIntentEpochs.set(
@@ -576,6 +632,8 @@ export function createSendService(deps: SendServiceDeps) {
      * by the dashboard.
      */
     replyToMessageId?: string;
+    recoveryPredecessorClientSendId?: string;
+    consumeDraft?: { text: string; updatedAt: Date };
   }): Promise<EnqueueSendResult> {
     const thread = await prisma.thread.findUnique({
       where: { id: input.threadId }
@@ -796,7 +854,8 @@ export function createSendService(deps: SendServiceDeps) {
           return {
             clientSendId: input.clientSendId,
             status: "PENDING",
-            replayed: true
+            replayed: true,
+            draftConsumed: existing.draftConsumed
           };
         }
       }
@@ -808,6 +867,7 @@ export function createSendService(deps: SendServiceDeps) {
             clientSendId: input.clientSendId,
             status: "SENT",
             replayed: true,
+            draftConsumed: existing.draftConsumed,
             result: { ...parseReceipt(existing.receiptJson), replayed: true }
           };
         }
@@ -843,18 +903,25 @@ export function createSendService(deps: SendServiceDeps) {
             return {
               clientSendId: input.clientSendId,
               status: "PENDING",
-              replayed: true
+              replayed: true,
+              draftConsumed: existing.draftConsumed
             };
           }
           return {
             clientSendId: input.clientSendId,
             status: "FAILED",
             replayed: true,
+            draftConsumed: existing.draftConsumed,
             errorMessage: parseFailedSendMessage(existing.errorJson)
           };
         }
         if (existing.status === "PENDING") {
-          return { clientSendId: input.clientSendId, status: "PENDING", replayed: true };
+          return {
+            clientSendId: input.clientSendId,
+            status: "PENDING",
+            replayed: true,
+            draftConsumed: existing.draftConsumed
+          };
         }
         // SCHEDULED / CANCELLED: the immediate-send path can't replay these. A
         // SCHEDULED row is drained by the scheduled-send promoter, not the
@@ -865,18 +932,39 @@ export function createSendService(deps: SendServiceDeps) {
         throw new Error(`Send request ${input.clientSendId} already exists in status ${existing.status}`);
       }
 
+      let draftConsumed = false;
       try {
-        await prisma.sendRequest.create({
-          data: {
-            clientSendId: input.clientSendId,
-            threadId: input.threadId,
-            requestText: input.text,
-            status: "PENDING",
-            source,
-            focusIntentVersion,
-            attachmentsJson: normalizedAttachmentsJson(input.attachments),
-            replyToMessageId: input.replyToMessageId ?? null
+        const data = {
+          clientSendId: input.clientSendId,
+          threadId: input.threadId,
+          requestText: input.text,
+          status: "PENDING" as const,
+          source,
+          focusIntentVersion,
+          attachmentsJson: normalizedAttachmentsJson(input.attachments),
+          replyToMessageId: input.replyToMessageId ?? null,
+          recoveryPredecessorClientSendId:
+            input.recoveryPredecessorClientSendId ?? null
+        };
+        draftConsumed = await prisma.$transaction(async (transaction) => {
+          await assertRecoveryPredecessorEligible(transaction, input);
+          const created = await transaction.sendRequest.create({ data });
+          if (!input.consumeDraft) return false;
+          const deletion = await transaction.draft.deleteMany({
+            where: {
+              threadId: input.threadId,
+              text: input.consumeDraft.text,
+              updatedAt: input.consumeDraft.updatedAt
+            }
+          });
+          const consumed = deletion.count === 1;
+          if (consumed) {
+            await transaction.sendRequest.update({
+              where: { id: created.id },
+              data: { draftConsumed: true }
+            });
           }
+          return consumed;
         });
       } catch (error) {
         if (!isUniqueConstraintError(error)) {
@@ -885,6 +973,24 @@ export function createSendService(deps: SendServiceDeps) {
         const winner = await prisma.sendRequest.findUnique({
           where: { clientSendId: input.clientSendId }
         });
+        if (!winner && input.recoveryPredecessorClientSendId) {
+          const lineageWinner = await prisma.sendRequest.findUnique({
+            where: {
+              recoveryPredecessorClientSendId:
+                input.recoveryPredecessorClientSendId
+            }
+          });
+          if (lineageWinner) {
+            throw new SendPolicyError(
+              "recovery_predecessor_already_claimed",
+              "Another recovered send already claimed the earlier request",
+              {
+                winningClientSendId: lineageWinner.clientSendId,
+                winningStatus: lineageWinner.status
+              }
+            );
+          }
+        }
         if (!winner) throw new Error("clientSendId conflict could not be reconciled");
         assertExistingSendIntent(winner, { ...input, source });
         if (winner.status === "SENT" && winner.receiptJson) {
@@ -893,6 +999,7 @@ export function createSendService(deps: SendServiceDeps) {
             clientSendId: input.clientSendId,
             status: "SENT",
             replayed: true,
+            draftConsumed: winner.draftConsumed,
             result: { ...parseReceipt(winner.receiptJson), replayed: true }
           };
         }
@@ -901,6 +1008,7 @@ export function createSendService(deps: SendServiceDeps) {
             clientSendId: input.clientSendId,
             status: "FAILED",
             replayed: true,
+            draftConsumed: winner.draftConsumed,
             errorMessage: parseFailedSendMessage(winner.errorJson)
           };
         }
@@ -909,7 +1017,12 @@ export function createSendService(deps: SendServiceDeps) {
             `Send request ${input.clientSendId} already exists in status ${winner.status}`
           );
         }
-        return { clientSendId: input.clientSendId, status: "PENDING", replayed: true };
+        return {
+          clientSendId: input.clientSendId,
+          status: "PENDING",
+          replayed: true,
+          draftConsumed: winner.draftConsumed
+        };
       }
 
       if (source === "focus_ack" || source === "focus_auto_ack") {
@@ -924,7 +1037,12 @@ export function createSendService(deps: SendServiceDeps) {
         });
       }
 
-      return { clientSendId: input.clientSendId, status: "PENDING", replayed: false };
+      return {
+        clientSendId: input.clientSendId,
+        status: "PENDING",
+        replayed: false,
+        draftConsumed
+      };
     };
 
     if (source === "focus_ack" || source === "focus_auto_ack") {
@@ -1026,9 +1144,39 @@ export function createSendService(deps: SendServiceDeps) {
     // A reset that entered the fence first can delete the graph, leaving this
     // worker with nothing to claim or dispatch. The guarded write still keeps
     // concurrent workers and crash recovery idempotent.
-    const claim = await prisma.sendRequest.updateMany({
-      where: { id: sendRequestId, status: "PENDING", receiptJson: null },
-      data: { receiptJson: SEND_CLAIM_MARKER }
+    const claim = await prisma.$transaction(async (transaction) => {
+      if (sendRequest.recoveryPredecessorClientSendId) {
+        try {
+          await assertRecoveryPredecessorEligible(transaction, {
+            clientSendId: sendRequest.clientSendId,
+            recoveryPredecessorClientSendId:
+              sendRequest.recoveryPredecessorClientSendId,
+            threadId: sendRequest.threadId
+          });
+        } catch (error) {
+          if (!(error instanceof SendPolicyError)) throw error;
+          await transaction.sendRequest.updateMany({
+            where: {
+              id: sendRequestId,
+              status: "PENDING",
+              receiptJson: null
+            },
+            data: {
+              status: "CANCELLED",
+              errorJson: JSON.stringify({
+                errorKind: "POLICY_BLOCKED",
+                message: error.message,
+                reasonCode: error.reasonCode
+              })
+            }
+          });
+          return { count: 0 };
+        }
+      }
+      return transaction.sendRequest.updateMany({
+        where: { id: sendRequestId, status: "PENDING", receiptJson: null },
+        data: { receiptJson: SEND_CLAIM_MARKER }
+      });
     });
     if (claim.count !== 1) return;
 
@@ -1075,6 +1223,17 @@ export function createSendService(deps: SendServiceDeps) {
           }`
         );
       }
+    }
+
+    async function assertRecoveryPredecessorDispatchEligible(): Promise<void> {
+      await prisma.$transaction((transaction) =>
+        assertRecoveryPredecessorEligible(transaction, {
+          clientSendId: claimedSendRequest.clientSendId,
+          recoveryPredecessorClientSendId:
+            claimedSendRequest.recoveryPredecessorClientSendId ?? undefined,
+          threadId: claimedSendRequest.threadId
+        })
+      );
     }
 
     async function persistDeliveredReceipt(receipt: SendReceipt): Promise<void> {
@@ -1134,6 +1293,7 @@ export function createSendService(deps: SendServiceDeps) {
         source
       });
       if (inSandbox) {
+        await assertRecoveryPredecessorDispatchEligible();
         const manifest = await deps.settingsStore.getDemoSeedManifest();
         if (!manifest || !manifest.threadIds.includes(thread.id)) {
           throw new Error(
@@ -1262,6 +1422,7 @@ export function createSendService(deps: SendServiceDeps) {
           await assertFocusAcknowledgementDispatchEligible?.();
           const beforeDispatch = async () => {
             await assertFocusAcknowledgementDispatchEligible?.();
+            await assertRecoveryPredecessorDispatchEligible();
             dispatchStarted = true;
           };
           const delivered = await adapter.sendMessage(
@@ -1308,6 +1469,7 @@ export function createSendService(deps: SendServiceDeps) {
           threadId: thread.id,
           platform: thread.platform as PlatformName,
           clientSendId: input.clientSendId,
+          draftConsumed: sendRequest.draftConsumed,
           verifiedBy: receipt.verifiedBy,
           acknowledgedAt: receipt.acknowledgedAt,
           platformResultAt
@@ -1354,6 +1516,7 @@ export function createSendService(deps: SendServiceDeps) {
             threadId: thread.id,
             platform: thread.platform as PlatformName,
             clientSendId: input.clientSendId,
+            draftConsumed: sendRequest.draftConsumed,
             verifiedBy: reconciledReceipt.verifiedBy,
             acknowledgedAt: reconciledReceipt.acknowledgedAt,
             platformResultAt
@@ -1492,6 +1655,8 @@ export function createSendService(deps: SendServiceDeps) {
     scheduledFor: Date;
     attachments?: SendAttachment[];
     replyToMessageId?: string;
+    recoveryPredecessorClientSendId?: string;
+    consumeDraft?: { text: string; updatedAt: Date };
   }): Promise<ScheduleSendResult> {
     const thread = await prisma.thread.findUnique({
       where: { id: input.threadId }
@@ -1525,24 +1690,46 @@ export function createSendService(deps: SendServiceDeps) {
           clientSendId: input.clientSendId,
           status: "SCHEDULED",
           scheduledFor: existing.scheduledFor.toISOString(),
-          replayed: true
+          replayed: true,
+          draftConsumed: existing.draftConsumed
         };
       }
       throw new Error(`Send request ${input.clientSendId} already exists in status ${existing.status}`);
     }
 
+    let draftConsumed = false;
     try {
-      await prisma.sendRequest.create({
-        data: {
-          clientSendId: input.clientSendId,
-          threadId: input.threadId,
-          requestText: input.text,
-          status: "SCHEDULED",
-          source: "manual",
-          scheduledFor: input.scheduledFor,
-          replyToMessageId: input.replyToMessageId ?? null,
-          attachmentsJson: normalizedAttachmentsJson(input.attachments)
+      const data = {
+        clientSendId: input.clientSendId,
+        threadId: input.threadId,
+        requestText: input.text,
+        status: "SCHEDULED" as const,
+        source: "manual" as const,
+        scheduledFor: input.scheduledFor,
+        replyToMessageId: input.replyToMessageId ?? null,
+        recoveryPredecessorClientSendId:
+          input.recoveryPredecessorClientSendId ?? null,
+        attachmentsJson: normalizedAttachmentsJson(input.attachments)
+      };
+      draftConsumed = await prisma.$transaction(async (transaction) => {
+        await assertRecoveryPredecessorEligible(transaction, input);
+        const created = await transaction.sendRequest.create({ data });
+        if (!input.consumeDraft) return false;
+        const deletion = await transaction.draft.deleteMany({
+          where: {
+            threadId: input.threadId,
+            text: input.consumeDraft.text,
+            updatedAt: input.consumeDraft.updatedAt
+          }
+        });
+        const consumed = deletion.count === 1;
+        if (consumed) {
+          await transaction.sendRequest.update({
+            where: { id: created.id },
+            data: { draftConsumed: true }
+          });
         }
+        return consumed;
       });
     } catch (error) {
       if (!isUniqueConstraintError(error)) {
@@ -1551,6 +1738,24 @@ export function createSendService(deps: SendServiceDeps) {
       const winner = await prisma.sendRequest.findUnique({
         where: { clientSendId: input.clientSendId }
       });
+      if (!winner && input.recoveryPredecessorClientSendId) {
+        const lineageWinner = await prisma.sendRequest.findUnique({
+          where: {
+            recoveryPredecessorClientSendId:
+              input.recoveryPredecessorClientSendId
+          }
+        });
+        if (lineageWinner) {
+          throw new SendPolicyError(
+            "recovery_predecessor_already_claimed",
+            "Another recovered send already claimed the earlier request",
+            {
+              winningClientSendId: lineageWinner.clientSendId,
+              winningStatus: lineageWinner.status
+            }
+          );
+        }
+      }
       if (!winner) throw new Error("clientSendId conflict could not be reconciled");
       assertExistingSendIntent(winner, {
         ...input,
@@ -1565,7 +1770,8 @@ export function createSendService(deps: SendServiceDeps) {
         clientSendId: input.clientSendId,
         status: "SCHEDULED",
         scheduledFor: winner.scheduledFor.toISOString(),
-        replayed: true
+        replayed: true,
+        draftConsumed: winner.draftConsumed
       };
     }
 
@@ -1585,7 +1791,8 @@ export function createSendService(deps: SendServiceDeps) {
       clientSendId: input.clientSendId,
       status: "SCHEDULED",
       scheduledFor: input.scheduledFor.toISOString(),
-      replayed: false
+      replayed: false,
+      draftConsumed
     };
   }
 
@@ -1674,7 +1881,9 @@ export function createSendService(deps: SendServiceDeps) {
     if (row.status !== "SCHEDULED") return { updated: false, reason: `not_scheduled:${row.status}` };
 
     const nextText = typeof input.text === "string" ? input.text : row.requestText;
-    if (nextText.length === 0) return { updated: false, reason: "empty_text" };
+    if (nextText.length === 0 && !row.attachmentsJson) {
+      return { updated: false, reason: "empty_text" };
+    }
     const nextScheduledFor = input.scheduledFor ?? row.scheduledFor;
     if (!nextScheduledFor) return { updated: false, reason: "no_scheduled_for" };
     if (Number.isNaN(nextScheduledFor.getTime())) return { updated: false, reason: "invalid_scheduled_for" };

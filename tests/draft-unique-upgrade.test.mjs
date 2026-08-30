@@ -70,7 +70,8 @@ function createLegacySendRequestTable(database) {
       clientSendId TEXT NOT NULL,
       threadId TEXT NOT NULL,
       status TEXT NOT NULL DEFAULT 'PENDING',
-      requestText TEXT NOT NULL
+      requestText TEXT NOT NULL,
+      draftConsumed BOOLEAN NOT NULL DEFAULT false
     )
   `);
 }
@@ -105,6 +106,27 @@ function assertUniqueDraftIndex(database) {
   assert.deepEqual(
     database.prepare('PRAGMA index_info("drafts_threadId_key")').all().map((column) => column.name),
     ["threadId"]
+  );
+}
+
+function assertUniqueRecoveryPredecessorIndex(database) {
+  const index = database
+    .prepare('PRAGMA index_list("send_requests")')
+    .all()
+    .find(
+      (candidate) =>
+        candidate.name ===
+        "send_requests_recoveryPredecessorClientSendId_key"
+    );
+  assert.equal(index?.unique, 1);
+  assert.deepEqual(
+    database
+      .prepare(
+        'PRAGMA index_info("send_requests_recoveryPredecessorClientSendId_key")'
+      )
+      .all()
+      .map((column) => column.name),
+    ["recoveryPredecessorClientSendId"]
   );
 }
 
@@ -581,15 +603,314 @@ test("database-only invalidates provenance from the immediately preceding source
   }
 });
 
+test("a current-stamp predecessor database gains send safety columns without losing sends", () => {
+  const { directory, databasePath, cleanup } = fixture();
+  try {
+    const currentSchema = readFileSync("packages/core/prisma/schema.prisma", "utf8");
+    const predecessorSchema = currentSchema
+      .replace(/^\s+draftConsumed\s+Boolean\s+@default\(false\)\s*$/m, "")
+      .replace(
+        /^\s+recoveryPredecessorClientSendId\s+String\?\s+@unique\s*$/m,
+        ""
+      );
+    assert.notEqual(predecessorSchema, currentSchema);
+    const predecessorSchemaPath = join(directory, "predecessor-no-draft-consumed.prisma");
+    writeFileSync(predecessorSchemaPath, predecessorSchema);
+    writeFileSync(databasePath, "", { mode: 0o600 });
+    const prismaCli = join(appDir, "node_modules", "prisma", "build", "index.js");
+    const predecessorPush = spawnSync(
+      process.execPath,
+      [prismaCli, "db", "push", "--schema", predecessorSchemaPath, "--skip-generate"],
+      {
+        cwd: appDir,
+        encoding: "utf8",
+        env: { ...process.env, DATABASE_URL: `file:${databasePath}` }
+      }
+    );
+    assert.equal(
+      predecessorPush.status,
+      0,
+      `${predecessorPush.stdout}\n${predecessorPush.stderr}`
+    );
+
+    let database = new Database(databasePath);
+    database.pragma("foreign_keys = OFF");
+    const now = Date.now();
+    database
+      .prepare(`
+        INSERT INTO "send_requests" (
+          "id", "clientSendId", "threadId", "status", "requestText",
+          "source", "createdAt", "updatedAt"
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `)
+      .run(
+        "send-before-draft-consumed",
+        "client-before-draft-consumed",
+        "thread-predecessor",
+        "PENDING",
+        "preserve me",
+        "manual",
+        now,
+        now
+      );
+    database.close();
+    writeFileSync(
+      join(directory, "app-prepare-stamps.json"),
+      `${JSON.stringify({ schemaHash: currentSchemaHash() })}\n`
+    );
+
+    const check = spawnSync(process.execPath, [repairScript, "--check", databasePath], {
+      cwd: appDir,
+      encoding: "utf8"
+    });
+    assert.equal(check.status, 2, check.stderr);
+
+    const result = runDatabaseOnly(directory, databasePath);
+    assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+    database = new Database(databasePath, { readonly: true, fileMustExist: true });
+    assert.equal(
+      database
+        .prepare('PRAGMA table_info("send_requests")')
+        .all()
+        .find((column) => column.name === "draftConsumed")?.notnull,
+      1
+    );
+    assert.deepEqual(
+      database
+        .prepare('SELECT "id", "draftConsumed" FROM "send_requests" WHERE "id" = ?')
+        .get("send-before-draft-consumed"),
+      { id: "send-before-draft-consumed", draftConsumed: 0 }
+    );
+    const predecessorColumn = database
+      .prepare('PRAGMA table_info("send_requests")')
+      .all()
+      .find((column) => column.name === "recoveryPredecessorClientSendId");
+    assert.equal(predecessorColumn?.type, "TEXT");
+    assert.equal(predecessorColumn?.notnull, 0);
+    assertUniqueRecoveryPredecessorIndex(database);
+    database.close();
+  } finally {
+    cleanup();
+  }
+});
+
+test("repair deterministically arbitrates duplicate recovery successors before adding uniqueness", () => {
+  const { databasePath, cleanup } = fixture();
+  try {
+    writeFileSync(databasePath, "", { mode: 0o600 });
+    const pushed = runCurrentSchemaPush(databasePath);
+    assert.equal(pushed.status, 0, `${pushed.stdout}\n${pushed.stderr}`);
+    let database = new Database(databasePath);
+    database.pragma("foreign_keys = OFF");
+    database.exec(
+      'DROP INDEX IF EXISTS "send_requests_recoveryPredecessorClientSendId_key"'
+    );
+    const insert = database.prepare(`
+      INSERT INTO "send_requests" (
+        "id", "clientSendId", "threadId", "status", "requestText",
+        "draftConsumed", "source", "receiptJson", "errorJson",
+        "recoveryPredecessorClientSendId", "createdAt", "updatedAt"
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    const now = Date.now();
+    insert.run(
+      "a-pending",
+      "pending-successor",
+      "thread-1",
+      "PENDING",
+      "same intent",
+      0,
+      "manual",
+      null,
+      null,
+      "failed-predecessor",
+      now,
+      now
+    );
+    insert.run(
+      "z-sent",
+      "sent-successor",
+      "thread-1",
+      "SENT",
+      "same intent",
+      0,
+      "manual",
+      JSON.stringify({ sentAt: "2026-08-30T09:00:00.000Z" }),
+      null,
+      "failed-predecessor",
+      now + 1,
+      now + 1
+    );
+    insert.run(
+      "a-retry-safe",
+      "retry-safe-successor",
+      "thread-1",
+      "FAILED",
+      "same intent",
+      0,
+      "manual",
+      null,
+      JSON.stringify({ errorKind: "TRANSIENT", message: "timeout" }),
+      "ambiguous-failed-predecessor",
+      now + 2,
+      now + 2
+    );
+    insert.run(
+      "z-in-doubt",
+      "in-doubt-successor",
+      "thread-1",
+      "FAILED",
+      "same intent",
+      0,
+      "manual",
+      null,
+      JSON.stringify({
+        errorKind: "DELIVERY_UNCERTAIN",
+        message: "delivery unknown"
+      }),
+      "ambiguous-failed-predecessor",
+      now + 3,
+      now + 3
+    );
+    insert.run(
+      "a-retry-safe-claim",
+      "retry-safe-claim-successor",
+      "thread-1",
+      "FAILED",
+      "same intent",
+      0,
+      "manual",
+      null,
+      JSON.stringify({ errorKind: "TRANSIENT", message: "timeout" }),
+      "claimed-predecessor",
+      now + 4,
+      now + 4
+    );
+    insert.run(
+      "z-claimed",
+      "claimed-successor",
+      "thread-1",
+      "PENDING",
+      "same intent",
+      0,
+      "manual",
+      JSON.stringify({ claim: "send-worker-v1" }),
+      null,
+      "claimed-predecessor",
+      now + 5,
+      now + 5
+    );
+    database.close();
+
+    runRepair(databasePath);
+    runRepair(databasePath);
+
+    database = new Database(databasePath);
+    assertUniqueRecoveryPredecessorIndex(database);
+    assert.deepEqual(
+      database
+        .prepare(`
+          SELECT "id", "status", "recoveryPredecessorClientSendId", "errorJson"
+          FROM "send_requests"
+          WHERE "id" IN ('a-pending', 'z-sent')
+          ORDER BY "id"
+        `)
+        .all()
+        .map((row) => ({
+          ...row,
+          errorJson: row.errorJson ? JSON.parse(row.errorJson) : null
+        })),
+      [
+        {
+          id: "a-pending",
+          status: "FAILED",
+          recoveryPredecessorClientSendId: null,
+          errorJson: {
+            errorKind: "DELIVERY_UNCERTAIN",
+            message: "Another recovered send already claimed this predecessor",
+            reasonCode: "recovery_predecessor_already_claimed"
+          }
+        },
+        {
+          id: "z-sent",
+          status: "SENT",
+          recoveryPredecessorClientSendId: "failed-predecessor",
+          errorJson: null
+        }
+      ]
+    );
+    for (const [predecessorId, clientSendIds] of [
+      [
+        "ambiguous-failed-predecessor",
+        ["retry-safe-successor", "in-doubt-successor"]
+      ],
+      [
+        "claimed-predecessor",
+        ["retry-safe-claim-successor", "claimed-successor"]
+      ]
+    ]) {
+      const ambiguousRows = database
+        .prepare(`
+          SELECT "status", "recoveryPredecessorClientSendId", "errorJson"
+          FROM "send_requests"
+          WHERE "clientSendId" IN (?, ?)
+        `)
+        .all(...clientSendIds);
+      assert.equal(ambiguousRows.length, 2);
+      assert.equal(
+        ambiguousRows.filter(
+          (row) => row.recoveryPredecessorClientSendId === predecessorId
+        ).length,
+        1
+      );
+      assert.ok(ambiguousRows.every((row) => row.status === "FAILED"));
+      assert.ok(
+        ambiguousRows.every(
+          (row) => JSON.parse(row.errorJson).errorKind === "DELIVERY_UNCERTAIN"
+        )
+      );
+    }
+    const insertAfterRepair = database.prepare(`
+      INSERT INTO "send_requests" (
+        "id", "clientSendId", "threadId", "status", "requestText",
+        "draftConsumed", "source", "receiptJson", "errorJson",
+        "recoveryPredecessorClientSendId", "createdAt", "updatedAt"
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    assert.throws(
+      () => insertAfterRepair.run(
+        "third",
+        "third-successor",
+        "thread-1",
+        "PENDING",
+        "same intent",
+        0,
+        "manual",
+        null,
+        null,
+        "failed-predecessor",
+        now + 2,
+        now + 2
+      ),
+      /UNIQUE constraint failed/
+    );
+    database.close();
+  } finally {
+    cleanup();
+  }
+});
+
 test("database-only retries a pending verified restore before schema checks", () => {
   const { directory, databasePath, cleanup } = fixture();
   try {
     let database = new Database(databasePath);
     createLegacyDraftTable(database);
     database.exec('CREATE UNIQUE INDEX "drafts_threadId_key" ON "drafts"("threadId")');
+    createLegacySendRequestTable(database);
     database.exec("CREATE TABLE pilot (id TEXT PRIMARY KEY)");
     database.prepare("INSERT INTO pilot (id) VALUES ('preserved')").run();
     database.close();
+    runRepair(databasePath);
 
     const backupPath = join(directory, "backups", "verified.sqlite");
     mkdirSync(join(directory, "backups"), { recursive: true });

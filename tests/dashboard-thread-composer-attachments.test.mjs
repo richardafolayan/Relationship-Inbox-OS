@@ -1,0 +1,608 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+const {
+  assertThreadComposerAttachmentsRecoverable,
+  createMemoryThreadComposerAttachmentStore,
+  getOrCreateThreadComposerTabId,
+  prepareThreadComposerAttachmentNamespaceHandoff,
+  prepareThreadComposerAttachmentOwnershipHandoff,
+  reconcileThreadComposerAttachmentOwnership,
+  removableThreadComposerAttachmentIds,
+  __test
+} = await import("../apps/dashboard/lib/thread-composer-attachments.ts");
+
+const descriptor = {
+  id: "attachment-1",
+  kind: "pdf",
+  lastModified: 123,
+  name: "pilot-notes.pdf",
+  size: 16,
+  type: "application/pdf"
+};
+
+test("attachment recovery preserves bytes and file identity", async () => {
+  const store = createMemoryThreadComposerAttachmentStore();
+  const file = new File(["pilot attachment"], descriptor.name, {
+    lastModified: descriptor.lastModified,
+    type: descriptor.type
+  });
+  assert.equal(file.size, descriptor.size);
+
+  await store.put("thread-a", descriptor, file);
+  const recovered = await store.read("thread-a", [descriptor]);
+
+  assert.equal(recovered.length, 1);
+  assert.deepEqual(recovered[0].descriptor, descriptor);
+  assert.equal(recovered[0].file.name, descriptor.name);
+  assert.equal(recovered[0].file.lastModified, descriptor.lastModified);
+  assert.equal(recovered[0].file.type, descriptor.type);
+  assert.equal(await recovered[0].file.text(), "pilot attachment");
+});
+
+test("attachment recovery is thread-scoped and validates metadata", async () => {
+  const store = createMemoryThreadComposerAttachmentStore();
+  const file = new File(["pilot attachment"], descriptor.name, {
+    lastModified: descriptor.lastModified,
+    type: descriptor.type
+  });
+  await store.put("thread-a", descriptor, file);
+
+  assert.deepEqual(await store.read("thread-b", [descriptor]), []);
+  assert.deepEqual(
+    await store.read("thread-a", [{ ...descriptor, size: descriptor.size + 1 }]),
+    []
+  );
+});
+
+test("consumed or discarded attachments cannot be recovered", async () => {
+  const store = createMemoryThreadComposerAttachmentStore();
+  const file = new File(["pilot attachment"], descriptor.name, {
+    lastModified: descriptor.lastModified,
+    type: descriptor.type
+  });
+  await store.put("thread-a", descriptor, file);
+  await store.remove("thread-a", [descriptor.id]);
+  assert.deepEqual(await store.read("thread-a", [descriptor]), []);
+});
+
+test("completion preserves attachment bytes still referenced by a newer composer generation", () => {
+  const completed = [descriptor, { ...descriptor, id: "attachment-2" }];
+  const newer = [{ ...descriptor, name: "still-in-the-composer.pdf" }];
+
+  assert.deepEqual(
+    removableThreadComposerAttachmentIds(completed, newer),
+    ["attachment-2"]
+  );
+});
+
+test("external actions wait for a verified recoverable attachment copy", async () => {
+  const store = createMemoryThreadComposerAttachmentStore(
+    "durable-test",
+    Date.now,
+    true
+  );
+  const file = new File(["pilot attachment"], descriptor.name, {
+    lastModified: descriptor.lastModified,
+    type: descriptor.type
+  });
+
+  await assert.rejects(
+    assertThreadComposerAttachmentsRecoverable(store, "thread-a", [descriptor]),
+    /could not be saved for recovery/
+  );
+
+  await store.put("thread-a", descriptor, file);
+  await assert.doesNotReject(
+    assertThreadComposerAttachmentsRecoverable(store, "thread-a", [descriptor])
+  );
+});
+
+test("the in-memory attachment store is non-durable unless a test opts in", () => {
+  assert.equal(createMemoryThreadComposerAttachmentStore().durable, false);
+});
+
+test("external actions reject a recoverable-looking copy held only in volatile memory", async () => {
+  const store = createMemoryThreadComposerAttachmentStore(
+    "volatile-tab",
+    Date.now,
+    false
+  );
+  const file = new File(["pilot attachment"], descriptor.name, {
+    lastModified: descriptor.lastModified,
+    type: descriptor.type
+  });
+  await store.put("thread-a", descriptor, file);
+
+  await assert.rejects(
+    assertThreadComposerAttachmentsRecoverable(store, "thread-a", [descriptor]),
+    /could not be saved durably/
+  );
+});
+
+test("a shared attempt can recover attachment bytes from its originating namespace", async () => {
+  const store = createMemoryThreadComposerAttachmentStore("tab-b");
+  const file = new File(["pilot attachment"], descriptor.name, {
+    lastModified: descriptor.lastModified,
+    type: descriptor.type
+  });
+  await store.put("thread-a", descriptor, file, "attempt-from-tab-a");
+
+  assert.deepEqual(await store.read("thread-a", [descriptor]), []);
+  const recovered = await store.read(
+    "thread-a",
+    [descriptor],
+    "attempt-from-tab-a"
+  );
+  assert.equal(await recovered[0].file.text(), "pilot attachment");
+  await store.remove("thread-a", [descriptor.id], "attempt-from-tab-a");
+  assert.deepEqual(
+    await store.read("thread-a", [descriptor], "attempt-from-tab-a"),
+    []
+  );
+});
+
+test("one tab cannot delete attachment bytes still owned by another tab", async () => {
+  let now = 1_000;
+  const store = createMemoryThreadComposerAttachmentStore("shared-namespace", () => now);
+  const file = new File(["pilot attachment"], descriptor.name, {
+    lastModified: descriptor.lastModified,
+    type: descriptor.type
+  });
+  await store.put("thread-a", descriptor, file);
+  await store.claimOwnership("thread-a", [descriptor.id], "tab-a:session-x");
+  await store.claimOwnership("thread-a", [descriptor.id], "tab-b:session-y");
+
+  await store.releaseOwnership("thread-a", "tab-a:session-x");
+  await store.removeUnowned("thread-a", [descriptor.id]);
+  assert.equal((await store.read("thread-a", [descriptor])).length, 1);
+
+  await store.releaseOwnership("thread-a", "tab-b:session-y");
+  await store.removeUnowned("thread-a", [descriptor.id]);
+  assert.equal((await store.read("thread-a", [descriptor])).length, 1);
+
+  now += __test.STALE_AFTER_MS + 1;
+  await store.removeUnowned("thread-a", [descriptor.id]);
+  assert.deepEqual(await store.read("thread-a", [descriptor]), []);
+});
+
+test("cloned tabs with one namespace and revision keep independent live-holder leases", async () => {
+  let now = 1_000;
+  const state = __test.createMemoryThreadComposerAttachmentState();
+  const tabA = createMemoryThreadComposerAttachmentStore(
+    "cloned-namespace",
+    () => now,
+    true,
+    "holder-a",
+    state
+  );
+  const tabB = createMemoryThreadComposerAttachmentStore(
+    "cloned-namespace",
+    () => now,
+    true,
+    "holder-b",
+    state
+  );
+  const file = new File(["pilot attachment"], descriptor.name, {
+    lastModified: descriptor.lastModified,
+    type: descriptor.type
+  });
+  await tabA.put("thread-a", descriptor, file);
+  await tabA.claimOwnership("thread-a", [descriptor.id], "session-x");
+  await tabB.claimOwnership("thread-a", [descriptor.id], "session-x");
+
+  now += __test.STALE_AFTER_MS + 1;
+  await tabB.claimOwnership("thread-a", [descriptor.id], "session-x");
+  await tabA.releaseOwnership("thread-a", "session-x");
+  await tabA.removeUnowned("thread-a", [descriptor.id]);
+  await tabA.purgeStale();
+
+  assert.equal((await tabB.read("thread-a", [descriptor])).length, 1);
+
+  await tabB.releaseOwnership("thread-a", "session-x");
+  now += __test.STALE_AFTER_MS + 1;
+  await tabB.purgeStale();
+  assert.deepEqual(await tabB.read("thread-a", [descriptor]), []);
+});
+
+test("repeated reload holders for one live revision are compacted to the newest lease", async () => {
+  let now = 1_000;
+  const state = __test.createMemoryThreadComposerAttachmentState();
+  const file = new File(["pilot attachment"], descriptor.name, {
+    lastModified: descriptor.lastModified,
+    type: descriptor.type
+  });
+  const first = createMemoryThreadComposerAttachmentStore(
+    "reload-namespace",
+    () => now,
+    true,
+    "holder-0",
+    state
+  );
+  await first.put("thread-a", descriptor, file);
+  await first.claimOwnership("thread-a", [descriptor.id], "session-x");
+  for (let index = 1; index <= 8; index += 1) {
+    now += 1;
+    const reloaded = createMemoryThreadComposerAttachmentStore(
+      "reload-namespace",
+      () => now,
+      true,
+      `holder-${index}`,
+      state
+    );
+    await reloaded.claimOwnership("thread-a", [descriptor.id], "session-x");
+  }
+
+  now += __test.STALE_AFTER_MS + 1;
+  const newest = createMemoryThreadComposerAttachmentStore(
+    "reload-namespace",
+    () => now,
+    true,
+    "holder-newest",
+    state
+  );
+  await newest.claimOwnership("thread-a", [descriptor.id], "session-x");
+  await newest.purgeStale(
+    (threadId, ownerId) => threadId === "thread-a" && ownerId === "session-x"
+  );
+
+  const ownerSets = [...state.owners.values()];
+  assert.equal(ownerSets.length, 1);
+  assert.equal(ownerSets[0].size, 1);
+  assert.equal((await newest.read("thread-a", [descriptor])).length, 1);
+});
+
+test("the stale sweep revisits a released blob after its quarantine expires", async () => {
+  let now = 1_000;
+  const store = createMemoryThreadComposerAttachmentStore("shared-namespace", () => now);
+  const file = new File(["pilot attachment"], descriptor.name, {
+    lastModified: descriptor.lastModified,
+    type: descriptor.type
+  });
+  await store.put("thread-a", descriptor, file);
+  await store.claimOwnership("thread-a", [descriptor.id], "session-x");
+  await store.releaseOwnership("thread-a", "session-x");
+
+  now += __test.STALE_AFTER_MS + 1;
+  await store.purgeStale();
+
+  assert.deepEqual(await store.read("thread-a", [descriptor]), []);
+});
+
+test("stale ownership gets a second quarantine before orphaned bytes are purged", async () => {
+  let now = 1_000;
+  const store = createMemoryThreadComposerAttachmentStore("tab-a", () => now);
+  const file = new File(["pilot attachment"], descriptor.name, {
+    lastModified: descriptor.lastModified,
+    type: descriptor.type
+  });
+  await store.put("thread-a", descriptor, file);
+  await store.claimOwnership("thread-a", [descriptor.id], "session-x");
+
+  now += __test.STALE_AFTER_MS + 1;
+  await store.purgeStale();
+  assert.equal((await store.read("thread-a", [descriptor])).length, 1);
+
+  now += __test.STALE_AFTER_MS + 1;
+  await store.purgeStale();
+  assert.deepEqual(await store.read("thread-a", [descriptor]), []);
+});
+
+test("a refreshed owner cancels orphan reclamation during the second quarantine", async () => {
+  let now = 1_000;
+  const store = createMemoryThreadComposerAttachmentStore("tab-a", () => now);
+  const file = new File(["pilot attachment"], descriptor.name, {
+    lastModified: descriptor.lastModified,
+    type: descriptor.type
+  });
+  await store.put("thread-a", descriptor, file);
+  await store.claimOwnership("thread-a", [descriptor.id], "session-x");
+
+  now += __test.STALE_AFTER_MS + 1;
+  await store.purgeStale();
+  await store.claimOwnership("thread-a", [descriptor.id], "session-x");
+  now += __test.STALE_AFTER_MS - 1;
+  await store.purgeStale();
+
+  assert.equal((await store.read("thread-a", [descriptor])).length, 1);
+});
+
+test("namespace migration owns the new copy before releasing the old one", async () => {
+  let now = 1_000;
+  const store = createMemoryThreadComposerAttachmentStore("tab-b", () => now);
+  const file = new File(["pilot attachment"], descriptor.name, {
+    lastModified: descriptor.lastModified,
+    type: descriptor.type
+  });
+  await store.put("thread-a", descriptor, file, "tab-a");
+  await store.claimOwnership("thread-a", [descriptor.id], "session-x", "tab-a");
+  await store.put("thread-a", descriptor, file, "tab-b");
+
+  const handoff = await prepareThreadComposerAttachmentNamespaceHandoff(
+    store,
+    "thread-a",
+    [descriptor.id],
+    "session-x",
+    "tab-a",
+    "tab-b"
+  );
+  await handoff.commit();
+  now += __test.STALE_AFTER_MS + 1;
+  await store.purgeStale();
+  assert.equal((await store.read("thread-a", [descriptor], "tab-b")).length, 1);
+
+  await store.releaseOwnership("thread-a", "session-x", "tab-b");
+  now += __test.STALE_AFTER_MS + 1;
+  await store.purgeStale();
+  assert.deepEqual(await store.read("thread-a", [descriptor], "tab-b"), []);
+});
+
+test("a recovery handoff claims its successor before releasing its predecessor", async () => {
+  let now = 1_000;
+  const store = createMemoryThreadComposerAttachmentStore("tab-a", () => now);
+  const file = new File(["pilot attachment"], descriptor.name, {
+    lastModified: descriptor.lastModified,
+    type: descriptor.type
+  });
+  const calls = [];
+  let allowSuccessorClaim;
+  const successorClaimAllowed = new Promise((resolve) => {
+    allowSuccessorClaim = resolve;
+  });
+  let markSuccessorClaimStarted;
+  const successorClaimStarted = new Promise((resolve) => {
+    markSuccessorClaimStarted = resolve;
+  });
+  const observedStore = {
+    ...store,
+    async claimOwnership(...args) {
+      calls.push(`claim:${args[2]}`);
+      if (args[2] === "session-y") {
+        markSuccessorClaimStarted();
+        await successorClaimAllowed;
+      }
+      await store.claimOwnership(...args);
+    },
+    async releaseOwnership(...args) {
+      calls.push(`release:${args[1]}`);
+      await store.releaseOwnership(...args);
+    }
+  };
+  await store.put("thread-a", descriptor, file);
+  await store.claimOwnership("thread-a", [descriptor.id], "session-x");
+  now += __test.STALE_AFTER_MS + 1;
+  await store.claimOwnership("thread-a", [descriptor.id], "session-x");
+
+  const preparing = prepareThreadComposerAttachmentOwnershipHandoff(
+    observedStore,
+    "thread-a",
+    [descriptor.id],
+    "session-x",
+    "session-y",
+    "tab-a"
+  );
+  await successorClaimStarted;
+  assert.deepEqual(calls, ["claim:session-y"]);
+  await store.purgeStale();
+  assert.equal((await store.read("thread-a", [descriptor])).length, 1);
+
+  allowSuccessorClaim();
+  const handoff = await preparing;
+  assert.deepEqual(calls, ["claim:session-y"]);
+  await handoff.commit();
+  assert.deepEqual(calls, ["claim:session-y", "release:session-x"]);
+  await store.purgeStale();
+  assert.equal((await store.read("thread-a", [descriptor])).length, 1);
+});
+
+test("rolling back an unpublished recovery releases only its speculative successor", async () => {
+  const store = createMemoryThreadComposerAttachmentStore("tab-a");
+  const calls = [];
+  const observedStore = {
+    ...store,
+    async claimOwnership(...args) {
+      calls.push(`claim:${args[2]}`);
+      await store.claimOwnership(...args);
+    },
+    async releaseOwnership(...args) {
+      calls.push(`release:${args[1]}`);
+      await store.releaseOwnership(...args);
+    }
+  };
+  const handoff = await prepareThreadComposerAttachmentOwnershipHandoff(
+    observedStore,
+    "thread-a",
+    [descriptor.id],
+    "session-x",
+    "session-y",
+    "tab-a"
+  );
+
+  await handoff.rollback();
+
+  assert.deepEqual(calls, ["claim:session-y", "release:session-y"]);
+});
+
+test("an inactive copied-tab lease is released after its shared send completes", async () => {
+  let now = 1_000;
+  const store = createMemoryThreadComposerAttachmentStore("tab-a", () => now);
+  const file = new File(["pilot attachment"], descriptor.name, {
+    lastModified: descriptor.lastModified,
+    type: descriptor.type
+  });
+  const session = {
+    attachments: [descriptor],
+    createdAt: now,
+    customScheduleValue: "",
+    replyToMessageId: null,
+    revision: 1,
+    revisionId: "session-x",
+    source: "user",
+    text: "Reply"
+  };
+  const ownership = {
+    attachmentIds: [descriptor.id],
+    namespace: "tab-a",
+    ownerId: "session-x",
+    revisionId: "session-x"
+  };
+  await store.put("thread-a", descriptor, file);
+  await store.claimOwnership("thread-a", [descriptor.id], ownership.ownerId);
+
+  now += __test.STALE_AFTER_MS + 1;
+  assert.equal(
+    await reconcileThreadComposerAttachmentOwnership(
+      store,
+      "thread-a",
+      ownership,
+      () => ({ readable: true, session }),
+      () => "sent"
+    ),
+    "released"
+  );
+  await store.purgeStale();
+
+  assert.deepEqual(await store.read("thread-a", [descriptor]), []);
+});
+
+test("unreadable shared completion state retains a copied-tab lease", async () => {
+  let now = 1_000;
+  const store = createMemoryThreadComposerAttachmentStore("tab-a", () => now);
+  const file = new File(["pilot attachment"], descriptor.name, {
+    lastModified: descriptor.lastModified,
+    type: descriptor.type
+  });
+  const ownership = {
+    attachmentIds: [descriptor.id],
+    namespace: "tab-a",
+    ownerId: "session-x",
+    revisionId: "session-x"
+  };
+  const session = {
+    attachments: [descriptor],
+    createdAt: now,
+    customScheduleValue: "",
+    replyToMessageId: null,
+    revision: 1,
+    revisionId: "session-x",
+    source: "user",
+    text: "Reply"
+  };
+  await store.put("thread-a", descriptor, file);
+  await store.claimOwnership("thread-a", [descriptor.id], ownership.ownerId);
+
+  now += __test.STALE_AFTER_MS + 1;
+  assert.equal(
+    await reconcileThreadComposerAttachmentOwnership(
+      store,
+      "thread-a",
+      ownership,
+      () => ({ readable: true, session }),
+      () => {
+        throw new Error("shared completion state unavailable");
+      }
+    ),
+    "retained"
+  );
+  await store.purgeStale();
+
+  assert.equal((await store.read("thread-a", [descriptor])).length, 1);
+});
+
+test("an unresolved pending owner stays recoverable until terminal release", async () => {
+  let now = 1_000;
+  const store = createMemoryThreadComposerAttachmentStore("tab-a", () => now);
+  const file = new File(["pilot attachment"], descriptor.name, {
+    lastModified: descriptor.lastModified,
+    type: descriptor.type
+  });
+  await store.put("thread-a", descriptor, file);
+  await store.claimOwnership("thread-a", [descriptor.id], "session-x");
+
+  for (let cycle = 0; cycle < 3; cycle += 1) {
+    now += __test.STALE_AFTER_MS + 1;
+    await store.claimOwnership("thread-a", [descriptor.id], "session-x");
+    await store.purgeStale();
+    assert.equal((await store.read("thread-a", [descriptor])).length, 1);
+  }
+
+  await store.releaseOwnership("thread-a", "session-x");
+  now += __test.STALE_AFTER_MS + 1;
+  await store.purgeStale();
+  assert.deepEqual(await store.read("thread-a", [descriptor]), []);
+});
+
+test("global purge preserves a live off-route owner and later reclaims its orphan", async () => {
+  let now = 1_000;
+  let durableStateExists = true;
+  const store = createMemoryThreadComposerAttachmentStore(
+    "tab-a",
+    () => now,
+    true
+  );
+  const file = new File(["pilot attachment"], descriptor.name, {
+    lastModified: descriptor.lastModified,
+    type: descriptor.type
+  });
+  await store.put("thread-a", descriptor, file);
+  await store.claimOwnership("thread-a", [descriptor.id], "session-x");
+
+  for (let cycle = 0; cycle < 3; cycle += 1) {
+    now += __test.STALE_AFTER_MS + 1;
+    await store.purgeStale(
+      (threadId, ownerId) =>
+        durableStateExists && threadId === "thread-a" && ownerId === "session-x"
+    );
+    assert.equal((await store.read("thread-a", [descriptor])).length, 1);
+  }
+
+  durableStateExists = false;
+  now += __test.STALE_AFTER_MS + 1;
+  await store.purgeStale(() => false);
+  assert.equal((await store.read("thread-a", [descriptor])).length, 1);
+  now += __test.STALE_AFTER_MS + 1;
+  await store.purgeStale(() => false);
+  assert.deepEqual(await store.read("thread-a", [descriptor]), []);
+});
+
+test("a blocked IndexedDB upgrade rejects instead of hanging attachment recovery", async () => {
+  const request = {};
+  const opening = __test.openDatabase({
+    open() {
+      queueMicrotask(() => request.onblocked());
+      return request;
+    }
+  });
+
+  await assert.rejects(opening, /Close other Tovi windows, then reload/);
+});
+
+test("an open attachment database closes when another version upgrade begins", async () => {
+  let closes = 0;
+  const database = { close: () => { closes += 1; } };
+  const request = { result: database };
+  const opening = __test.openDatabase({
+    open() {
+      queueMicrotask(() => request.onsuccess());
+      return request;
+    }
+  });
+
+  assert.equal(await opening, database);
+  database.onversionchange();
+  assert.equal(closes, 1);
+});
+
+test("a tab keeps its recovery namespace without sharing a generated id", () => {
+  const data = new Map();
+  const storage = {
+    getItem: (key) => data.get(key) ?? null,
+    setItem: (key, value) => data.set(key, value)
+  };
+  let generated = 0;
+  const first = getOrCreateThreadComposerTabId(storage, () => `tab-${++generated}`);
+  const second = getOrCreateThreadComposerTabId(storage, () => `tab-${++generated}`);
+  assert.equal(first, "tab-1");
+  assert.equal(second, "tab-1");
+  assert.equal(generated, 1);
+});
