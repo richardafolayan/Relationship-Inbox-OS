@@ -303,23 +303,27 @@ test("LinkedIn fallback observes delayed virtualized changes even when candidate
         <p class="msg-conversation-card__message-snippet">You: already replied</p>
       </li>
     </ul>
-    <script>
-      const list = document.querySelector("ul");
-      list.scrollTop = list.scrollHeight;
-      let scheduled = false;
-      list.addEventListener("scroll", () => {
-        if (scheduled) return;
-        scheduled = true;
-        setTimeout(() => {
-          const slot = list.children[1];
-          slot.innerHTML = '<h3>Filtered B</h3><p class="msg-conversation-card__message-snippet">You: still replied</p>';
-        }, 350);
-      });
-    </script>
   `);
 
   const selectors = selectorsForInbox("about:blank");
+  await fixture.page.evaluate(() => {
+    const list = document.querySelector("ul");
+    list.scrollTop = list.scrollHeight;
+  });
   const before = await fixture.adapter.captureThreadRowsSnapshot(fixture.page, selectors);
+  await fixture.page.evaluate(() => {
+    const list = document.querySelector("ul");
+    let scheduled = false;
+    list.addEventListener("scroll", () => {
+      if (scheduled) return;
+      scheduled = true;
+      setTimeout(() => {
+        const slot = list.children[1];
+        slot.innerHTML =
+          '<h3>Filtered B</h3><p class="msg-conversation-card__message-snippet">You: still replied</p>';
+      }, 350);
+    });
+  });
   const outcome = await fixture.adapter.deepScrollThreadList(fixture.page, selectors, before);
   const after = await fixture.adapter.captureThreadRowsSnapshot(fixture.page, selectors);
 
