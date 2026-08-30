@@ -26,6 +26,7 @@ const {
   desktopCapabilities,
   desktopPaths,
   isInternalAppUrl,
+  isLocalDashboardUrl,
   isSafeExternalUrl,
   isSupportedNodeVersion,
   loadingHtml,
@@ -307,6 +308,24 @@ function showLoading(message = `Starting ${APP_NAME}...`) {
     .catch((error) => writeLog(`Could not show startup screen: ${error.message}`));
 }
 
+function dropBootstrapHistory(window) {
+  if (!window || window.isDestroyed()) return;
+  try {
+    // Drop the data: startup entry so View > Back cannot reopen it.
+    window.webContents.navigationHistory.clear();
+  } catch (error) {
+    writeLog(`Could not clear navigation history: ${error.message}`);
+  }
+}
+
+function historyEntryAtOffset(history, offset) {
+  try {
+    return history.getEntryAtIndex(history.getActiveIndex() + offset) || null;
+  } catch {
+    return null;
+  }
+}
+
 async function loadDashboardWhenReady(window, url, generation) {
   if (!window) return;
   const deadline = Date.now() + START_TIMEOUT_MS;
@@ -314,6 +333,7 @@ async function loadDashboardWhenReady(window, url, generation) {
     if (await localAppReady()) {
       try {
         await window.loadURL(url);
+        dropBootstrapHistory(window);
         if (!window.isVisible()) window.show();
         restartHistory = [];
         setTimeout(refreshMenuState, 500);
@@ -704,8 +724,20 @@ function goInHistory(direction) {
   const contents = mainWindow && !mainWindow.isDestroyed() ? mainWindow.webContents : null;
   if (!contents) return;
   const history = contents.navigationHistory;
-  if (direction === "back" && history.canGoBack()) history.goBack();
-  if (direction === "forward" && history.canGoForward()) history.goForward();
+  if (!history) return;
+  if (direction === "back") {
+    if (!history.canGoBack()) return;
+    const previous = historyEntryAtOffset(history, -1);
+    if (!previous || !isLocalDashboardUrl(previous.url, process.env)) return;
+    history.goBack();
+    return;
+  }
+  if (direction === "forward") {
+    if (!history.canGoForward()) return;
+    const next = historyEntryAtOffset(history, 1);
+    if (!next || !isLocalDashboardUrl(next.url, process.env)) return;
+    history.goForward();
+  }
 }
 
 function runInPage(expression) {
