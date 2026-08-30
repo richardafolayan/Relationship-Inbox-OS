@@ -225,7 +225,7 @@ async function preparePackagedStorage() {
     ...(featureDefaults.GOOGLE_MESSAGES_ENABLED
       ? { GOOGLE_MESSAGES_ENABLED: featureDefaults.GOOGLE_MESSAGES_ENABLED }
       : {})
-  }, { keepExisting: true });
+  }, { keepExisting: true, replaceBlank: true });
   writePrivateTextAtomically(envPath, envText);
   return true;
 }

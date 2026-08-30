@@ -118,6 +118,43 @@ test("mergeEnvValues forces keys, preserves comments, and keepExisting only fill
   assert.match(defaults, /^BROWSER_PROFILE_MODE=personal$/m);
 });
 
+test("packaged defaults replace blank template values but preserve explicit choices", () => {
+  const input = "WHATSAPP_ENABLED=\nGOOGLE_MESSAGES_ENABLED=false\n";
+  const defaults = launcher.mergeEnvValues(
+    input,
+    {
+      WHATSAPP_ENABLED: "true",
+      GOOGLE_MESSAGES_ENABLED: "true"
+    },
+    { keepExisting: true, replaceBlank: true }
+  );
+
+  assert.match(defaults, /^WHATSAPP_ENABLED=true$/m);
+  assert.match(defaults, /^GOOGLE_MESSAGES_ENABLED=false$/m);
+});
+
+test("fresh Windows template enables the intended packaged platform defaults", () => {
+  const template = readFileSync(resolve(".env.example"), "utf8");
+  const featureDefaults = launcher.packagedFeatureDefaults("win32");
+  const platformDefaults = launcher.mergeEnvValues(template, {
+    IMESSAGE_ENABLED: featureDefaults.IMESSAGE_ENABLED,
+    BROWSER_PROFILE_MODE: featureDefaults.BROWSER_PROFILE_MODE
+  });
+  const defaults = launcher.mergeEnvValues(
+    platformDefaults,
+    {
+      WHATSAPP_ENABLED: featureDefaults.WHATSAPP_ENABLED,
+      GOOGLE_MESSAGES_ENABLED: featureDefaults.GOOGLE_MESSAGES_ENABLED
+    },
+    { keepExisting: true, replaceBlank: true }
+  );
+
+  assert.match(defaults, /^IMESSAGE_ENABLED=false$/m);
+  assert.match(defaults, /^BROWSER_PROFILE_MODE=isolated$/m);
+  assert.match(defaults, /^WHATSAPP_ENABLED=true$/m);
+  assert.match(defaults, /^GOOGLE_MESSAGES_ENABLED=true$/m);
+});
+
 test("isSafeExternalUrl allows web and mail links only", () => {
   assert.equal(launcher.isSafeExternalUrl("https://example.com"), true);
   assert.equal(launcher.isSafeExternalUrl("mailto:someone@example.com"), true);
