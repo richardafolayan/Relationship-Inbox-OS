@@ -134,13 +134,17 @@ test("mobile Tonight uses a compact summary rather than full category bars", () 
 
 test("new mobile Today UI copy avoids em and en dashes", () => {
   // Only check short JSX text nodes that look like labels, not code comments.
-  const uiStrings = [...TODAY.matchAll(/>([^<>{\n]{1,80})</g)]
+  const textNodeStrings = [...TODAY.matchAll(/>([^<>{\n]{1,80})</g)]
     .map((m) => m[1].trim())
     .filter(
       (s) =>
         s.length > 0 &&
         /^(Today|Up next|Tonight|Open|Snooze|Mark handled|Inbox|\+\s|\d)/.test(s)
     );
+  const inlineStatusStrings = [...TODAY.matchAll(/["']([^"'\n]{1,80})["']/g)]
+    .map((m) => m[1].trim())
+    .filter((s) => /^(Snooze|Snoozing|Mark handled|Marking)/.test(s));
+  const uiStrings = [...textNodeStrings, ...inlineStatusStrings];
   assert.ok(uiStrings.length >= 3, "expected several mobile UI labels");
   for (const s of uiStrings) {
     assert.doesNotMatch(s, /[—–]/, `UI copy must not use em/en dashes: ${JSON.stringify(s)}`);
@@ -151,5 +155,8 @@ test("new mobile Today UI copy avoids em and en dashes", () => {
   assert.match(TODAY, />\s*Tonight\s*</);
   assert.match(TODAY, /Open &amp; reply/);
   assert.match(TODAY, /Mark handled/);
-  assert.match(TODAY, /sm:hidden">Snooze</);
+  assert.match(
+    TODAY,
+    /sm:hidden">\s*\{heroActionPending === "snooze" \? "Snoozing\.\.\." : "Snooze"\}/
+  );
 });

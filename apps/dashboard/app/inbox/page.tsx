@@ -23,6 +23,7 @@ import { FocusInboxGroup } from "@/components/common/focus/focus-inbox-group";
 import { BrandLoader } from "@/components/common/brand-loader";
 import { DegradedBanner } from "@/components/common/degraded-banner";
 import { MacContactsHint } from "@/components/common/mac-contacts-hint";
+import { Button } from "@/components/ui/button";
 import dynamic from "next/dynamic";
 import { PersonAvatar } from "@/components/common/person-avatar";
 import { readInboxQueryParam } from "@/lib/inbox-query";
@@ -263,6 +264,8 @@ export default function InboxPage() {
   // A cached list (even an empty one) counts as loaded - no skeleton on
   // top of data we are already painting.
   const loaded = loadedState || inboxSeed !== undefined;
+  const [inboxUnavailable, setInboxUnavailable] = useState(false);
+  const [retryingInbox, setRetryingInbox] = useState(false);
   const [query, setQuery] = useState("");
   const [tab, setTab] = useState<RiskTab>("all");
   const [category, setCategory] = useState<CategoryFilter>("any");
@@ -288,6 +291,7 @@ export default function InboxPage() {
   const [bulkResult, setBulkResult] = useState<string | null>(null);
 
   const applyInbox = useCallback((inbox: InboxResponse) => {
+    setInboxUnavailable(false);
     setData(inbox);
     const stillPending = new Set(
       inbox.rows.filter((row) => row.needsReply !== false).map((row) => row.id)
@@ -319,10 +323,20 @@ export default function InboxPage() {
         swr: true,
         onFresh: (d) => applyInbox(d as InboxResponse)
       }).catch(() => null);
+    setInboxUnavailable(inbox === null);
     if (inbox) applyInbox(inbox);
     setLoaded(true);
     void supportingContext;
   }, [applyInbox]);
+
+  const retryInbox = useCallback(async () => {
+    setRetryingInbox(true);
+    try {
+      await refresh({ force: true });
+    } finally {
+      setRetryingInbox(false);
+    }
+  }, [refresh]);
 
   // Seed search from a ?q= deep link (the thread participant popover's
   // "Find 1:1 thread" → /inbox?q=<handle>). Runs once on mount; the inbox
@@ -931,6 +945,23 @@ export default function InboxPage() {
 
       {!loaded ? (
         <BrandLoader className="py-1" />
+      ) : inboxUnavailable && !data ? (
+        <div
+          data-testid="inbox-unavailable"
+          className="flex flex-col items-center justify-center gap-3 py-12 text-center"
+        >
+          <p className="m-0 text-[16px] font-medium text-ink">Your inbox is unavailable.</p>
+          <p className="m-0 max-w-[46ch] text-[14px] text-ink-2">
+            Tovi could not reach the local helper. Start it, then try again.
+          </p>
+          <Button
+            variant="quiet"
+            disabled={retryingInbox}
+            onClick={() => void retryInbox()}
+          >
+            {retryingInbox ? "Trying again..." : "Try again"}
+          </Button>
+        </div>
       ) : visible.length === 0 && !showAll && hiddenByHorizon > 0 && !query.trim() ? (
         <div className="flex flex-col items-center justify-center gap-2 py-12 text-center">
           {tab === "all" ? (
@@ -1411,7 +1442,7 @@ const InboxRowItem = memo(function InboxRowItem({ row, selectMode, selected, onT
               : "border-hairline-strong bg-paper text-ink-3 hover:border-ink-3 hover:text-ink-2",
             selectMode
               ? "opacity-100"
-              : "opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
+              : "pointer-events-none opacity-0 group-hover:pointer-events-auto group-hover:opacity-100 focus-visible:pointer-events-auto focus-visible:opacity-100"
           )}
         >
           {selected ? (
@@ -1477,7 +1508,7 @@ const InboxRowItem = memo(function InboxRowItem({ row, selectMode, selected, onT
             "-my-1 shrink-0 rounded p-[3px] transition-[color,opacity] duration-calm",
             fav
               ? "text-accent opacity-100"
-              : "text-ink-4 opacity-0 hover:text-accent group-hover:opacity-100 focus-visible:opacity-100"
+              : "pointer-events-none text-ink-4 opacity-0 hover:text-accent group-hover:pointer-events-auto group-hover:opacity-100 focus-visible:pointer-events-auto focus-visible:opacity-100"
           )}
         >
           <Star className="h-[15px] w-[15px]" strokeWidth={1.6} fill={fav ? "currentColor" : "none"} />
