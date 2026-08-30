@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, resolve } from "node:path";
+import dotenv from "dotenv";
 
 // First-run setup: save a Gemini API key from the dashboard (#845).
 //
@@ -10,8 +11,9 @@ import { basename, dirname, resolve } from "node:path";
 // setup wizard a safe write path:
 //
 //   validate (live, against the Gemini endpoint) → stage outside the active
-//   config → commit authoritative setup state → promote atomically → apply
-//   to the live process.
+//   config → journal and promote atomically → commit the matching setup
+//   transaction → apply to the live process. Startup uses the transaction id
+//   to keep a committed promotion or roll back an interrupted one.
 //
 // The key value must never be logged; errors carry calm operator-facing
 // messages only.
@@ -73,10 +75,31 @@ export function upsertEnvFile(filePath: string, key: string, value: string): voi
 }
 
 export interface StagedEnvFileValue {
+  transactionId: string;
   commit(): void;
   rollback(): void;
   finalize(): void;
   discard(): void;
+}
+
+interface EnvFileValueTransactionJournal {
+  transactionId: string;
+  existed: boolean;
+  backupName: string | null;
+}
+
+function transactionJournalPath(filePath: string): string {
+  return `${filePath}.setup-key-transaction.json`;
+}
+
+function removeTransactionArtifacts(
+  journalPath: string,
+  pendingPath: string | null,
+  backupPath: string | null
+): void {
+  if (pendingPath) rmSync(pendingPath, { force: true });
+  if (backupPath) rmSync(backupPath, { force: true });
+  rmSync(journalPath, { force: true });
 }
 
 export function stageEnvFileValue(
@@ -86,14 +109,35 @@ export function stageEnvFileValue(
 ): StagedEnvFileValue {
   const current = existsSync(filePath) ? readFileSync(filePath, "utf8") : "";
   const next = upsertEnvContent(current, key, value);
-  const tempPath = `${filePath}.${randomUUID()}.pending`;
+  const transactionId = randomUUID();
+  const tempPath = `${filePath}.${transactionId}.setup-key-pending`;
+  const backupPath = `${filePath}.${transactionId}.setup-key-backup`;
+  const journalPath = transactionJournalPath(filePath);
   writeFileSync(tempPath, next, { encoding: "utf8", mode: 0o600 });
   const existed = existsSync(filePath);
   let state: "pending" | "promoted" | "settled" = "pending";
 
   return {
+    transactionId,
     commit: () => {
       if (state !== "pending") throw new Error("Staged environment value already settled.");
+      if (existsSync(journalPath)) {
+        throw new Error("Another setup key transaction still requires recovery.");
+      }
+      if (existed) {
+        writeFileSync(backupPath, current, { encoding: "utf8", mode: 0o600 });
+      }
+      const journalTempPath = `${journalPath}.${transactionId}.tmp`;
+      writeFileSync(
+        journalTempPath,
+        JSON.stringify({
+          transactionId,
+          existed,
+          backupName: existed ? basename(backupPath) : null
+        } satisfies EnvFileValueTransactionJournal),
+        { encoding: "utf8", mode: 0o600 }
+      );
+      renameSync(journalTempPath, journalPath);
       renameSync(tempPath, filePath);
       state = "promoted";
     },
@@ -106,18 +150,71 @@ export function stageEnvFileValue(
       } else {
         rmSync(filePath, { force: true });
       }
+      removeTransactionArtifacts(journalPath, tempPath, existed ? backupPath : null);
       state = "settled";
     },
     finalize: () => {
       if (state !== "promoted") throw new Error("Staged environment value was not promoted.");
+      removeTransactionArtifacts(journalPath, tempPath, existed ? backupPath : null);
       state = "settled";
     },
     discard: () => {
       if (state !== "pending") return;
-      rmSync(tempPath, { force: true });
+      if (existsSync(journalPath)) {
+        recoverEnvFileValueTransaction(filePath, null);
+      } else {
+        rmSync(tempPath, { force: true });
+        rmSync(backupPath, { force: true });
+      }
       state = "settled";
     }
   };
+}
+
+export function recoverEnvFileValueTransaction(
+  filePath: string,
+  committedTransactionId: string | null | undefined
+): "none" | "rolled_back" | "committed" {
+  const journalPath = transactionJournalPath(filePath);
+  if (!existsSync(journalPath)) return "none";
+  let journal: EnvFileValueTransactionJournal;
+  try {
+    journal = JSON.parse(readFileSync(journalPath, "utf8")) as EnvFileValueTransactionJournal;
+  } catch {
+    throw new Error("The setup key recovery journal is unreadable.");
+  }
+  const expectedBackupName =
+    `${basename(filePath)}.${journal.transactionId}.setup-key-backup`;
+  if (
+    typeof journal.transactionId !== "string" ||
+    !/^[0-9a-f-]{36}$/i.test(journal.transactionId) ||
+    typeof journal.existed !== "boolean" ||
+    (journal.existed && journal.backupName !== expectedBackupName) ||
+    (!journal.existed && journal.backupName !== null)
+  ) {
+    throw new Error("The setup key recovery journal is invalid.");
+  }
+  const parent = dirname(filePath);
+  const backupPath = journal.backupName ? resolve(parent, journal.backupName) : null;
+  if (journal.transactionId === committedTransactionId) {
+    removeTransactionArtifacts(journalPath, null, backupPath);
+    return "committed";
+  }
+  if (journal.existed) {
+    if (!backupPath || !existsSync(backupPath)) {
+      throw new Error("The setup key rollback backup is missing.");
+    }
+    renameSync(backupPath, filePath);
+  } else {
+    rmSync(filePath, { force: true });
+  }
+  removeTransactionArtifacts(journalPath, null, backupPath);
+  return "rolled_back";
+}
+
+export function readEnvFileValue(filePath: string, key: string): string | undefined {
+  if (!existsSync(filePath)) return undefined;
+  return dotenv.parse(readFileSync(filePath, "utf8"))[key] || undefined;
 }
 
 export function discardStaleEnvFileStages(filePath: string): void {
@@ -125,7 +222,12 @@ export function discardStaleEnvFileStages(filePath: string): void {
   if (!existsSync(parent)) return;
   const prefix = `${basename(filePath)}.`;
   for (const name of readdirSync(parent)) {
-    if (name.startsWith(prefix) && name.endsWith(".pending")) {
+    if (
+      name.startsWith(prefix) &&
+      (name.endsWith(".pending") ||
+        name.endsWith(".setup-key-pending") ||
+        name.endsWith(".setup-key-backup"))
+    ) {
       rmSync(resolve(parent, name), { force: true });
     }
   }
@@ -176,7 +278,7 @@ export async function validateGeminiKey(
 export interface ApplyGeminiKeyDeps<TState> {
   validate: (key: string) => Promise<GeminiKeyCheck>;
   stage: (key: string) => StagedEnvFileValue;
-  commitState: () => Promise<TState>;
+  commitState: (transactionId: string) => Promise<TState>;
   applyRuntime: (key: string) => void;
 }
 
@@ -224,13 +326,22 @@ export async function applyGeminiKey<TState>(
 
   let state: TState;
   try {
-    state = await deps.commitState();
+    state = await deps.commitState(staged.transactionId);
   } catch (error) {
-    staged.rollback();
+    try {
+      staged.rollback();
+    } catch {
+      // Startup recovery uses the uncommitted journal to finish this rollback.
+    }
     throw error;
   }
 
-  staged.finalize();
+  try {
+    staged.finalize();
+  } catch {
+    // State and file are already committed. The matching journal lets startup
+    // finish cleanup without turning a successful save into a false failure.
+  }
   deps.applyRuntime(key);
   return { ok: true, state };
 }

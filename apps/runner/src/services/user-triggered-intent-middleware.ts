@@ -29,7 +29,7 @@ export function resolveFocusPolicyMutationIntentKey(
   req: IntentRequest
 ): string | undefined {
   return req.method.toUpperCase() === "POST" &&
-    /^\/control\/operator-profile\/?$/i.test(req.path)
+    /^\/control\/(operator-profile|settings|setup\/preferences)\/?$/i.test(req.path)
     ? "focus-policy"
     : undefined;
 }

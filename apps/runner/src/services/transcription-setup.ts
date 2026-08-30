@@ -283,8 +283,8 @@ export function createTranscriptionSetupManager(deps: TranscriptionSetupManagerD
       void Promise.resolve()
         .then(() => download(selectedModel.modelId, stagedDir))
         .then(() => {
-          rmSync(join(stagedDir, DOWNLOAD_LEASE_FILE), { force: true });
           activateDownloadedModel(stagedDir, deps.modelDir);
+          rmSync(join(deps.modelDir, DOWNLOAD_LEASE_FILE), { force: true });
           deps.applyRuntime(mode, true, selectedModel.modelId);
           phase = "idle";
           targetMode = null;

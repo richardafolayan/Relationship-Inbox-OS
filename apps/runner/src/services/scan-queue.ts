@@ -1468,7 +1468,15 @@ export function createScanQueue(deps: ScanQueueDeps) {
     };
 
     for (const platform of scanPlatforms) {
+      const beforeLockSettings = await deps.settingsStore.getSettings();
+      if (!beforeLockSettings.enabledPlatforms.includes(platform)) {
+        continue;
+      }
       await deps.platformMutex.runWithQueueOne(lockKey(platform), async () => {
+        const authoritativeSettings = await deps.settingsStore.getSettings();
+        if (!authoritativeSettings.enabledPlatforms.includes(platform)) {
+          return;
+        }
         const runLogger = createRunLogger({
           requestId: job.jobId,
           platform,
@@ -3756,18 +3764,36 @@ export function createScanQueue(deps: ScanQueueDeps) {
           sourceChangedAt: trigger.sourceChangedAt,
           persistedAt,
           trigger: trigger.kind
-        }
+      }
       : undefined;
-    if (shouldContinue && !shouldContinue()) {
-      return { updatedThreads: 0, parsedMessages: 0, persistedMessages: 0, quarantinedMessages: 0 };
+    if (syncTiming && persistedMessages > 0) {
+      deps.recordLatency?.({
+        metric: "source_change_to_persisted_message",
+        durationMs: Date.parse(syncTiming.persistedAt) - Date.parse(syncTiming.sourceChangedAt),
+        platform
+      });
+      deps.eventBus.emit({
+        type: "MESSAGES_PERSISTED",
+        jobId,
+        threadId: thread.id,
+        platform,
+        syncTiming
+      });
     }
+    const optionalWorkStillAllowed = (): boolean =>
+      !shouldContinue || shouldContinue();
+    if (!optionalWorkStillAllowed()) skipAi = true;
 
     // Transcription enqueue. We resolve the persisted Message ids in a
     // single query rather than per-message lookups, then hand each one to
     // the optional hook. Fire-and-forget: scans never block on OpenAI
     // latency, and the transcription service's audioFingerprint dedup
     // means re-scans of the same audio are free.
-    if (audioBearingMessageKeys.length > 0 && deps.onAudioMessage) {
+    if (
+      audioBearingMessageKeys.length > 0 &&
+      deps.onAudioMessage &&
+      optionalWorkStillAllowed()
+    ) {
       try {
         const persistedAudioRows = await prisma.message.findMany({
           where: {
@@ -3970,7 +3996,10 @@ export function createScanQueue(deps: ScanQueueDeps) {
       : null;
 
     const shouldRefreshSummary =
-      !skipAi && !!lastInboundHash && lastInboundHash !== thread.lastInboundHash;
+      !skipAi &&
+      optionalWorkStillAllowed() &&
+      !!lastInboundHash &&
+      lastInboundHash !== thread.lastInboundHash;
 
     let summary = thread.rollingSummary;
     let whatTheyWant = thread.whatTheyWant;
@@ -3997,16 +4026,20 @@ export function createScanQueue(deps: ScanQueueDeps) {
       // Defensive sanitiser: AI output (or its fallback path) can contain
       // unpaired surrogates if a slice landed mid-emoji. Strip them before
       // writing — the SQLite driver rejects the resulting JSON otherwise.
-      summary = stripUnpairedSurrogates(aiSummary.summary);
-      whatTheyWant = stripUnpairedSurrogates(aiSummary.what_they_want);
-      openLoopsJson = JSON.stringify(aiSummary.open_loops.map((s) => stripUnpairedSurrogates(s)));
-      toneNotesJson = JSON.stringify(aiSummary.tone_notes.map((s) => stripUnpairedSurrogates(s)));
-      // remember notes are already surrogate-stripped inside updateThreadSummary.
-      rememberJson = JSON.stringify(aiSummary.remember);
-      // Reply Brief is already sanitised + sub-fields surrogate-stripped
-      // inside updateThreadSummary. Persisted as a single JSON blob; the
-      // dashboard parses on read.
-      replyBriefJson = aiSummary.reply_brief ? JSON.stringify(aiSummary.reply_brief) : null;
+      if (optionalWorkStillAllowed()) {
+        summary = stripUnpairedSurrogates(aiSummary.summary);
+        whatTheyWant = stripUnpairedSurrogates(aiSummary.what_they_want);
+        openLoopsJson = JSON.stringify(aiSummary.open_loops.map((s) => stripUnpairedSurrogates(s)));
+        toneNotesJson = JSON.stringify(aiSummary.tone_notes.map((s) => stripUnpairedSurrogates(s)));
+        // remember notes are already surrogate-stripped inside updateThreadSummary.
+        rememberJson = JSON.stringify(aiSummary.remember);
+        // Reply Brief is already sanitised + sub-fields surrogate-stripped
+        // inside updateThreadSummary. Persisted as a single JSON blob; the
+        // dashboard parses on read.
+        replyBriefJson = aiSummary.reply_brief ? JSON.stringify(aiSummary.reply_brief) : null;
+      } else {
+        skipAi = true;
+      }
     }
 
     // Phase 3: classify on first encounter only. Once a thread has a
@@ -4014,7 +4047,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
     // can be triggered via /control/classify-uncategorized after a wrong
     // verdict is corrected manually.
     let categoryUpdate: string | null | undefined = undefined;
-    if (!skipAi && !thread.category && hasPersistedMessages) {
+    if (!skipAi && optionalWorkStillAllowed() && !thread.category && hasPersistedMessages) {
       const classified = await deps.aiService
         .classifyThreadCategory({
           platform: thread.platform as PlatformName,
@@ -4024,8 +4057,10 @@ export function createScanQueue(deps: ScanQueueDeps) {
           whatTheyWant: whatTheyWant ?? null
         })
         .catch(() => null);
-      if (classified) {
+      if (classified && optionalWorkStillAllowed()) {
         categoryUpdate = classified;
+      } else if (!optionalWorkStillAllowed()) {
+        skipAi = true;
       }
     }
 
@@ -4050,7 +4085,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
     // operator can pick a quieter tier without losing summaries.
     const operatorProfile = await deps.settingsStore.getOperatorProfile();
     const allowClassification = operatorProfile.aiHelpLevel !== "memory_only";
-    if (!skipAi && lastInboundMessage && allowClassification) {
+    if (!skipAi && optionalWorkStillAllowed() && lastInboundMessage && allowClassification) {
       const closedKey = stableHash(
         `closed-v3|${lastInboundMessage.timestamp.toISOString()}|${cleanText(lastInboundMessage.text)}`
       );
@@ -4074,7 +4109,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
             summary: summary ?? null
           })
           .catch(() => null);
-        if (verdict) {
+        if (verdict && optionalWorkStillAllowed()) {
           closedStatusUpdate = verdict.status;
           closedStatusReasonUpdate = verdict.reason;
           closedStatusCacheKeyUpdate = closedKey;
@@ -4196,23 +4231,6 @@ export function createScanQueue(deps: ScanQueueDeps) {
       }
     }
 
-    if (shouldContinue && !shouldContinue()) {
-      return { updatedThreads: 0, parsedMessages: 0, persistedMessages: 0, quarantinedMessages: 0 };
-    }
-    if (syncTiming && persistedMessages > 0) {
-      deps.recordLatency?.({
-        metric: "source_change_to_persisted_message",
-        durationMs: Date.parse(syncTiming.persistedAt) - Date.parse(syncTiming.sourceChangedAt),
-        platform
-      });
-      deps.eventBus.emit({
-        type: "MESSAGES_PERSISTED",
-        jobId,
-        threadId: thread.id,
-        platform,
-        syncTiming
-      });
-    }
     deps.eventBus.emit({
       type: "THREAD_UPDATED",
       jobId,
@@ -4317,6 +4335,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
         messages?: NormalizedMessage[];
         skipAi?: boolean;
         trigger?: ScanTrigger;
+        shouldContinue?: () => boolean;
       }
     ) =>
       syncThread(
@@ -4329,8 +4348,12 @@ export function createScanQueue(deps: ScanQueueDeps) {
         false,
         input.skipAi ?? false,
         input.trigger,
-        undefined
+        input.shouldContinue
       ),
+    createContinueGate: () => {
+      const baseline = abortVersion;
+      return () => abortVersion === baseline;
+    },
     clearAbort
   };
 

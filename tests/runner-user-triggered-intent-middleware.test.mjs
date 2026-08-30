@@ -33,11 +33,15 @@ test("the resolver covers every path shape accepted by the Express send routes",
   );
 });
 
-test("operator-profile writes register a focus-policy mutation for every Express path variant", () => {
+test("focus-policy and platform-selection writes register a mutation intent at request arrival", () => {
   for (const path of [
     "/control/operator-profile",
     "/control/operator-profile/",
-    "/CONTROL/OPERATOR-PROFILE"
+    "/CONTROL/OPERATOR-PROFILE",
+    "/control/settings",
+    "/control/settings/",
+    "/control/setup/preferences",
+    "/CONTROL/SETUP/PREFERENCES/"
   ]) {
     assert.equal(
       resolveFocusPolicyMutationIntentKey({ method: "POST", path }),
@@ -46,6 +50,10 @@ test("operator-profile writes register a focus-policy mutation for every Express
   }
   assert.equal(
     resolveFocusPolicyMutationIntentKey({ method: "GET", path: "/control/operator-profile" }),
+    undefined
+  );
+  assert.equal(
+    resolveFocusPolicyMutationIntentKey({ method: "POST", path: "/control/setup/complete" }),
     undefined
   );
 });

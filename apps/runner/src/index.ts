@@ -10,7 +10,7 @@ import multer from "multer";
 import OpenAI from "openai";
 import { z } from "zod";
 import { v4 as uuid } from "uuid";
-import type { NormalizedMessage, PlatformAdapter, PlatformName, RememberItem, SelectorRegistry, SuggestedRepliesOutput, ThreadStub } from "@inbox-os/core";
+import type { AppSettings, NormalizedMessage, PlatformAdapter, PlatformName, RememberItem, SelectorRegistry, SuggestedRepliesOutput, ThreadStub } from "@inbox-os/core";
 import { BIRTHDAY_HORIZON_DAYS, calculateRisk, daysUntilBirthday, isNonContentIMessageSystemEvent, LEGACY_APP_NAME, resolveAppName, stableHash } from "@inbox-os/core";
 import { Prisma } from "@prisma/client";
 import { cleanText } from "./platforms/utils";
@@ -27,6 +27,8 @@ import {
 import {
   applyGeminiKey,
   discardStaleEnvFileStages,
+  readEnvFileValue,
+  recoverEnvFileValueTransaction,
   resolveEnvWritePath,
   stageEnvFileValue,
   validateGeminiKey
@@ -52,6 +54,12 @@ import {
   reconcileSelectedPlatformLifecycle,
   shouldStartLinkedInRealtimeWatcher
 } from "./services/platform-selection-reconciler";
+import {
+  createPlatformSelectionCoordinator,
+  PlatformNotSelectedError,
+  PlatformSelectionSupersededError,
+  type ReservedPlatformSelectionMutation
+} from "./services/platform-selection-coordinator";
 import { createAuditService } from "./services/audit";
 import { deleteDraftRevision } from "./services/draft";
 import { summarizeControlBody } from "./services/control-audit";
@@ -134,7 +142,8 @@ import { resolveSseResumeCursor } from "./services/sse-resume-cursor";
 import { resummarizeThread } from "./services/resummarize-thread";
 import { pickCanonicalThread, canonicalWriteTargetId } from "./services/canonical-thread";
 import { parseAllowedProfileUrl, ProfileUrlPolicyError } from "./services/profile-url-policy";
-import { createIMessageWatcher } from "./services/imessage-watcher";
+import { createIMessageWatcher, type IMessageWatcher } from "./services/imessage-watcher";
+import { createIMessageSelectionLifecycle } from "./services/imessage-selection-lifecycle";
 import { createChangeTriggeredScan } from "./services/change-triggered-scan";
 import {
   createMessageSyncLatencyTracker,
@@ -191,7 +200,7 @@ import {
 } from "./services/calendar-focus";
 import { fetchIcsText } from "./services/calendar-fetch";
 import { summarizeCalendar } from "./services/calendar-ics";
-import { createBirthdaySync } from "./services/birthday-sync";
+import { createBirthdaySync, type BirthdaySync } from "./services/birthday-sync";
 import { createImessageNameSync, type ImessageNameSync } from "./services/imessage-name-sync";
 import {
   canSelfUpdateInPlace,
@@ -636,16 +645,6 @@ let onWhatsAppMessageArrived:
 let onLinkedInInboxChanged:
   | ((change: { reason: string; sourceChangedAt: string }) => void)
   | null = null;
-
-async function ensurePlatformEnabledInSettings(platform: PlatformName): Promise<void> {
-  const settings = await settingsStore.getSettings();
-  if (settings.enabledPlatforms.includes(platform)) {
-    return;
-  }
-  await settingsStore.updateSettings({
-    enabledPlatforms: [...settings.enabledPlatforms, platform]
-  });
-}
 
 // Mirror the whatsapp-web.js connect state onto the WHATSAPP platforms row so
 // the dashboard's "X/N connected" count, reconnect modal, and hasEverConnected
@@ -1662,9 +1661,10 @@ calendarFocusService.start();
 // Syncs contact birthdays from the macOS AddressBook into Person rows once
 // at boot and then daily. Mac-only and read-only against Contacts; a no-op
 // when Contacts data is unreadable. Feeds the dashboard's birthday surfaces.
-if (runnerConfig.contacts.birthdaySyncEnabled && runnerConfig.platformAvailability.IMESSAGE) {
-  createBirthdaySync().start();
-}
+const birthdaySync: BirthdaySync | null =
+  runnerConfig.contacts.birthdaySyncEnabled && runnerConfig.platformAvailability.IMESSAGE
+    ? createBirthdaySync()
+    : null;
 
 // Rewrites existing iMessage rows whose name is still a raw phone/email handle
 // to the real contact name (live macOS Contacts + optional vCard), once at
@@ -1675,7 +1675,63 @@ if (runnerConfig.contacts.birthdaySyncEnabled && runnerConfig.platformAvailabili
 let imessageNameSync: ImessageNameSync | null = null;
 if (runnerConfig.platformAvailability.IMESSAGE) {
   imessageNameSync = createImessageNameSync();
-  imessageNameSync.start();
+}
+
+let imessageWatcher: IMessageWatcher | null = null;
+
+async function probeIMessageConnection(): Promise<void> {
+  try {
+    const probe = new IMessageDb(runnerConfig.imessage.dbPath);
+    probe.close();
+    await prisma.platform.upsert({
+      where: { name: "IMESSAGE" },
+      update: { status: "CONNECTED", lastError: null },
+      create: { name: "IMESSAGE", status: "CONNECTED" }
+    });
+  } catch (error) {
+    await prisma.platform.upsert({
+      where: { name: "IMESSAGE" },
+      update: {
+        status: "NOT_CONNECTED",
+        lastError: error instanceof Error ? error.message : "chat.db unreadable"
+      },
+      create: { name: "IMESSAGE", status: "NOT_CONNECTED" }
+    });
+  }
+}
+
+const imessageSelectionLifecycle = createIMessageSelectionLifecycle({
+  probe: probeIMessageConnection,
+  startBirthdaySync: () => birthdaySync?.start(),
+  stopBirthdaySync: () => birthdaySync?.stop(),
+  startNameSync: () => imessageNameSync?.start(),
+  stopNameSync: () => imessageNameSync?.stop(),
+  startWatcher: () => {
+    imessageWatcher ??= createIMessageWatcher({
+      dbPath: runnerConfig.imessage.dbPath,
+      debounceMs: runnerConfig.imessage.watchDebounceMs,
+      onChange: ({ reason, sourceChangedAt }) => {
+        void settingsStore.getSettings().then((settings) => {
+          if (!settings.enabledPlatforms.includes("IMESSAGE")) return;
+          imessageChangeTriggeredScan.notify({ reason, sourceChangedAt });
+          void auditService.log({
+            platform: "IMESSAGE",
+            stage: "Scan",
+            action: "IMESSAGE_WATCH_TRIGGER",
+            status: "OK",
+            details: { reason, sourceChangedAt, status: "change_coalesced" }
+          });
+        });
+      }
+    });
+    imessageWatcher.start();
+  },
+  stopWatcher: () => imessageWatcher?.stop()
+});
+
+async function reconcileIMessageSelection(selected: boolean): Promise<void> {
+  if (!runnerConfig.imessage.enabled) return;
+  await imessageSelectionLifecycle.reconcile(selected);
 }
 
 const connectInFlight = new Map<PlatformName, Promise<void>>();
@@ -1789,6 +1845,14 @@ async function withWhatsAppSessionLocks<T>(
   );
 }
 
+const platformSelectionCoordinator = createPlatformSelectionCoordinator({
+  platforms: allPlatforms,
+  getEnabledPlatforms: async () => (await settingsStore.getSettings()).enabledPlatforms,
+  requestAbort: (reason) => scanQueue.requestAbort(reason),
+  withPlatformLocks: (platform, work) =>
+    withExternalActionLock(platform, () => withPlatformControlLock(platform, work))
+});
+
 const managedSessionPlatforms: PlatformName[] = [
   "LINKEDIN",
   "INSTAGRAM",
@@ -1798,6 +1862,9 @@ const managedSessionPlatforms: PlatformName[] = [
 ];
 
 async function reconcilePlatformSelection(): Promise<void> {
+  const selectedPlatforms = await settingsStore.getSettings()
+    .then((settings) => settings.enabledPlatforms);
+  await reconcileIMessageSelection(selectedPlatforms.includes("IMESSAGE"));
   await reconcileSelectedPlatformLifecycle({
     getEnabledPlatforms: async () => (await settingsStore.getSettings()).enabledPlatforms,
     getCurrentScanPlatform: () => scanQueue.getCurrentScanPlatform(),
@@ -2814,48 +2881,62 @@ app.post("/control/imessage/import-history", asyncRoute(async (req, res) => {
   const requestId = uuid();
   const startedAt = Date.now();
   const summary = { threadsIngested: 0, messagesParsed: 0, updatedThreads: 0, threadFailures: 0 };
+  const shouldContinue = scanQueue.createContinueGate();
 
-  await withPlatformControlLock("IMESSAGE", async () => {
-    let index = 0;
-    for (const r of candidates) {
-      index += 1;
-      const candidate: ThreadStub = {
-        platformThreadId: r.guid,
-        displayName: resolveName(r),
-        lastMessagePreview: r.lastMessagePreview ?? "",
-        lastMessageAt: r.lastMessageAt,
-        ...groupStubFields(r)
-      };
-      try {
-        // High maxMessages so a full year of even chatty threads is
-        // pulled; chat.db reads are cheap and the upsert is idempotent.
-        const partial = await scanQueue.syncThreadForIngest({
-          platform: "IMESSAGE",
-          candidate,
-          maxMessages: 20000,
-          requestId,
-          // Raw historical ingest: no per-thread AI (enrichment is gated;
-          // the recurring scanner does AI for active threads).
-          skipAi: true
-        });
-        summary.threadsIngested += 1;
-        summary.updatedThreads += partial.updatedThreads ?? 0;
-        summary.messagesParsed += partial.parsedMessages ?? 0;
-      } catch (error) {
-        summary.threadFailures += 1;
-        console.warn(
-          `[imessage-import] thread ${index}/${candidates.length} "${r.displayName}" failed (skipped): ${
-            error instanceof Error ? error.message : String(error)
-          }\n${error instanceof Error ? error.stack ?? "(no stack)" : ""}`
-        );
+  try {
+    await platformSelectionCoordinator.withSelectedPlatform("IMESSAGE", async () => {
+      let index = 0;
+      for (const r of candidates) {
+        if (!shouldContinue()) break;
+        index += 1;
+        const candidate: ThreadStub = {
+          platformThreadId: r.guid,
+          displayName: resolveName(r),
+          lastMessagePreview: r.lastMessagePreview ?? "",
+          lastMessageAt: r.lastMessageAt,
+          ...groupStubFields(r)
+        };
+        try {
+          // High maxMessages so a full year of even chatty threads is
+          // pulled; chat.db reads are cheap and the upsert is idempotent.
+          const partial = await scanQueue.syncThreadForIngest({
+            platform: "IMESSAGE",
+            candidate,
+            maxMessages: 20000,
+            requestId,
+            // Raw historical ingest: no per-thread AI (enrichment is gated;
+            // the recurring scanner does AI for active threads).
+            skipAi: true,
+            shouldContinue
+          });
+          summary.threadsIngested += 1;
+          summary.updatedThreads += partial.updatedThreads ?? 0;
+          summary.messagesParsed += partial.parsedMessages ?? 0;
+        } catch (error) {
+          summary.threadFailures += 1;
+          console.warn(
+            `[imessage-import] thread ${index}/${candidates.length} "${r.displayName}" failed (skipped): ${
+              error instanceof Error ? error.message : String(error)
+            }\n${error instanceof Error ? error.stack ?? "(no stack)" : ""}`
+          );
+        }
+        if (index % 25 === 0 || index === candidates.length) {
+          console.log(
+            `[imessage-import] ${index}/${candidates.length} threads · ${summary.messagesParsed} msgs · ${summary.threadFailures} failed`
+          );
+        }
       }
-      if (index % 25 === 0 || index === candidates.length) {
-        console.log(
-          `[imessage-import] ${index}/${candidates.length} threads · ${summary.messagesParsed} msgs · ${summary.threadFailures} failed`
-        );
-      }
+    });
+  } catch (error) {
+    if (error instanceof PlatformNotSelectedError) {
+      res.status(409).json({
+        error: "iMessage is no longer selected in Settings.",
+        reason: "platform_not_selected"
+      });
+      return;
     }
-  });
+    throw error;
+  }
 
   res.json({
     ok: true,
@@ -3049,8 +3130,12 @@ app.post("/control/setup/ai-key", asyncRoute(async (req, res) => {
       applyGeminiKey(payload.key, {
         validate: (key) => validateGeminiKey(key, runnerConfig.geminiBaseUrl),
         stage: (key) => stageEnvFileValue(resolveEnvWritePath(), "GEMINI_API_KEY", key),
-        commitState: () =>
-          setupPreferencesCoordinator.enableAiProvider("gemini", payload.expectedRevision),
+        commitState: (transactionId) =>
+          setupPreferencesCoordinator.enableAiProvider(
+            "gemini",
+            payload.expectedRevision,
+            transactionId
+          ),
         applyRuntime: (key) => {
           process.env.GEMINI_API_KEY = key;
           runnerConfig.geminiApiKey = key;
@@ -3100,7 +3185,8 @@ app.get("/data/setup/status", asyncRoute(async (_req, res) => {
   res.json({
     preferences: {
       ...preferences,
-      selectedPlatforms: preferences.selectedPlatforms.filter((platform) => available.has(platform))
+      selectedPlatforms: settings.enabledPlatforms.filter((platform) => available.has(platform)),
+      aiEnabled: settings.aiEnabled !== false
     },
     settings: {
       enabledPlatforms: settings.enabledPlatforms,
@@ -3116,14 +3202,21 @@ app.get("/data/setup/status", asyncRoute(async (_req, res) => {
 }));
 
 app.post("/control/setup/preferences", asyncRoute(async (req, res) => {
-  const request = parseSetupPreferencesRequest(req.body);
+  const completeFocusPolicyMutation = beginUserTriggeredIntentOperation(res);
   try {
+    const request = parseSetupPreferencesRequest(req.body);
     if (request.kind === "complete") {
       const result = await setupPreferencesCoordinator.complete(request.payload);
       res.json({ ok: true, ...result });
       return;
     }
-    const preferences = await setupPreferencesCoordinator.update(request.payload);
+    const selectionMutation = request.payload.selectedPlatforms
+      ? platformSelectionCoordinator.reserveMutation(request.payload.selectedPlatforms)
+      : null;
+    const persist = () => setupPreferencesCoordinator.update(request.payload);
+    const preferences = selectionMutation
+      ? await selectionMutation.run(persist)
+      : await persist();
     abortCurrentScanIfDeselected((await settingsStore.getSettings()).enabledPlatforms);
     schedulePlatformSelectionReconciliation();
     res.json({ ok: true, preferences });
@@ -3135,7 +3228,16 @@ app.post("/control/setup/preferences", asyncRoute(async (req, res) => {
       });
       return;
     }
+    if (error instanceof PlatformSelectionSupersededError) {
+      res.status(409).json({
+        error: "Platform choices changed in another window. Review the latest choices and try again.",
+        preferences: await getSetupPreferences()
+      });
+      return;
+    }
     throw error;
+  } finally {
+    completeFocusPolicyMutation();
   }
 }));
 
@@ -3401,7 +3503,27 @@ const automaticUpdateScheduler = createAutomaticUpdateScheduler({
   }
 });
 
+async function persistSettingsUpdate(
+  update: Partial<AppSettings>,
+  selectionMutation?: ReservedPlatformSelectionMutation
+) {
+  const persist = async () => {
+    if (update.enabledPlatforms !== undefined || update.aiEnabled !== undefined) {
+      await setupPreferencesCoordinator.updateFromSettings(update);
+      return settingsStore.getSettings();
+    }
+    return settingsStore.updateSettings(update);
+  };
+  return selectionMutation
+    ? selectionMutation.run(persist)
+    : update.enabledPlatforms !== undefined
+      ? platformSelectionCoordinator.mutate(update.enabledPlatforms, persist)
+    : persist();
+}
+
 app.post("/control/settings", asyncRoute(async (req, res) => {
+  const completeFocusPolicyMutation = beginUserTriggeredIntentOperation(res);
+  try {
   const quietHoursWindowSchema = z
     .object({
       start: z.string().regex(/^\d{1,2}:\d{2}$/),
@@ -3434,6 +3556,10 @@ app.post("/control/settings", asyncRoute(async (req, res) => {
     })
     .parse(req.body);
 
+  const selectionMutation = payload.enabledPlatforms
+    ? platformSelectionCoordinator.reserveMutation(payload.enabledPlatforms)
+    : undefined;
+
   const previous = await settingsStore.getSettings();
 
   // Presenter sandbox piggybacks on the existing demoMode plumbing so the
@@ -3451,19 +3577,16 @@ app.post("/control/settings", asyncRoute(async (req, res) => {
     const manifest = await settingsStore.getDemoSeedManifest();
     let next = previous;
     if (manifest) {
-      await cleanupDemoManifest(manifest, async () => {
-        next = await settingsStore.updateSettings(updatePayload);
-      });
-    } else {
-      next = await settingsStore.updateSettings(updatePayload);
+      await cleanupDemoManifest(manifest);
     }
+    next = await persistSettingsUpdate(updatePayload, selectionMutation);
     abortCurrentScanIfDeselected(next.enabledPlatforms);
     schedulePlatformSelectionReconciliation();
     res.json(next);
     return;
   }
 
-  const next = await settingsStore.updateSettings(updatePayload);
+  const next = await persistSettingsUpdate(updatePayload, selectionMutation);
   abortCurrentScanIfDeselected(next.enabledPlatforms);
   schedulePlatformSelectionReconciliation();
 
@@ -3485,6 +3608,17 @@ app.post("/control/settings", asyncRoute(async (req, res) => {
   }
 
   res.json(next);
+  } catch (error) {
+    if (error instanceof PlatformSelectionSupersededError) {
+      res.status(409).json({
+        error: "Platform choices changed in another window. Review the latest choices and try again."
+      });
+      return;
+    }
+    throw error;
+  } finally {
+    completeFocusPolicyMutation();
+  }
 }));
 
 // Overdue-reply digest (#360). One calm digest; off by default; cadence is
@@ -4048,8 +4182,8 @@ app.post("/control/platform/connect", asyncRoute(async (req, res) => {
   const startedAt = Date.now();
   const connectTimeoutMs = connectTimeoutMsForCurrentProfile(platform);
 
-  await withPlatformControlLock(platform, async () => {
-    await ensurePlatformEnabledInSettings(platform);
+  try {
+  await platformSelectionCoordinator.withSelectedPlatform(platform, async () => {
     const platformSession = resolvePlatformSession(platform);
     const browserProfileDetails = platformBrowserProfileDetails(
       platform,
@@ -4209,6 +4343,16 @@ app.post("/control/platform/connect", asyncRoute(async (req, res) => {
       });
     }
   });
+  } catch (error) {
+    if (error instanceof PlatformNotSelectedError) {
+      res.status(409).json({
+        error: "Select this message source in Settings before connecting it.",
+        reason: "platform_not_selected"
+      });
+      return;
+    }
+    throw error;
+  }
 }));
 
 app.post("/control/platform/test-selectors", asyncRoute(async (req, res) => {
@@ -5260,6 +5404,7 @@ app.post("/control/thread/:threadId/rescan", asyncRoute(async (req, res) => {
     res.status(409).json({ error: "This message source is not selected in Settings.", reason: "platform_not_selected" });
     return;
   }
+  const shouldContinue = scanQueue.createContinueGate();
 
   // For iMessage we render one row per Person but chat.db may have several
   // chats with that human (phone + email). Rescanning ONLY the canonical
@@ -5305,7 +5450,7 @@ app.post("/control/thread/:threadId/rescan", asyncRoute(async (req, res) => {
     personName: target.displayName
   });
   try {
-    const result = await withPlatformControlLock(target.platform, async () => {
+    const result = await platformSelectionCoordinator.withSelectedPlatform(target.platform, async () => {
       const aggregate = {
         updatedThreads: 0,
         parsedMessages: 0,
@@ -5329,6 +5474,7 @@ app.post("/control/thread/:threadId/rescan", asyncRoute(async (req, res) => {
       const targetIds = targets.map((t) => t.id);
       const messagesBefore = await prisma.message.count({ where: { threadId: { in: targetIds } } });
       for (const t of targets) {
+        if (!shouldContinue()) break;
         const candidate: ThreadStub = {
           platformThreadId: t.platformThreadId,
           displayName: t.person.displayName,
@@ -5340,7 +5486,8 @@ app.post("/control/thread/:threadId/rescan", asyncRoute(async (req, res) => {
           platform: target.platform,
           candidate,
           maxMessages: settings.maxMessagesPerThread,
-          requestId
+          requestId,
+          shouldContinue
         });
         aggregate.updatedThreads += partial.updatedThreads ?? 0;
         aggregate.parsedMessages += partial.parsedMessages ?? 0;
@@ -5413,6 +5560,24 @@ app.post("/control/thread/:threadId/rescan", asyncRoute(async (req, res) => {
       // confident "No new messages from X" for a check that errored.
       failed: true
     });
+    if (error instanceof PlatformNotSelectedError) {
+      await auditService.log({
+        platform: target.platform,
+        stage: "Scan",
+        action: "RESCAN_THREAD_CANCELLED",
+        status: "OK",
+        details: {
+          requestId,
+          threadId: target.threadId,
+          reason: "platform_not_selected"
+        }
+      });
+      res.status(409).json({
+        error: "This message source is no longer selected in Settings.",
+        reason: "platform_not_selected"
+      });
+      return;
+    }
     await auditService.log({
       platform: target.platform,
       stage: "Scan",
@@ -7548,6 +7713,15 @@ app.post("/control/imessage/contacts/resync", asyncRoute(async (_req, res) => {
     });
     return;
   }
+  const settings = await settingsStore.getSettings();
+  if (!settings.enabledPlatforms.includes("IMESSAGE")) {
+    res.status(409).json({
+      ok: false,
+      reason: "platform_not_selected",
+      message: "Select iMessage in Settings before checking Contacts."
+    });
+    return;
+  }
   await imessageNameSync.tick();
   res.json({ ok: true, health: imessageNameSync.getHealth() });
 }));
@@ -7980,29 +8154,34 @@ app.post("/control/whatsapp/connect", asyncRoute(async (_req, res) => {
     res.status(500).json({ ok: false, reason: "no_adapter" });
     return;
   }
-  await ensurePlatformEnabledInSettings("WHATSAPP");
-  if (whatsappConnect.state === "connected") {
-    res.json({ ok: true, state: whatsappConnect.state });
-    return;
-  }
-  if (whatsappConnect.state === "connecting" || whatsappConnect.state === "qr_ready") {
-    res.status(202).json({ ok: true, state: whatsappConnect.state });
-    return;
-  }
-  whatsappConnect.state = "connecting";
-  whatsappConnect.updatedAt = new Date().toISOString();
-  void (async () => {
-    let ready = Promise.resolve();
-    await withWhatsAppSessionLocks(async () => {
+  let ready = Promise.resolve();
+  try {
+    await platformSelectionCoordinator.withSelectedPlatform("WHATSAPP", async () => {
+      if (whatsappConnect.state === "connected") {
+        res.json({ ok: true, state: whatsappConnect.state });
+        return;
+      }
+      if (whatsappConnect.state === "connecting" || whatsappConnect.state === "qr_ready") {
+        res.status(202).json({ ok: true, state: whatsappConnect.state });
+        return;
+      }
+      whatsappConnect.state = "connecting";
+      whatsappConnect.updatedAt = new Date().toISOString();
       ready = adapter.ensureConnected();
+      res.status(202).json({ ok: true, state: whatsappConnect.state });
     });
-    await ready;
-  })().catch((error) => {
+  } catch (error) {
+    if (error instanceof PlatformNotSelectedError) {
+      res.status(409).json({ ok: false, reason: "platform_not_selected" });
+      return;
+    }
+    throw error;
+  }
+  void ready.catch((error) => {
     console.warn(`[whatsapp] connect failed: ${error instanceof Error ? error.message : String(error)}`);
     whatsappConnect.state = "disconnected";
     whatsappConnect.updatedAt = new Date().toISOString();
   });
-  res.status(202).json({ ok: true, state: whatsappConnect.state });
 }));
 
 app.post("/control/whatsapp/refresh-qr", asyncRoute(async (_req, res) => {
@@ -8016,19 +8195,24 @@ app.post("/control/whatsapp/refresh-qr", asyncRoute(async (_req, res) => {
     res.status(500).json({ ok: false, reason: "no_adapter" });
     return;
   }
-  await ensurePlatformEnabledInSettings("WHATSAPP");
-  whatsappConnect.qr = null;
-  whatsappConnect.qrDataUrl = null;
-  whatsappConnect.state = "connecting";
-  whatsappConnect.updatedAt = new Date().toISOString();
-  void (async () => {
-    let ready = Promise.resolve();
-    await withWhatsAppSessionLocks(async () => {
+  let ready = Promise.resolve();
+  try {
+    await platformSelectionCoordinator.withSelectedPlatform("WHATSAPP", async () => {
+      whatsappConnect.qr = null;
+      whatsappConnect.qrDataUrl = null;
+      whatsappConnect.state = "connecting";
+      whatsappConnect.updatedAt = new Date().toISOString();
       await adapter.closeSession("refresh_qr");
       ready = adapter.ensureConnected();
     });
-    await ready;
-  })().catch((error) => {
+  } catch (error) {
+    if (error instanceof PlatformNotSelectedError) {
+      res.status(409).json({ ok: false, reason: "platform_not_selected" });
+      return;
+    }
+    throw error;
+  }
+  void ready.catch((error) => {
     console.warn(`[whatsapp] QR refresh failed: ${error instanceof Error ? error.message : String(error)}`);
     whatsappConnect.state = "disconnected";
     whatsappConnect.updatedAt = new Date().toISOString();
@@ -8486,6 +8670,7 @@ app.post("/control/platform/linkedin/smoke-unread", asyncRoute(async (_req, res)
     logDir
   });
   await smokeLogger.logLogDir();
+  const shouldContinue = scanQueue.createContinueGate();
 
   const linkedInAdapter = adapters.LINKEDIN as typeof adapters.LINKEDIN & {
     setRunLogger?: (logger: typeof runLogger | null) => void;
@@ -8506,8 +8691,8 @@ app.post("/control/platform/linkedin/smoke-unread", asyncRoute(async (_req, res)
   };
 
   try {
-    const settings = await settingsStore.getSettings();
-    const result = await withPlatformControlLock("LINKEDIN", async () => {
+    const result = await platformSelectionCoordinator.withSelectedPlatform("LINKEDIN", async () => {
+      const settings = await settingsStore.getSettings();
       linkedInAdapter.setRunLogger?.(runLogger);
       return linkedInAdapter.smokeUnreadIngest({
         requestId,
@@ -8521,7 +8706,8 @@ app.post("/control/platform/linkedin/smoke-unread", asyncRoute(async (_req, res)
             candidate: persistInput.thread,
             maxMessages: settings.maxMessagesPerThread,
             requestId,
-            messages: persistInput.messages
+            messages: persistInput.messages,
+            shouldContinue
           })
       });
     });
@@ -8560,6 +8746,16 @@ app.post("/control/platform/linkedin/smoke-unread", asyncRoute(async (_req, res)
       }
     });
   } catch (error) {
+    if (error instanceof PlatformNotSelectedError) {
+      res.status(409).json({
+        ok: false,
+        requestId,
+        logDir,
+        reason: "platform_not_selected",
+        error: "LinkedIn is not selected in Settings."
+      });
+      return;
+    }
     const failure = resolveSmokeFailure({ error });
     runLogger.logError({
       component: "linkedin-smoke",
@@ -9340,7 +9536,17 @@ process.on("uncaughtException", (error) => {
 
 async function start(): Promise<void> {
   await ensureRuntimeDirs();
-  discardStaleEnvFileStages(resolveEnvWritePath());
+  const startupSettings = await settingsStore.getSettings();
+  const envWritePath = resolveEnvWritePath();
+  recoverEnvFileValueTransaction(
+    envWritePath,
+    startupSettings.setupGeminiKeyTransactionId
+  );
+  discardStaleEnvFileStages(envWritePath);
+  const recoveredGeminiKey = readEnvFileValue(envWritePath, "GEMINI_API_KEY");
+  if (recoveredGeminiKey) process.env.GEMINI_API_KEY = recoveredGeminiKey;
+  else delete process.env.GEMINI_API_KEY;
+  runnerConfig.geminiApiKey = recoveredGeminiKey;
   sweepTranscriptionDownloadOrphans(runnerConfig.audioTranscription.transformers.modelDir);
   await sweepOutgoingAttachmentOrphansOnce();
   const outgoingAttachmentSweepTimer = setInterval(
@@ -9348,10 +9554,7 @@ async function start(): Promise<void> {
     OUTGOING_ATTACHMENT_ORPHAN_GRACE_MS
   );
   outgoingAttachmentSweepTimer.unref();
-  const [startupSettings, startupSetupPreferences] = await Promise.all([
-    settingsStore.getSettings(),
-    getSetupPreferences()
-  ]);
+  const startupSetupPreferences = await getSetupPreferences();
   if (
     startupSetupPreferences.revision > 0 ||
     startupSetupPreferences.startedAt ||
@@ -9361,56 +9564,7 @@ async function start(): Promise<void> {
   }
   scanQueue.startScheduler();
 
-  // iMessage connectivity = "can we read chat.db", not "has it
-  // scanned since boot". Without this probe iMessage sits at
-  // NOT_CONNECTED from every restart until its first scan, which
-  // lights it up in the reconnect modal as a false connection
-  // issue (and with browser-session actions that don't even apply
-  // to a local-DB platform). Probe chat.db once at boot and set
-  // the status to match reality. A genuinely missing Full Disk
-  // Access grant still leaves it NOT_CONNECTED — which is correct,
-  // and the modal handles that case with permission guidance.
-  if (runnerConfig.imessage.enabled) {
-    try {
-      const probe = new IMessageDb(runnerConfig.imessage.dbPath);
-      probe.close();
-      await prisma.platform.upsert({
-        where: { name: "IMESSAGE" },
-        update: { status: "CONNECTED", lastError: null },
-        create: { name: "IMESSAGE", status: "CONNECTED" }
-      });
-    } catch (error) {
-      await prisma.platform.upsert({
-        where: { name: "IMESSAGE" },
-        update: {
-          status: "NOT_CONNECTED",
-          lastError: error instanceof Error ? error.message : "chat.db unreadable"
-        },
-        create: { name: "IMESSAGE", status: "NOT_CONNECTED" }
-      });
-    }
-  }
-
-  if (runnerConfig.imessage.enabled) {
-    const watcher = createIMessageWatcher({
-      dbPath: runnerConfig.imessage.dbPath,
-      debounceMs: runnerConfig.imessage.watchDebounceMs,
-      onChange: ({ reason, sourceChangedAt }) => {
-        void settingsStore.getSettings().then((settings) => {
-          if (!settings.enabledPlatforms.includes("IMESSAGE")) return;
-          imessageChangeTriggeredScan.notify({ reason, sourceChangedAt });
-          void auditService.log({
-            platform: "IMESSAGE",
-            stage: "Scan",
-            action: "IMESSAGE_WATCH_TRIGGER",
-            status: "OK",
-            details: { reason, sourceChangedAt, status: "change_coalesced" }
-          });
-        });
-      }
-    });
-    watcher.start();
-  }
+  await reconcileIMessageSelection(startupSettings.enabledPlatforms.includes("IMESSAGE"));
 
   const linkedInPlatform = await prisma.platform.findUnique({ where: { name: "LINKEDIN" } });
   if (shouldStartLinkedInRealtimeWatcher({

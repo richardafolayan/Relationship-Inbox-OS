@@ -172,12 +172,13 @@ test("parsed partial setup requests do not erase an earlier startedAt", async ()
 
 test("AI provider activation is one coherent setup revision", async () => {
   const harness = createHarness();
-  const preferences = await harness.coordinator.enableAiProvider("gemini", 0);
+  const preferences = await harness.coordinator.enableAiProvider("gemini", 0, "tx-gemini");
 
   assert.equal(preferences.aiEnabled, true);
   assert.equal(preferences.revision, 1);
   assert.equal(harness.getSettings().aiEnabled, true);
   assert.equal(harness.getSettings().aiProvider, "gemini");
+  assert.equal(harness.getSettings().setupGeminiKeyTransactionId, "tx-gemini");
   assert.deepEqual(harness.events, ["setup-transaction", "settings-cache"]);
 });
 
@@ -190,7 +191,7 @@ test("an older Gemini activation cannot override a later AI opt-out", async () =
   });
 
   await assert.rejects(
-    harness.coordinator.enableAiProvider("gemini", started.revision),
+    harness.coordinator.enableAiProvider("gemini", started.revision, "tx-stale"),
     (error) => {
       assert.ok(error instanceof SetupPreferencesConflictError);
       assert.equal(error.current.revision, disabled.revision);
@@ -213,11 +214,31 @@ test("side endpoints preserve platforms connected after setup started", async ()
     expectedRevision: started.revision,
     transcriptionMode: "standard"
   });
-  const ai = await harness.coordinator.enableAiProvider("gemini", transcription.revision);
+  const ai = await harness.coordinator.enableAiProvider("gemini", transcription.revision, "tx-side");
 
   assert.equal(transcription.transcriptionMode, "standard");
   assert.equal(ai.aiEnabled, true);
   assert.deepEqual(harness.getSettings().enabledPlatforms, ["LINKEDIN", "INSTAGRAM"]);
+});
+
+test("Settings source changes atomically mirror the setup row used by a rerun", async () => {
+  const harness = createHarness();
+  await harness.coordinator.update({
+    expectedRevision: 0,
+    startedAt: "start",
+    selectedPlatforms: ["LINKEDIN"]
+  });
+
+  const mirrored = await harness.coordinator.updateFromSettings({
+    enabledPlatforms: ["INSTAGRAM"],
+    aiEnabled: true
+  });
+
+  assert.deepEqual(harness.getSettings().enabledPlatforms, ["INSTAGRAM"]);
+  assert.equal(harness.getSettings().aiEnabled, true);
+  assert.deepEqual(mirrored.selectedPlatforms, ["INSTAGRAM"]);
+  assert.equal(mirrored.aiEnabled, true);
+  assert.deepEqual(harness.getStored(), mirrored);
 });
 
 test("completion atomically stamps operator profile and setup preferences", async () => {

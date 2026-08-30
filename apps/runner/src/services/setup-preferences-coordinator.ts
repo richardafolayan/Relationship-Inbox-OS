@@ -141,9 +141,27 @@ export function createSetupPreferencesCoordinator(deps: SetupPreferencesCoordina
 
   async function enableAiProvider(
     provider: "gemini",
-    expectedRevision: number
+    expectedRevision: number,
+    setupGeminiKeyTransactionId: string
   ): Promise<SetupPreferences> {
-    return updateState({ aiEnabled: true, expectedRevision }, { aiProvider: provider });
+    return updateState(
+      { aiEnabled: true, expectedRevision },
+      { aiProvider: provider, setupGeminiKeyTransactionId }
+    );
+  }
+
+  async function updateFromSettings(
+    partial: Partial<AppSettings>
+  ): Promise<SetupPreferences> {
+    return updateState(
+      {
+        ...(partial.enabledPlatforms !== undefined
+          ? { selectedPlatforms: partial.enabledPlatforms }
+          : {}),
+        ...(partial.aiEnabled !== undefined ? { aiEnabled: partial.aiEnabled } : {})
+      },
+      partial
+    );
   }
 
   async function complete(payload: CompleteSetupPayload): Promise<{
@@ -169,5 +187,5 @@ export function createSetupPreferencesCoordinator(deps: SetupPreferencesCoordina
     });
   }
 
-  return { update, enableAiProvider, complete };
+  return { update, updateFromSettings, enableAiProvider, complete };
 }

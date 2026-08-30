@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -225,6 +225,44 @@ test("startup removes only orphaned transcription download stages", () => {
   try {
     assert.equal(sweepTranscriptionDownloadOrphans(modelDir), 1);
     assert.deepEqual(readdirSync(root).sort(), [".models-download-active"]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a startup sweep cannot delete a completed download while activation owns its live lease", async () => {
+  const root = mkdtempSync(join(tmpdir(), "tovi-transcription-activation-"));
+  const modelDir = join(root, "models");
+  let enabled = false;
+  let swept = -1;
+  const manager = createTranscriptionSetupManager({
+    modelDir,
+    downloadScript: "/unused",
+    initialEnabled: () => enabled,
+    initialModelId: () => TRANSCRIPTION_MODELS.standard.modelId,
+    applyRuntime: (_mode, nextEnabled) => { enabled = nextEnabled; },
+    download: async (modelId, stagedDir) => {
+      writeFileSync(join(stagedDir, "model.onnx"), "model");
+      writeFileSync(join(stagedDir, ".tovi-transcription-model.json"), JSON.stringify({
+        modelId,
+        downloadedAt: new Date().toISOString(),
+        bytes: 5
+      }));
+    },
+    activateDownloadedModel: (stagedDir, targetDir) => {
+      swept = sweepTranscriptionDownloadOrphans(targetDir);
+      renameSync(stagedDir, targetDir);
+    }
+  });
+  try {
+    manager.prepare("standard").commit();
+    for (let attempt = 0; attempt < 20 && manager.status().phase === "downloading"; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert.equal(swept, 0);
+    assert.equal(manager.status().phase, "idle");
+    assert.equal(manager.status().installedMode, "standard");
+    assert.equal(enabled, true);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

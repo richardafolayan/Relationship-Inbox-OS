@@ -65,8 +65,8 @@ test("connection completion cannot resurrect a source removed while login was op
     runnerSource.indexOf('app.post("/control/platform/connect"'),
     runnerSource.indexOf('app.post("/control/platform/test-selectors"')
   );
-  assert.ok(route.indexOf("ensurePlatformEnabledInSettings(platform)") < route.indexOf("connectPromise"));
-  assert.equal(route.match(/ensurePlatformEnabledInSettings\(platform\)/g)?.length, 1);
+  assert.ok(route.indexOf("withSelectedPlatform(platform") < route.indexOf("connectPromise"));
+  assert.doesNotMatch(route, /ensurePlatformEnabledInSettings|updateSettings\(/);
   assert.match(route, /settings\.enabledPlatforms\.includes\("LINKEDIN"\)/);
 });
 

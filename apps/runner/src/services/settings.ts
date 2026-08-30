@@ -29,6 +29,15 @@ export const OPERATOR_PROFILE_KEY = "operator_profile_v1";
 const REPLY_STYLES: ReplyStyle[] = ["warm", "direct", "casual", "thoughtful", "concise"];
 const AI_HELP_LEVELS: AiHelpLevel[] = ["memory_only", "writing_support", "full_drafts"];
 const FOCUS_AUDIENCES: FocusAudience[] = ["favourites", "all_personal"];
+const LEGACY_ENABLED_PLATFORMS: PlatformName[] = ["LINKEDIN", "IMESSAGE"];
+const PLATFORM_NAMES: PlatformName[] = [
+  "LINKEDIN",
+  "INSTAGRAM",
+  "TIKTOK",
+  "IMESSAGE",
+  "WHATSAPP",
+  "GOOGLE_MESSAGES"
+];
 
 // Conservative default: full AI reply drafting is OFF until the operator
 // opts in. Summaries / open loops / "shorten" + "warmer" still work.
@@ -197,6 +206,47 @@ function cloneSettings(settings: AppSettings): AppSettings {
   };
 }
 
+export function mergePersistedAppSettings(value: unknown): {
+  settings: AppSettings;
+  shouldPersistUpgrade: boolean;
+} {
+  const raw = value && typeof value === "object"
+    ? (value as Partial<AppSettings>)
+    : {};
+  const hasEnabledPlatforms = Object.prototype.hasOwnProperty.call(raw, "enabledPlatforms");
+  const hasAiEnabled = Object.prototype.hasOwnProperty.call(raw, "aiEnabled");
+  const persistedPlatforms = hasEnabledPlatforms && Array.isArray(raw.enabledPlatforms)
+    ? Array.from(new Set(raw.enabledPlatforms.filter(
+        (platform): platform is PlatformName =>
+          typeof platform === "string" && PLATFORM_NAMES.includes(platform as PlatformName)
+      )))
+    : [];
+  const enabledPlatformsAreValid =
+    !hasEnabledPlatforms ||
+    (Array.isArray(raw.enabledPlatforms) &&
+      raw.enabledPlatforms.length === persistedPlatforms.length);
+  const aiEnabledIsValid = !hasAiEnabled || typeof raw.aiEnabled === "boolean";
+  return {
+    settings: {
+      ...defaultSettings,
+      ...raw,
+      enabledPlatforms: hasEnabledPlatforms
+        ? persistedPlatforms
+        : [...LEGACY_ENABLED_PLATFORMS],
+      aiEnabled: hasAiEnabled && typeof raw.aiEnabled === "boolean"
+        ? raw.aiEnabled
+        : hasAiEnabled
+          ? defaultSettings.aiEnabled
+          : true
+    },
+    shouldPersistUpgrade:
+      !hasEnabledPlatforms ||
+      !hasAiEnabled ||
+      !enabledPlatformsAreValid ||
+      !aiEnabledIsValid
+  };
+}
+
 function mergeOperatorProfile(
   current: OperatorProfile,
   partial: Partial<OperatorProfile>
@@ -247,7 +297,9 @@ function cloneSelectorOverrides(overrides: SelectorOverrideStore): SelectorOverr
   ) as SelectorOverrideStore;
 }
 
-export function createSettingsStore(): SettingsStore {
+export function createSettingsStore(
+  database: Pick<typeof prisma, "setting"> = prisma
+): SettingsStore {
   const writeMutex = createKeyedMutex();
   let settingsCache: AppSettings | null = null;
   let settingsLoadPromise: Promise<AppSettings> | null = null;
@@ -266,9 +318,9 @@ export function createSettingsStore(): SettingsStore {
     // `getSelectorOverrides`. The earlier in-place `settingsCache = ...`
     // had a real write-race here.
     settingsLoadPromise ??= (async () => {
-      const record = await prisma.setting.findUnique({ where: { key: APP_SETTINGS_KEY } });
+      const record = await database.setting.findUnique({ where: { key: APP_SETTINGS_KEY } });
       if (!record) {
-        await prisma.setting.upsert({
+        await database.setting.upsert({
           where: { key: APP_SETTINGS_KEY },
           update: {},
           create: {
@@ -280,12 +332,15 @@ export function createSettingsStore(): SettingsStore {
         return cloneSettings(settingsCache);
       }
 
-      const loaded: AppSettings = {
-        ...defaultSettings,
-        // A corrupt app_settings row must not throw out of getSettings — it's
-        // read at boot and on many control routes. Fall back to defaults.
-        ...safeJsonParse<Partial<AppSettings>>(record.valueJson, {})
-      };
+      const parsed = safeJsonParse<Partial<AppSettings>>(record.valueJson, {});
+      const { settings: loaded, shouldPersistUpgrade } = mergePersistedAppSettings(parsed);
+      if (shouldPersistUpgrade) {
+        await database.setting.upsert({
+          where: { key: APP_SETTINGS_KEY },
+          update: { valueJson: JSON.stringify(loaded) },
+          create: { key: APP_SETTINGS_KEY, valueJson: JSON.stringify(loaded) }
+        });
+      }
       settingsCache ??= cloneSettings(loaded);
       return cloneSettings(settingsCache);
     })().finally(() => {
@@ -309,7 +364,7 @@ export function createSettingsStore(): SettingsStore {
           }
           const next: AppSettings = { ...current, ...partial };
           const write = persist ?? (async (value: AppSettings) => {
-            await prisma.setting.upsert({
+            await database.setting.upsert({
               where: { key: APP_SETTINGS_KEY },
               update: { valueJson: JSON.stringify(value) },
               create: { key: APP_SETTINGS_KEY, valueJson: JSON.stringify(value) }
@@ -335,7 +390,7 @@ export function createSettingsStore(): SettingsStore {
     }
 
     selectorOverridesLoadPromise ??= (async () => {
-      const record = await prisma.setting.findUnique({ where: { key: SELECTOR_OVERRIDES_KEY } });
+      const record = await database.setting.findUnique({ where: { key: SELECTOR_OVERRIDES_KEY } });
       const loaded: SelectorOverrideStore = record
         ? safeJsonParse<SelectorOverrideStore>(record.valueJson, {})
         : {};
@@ -362,7 +417,7 @@ export function createSettingsStore(): SettingsStore {
       }
     };
 
-    await prisma.setting.upsert({
+    await database.setting.upsert({
       where: { key: SELECTOR_OVERRIDES_KEY },
       update: { valueJson: JSON.stringify(next) },
       create: { key: SELECTOR_OVERRIDES_KEY, valueJson: JSON.stringify(next) }
@@ -381,7 +436,7 @@ export function createSettingsStore(): SettingsStore {
       [platform]: platformOverrides
     };
 
-    await prisma.setting.upsert({
+    await database.setting.upsert({
       where: { key: SELECTOR_OVERRIDES_KEY },
       update: { valueJson: JSON.stringify(next) },
       create: { key: SELECTOR_OVERRIDES_KEY, valueJson: JSON.stringify(next) }
@@ -391,7 +446,7 @@ export function createSettingsStore(): SettingsStore {
   }
 
   async function getDemoSeedManifest(): Promise<DemoSeedManifest | null> {
-    const record = await prisma.setting.findUnique({ where: { key: DEMO_SEED_MANIFEST_KEY } });
+    const record = await database.setting.findUnique({ where: { key: DEMO_SEED_MANIFEST_KEY } });
     if (!record) {
       return null;
     }
@@ -400,11 +455,11 @@ export function createSettingsStore(): SettingsStore {
 
   async function setDemoSeedManifest(manifest: DemoSeedManifest | null): Promise<void> {
     if (!manifest) {
-      await prisma.setting.deleteMany({ where: { key: DEMO_SEED_MANIFEST_KEY } });
+      await database.setting.deleteMany({ where: { key: DEMO_SEED_MANIFEST_KEY } });
       return;
     }
 
-    await prisma.setting.upsert({
+    await database.setting.upsert({
       where: { key: DEMO_SEED_MANIFEST_KEY },
       update: { valueJson: JSON.stringify(manifest) },
       create: { key: DEMO_SEED_MANIFEST_KEY, valueJson: JSON.stringify(manifest) }
@@ -412,7 +467,7 @@ export function createSettingsStore(): SettingsStore {
   }
 
   async function getOperatorProfile(): Promise<OperatorProfile> {
-    const record = await prisma.setting.findUnique({ where: { key: OPERATOR_PROFILE_KEY } });
+    const record = await database.setting.findUnique({ where: { key: OPERATOR_PROFILE_KEY } });
     if (!record) return { ...emptyOperatorProfile };
     try {
       const parsed = JSON.parse(record.valueJson) as Record<string, unknown>;
@@ -449,7 +504,7 @@ export function createSettingsStore(): SettingsStore {
           }
           const next = mergeOperatorProfile(current, partial);
           const write = persist ?? (async (value: OperatorProfile) => {
-            await prisma.setting.upsert({
+            await database.setting.upsert({
               where: { key: OPERATOR_PROFILE_KEY },
               update: { valueJson: JSON.stringify(value) },
               create: { key: OPERATOR_PROFILE_KEY, valueJson: JSON.stringify(value) }
@@ -484,7 +539,7 @@ export function createSettingsStore(): SettingsStore {
           ackedPersonIds: [...current.focusWindow.ackedPersonIds, personId]
         }
       };
-      await prisma.setting.upsert({
+      await database.setting.upsert({
         where: { key: OPERATOR_PROFILE_KEY },
         update: { valueJson: JSON.stringify(next) },
         create: { key: OPERATOR_PROFILE_KEY, valueJson: JSON.stringify(next) }

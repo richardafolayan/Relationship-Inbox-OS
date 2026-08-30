@@ -541,6 +541,8 @@ export interface AppSettings {
   // Gemma works through Google's OpenAI-compat endpoint once the
   // thinking_level=MINIMAL extra is set; see services/ai.ts:geminiExtraBody.
   geminiModel?: string;
+  /** Last durably committed setup key promotion used for crash recovery. */
+  setupGeminiKeyTransactionId?: string;
   /**
    * Pause Mac auto-scan (and mute desktop alerts) inside quietHoursWindow.
    * Optional so pre-existing app_settings rows still parse; undefined means

@@ -272,6 +272,7 @@ function makeHarness(initialRows, opts = {}) {
     settingsStore: {
       getSettings: async () => ({
         presenterDemoMode: "off",
+        enabledPlatforms: opts.enabledPlatforms ?? ["LINKEDIN", "IMESSAGE"],
         amberHours: 24,
         redHours: 72
       }),
