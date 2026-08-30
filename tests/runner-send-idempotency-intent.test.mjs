@@ -403,11 +403,19 @@ test("route cleanup discards newly uploaded files after an attachment replay", a
   );
   assert.match(
     indexSource,
-    /const uploadedFiles =[\s\S]*?const uploadedAttachmentPaths =[\s\S]*?try \{[\s\S]*?\.parse\(req\.body\)/
+    /const stagedAttachmentRequest = createStagedAttachmentRequestLifecycle\(req,[\s\S]*?const uploadedFiles =[\s\S]*?try \{[\s\S]*?\.parse\(req\.body\)/
   );
   assert.match(
     indexSource,
-    /!stagedAttachmentsHandled[\s\S]*?stagedPersistenceAttempted[\s\S]*?sendRequestOwnsStagedAttachments\([\s\S]*?\.catch\(\(\) => "unknown"\)[\s\S]*?shouldDiscardStagedAttachments\([\s\S]*?discardStagedAttachments\(uploadedAttachmentPaths\)/
+    /stagedAttachmentRequest\.markPersistenceAttempted\(payload\.clientSendId\)/
+  );
+  assert.match(
+    indexSource,
+    /stagedAttachmentRequest\.markHandled\(\)/
+  );
+  assert.match(
+    indexSource,
+    /finally \{\s*await stagedAttachmentRequest\.finalize\(\)/
   );
   assert.match(
     indexSource,

@@ -36,10 +36,11 @@ import { createAuditService } from "./services/audit";
 import { deleteDraftRevision } from "./services/draft";
 import { summarizeControlBody } from "./services/control-audit";
 import { createEventBus } from "./services/event-bus";
+import type { StagedAttachmentOwnership } from "./services/staged-attachment-cleanup";
 import {
-  shouldDiscardStagedAttachments,
-  type StagedAttachmentOwnership
-} from "./services/staged-attachment-cleanup";
+  createStagedAttachmentRequestLifecycle,
+  multipartOnly
+} from "./services/staged-attachment-request";
 import {
   createAiService,
   contactSnapshotFingerprint,
@@ -367,14 +368,7 @@ const uploadAttachments = multer({
   limits: { fileSize: 50 * 1024 * 1024 } // 50MB per file
 }).array("attachments", 10);
 
-function maybeMultipart(req: express.Request, res: express.Response, next: express.NextFunction): void {
-  const ct = (req.headers["content-type"] ?? "").toLowerCase();
-  if (ct.startsWith("multipart/form-data")) {
-    uploadAttachments(req, res, next);
-  } else {
-    next();
-  }
-}
+const maybeMultipart = multipartOnly(uploadAttachments);
 
 async function sha256File(path: string): Promise<string> {
   return new Promise((resolveHash, rejectHash) => {
@@ -4115,6 +4109,10 @@ app.post("/control/platform/test-selectors", asyncRoute(async (req, res) => {
 app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req, res) => {
   const completeUserTriggeredIntent = beginUserTriggeredIntentOperation(res);
   const requestIntentVersion = userTriggeredIntentVersion(res);
+  const stagedAttachmentRequest = createStagedAttachmentRequestLifecycle(req, {
+    discard: discardStagedAttachments,
+    resolveOwnership: sendRequestOwnsStagedAttachments
+  });
   let stagedAttachments: Array<{
     absolutePath: string;
     contentDigest: string;
@@ -4123,12 +4121,6 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
     mimeType: string;
   }> = [];
   const uploadedFiles = (req.files as Express.Multer.File[] | undefined) ?? [];
-  const uploadedAttachmentPaths = uploadedFiles.map((file) => ({
-    absolutePath: file.path
-  }));
-  let stagedAttachmentsHandled = false;
-  let stagedClientSendId: string | undefined;
-  let stagedPersistenceAttempted = false;
   try {
   const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
   if (await checkPresenterGuard(res, settingsStore, { threadId, action: "send", kind: "thread-mutation" })) return;
@@ -4163,7 +4155,6 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
       { message: "consumeDraftText and consumeDraftUpdatedAt must be provided together" }
     )
     .parse(req.body);
-  stagedClientSendId = payload.clientSendId;
   stagedAttachments = await Promise.all(
     uploadedFiles.map(async (f) => ({
       absolutePath: f.path,
@@ -4199,7 +4190,7 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
   // over from there.
   if (payload.scheduledFor) {
     try {
-      stagedPersistenceAttempted = true;
+      stagedAttachmentRequest.markPersistenceAttempted(payload.clientSendId);
       const scheduleResult = await sendService.enqueueScheduledSend({
         threadId,
         text: payload.text,
@@ -4220,7 +4211,7 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
       if (scheduleResult.replayed) {
         await discardStagedAttachments(stagedAttachments);
       }
-      stagedAttachmentsHandled = true;
+      stagedAttachmentRequest.markHandled();
       res.json({
         clientSendId: scheduleResult.clientSendId,
         status: scheduleResult.status,
@@ -4261,7 +4252,7 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
       payload.clientSendId,
       payload.clientRequestedAt ?? new Date().toISOString()
     );
-    stagedPersistenceAttempted = true;
+    stagedAttachmentRequest.markPersistenceAttempted(payload.clientSendId);
     const queueResult = await sendQueue.enqueueAndKick({
       threadId,
       text: payload.text,
@@ -4286,7 +4277,7 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
     if (queueResult.replayed) {
       await discardStagedAttachments(stagedAttachments);
     }
-    stagedAttachmentsHandled = true;
+    stagedAttachmentRequest.markHandled();
     res.json(queueResult);
   } catch (error) {
     await auditService.log({
@@ -4303,25 +4294,7 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
     throw error;
   }
   } finally {
-    if (!stagedAttachmentsHandled) {
-      const ownership: StagedAttachmentOwnership = stagedPersistenceAttempted
-        ? await sendRequestOwnsStagedAttachments(
-            stagedClientSendId,
-            uploadedAttachmentPaths
-          ).catch(() => "unknown")
-        : "unowned";
-      if (
-        shouldDiscardStagedAttachments({
-          handled: stagedAttachmentsHandled,
-          ownership,
-          persistenceAttempted: stagedPersistenceAttempted
-        })
-      ) {
-        await discardStagedAttachments(uploadedAttachmentPaths).catch(
-          () => undefined
-        );
-      }
-    }
+    await stagedAttachmentRequest.finalize();
     completeUserTriggeredIntent();
   }
 }));

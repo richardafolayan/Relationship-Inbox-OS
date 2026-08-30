@@ -181,6 +181,7 @@ import {
   composerNotFoundRecoveryAfterDispatchFailure,
   composerNotFoundRecoveryOnResume,
   composerRecoveryLineageConflict,
+  composerRecoveryLineageConflictPendingState,
   composerRecoveryResolution,
   composerReplayPreflight,
   composerSendRecoveryDisposition,
@@ -1664,6 +1665,11 @@ export default function ThreadPage() {
   const checkPendingDeliveryRef = useRef<(clientSendId: string) => Promise<void>>(
     async () => undefined
   );
+  const retainComposerLineageConflictRef = useRef<(
+    targetThreadId: string,
+    clientSendId: string,
+    error: unknown
+  ) => Promise<boolean>>(async () => false);
   const restorePendingComposerSendRef = useRef<(
     pending: PendingSend,
     message: string,
@@ -4198,6 +4204,15 @@ export default function ThreadPage() {
             return;
           }
           if (replayError) {
+            if (
+              await retainComposerLineageConflictRef.current(
+                pending.threadId,
+                pending.clientSendId,
+                replayError
+              )
+            ) {
+              return;
+            }
             const failure = classifyConsumerFailure(replayError, {
               path: `/runner/control/thread/${pending.threadId}/send`,
               method: "POST"
@@ -4713,12 +4728,8 @@ export default function ThreadPage() {
         pending.clientSendId === clientSendId
           ? {
               ...pending,
-              errorKind: "POLICY_BLOCKED" as const,
+              ...composerRecoveryLineageConflictPendingState(conflict),
               errorMessage: message,
-              failed: conflict.winningStatus !== "PENDING",
-              lineageWinnerClientSendId: conflict.winningClientSendId,
-              notFoundRecovery: "blocked" as const,
-              uncertain: false
             }
           : pending
       );
@@ -4731,6 +4742,7 @@ export default function ThreadPage() {
     );
     return true;
   }, [blockComposerSession, externalActionAttempts]);
+  retainComposerLineageConflictRef.current = retainComposerLineageConflict;
 
   const onSend = useCallback(async () => {
     if (

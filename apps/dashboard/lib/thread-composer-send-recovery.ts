@@ -450,6 +450,25 @@ export function composerRecoveryLineageConflict(
   };
 }
 
+export function composerRecoveryLineageConflictPendingState(conflict: {
+  winningClientSendId: string;
+  winningStatus?: string;
+}): {
+  errorKind: "POLICY_BLOCKED";
+  failed: boolean;
+  lineageWinnerClientSendId: string;
+  notFoundRecovery: "blocked";
+  uncertain: false;
+} {
+  return {
+    errorKind: "POLICY_BLOCKED",
+    failed: conflict.winningStatus !== "PENDING",
+    lineageWinnerClientSendId: conflict.winningClientSendId,
+    notFoundRecovery: "blocked",
+    uncertain: false
+  };
+}
+
 export function composerNotFoundRecoveryOnResume(
   recovery: ThreadComposerSendAttemptValue["notFoundRecovery"]
 ): "replay" | "restore" {

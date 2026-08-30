@@ -8,6 +8,7 @@ import {
   composerNotFoundRecoveryOnResume,
   composerIntentForRecovery,
   composerRecoveryLineageConflict,
+  composerRecoveryLineageConflictPendingState,
   composerRecoveryResolution,
   composerReplayPreflight,
   composerSendRecoveryDisposition,
@@ -100,6 +101,54 @@ test("a predecessor uniqueness conflict exposes its authoritative winner", () =>
     }),
     null
   );
+});
+
+test("a NOT_FOUND replay that loses its lineage stays blocked until the winner sends", () => {
+  const replayStatus = composerSendRecoveryDisposition({
+    status: "NOT_FOUND",
+    errorKind: null,
+    errorJson: null
+  });
+  assert.equal(replayStatus, "replay_same_id");
+
+  const conflict = composerRecoveryLineageConflict({
+    payload: {
+      reasonCode: "recovery_predecessor_already_claimed",
+      winningClientSendId: "550c8686-984a-4ddf-99ab-d2cdd7678c62",
+      winningStatus: "PENDING"
+    }
+  });
+  assert.ok(conflict);
+  const loser = composerRecoveryLineageConflictPendingState(conflict);
+  assert.deepEqual(loser, {
+    errorKind: "POLICY_BLOCKED",
+    failed: false,
+    lineageWinnerClientSendId: conflict.winningClientSendId,
+    notFoundRecovery: "blocked",
+    uncertain: false
+  });
+
+  assert.equal(
+    composerSendRecoveryDisposition({
+      status: conflict.winningStatus,
+      errorKind: null,
+      errorJson: null
+    }),
+    "retain"
+  );
+  assert.equal(loser.notFoundRecovery, "blocked");
+  assert.equal(loser.errorKind, "POLICY_BLOCKED");
+
+  assert.equal(
+    composerSendRecoveryDisposition({
+      status: "SENT",
+      errorKind: null,
+      errorJson: null
+    }),
+    "cleanup"
+  );
+  assert.equal(loser.notFoundRecovery, "blocked");
+  assert.equal(loser.errorKind, "POLICY_BLOCKED");
 });
 
 test("only the exact captured composer revision is hidden while delivery is unresolved", () => {

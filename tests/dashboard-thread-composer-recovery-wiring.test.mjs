@@ -147,6 +147,25 @@ test("completed composer generations suppress copied-tab duplicate sends", () =>
     source,
     /pending\.lineageWinnerClientSendId[\s\S]*?data\/send-status\/\$\{encodeURIComponent\([\s\S]*?pending\.lineageWinnerClientSendId/
   );
+  const replayFailureStart = source.indexOf("if (replayError) {");
+  const replayFailureEnd = source.indexOf(
+    "setPendingSends((current) =>",
+    replayFailureStart
+  );
+  const replayFailure = source.slice(replayFailureStart, replayFailureEnd);
+  assert.match(
+    replayFailure,
+    /retainComposerLineageConflictRef\.current\([\s\S]*?replayError/
+  );
+  assert.ok(
+    replayFailure.indexOf("retainComposerLineageConflictRef.current") <
+      replayFailure.indexOf("classifyConsumerFailure"),
+    "a typed lineage winner must be retained before generic replay failure recovery"
+  );
+  assert.match(
+    source,
+    /retainComposerLineageConflictRef\.current = retainComposerLineageConflict/
+  );
 });
 
 test("attachment restoration blocks send and schedule until every intended file is resolved", () => {
