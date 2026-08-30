@@ -11,6 +11,7 @@ export function buildScheduledSendRequest(input: {
   clientSendId: string;
   clientRequestedAt?: string;
   draftRevision?: { text: string; updatedAt: string } | null;
+  recoveryPredecessorClientSendId?: string;
   replyToMessageId?: string;
   scheduledFor: string;
   text: string;
@@ -28,6 +29,12 @@ export function buildScheduledSendRequest(input: {
             }
           : {}),
         ...(input.replyToMessageId ? { replyToMessageId: input.replyToMessageId } : {}),
+        ...(input.recoveryPredecessorClientSendId
+          ? {
+              recoveryPredecessorClientSendId:
+                input.recoveryPredecessorClientSendId
+            }
+          : {}),
         scheduledFor: input.scheduledFor,
         text: input.text
       }
@@ -42,6 +49,12 @@ export function buildScheduledSendRequest(input: {
     body.append("consumeDraftUpdatedAt", input.draftRevision.updatedAt);
   }
   if (input.replyToMessageId) body.append("replyToMessageId", input.replyToMessageId);
+  if (input.recoveryPredecessorClientSendId) {
+    body.append(
+      "recoveryPredecessorClientSendId",
+      input.recoveryPredecessorClientSendId
+    );
+  }
   body.append("scheduledFor", input.scheduledFor);
   body.append("text", input.text);
   for (const attachment of input.attachments) {

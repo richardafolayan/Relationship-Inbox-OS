@@ -8,6 +8,7 @@ import Database from "better-sqlite3";
 const DRAFT_THREAD_INDEX = "drafts_threadId_key";
 const SEND_SOURCE_COLUMN = "source";
 const SEND_DRAFT_CONSUMED_COLUMN = "draftConsumed";
+const SEND_RECOVERY_PREDECESSOR_COLUMN = "recoveryPredecessorClientSendId";
 const SEND_SOURCE_REPAIR_MARKER_ID = "data_repair_send_request_source_v2";
 const SEND_SOURCE_REPAIR_MARKER_KEY = "data_repair_send_request_source_v2";
 const SEND_SOURCE_REPAIR_MARKER_VALUE = '{"version":2}';
@@ -120,6 +121,46 @@ export function hasSendRequestDraftConsumedColumn(database) {
       Number(column.notnull) === 1 &&
       ["false", "0"].includes(String(column.dflt_value).toLowerCase())
   );
+}
+
+export function hasSendRequestRecoveryPredecessorColumn(database) {
+  const sendRequestsTable = database
+    .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'send_requests'")
+    .get();
+  if (!sendRequestsTable) return false;
+  const column = database
+    .prepare('PRAGMA table_info("send_requests")')
+    .all()
+    .find((candidate) => candidate.name === SEND_RECOVERY_PREDECESSOR_COLUMN);
+  return Boolean(
+    column &&
+      String(column.type).toUpperCase() === "TEXT" &&
+      Number(column.notnull) === 0
+  );
+}
+
+export function repairSendRequestRecoveryPredecessorColumn(database) {
+  const sendRequestsTable = database
+    .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'send_requests'")
+    .get();
+  if (!sendRequestsTable) return { columnAdded: false };
+  if (hasSendRequestRecoveryPredecessorColumn(database)) {
+    return { columnAdded: false };
+  }
+  const existingColumn = database
+    .prepare('PRAGMA table_info("send_requests")')
+    .all()
+    .find((candidate) => candidate.name === SEND_RECOVERY_PREDECESSOR_COLUMN);
+  if (existingColumn) {
+    throw new Error("Existing send recovery predecessor column is incompatible");
+  }
+  database.exec(
+    'ALTER TABLE "send_requests" ADD COLUMN "recoveryPredecessorClientSendId" TEXT'
+  );
+  if (!hasSendRequestRecoveryPredecessorColumn(database)) {
+    throw new Error("Send recovery predecessor column could not be validated");
+  }
+  return { columnAdded: true };
 }
 
 function sendRequestSourceRepairMarker(database) {
@@ -243,13 +284,15 @@ function runCli() {
         !draftsTable ||
         !hasCorrectDraftThreadIndex(database) ||
         sendRequestSourceRequiresRepair(database) ||
-        !hasSendRequestDraftConsumedColumn(database)
+        !hasSendRequestDraftConsumedColumn(database) ||
+        !hasSendRequestRecoveryPredecessorColumn(database)
       ) {
         process.exitCode = 2;
       }
     } else {
       repairDraftUniqueness(database);
       repairSendRequestSource(database);
+      repairSendRequestRecoveryPredecessorColumn(database);
     }
   } finally {
     database.close();

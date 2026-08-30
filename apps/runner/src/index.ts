@@ -4107,7 +4107,8 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
       // sends a reply, it includes the parent Message.id here. The send
       // itself still goes out as a regular text bubble — the threading is
       // only persisted on our side and rendered by the dashboard.
-      replyToMessageId: z.string().min(1).optional()
+      replyToMessageId: z.string().min(1).optional(),
+      recoveryPredecessorClientSendId: z.string().uuid().optional()
     })
     .refine(
       (value) =>
@@ -4159,6 +4160,8 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
         scheduledFor: new Date(payload.scheduledFor),
         attachments: stagedAttachments,
         replyToMessageId: payload.replyToMessageId,
+        recoveryPredecessorClientSendId:
+          payload.recoveryPredecessorClientSendId,
         consumeDraft:
           payload.consumeDraftText !== undefined && payload.consumeDraftUpdatedAt
             ? {
@@ -4221,6 +4224,8 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
         payload.source === "focus_ack" ? requestIntentVersion : undefined,
       rearmPolicyBlockedFocusAcknowledgement: payload.source === "focus_ack",
       replyToMessageId: payload.replyToMessageId,
+      recoveryPredecessorClientSendId:
+        payload.recoveryPredecessorClientSendId,
       consumeDraft:
         payload.consumeDraftText !== undefined && payload.consumeDraftUpdatedAt
           ? {

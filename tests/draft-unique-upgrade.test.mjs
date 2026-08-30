@@ -582,14 +582,13 @@ test("database-only invalidates provenance from the immediately preceding source
   }
 });
 
-test("a current-stamp predecessor database gains draftConsumed without losing sends", () => {
+test("a current-stamp predecessor database gains send safety columns without losing sends", () => {
   const { directory, databasePath, cleanup } = fixture();
   try {
     const currentSchema = readFileSync("packages/core/prisma/schema.prisma", "utf8");
-    const predecessorSchema = currentSchema.replace(
-      /^\s+draftConsumed\s+Boolean\s+@default\(false\)\s*$/m,
-      ""
-    );
+    const predecessorSchema = currentSchema
+      .replace(/^\s+draftConsumed\s+Boolean\s+@default\(false\)\s*$/m, "")
+      .replace(/^\s+recoveryPredecessorClientSendId\s+String\?\s*$/m, "");
     assert.notEqual(predecessorSchema, currentSchema);
     const predecessorSchemaPath = join(directory, "predecessor-no-draft-consumed.prisma");
     writeFileSync(predecessorSchemaPath, predecessorSchema);
@@ -658,6 +657,12 @@ test("a current-stamp predecessor database gains draftConsumed without losing se
         .get("send-before-draft-consumed"),
       { id: "send-before-draft-consumed", draftConsumed: 0 }
     );
+    const predecessorColumn = database
+      .prepare('PRAGMA table_info("send_requests")')
+      .all()
+      .find((column) => column.name === "recoveryPredecessorClientSendId");
+    assert.equal(predecessorColumn?.type, "TEXT");
+    assert.equal(predecessorColumn?.notnull, 0);
     database.close();
   } finally {
     cleanup();

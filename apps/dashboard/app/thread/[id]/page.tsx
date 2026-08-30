@@ -183,13 +183,17 @@ import {
   composerRecoveryResolution,
   composerReplayPreflight,
   composerSendRecoveryDisposition,
+  createSerializedComposerRecoveryState,
   missingThreadComposerAttachments,
   normalizeThreadComposerSendAttempt,
   recoveredComposerAuthoritativeDisposition,
   recoveredComposerSessionDisposition,
   resolvedComposerScheduleInstant,
   runComposerReplayRouteFence,
+  runRecoveredSuccessorDispatchFence,
+  runSerializedComposerRecovery,
   shouldHideComposerSessionForAttempt,
+  terminalComposerReceiptRetention,
   terminalThreadComposerSendAttemptValue,
   threadComposerSendScope,
   type ThreadComposerDraftRevision,
@@ -340,6 +344,13 @@ type PendingSend = {
   uncertain?: boolean;
   errorMessage?: string;
   errorKind?: "AUTH_REQUIRED" | "SELECTOR_FAIL" | "PROFILE_LOCKED" | "TRANSIENT" | "POLICY_BLOCKED" | "DELIVERY_UNCERTAIN" | "UNKNOWN";
+  terminalRecordPending?: "SENT" | "SCHEDULED";
+};
+
+type PendingComposerRecoveryRequest = {
+  message: string;
+  options: { recordAlreadyReleased?: boolean };
+  pending: PendingSend;
 };
 
 function pendingComposerAttemptValue(
@@ -1641,13 +1652,9 @@ export default function ThreadPage() {
   const activePendingReconcileKey = pendingSendReconcileKey(activePendingSends);
   const pendingSendsRef = useRef(pendingSends);
   const durableAttemptReconciliationRef = useRef<Set<string>>(new Set());
-  const queuedComposerRecoveriesRef = useRef<Map<
-    string,
-    {
-      message: string;
-      options: { recordAlreadyReleased?: boolean };
-    }
-  >>(new Map());
+  const composerRecoveryQueueRef = useRef(
+    createSerializedComposerRecoveryState<PendingComposerRecoveryRequest>()
+  );
   const checkPendingDeliveryRef = useRef<(clientSendId: string) => Promise<void>>(
     async () => undefined
   );
@@ -1672,6 +1679,8 @@ export default function ThreadPage() {
           clientRequestedAt: value.requestedAt,
           clientSendId: value.clientSendId,
           draftRevision: attempt.draftRevision,
+          recoveryPredecessorClientSendId:
+            attempt.recoveryPredecessorClientSendId,
           replyToMessageId: attempt.composerIntent.replyToMessageId ?? undefined,
           scheduledFor: attempt.scheduledFor,
           text: attempt.composerIntent.text
@@ -1697,6 +1706,12 @@ export default function ThreadPage() {
         if (attempt.composerIntent.replyToMessageId) {
           form.append("replyToMessageId", attempt.composerIntent.replyToMessageId);
         }
+        if (attempt.recoveryPredecessorClientSendId) {
+          form.append(
+            "recoveryPredecessorClientSendId",
+            attempt.recoveryPredecessorClientSendId
+          );
+        }
         for (const attachment of attachments) {
           form.append("attachments", attachment.file, attachment.file.name);
         }
@@ -1715,6 +1730,12 @@ export default function ThreadPage() {
           : {}),
         ...(attempt.composerIntent.replyToMessageId
           ? { replyToMessageId: attempt.composerIntent.replyToMessageId }
+          : {}),
+        ...(attempt.recoveryPredecessorClientSendId
+          ? {
+              recoveryPredecessorClientSendId:
+                attempt.recoveryPredecessorClientSendId
+            }
           : {})
       });
     },
@@ -2633,17 +2654,21 @@ export default function ThreadPage() {
     return completed;
   }, [externalActionAttempts]);
 
-  const retainTerminalComposerReceipt = useCallback((pending: PendingSend) => {
-    const message =
-      "Tovi confirmed this reply was sent, but could not save the local safety record. Sending stays blocked while Tovi retries.";
+  const retainTerminalComposerReceipt = useCallback((
+    pending: PendingSend,
+    status: "SENT" | "SCHEDULED"
+  ) => {
+    const retention = terminalComposerReceiptRetention(status);
+    const message = retention.message;
     const next = pendingSendsRef.current.map((item) =>
       item.clientSendId === pending.clientSendId
         ? {
             ...item,
-            errorKind: "DELIVERY_UNCERTAIN" as const,
+            errorKind: undefined,
             errorMessage: message,
-            failed: true,
-            uncertain: true
+            failed: false,
+            terminalRecordPending: retention.terminalStatus,
+            uncertain: false
           }
         : item
     );
@@ -2771,7 +2796,7 @@ export default function ThreadPage() {
             await refreshThread({ authoritative: true });
           }
           if (pending && !terminalRecorded) {
-            retainTerminalComposerReceipt(pending);
+            retainTerminalComposerReceipt(pending, "SENT");
             return;
           }
           setPendingSends((prev) =>
@@ -2914,7 +2939,7 @@ export default function ThreadPage() {
     ]
   );
 
-  const restorePendingComposerSend = useCallback(
+  const restorePendingComposerSendCore = useCallback(
     async (
       pending: PendingSend,
       message: string,
@@ -2984,16 +3009,6 @@ export default function ThreadPage() {
         );
         return;
       }
-      if (composerRecoveryInProgressRef.current) {
-        queuedComposerRecoveriesRef.current.set(pending.clientSendId, {
-          message,
-          options
-        });
-        return;
-      }
-      composerRecoveryInProgressRef.current = pending.threadId;
-      setComposerRecoveryInProgress(true);
-      try {
         const recoveryIntent = composerIntentForRecovery(
           pending.composerIntent,
           pending.attemptKind ?? "immediate",
@@ -3328,40 +3343,48 @@ export default function ThreadPage() {
           current.filter((item) => item.clientSendId !== pending.clientSendId)
         );
         showPendingError(message);
-      } finally {
-        if (composerRecoveryInProgressRef.current === pending.threadId) {
-          composerRecoveryInProgressRef.current = null;
-          setComposerRecoveryInProgress(false);
-          if (routeThreadIdRef.current === pending.threadId) {
-            window.requestAnimationFrame(() => composerInputRef.current?.focus());
-          }
-          let queued = queuedComposerRecoveriesRef.current.entries().next().value as
-            | [string, { message: string; options: { recordAlreadyReleased?: boolean } }]
-            | undefined;
-          while (queued) {
-            const [queuedClientSendId, queuedRecovery] = queued;
-            queuedComposerRecoveriesRef.current.delete(queuedClientSendId);
-            const livePending = pendingSendsRef.current.find(
-              (item) => item.clientSendId === queuedClientSendId
-            );
-            if (livePending) {
-              window.setTimeout(() => {
-                void restorePendingComposerSendRef.current(
-                  livePending,
-                  queuedRecovery.message,
-                  queuedRecovery.options
-                );
-              }, 0);
-              break;
-            }
-            queued = queuedComposerRecoveriesRef.current.entries().next().value as
-              | [string, { message: string; options: { recordAlreadyReleased?: boolean } }]
-              | undefined;
-          }
-        }
-      }
     },
     [composerAttachmentStore, externalActionAttempts]
+  );
+
+  const restorePendingComposerSend = useCallback(
+    async (
+      pending: PendingSend,
+      message: string,
+      options: { recordAlreadyReleased?: boolean } = {}
+    ) => {
+      await runSerializedComposerRecovery({
+        key: pending.clientSendId,
+        run: async (request, wasQueued) => {
+          const livePending = wasQueued
+            ? pendingSendsRef.current.find(
+                (item) => item.clientSendId === request.pending.clientSendId
+              )
+            : request.pending;
+          if (!livePending) return;
+          composerRecoveryInProgressRef.current = livePending.threadId;
+          setComposerRecoveryInProgress(true);
+          try {
+            await restorePendingComposerSendCore(
+              livePending,
+              request.message,
+              request.options
+            );
+          } finally {
+            if (composerRecoveryInProgressRef.current === livePending.threadId) {
+              composerRecoveryInProgressRef.current = null;
+              setComposerRecoveryInProgress(false);
+              if (routeThreadIdRef.current === livePending.threadId) {
+                window.requestAnimationFrame(() => composerInputRef.current?.focus());
+              }
+            }
+          }
+        },
+        state: composerRecoveryQueueRef.current,
+        value: { message, options, pending }
+      });
+    },
+    [restorePendingComposerSendCore]
   );
   restorePendingComposerSendRef.current = restorePendingComposerSend;
 
@@ -3734,7 +3757,7 @@ export default function ThreadPage() {
               .map((result) => result.pending.clientSendId)
           );
           for (const result of terminalResults) {
-            if (!result.recorded) retainTerminalComposerReceipt(result.pending);
+            if (!result.recorded) retainTerminalComposerReceipt(result.pending, "SENT");
           }
           await refreshThread({ authoritative: true });
           if (cancelled) return;
@@ -3843,7 +3866,10 @@ export default function ThreadPage() {
           clearCapturedComposerAfterAcceptedAction(pending);
           await refreshThread({ authoritative: true });
           if (!terminalRecorded) {
-            retainTerminalComposerReceipt(pending);
+            retainTerminalComposerReceipt(
+              pending,
+              response.status === "SCHEDULED" ? "SCHEDULED" : "SENT"
+            );
             return;
           }
           setPendingSends((prev) => prev.filter((item) => item.clientSendId !== clientSendId));
@@ -3978,6 +4004,7 @@ export default function ThreadPage() {
           }
           let claimedPending: PendingSend | null = null;
           let replayError: unknown;
+          const replayClaimId = uuid();
           const replayRun = await runComposerReplayRouteFence({
             claim: () => externalActionAttempts.compareAndUpdateScopedValue<
               ThreadComposerSendAttemptValue
@@ -3986,7 +4013,7 @@ export default function ThreadPage() {
               (value) =>
                 value.clientSendId === pending.clientSendId &&
                 value.notFoundRecovery === "replay",
-              (value) => ({ ...value, notFoundRecovery: "blocked" })
+              (value) => ({ ...value, notFoundRecovery: "blocked", replayClaimId })
             ),
             dispatch: async (replayValue) => {
               if (replayError) return;
@@ -4030,9 +4057,35 @@ export default function ThreadPage() {
                 replayError = error;
               }
             },
+            validateClaim: async () => {
+              if (
+                replayError ||
+                terminalComposerSendFencesRef.current.has(pending.clientSendId)
+              ) {
+                return false;
+              }
+              const authoritative = normalizeThreadComposerSendAttempt(
+                externalActionAttempts.readScopedAttempt(
+                  threadComposerSendScope(pending.threadId)
+                )
+              );
+              return Boolean(
+                authoritative &&
+                  authoritative.value.clientSendId === pending.clientSendId &&
+                  authoritative.value.notFoundRecovery === "blocked" &&
+                  authoritative.value.replayClaimId === replayClaimId
+              );
+            },
             threadId: pending.threadId
           });
           if (replayRun.kind === "off_route") return;
+          if (replayRun.kind === "revoked") {
+            window.setTimeout(
+              () => void checkPendingDeliveryRef.current(pending.clientSendId),
+              0
+            );
+            return;
+          }
           if (replayRun.kind === "not_claimed") {
             const sharedAttempt = normalizeThreadComposerSendAttempt(
               externalActionAttempts.readScopedAttempt(
@@ -4588,6 +4641,11 @@ export default function ThreadPage() {
       sendingRef.current = false;
       return;
     }
+    const recoveredPredecessorStillUnsent = () =>
+      !capturedSession.recoveryClientSendId ||
+      (!terminalComposerSendFencesRef.current.has(
+        capturedSession.recoveryClientSendId
+      ) && composerSessionDisposition(startThreadId, capturedSession) === "active");
     const sessionDisposition = composerSessionDisposition(startThreadId, capturedSession);
     if (sessionDisposition !== "active") {
       if (sessionDisposition === "sent") {
@@ -4615,6 +4673,15 @@ export default function ThreadPage() {
       sendingRef.current = false;
       return;
     }
+    if (!recoveredPredecessorStillUnsent()) {
+      suppressComposerSession(
+        startThreadId,
+        capturedSession,
+        "This reply was already sent or scheduled from another window."
+      );
+      sendingRef.current = false;
+      return;
+    }
     try {
       await awaitComposerAttachmentOwnership(startThreadId, capturedSession);
     } catch (ownershipError) {
@@ -4628,7 +4695,8 @@ export default function ThreadPage() {
     }
     if (
       routeThreadIdRef.current !== startThreadId ||
-      !sameThreadComposerIntent(composerIntentRef.current, capturedIntent)
+      !sameThreadComposerIntent(composerIntentRef.current, capturedIntent) ||
+      !recoveredPredecessorStillUnsent()
     ) {
       if (routeThreadIdRef.current === startThreadId) {
         setError("Your reply changed while its attachments were being preserved. Review it, then send again.");
@@ -4691,7 +4759,8 @@ export default function ThreadPage() {
       }
       if (
         routeThreadIdRef.current !== startThreadId ||
-        !sameThreadComposerIntent(composerIntentRef.current, capturedIntent)
+        !sameThreadComposerIntent(composerIntentRef.current, capturedIntent) ||
+        !recoveredPredecessorStillUnsent()
       ) {
         if (routeThreadIdRef.current === startThreadId) {
           setError("Your reply changed while its attachment was being prepared. Review it, then send again.");
@@ -4725,7 +4794,8 @@ export default function ThreadPage() {
     }
     if (
       routeThreadIdRef.current !== startThreadId ||
-      !sameThreadComposerIntent(composerIntentRef.current, capturedIntent)
+      !sameThreadComposerIntent(composerIntentRef.current, capturedIntent) ||
+      !recoveredPredecessorStillUnsent()
     ) {
       if (routeThreadIdRef.current === startThreadId) {
         setError("Your reply changed while Tovi was preserving it. Review it, then send again.");
@@ -4741,6 +4811,12 @@ export default function ThreadPage() {
     const attemptIntent: ThreadComposerSendAttemptIntent = {
       composerIntent: capturedIntent,
       draftRevision,
+      ...(capturedSession.recoveryClientSendId
+        ? {
+            recoveryPredecessorClientSendId:
+              capturedSession.recoveryClientSendId
+          }
+        : {}),
       sessionRevisionId: capturedSession.revisionId,
       kind: "immediate",
       scheduledFor: null,
@@ -4814,11 +4890,40 @@ export default function ThreadPage() {
     clearCapturedComposerAfterAcceptedAction(pending);
     stickToBottomRef.current = true;
     try {
-      const response = await dispatchComposerSendAttempt(
-        attemptIntent,
-        attemptValue,
-        attachmentsToSend
-      );
+      const dispatchRun = await runRecoveredSuccessorDispatchFence({
+        canDispatch: recoveredPredecessorStillUnsent,
+        dispatch: () =>
+          dispatchComposerSendAttempt(
+            attemptIntent,
+            attemptValue,
+            attachmentsToSend
+          ),
+        release: async () => {
+          const released = await externalActionAttempts.compareAndCompleteScopedValue<
+            ThreadComposerSendAttemptValue
+          >(
+            threadComposerSendScope(startThreadId),
+            (value) => value.clientSendId === clientSendId
+          );
+          if (!released) {
+            throw new Error("The superseded retry could not be released safely");
+          }
+        }
+      });
+      if (dispatchRun.kind !== "dispatched") {
+        setPendingSends((current) =>
+          current.filter((item) => item.clientSendId !== clientSendId)
+        );
+        suppressComposerSession(
+          startThreadId,
+          capturedSession,
+          dispatchRun.kind === "superseded"
+            ? "This reply was already sent or scheduled from another window."
+            : "This reply changed while Tovi was checking it. Sending stays blocked until you reload."
+        );
+        return;
+      }
+      const response = dispatchRun.value;
       if (response.draftConsumed) consumePendingDraftRevision(pending);
       invalidateCache(`/runner/data/thread/${startThreadId}`);
       if (pending.draftRevision) void refreshThread();
@@ -5576,6 +5681,11 @@ export default function ThreadPage() {
         setError("Tovi could not safely preserve this scheduled reply. Reload before trying again.");
         return;
       }
+      const recoveredPredecessorStillUnsent = () =>
+        !capturedSession.recoveryClientSendId ||
+        (!terminalComposerSendFencesRef.current.has(
+          capturedSession.recoveryClientSendId
+        ) && composerSessionDisposition(startThreadId, capturedSession) === "active");
       const sessionDisposition = composerSessionDisposition(startThreadId, capturedSession);
       if (sessionDisposition !== "active") {
         if (sessionDisposition === "sent") {
@@ -5601,6 +5711,14 @@ export default function ThreadPage() {
       ) {
         return;
       }
+      if (!recoveredPredecessorStillUnsent()) {
+        suppressComposerSession(
+          startThreadId,
+          capturedSession,
+          "This reply was already sent or scheduled from another window."
+        );
+        return;
+      }
       try {
         await awaitComposerAttachmentOwnership(startThreadId, capturedSession);
       } catch (ownershipError) {
@@ -5614,7 +5732,8 @@ export default function ThreadPage() {
       if (
         routeThreadIdRef.current !== startThreadId ||
         !sameThreadComposerIntent(composerIntentRef.current, capturedIntent) ||
-        composerActionRef.current
+        composerActionRef.current ||
+        !recoveredPredecessorStillUnsent()
       ) {
         if (routeThreadIdRef.current === startThreadId) {
           setError("Your reply changed while its attachments were being preserved. Review it, then schedule again.");
@@ -5653,7 +5772,8 @@ export default function ThreadPage() {
         );
         if (
           routeThreadIdRef.current !== startThreadId ||
-          !sameThreadComposerIntent(composerIntentRef.current, capturedIntent)
+          !sameThreadComposerIntent(composerIntentRef.current, capturedIntent) ||
+          !recoveredPredecessorStillUnsent()
         ) {
           if (routeThreadIdRef.current === startThreadId) {
             setError("Your reply changed while its attachment was being prepared. Review it, then schedule again.");
@@ -5668,7 +5788,8 @@ export default function ThreadPage() {
         const currentDraftRevision = draftAction.revision;
         if (
           routeThreadIdRef.current !== startThreadId ||
-          !sameThreadComposerIntent(composerIntentRef.current, capturedIntent)
+          !sameThreadComposerIntent(composerIntentRef.current, capturedIntent) ||
+          !recoveredPredecessorStillUnsent()
         ) {
           if (routeThreadIdRef.current === startThreadId) {
             setError("Your reply changed while Tovi was preserving it. Review it, then schedule again.");
@@ -5683,6 +5804,12 @@ export default function ThreadPage() {
         const attemptIntent: ThreadComposerSendAttemptIntent = {
           composerIntent: capturedIntent,
           draftRevision,
+          ...(capturedSession.recoveryClientSendId
+            ? {
+                recoveryPredecessorClientSendId:
+                  capturedSession.recoveryClientSendId
+              }
+            : {}),
           sessionRevisionId: capturedSession.revisionId,
           kind: "scheduled",
           scheduledFor,
@@ -5738,11 +5865,42 @@ export default function ThreadPage() {
           ...current.filter((item) => item.clientSendId !== pending.clientSendId),
           pending
         ]);
-        const response = await dispatchComposerSendAttempt(
-          attemptIntent,
-          attemptValue,
-          composerAttachments
-        );
+        const dispatchRun = await runRecoveredSuccessorDispatchFence({
+          canDispatch: recoveredPredecessorStillUnsent,
+          dispatch: () =>
+            dispatchComposerSendAttempt(
+              attemptIntent,
+              attemptValue,
+              composerAttachments
+            ),
+          release: async () => {
+            const released = await externalActionAttempts.compareAndCompleteScopedValue<
+              ThreadComposerSendAttemptValue
+            >(
+              threadComposerSendScope(startThreadId),
+              (value) => value.clientSendId === attemptValue.clientSendId
+            );
+            if (!released) {
+              throw new Error("The superseded schedule could not be released safely");
+            }
+          }
+        });
+        if (dispatchRun.kind !== "dispatched") {
+          setPendingSends((current) =>
+            current.filter(
+              (item) => item.clientSendId !== attemptValue.clientSendId
+            )
+          );
+          suppressComposerSession(
+            startThreadId,
+            capturedSession,
+            dispatchRun.kind === "superseded"
+              ? "This reply was already sent or scheduled from another window."
+              : "This reply changed while Tovi was checking it. Scheduling stays blocked until you reload."
+          );
+          return;
+        }
+        const response = dispatchRun.value;
         if (response.draftConsumed) consumePendingDraftRevision(pending);
         clearCapturedComposerAfterAcceptedAction(pending);
         invalidateCache(`/runner/data/thread/${startThreadId}`);
@@ -8812,7 +8970,22 @@ export default function ThreadPage() {
                 </div>
                 <div className="mt-[6px] flex items-center gap-2 font-mono text-[11px] tracking-[0.02em] text-ink-3">
                   <span>{formatClock(pending.sentAt)}</span>
-                  {pending.failed || pending.uncertain ? (
+                  {pending.terminalRecordPending ? (
+                    <>
+                      <span className="text-ink-2">
+                        · {pending.terminalRecordPending === "SCHEDULED"
+                          ? "scheduled, saving safety record"
+                          : "sent, saving safety record"}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => void checkPendingDelivery(pending.clientSendId)}
+                        className="text-ink-2 underline-offset-2 hover:text-ink hover:underline"
+                      >
+                        check status
+                      </button>
+                    </>
+                  ) : pending.failed || pending.uncertain ? (
                     <>
                       <span className="text-ink-2">
                         · {pending.uncertain || pending.errorKind === "DELIVERY_UNCERTAIN"

@@ -13,10 +13,14 @@ import {
   recoveredComposerAuthoritativeDisposition,
   resolvedComposerScheduleInstant,
   recoveredComposerSessionDisposition,
+  createSerializedComposerRecoveryState,
   runComposerReplayRouteFence,
+  runRecoveredSuccessorDispatchFence,
+  runSerializedComposerRecovery,
   missingThreadComposerAttachments,
   normalizeThreadComposerSendAttempt,
   shouldHideComposerSessionForAttempt,
+  terminalComposerReceiptRetention,
   threadComposerSendScope
 } from "../apps/dashboard/lib/thread-composer-send-recovery.ts";
 
@@ -363,6 +367,150 @@ test("replay rechecks the live route after attachment preparation and before dis
   assert.deepEqual(result, { kind: "off_route" });
   assert.deepEqual(events, ["prepare", "review:claimed-a"]);
 });
+
+test("replay refuses a claim revoked while attachments are prepared", async () => {
+  let claimCurrent = true;
+  const events = [];
+  const result = await runComposerReplayRouteFence({
+    claim: async () => "claim-a",
+    dispatch: async () => events.push("dispatch"),
+    getActiveThreadId: () => "thread-a",
+    moveToReview: async () => events.push("review"),
+    prepare: async () => {
+      events.push("prepare");
+      claimCurrent = false;
+    },
+    threadId: "thread-a",
+    validateClaim: async () => claimCurrent
+  });
+
+  assert.deepEqual(result, { claimed: "claim-a", kind: "revoked" });
+  assert.deepEqual(events, ["prepare"]);
+});
+
+test("serialized recovery drains a skipped queued item before restoring the next", async () => {
+  const state = createSerializedComposerRecoveryState();
+  const events = [];
+  let releaseA;
+  const heldA = new Promise((resolve) => {
+    releaseA = resolve;
+  });
+  const run = async (value, wasQueued) => {
+    events.push(`start:${value}:${wasQueued}`);
+    if (value === "A") await heldA;
+    if (value !== "B") events.push(`restore:${value}`);
+  };
+
+  const a = runSerializedComposerRecovery({ key: "A", run, state, value: "A" });
+  await Promise.resolve();
+  assert.equal(
+    await runSerializedComposerRecovery({ key: "B", run, state, value: "B" }),
+    "queued"
+  );
+  assert.equal(
+    await runSerializedComposerRecovery({ key: "C", run, state, value: "C" }),
+    "queued"
+  );
+  releaseA();
+
+  assert.equal(await a, "processed");
+  assert.deepEqual(events, [
+    "start:A:false",
+    "restore:A",
+    "start:B:true",
+    "start:C:true",
+    "restore:C"
+  ]);
+  assert.equal(state.active, false);
+  assert.equal(state.queued.size, 0);
+});
+
+test("serialized recovery cannot let a duplicate active key strand a later item", async () => {
+  const state = createSerializedComposerRecoveryState();
+  const events = [];
+  let releaseA;
+  const heldA = new Promise((resolve) => {
+    releaseA = resolve;
+  });
+  const run = async (value, wasQueued) => {
+    events.push(`${value}:${wasQueued}`);
+    if (value === "A-first") await heldA;
+  };
+
+  const a = runSerializedComposerRecovery({ key: "A", run, state, value: "A-first" });
+  await Promise.resolve();
+  await runSerializedComposerRecovery({ key: "A", run, state, value: "A-duplicate" });
+  await runSerializedComposerRecovery({ key: "C", run, state, value: "C" });
+  releaseA();
+  await a;
+
+  assert.deepEqual(events, ["A-first:false", "A-duplicate:true", "C:true"]);
+  assert.equal(state.active, false);
+  assert.equal(state.queued.size, 0);
+});
+
+test("serialized recovery drains later work after a queued recovery throws", async () => {
+  const state = createSerializedComposerRecoveryState();
+  const events = [];
+  let releaseA;
+  const heldA = new Promise((resolve) => {
+    releaseA = resolve;
+  });
+  const run = async (value) => {
+    events.push(value);
+    if (value === "A") await heldA;
+    if (value === "B") throw new Error("B failed");
+  };
+
+  const a = runSerializedComposerRecovery({ key: "A", run, state, value: "A" });
+  await Promise.resolve();
+  await runSerializedComposerRecovery({ key: "B", run, state, value: "B" });
+  await runSerializedComposerRecovery({ key: "C", run, state, value: "C" });
+  releaseA();
+
+  await assert.rejects(a, /B failed/);
+  assert.deepEqual(events, ["A", "B", "C"]);
+  assert.equal(state.active, false);
+  assert.equal(state.queued.size, 0);
+});
+
+test("scheduled acceptance retains truthful local-record recovery copy", () => {
+  const scheduled = terminalComposerReceiptRetention("SCHEDULED");
+  assert.equal(scheduled.terminalStatus, "SCHEDULED");
+  assert.match(scheduled.message, /scheduled/i);
+  assert.doesNotMatch(scheduled.message, /was sent|delivery not confirmed/i);
+
+  const sent = terminalComposerReceiptRetention("SENT");
+  assert.equal(sent.terminalStatus, "SENT");
+  assert.match(sent.message, /was sent/i);
+});
+
+for (const kind of ["immediate", "scheduled"]) {
+  test(`a late terminal predecessor blocks ${kind} successor dispatch`, async () => {
+    let predecessorTerminal = false;
+    let dispatched = 0;
+    let released = 0;
+    const successorAllocated = Promise.resolve().then(() => {
+      predecessorTerminal = true;
+    });
+    await successorAllocated;
+
+    const result = await runRecoveredSuccessorDispatchFence({
+      canDispatch: () => !predecessorTerminal,
+      dispatch: async () => {
+        dispatched += 1;
+        return "accepted";
+      },
+      release: async () => {
+        released += 1;
+      }
+    });
+
+    assert.deepEqual(result, { kind: "superseded" });
+    assert.equal(dispatched, 0);
+    assert.equal(released, 1);
+  });
+}
 
 test("an edited successor stays active and expired restoration proof fails closed", () => {
   const recovered = {

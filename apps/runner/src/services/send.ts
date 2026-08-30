@@ -9,7 +9,8 @@ import { buildDemoSendReceipt } from "./demo-send";
 import {
   classifySendFailureKind,
   consumerSendFailure,
-  parsePersistedSendFailure
+  parsePersistedSendFailure,
+  persistedSendRetryEligibility
 } from "./send-failure";
 import {
   focusAcknowledgementClientSendIds,
@@ -201,6 +202,7 @@ type PersistedSendIntent = {
   attachmentsJson: string | null;
   replyToMessageId: string | null;
   scheduledFor: Date | null;
+  recoveryPredecessorClientSendId: string | null;
 };
 
 function normalizedAttachmentsJson(attachments?: SendAttachment[]): string | null {
@@ -269,6 +271,7 @@ function assertExistingSendIntent(
     source: SendSource;
     attachments?: SendAttachment[];
     replyToMessageId?: string;
+    recoveryPredecessorClientSendId?: string;
     scheduledFor?: Date;
   },
   options: { allowRequestTextChange?: boolean } = {}
@@ -282,7 +285,9 @@ function assertExistingSendIntent(
     normalizePersistedAttachmentsJson(existing.attachmentsJson) !==
       attachmentIntentJson(expected.attachments) ||
     (existing.replyToMessageId ?? null) !== (expected.replyToMessageId ?? null) ||
-    existingScheduledFor !== expectedScheduledFor
+    existingScheduledFor !== expectedScheduledFor ||
+    (existing.recoveryPredecessorClientSendId ?? null) !==
+      (expected.recoveryPredecessorClientSendId ?? null)
   ) {
     throw new Error("clientSendId is already linked to a different send intent");
   }
@@ -321,6 +326,16 @@ export function assertInstagramManualTextSend(input: {
   }
 }
 
+export function recoveryPredecessorIsDefinitelyUnsent(
+  status: string,
+  errorJson?: string | null
+): boolean {
+  return (
+    status === "CANCELLED" ||
+    persistedSendRetryEligibility(status, errorJson).allowed
+  );
+}
+
 export function createSendService(deps: SendServiceDeps) {
   // Default to the runner's singleton; tests inject a fake to exercise the
   // scheduled-send race guards without a real database.
@@ -336,6 +351,40 @@ export function createSendService(deps: SendServiceDeps) {
     focusPolicyIntentEpoch: number;
     selfIntentAllowance: number;
   }>();
+
+  async function assertRecoveryPredecessorEligible(
+    database: Prisma.TransactionClient,
+    input: {
+      clientSendId: string;
+      recoveryPredecessorClientSendId?: string;
+      threadId: string;
+    }
+  ): Promise<void> {
+    const predecessorId = input.recoveryPredecessorClientSendId;
+    if (!predecessorId) return;
+    if (predecessorId === input.clientSendId) {
+      throw new SendPolicyError(
+        "recovery_predecessor_identity_reused",
+        "Recovered sends require a distinct successor identity"
+      );
+    }
+    const predecessor = await database.sendRequest.findUnique({
+      where: { clientSendId: predecessorId }
+    });
+    if (
+      !predecessor ||
+      predecessor.threadId !== input.threadId ||
+      !recoveryPredecessorIsDefinitelyUnsent(
+        predecessor.status,
+        predecessor.errorJson
+      )
+    ) {
+      throw new SendPolicyError(
+        "recovery_predecessor_not_retryable",
+        "The earlier send is no longer definitely unsent"
+      );
+    }
+  }
 
   function registerUserTriggeredIntent(threadId: string): () => void {
     userTriggeredIntentEpochs.set(
@@ -578,6 +627,7 @@ export function createSendService(deps: SendServiceDeps) {
      * by the dashboard.
      */
     replyToMessageId?: string;
+    recoveryPredecessorClientSendId?: string;
     consumeDraft?: { text: string; updatedAt: Date };
   }): Promise<EnqueueSendResult> {
     const thread = await prisma.thread.findUnique({
@@ -887,30 +937,30 @@ export function createSendService(deps: SendServiceDeps) {
           source,
           focusIntentVersion,
           attachmentsJson: normalizedAttachmentsJson(input.attachments),
-          replyToMessageId: input.replyToMessageId ?? null
+          replyToMessageId: input.replyToMessageId ?? null,
+          recoveryPredecessorClientSendId:
+            input.recoveryPredecessorClientSendId ?? null
         };
-        if (input.consumeDraft) {
-          draftConsumed = await prisma.$transaction(async (transaction) => {
-            const created = await transaction.sendRequest.create({ data });
-            const deletion = await transaction.draft.deleteMany({
-              where: {
-                threadId: input.threadId,
-                text: input.consumeDraft!.text,
-                updatedAt: input.consumeDraft!.updatedAt
-              }
-            });
-            const consumed = deletion.count === 1;
-            if (consumed) {
-              await transaction.sendRequest.update({
-                where: { id: created.id },
-                data: { draftConsumed: true }
-              });
+        draftConsumed = await prisma.$transaction(async (transaction) => {
+          await assertRecoveryPredecessorEligible(transaction, input);
+          const created = await transaction.sendRequest.create({ data });
+          if (!input.consumeDraft) return false;
+          const deletion = await transaction.draft.deleteMany({
+            where: {
+              threadId: input.threadId,
+              text: input.consumeDraft.text,
+              updatedAt: input.consumeDraft.updatedAt
             }
-            return consumed;
           });
-        } else {
-          await prisma.sendRequest.create({ data });
-        }
+          const consumed = deletion.count === 1;
+          if (consumed) {
+            await transaction.sendRequest.update({
+              where: { id: created.id },
+              data: { draftConsumed: true }
+            });
+          }
+          return consumed;
+        });
       } catch (error) {
         if (!isUniqueConstraintError(error)) {
           throw error;
@@ -1071,9 +1121,43 @@ export function createSendService(deps: SendServiceDeps) {
     // A reset that entered the fence first can delete the graph, leaving this
     // worker with nothing to claim or dispatch. The guarded write still keeps
     // concurrent workers and crash recovery idempotent.
-    const claim = await prisma.sendRequest.updateMany({
-      where: { id: sendRequestId, status: "PENDING", receiptJson: null },
-      data: { receiptJson: SEND_CLAIM_MARKER }
+    const claim = await prisma.$transaction(async (transaction) => {
+      if (sendRequest.recoveryPredecessorClientSendId) {
+        const predecessor = await transaction.sendRequest.findUnique({
+          where: {
+            clientSendId: sendRequest.recoveryPredecessorClientSendId
+          }
+        });
+        if (
+          !predecessor ||
+          predecessor.threadId !== sendRequest.threadId ||
+          !recoveryPredecessorIsDefinitelyUnsent(
+            predecessor.status,
+            predecessor.errorJson
+          )
+        ) {
+          await transaction.sendRequest.updateMany({
+            where: {
+              id: sendRequestId,
+              status: "PENDING",
+              receiptJson: null
+            },
+            data: {
+              status: "CANCELLED",
+              errorJson: JSON.stringify({
+                errorKind: "POLICY_BLOCKED",
+                message:
+                  "The earlier send is no longer definitely unsent"
+              })
+            }
+          });
+          return { count: 0 };
+        }
+      }
+      return transaction.sendRequest.updateMany({
+        where: { id: sendRequestId, status: "PENDING", receiptJson: null },
+        data: { receiptJson: SEND_CLAIM_MARKER }
+      });
     });
     if (claim.count !== 1) return;
 
@@ -1118,6 +1202,27 @@ export function createSendService(deps: SendServiceDeps) {
           `[send] platform-result observer failed for ${input.clientSendId}: ${
             error instanceof Error ? error.message : String(error)
           }`
+        );
+      }
+    }
+
+    async function assertRecoveryPredecessorDispatchEligible(): Promise<void> {
+      const predecessorId = claimedSendRequest.recoveryPredecessorClientSendId;
+      if (!predecessorId) return;
+      const predecessor = await prisma.sendRequest.findUnique({
+        where: { clientSendId: predecessorId }
+      });
+      if (
+        !predecessor ||
+        predecessor.threadId !== claimedSendRequest.threadId ||
+        !recoveryPredecessorIsDefinitelyUnsent(
+          predecessor.status,
+          predecessor.errorJson
+        )
+      ) {
+        throw new SendPolicyError(
+          "recovery_predecessor_not_retryable",
+          "The earlier send is no longer definitely unsent"
         );
       }
     }
@@ -1179,6 +1284,7 @@ export function createSendService(deps: SendServiceDeps) {
         source
       });
       if (inSandbox) {
+        await assertRecoveryPredecessorDispatchEligible();
         const manifest = await deps.settingsStore.getDemoSeedManifest();
         if (!manifest || !manifest.threadIds.includes(thread.id)) {
           throw new Error(
@@ -1307,6 +1413,7 @@ export function createSendService(deps: SendServiceDeps) {
           await assertFocusAcknowledgementDispatchEligible?.();
           const beforeDispatch = async () => {
             await assertFocusAcknowledgementDispatchEligible?.();
+            await assertRecoveryPredecessorDispatchEligible();
             dispatchStarted = true;
           };
           const delivered = await adapter.sendMessage(
@@ -1539,6 +1646,7 @@ export function createSendService(deps: SendServiceDeps) {
     scheduledFor: Date;
     attachments?: SendAttachment[];
     replyToMessageId?: string;
+    recoveryPredecessorClientSendId?: string;
     consumeDraft?: { text: string; updatedAt: Date };
   }): Promise<ScheduleSendResult> {
     const thread = await prisma.thread.findUnique({
@@ -1590,30 +1698,30 @@ export function createSendService(deps: SendServiceDeps) {
         source: "manual" as const,
         scheduledFor: input.scheduledFor,
         replyToMessageId: input.replyToMessageId ?? null,
+        recoveryPredecessorClientSendId:
+          input.recoveryPredecessorClientSendId ?? null,
         attachmentsJson: normalizedAttachmentsJson(input.attachments)
       };
-      if (input.consumeDraft) {
-        draftConsumed = await prisma.$transaction(async (transaction) => {
-          const created = await transaction.sendRequest.create({ data });
-          const deletion = await transaction.draft.deleteMany({
-            where: {
-              threadId: input.threadId,
-              text: input.consumeDraft!.text,
-              updatedAt: input.consumeDraft!.updatedAt
-            }
-          });
-          const consumed = deletion.count === 1;
-          if (consumed) {
-            await transaction.sendRequest.update({
-              where: { id: created.id },
-              data: { draftConsumed: true }
-            });
+      draftConsumed = await prisma.$transaction(async (transaction) => {
+        await assertRecoveryPredecessorEligible(transaction, input);
+        const created = await transaction.sendRequest.create({ data });
+        if (!input.consumeDraft) return false;
+        const deletion = await transaction.draft.deleteMany({
+          where: {
+            threadId: input.threadId,
+            text: input.consumeDraft.text,
+            updatedAt: input.consumeDraft.updatedAt
           }
-          return consumed;
         });
-      } else {
-        await prisma.sendRequest.create({ data });
-      }
+        const consumed = deletion.count === 1;
+        if (consumed) {
+          await transaction.sendRequest.update({
+            where: { id: created.id },
+            data: { draftConsumed: true }
+          });
+        }
+        return consumed;
+      });
     } catch (error) {
       if (!isUniqueConstraintError(error)) {
         throw error;

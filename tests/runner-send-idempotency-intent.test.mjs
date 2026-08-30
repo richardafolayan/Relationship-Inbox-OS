@@ -99,7 +99,8 @@ test("immediate clientSendId replay is bound to the complete immutable intent", 
     { text: "Changed text" },
     { source: "focus_ack" },
     { attachments: [{ absolutePath: "/tmp/other.jpg", displayName: "other.jpg" }] },
-    { replyToMessageId: "message-2" }
+    { replyToMessageId: "message-2" },
+    { recoveryPredecessorClientSendId: "11111111-1111-4111-8111-111111111111" }
   ];
 
   for (const changed of dimensions) {
@@ -111,6 +112,49 @@ test("immediate clientSendId replay is bound to the complete immutable intent", 
     );
     assert.equal(h.rows.length, 1);
   }
+});
+
+test("a recovered immediate send requires a definitely unsent predecessor", async () => {
+  const predecessorId = "11111111-1111-4111-8111-111111111111";
+  const predecessor = {
+    id: "predecessor",
+    clientSendId: predecessorId,
+    threadId: "thread-1",
+    requestText: "Original text",
+    status: "SENT",
+    source: "manual",
+    scheduledFor: null,
+    receiptJson: "{}",
+    errorJson: null,
+    attachmentsJson: null,
+    replyToMessageId: null,
+    recoveryPredecessorClientSendId: null,
+    draftConsumed: false
+  };
+  const blocked = harness();
+  blocked.rows.push(predecessor);
+  await assert.rejects(
+    () => blocked.service.enqueueSend(immediateInput({
+      clientSendId: "22222222-2222-4222-8222-222222222222",
+      recoveryPredecessorClientSendId: predecessorId
+    })),
+    /no longer definitely unsent/i
+  );
+  assert.equal(blocked.rows.length, 1);
+
+  const allowed = harness();
+  allowed.rows.push({
+    ...predecessor,
+    status: "FAILED",
+    receiptJson: null,
+    errorJson: JSON.stringify({ errorKind: "TRANSIENT", message: "timeout" })
+  });
+  const result = await allowed.service.enqueueSend(immediateInput({
+    clientSendId: "33333333-3333-4333-8333-333333333333",
+    recoveryPredecessorClientSendId: predecessorId
+  }));
+  assert.equal(result.status, "PENDING");
+  assert.equal(allowed.rows[1].recoveryPredecessorClientSendId, predecessorId);
 });
 
 test("creating a send consumes only the exact saved draft revision in the same transaction", async () => {
@@ -268,6 +312,38 @@ test("scheduled clientSendId replay is bound to text, time, attachments, and rep
     );
     assert.equal(h.rows.length, 1);
   }
+});
+
+test("a recovered scheduled send is rejected after its predecessor becomes sent", async () => {
+  const h = harness();
+  const predecessorId = "44444444-4444-4444-8444-444444444444";
+  h.rows.push({
+    id: "scheduled-predecessor",
+    clientSendId: predecessorId,
+    threadId: "thread-1",
+    requestText: "Scheduled text",
+    status: "SENT",
+    source: "manual",
+    scheduledFor: null,
+    receiptJson: "{}",
+    errorJson: null,
+    attachmentsJson: null,
+    replyToMessageId: null,
+    recoveryPredecessorClientSendId: null,
+    draftConsumed: false
+  });
+
+  await assert.rejects(
+    () => h.service.enqueueScheduledSend({
+      threadId: "thread-1",
+      text: "Scheduled text",
+      clientSendId: "55555555-5555-4555-8555-555555555555",
+      recoveryPredecessorClientSendId: predecessorId,
+      scheduledFor: new Date(Date.now() + 3_600_000)
+    }),
+    /no longer definitely unsent/i
+  );
+  assert.equal(h.rows.length, 1);
 });
 
 test("creating a scheduled send atomically consumes only its captured draft revision", async () => {

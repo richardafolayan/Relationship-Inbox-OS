@@ -12,6 +12,14 @@ const attachmentStoreSource = readFileSync(
   "utf8"
 );
 
+function recoveryCoreSource() {
+  const start = source.indexOf("const restorePendingComposerSendCore = useCallback(");
+  const end = source.indexOf("const restorePendingComposerSend = useCallback(", start);
+  assert.notEqual(start, -1);
+  assert.notEqual(end, -1);
+  return source.slice(start, end);
+}
+
 test("thread navigation snapshots the previous full intent and restores only the new thread", () => {
   const start = source.indexOf("useLayoutEffect(() => {");
   const end = source.indexOf("useEffect(() => {", start);
@@ -78,9 +86,7 @@ test("an immediate send preserves its full intent until the exact attempt is res
 });
 
 test("a failed captured reply stays separate when the operator has typed newer text", () => {
-  const start = source.indexOf("const restorePendingComposerSend = useCallback(");
-  const end = source.indexOf("const clearCapturedComposerAfterAcceptedAction", start);
-  const restore = source.slice(start, end);
+  const restore = recoveryCoreSource();
   assert.match(restore, /safeSendFailureDisposition\(/);
   assert.match(restore, /recoveryDisposition !== "restore_captured"/);
   assert.match(restore, /Your original reply is still kept above/);
@@ -207,9 +213,7 @@ test("startup refreshes restored leases before the first stale purge", () => {
 });
 
 test("failed-send recovery owns and CAS-persists the successor before publishing its tombstone", () => {
-  const start = source.indexOf("const restorePendingComposerSend = useCallback(");
-  const end = source.indexOf("const clearCapturedComposerAfterAcceptedAction", start);
-  const restore = source.slice(start, end);
+  const restore = recoveryCoreSource();
   const persist = restore.indexOf("preparedRecoverySession = compareAndRestoreThreadComposerSession(");
   const prepare = restore.indexOf("prepareThreadComposerAttachmentOwnershipHandoff(");
   const publish = restore.indexOf("compareAndCompleteScopedValue<ThreadComposerSendAttemptValue>");
@@ -229,9 +233,7 @@ test("failed-send recovery owns and CAS-persists the successor before publishing
 });
 
 test("late failed-send recovery cannot write into another route or newer composer", () => {
-  const start = source.indexOf("const restorePendingComposerSend = useCallback(");
-  const end = source.indexOf("const clearCapturedComposerAfterAcceptedAction", start);
-  const restore = source.slice(start, end);
+  const restore = recoveryCoreSource();
   const publish = restore.indexOf("compareAndCompleteScopedValue<ThreadComposerSendAttemptValue>");
   const finalDisposition = restore.lastIndexOf("const finalDisposition = safeSendFailureDisposition(");
   const applyComposer = restore.lastIndexOf("setComposer(recoveryIntent.text)");
@@ -242,7 +244,7 @@ test("late failed-send recovery cannot write into another route or newer compose
     restore.slice(finalDisposition, applyComposer),
     /finalDisposition !== "restore_captured"[\s\S]*?return;/
   );
-  assert.match(restore, /composerRecoveryInProgressRef\.current = pending\.threadId/);
+  assert.match(source, /composerRecoveryInProgressRef\.current = livePending\.threadId/);
 });
 
 test("recovery blocks passive persistence and exposes a visible busy state", () => {
@@ -279,9 +281,7 @@ test("all durable composer attempts reconcile and terminal SSE cleanup precedes 
 });
 
 test("late terminal delivery closes restored lineage before the composer is published", () => {
-  const restoreStart = source.indexOf("const restorePendingComposerSend = useCallback(");
-  const restoreEnd = source.indexOf("const clearCapturedComposerAfterAcceptedAction", restoreStart);
-  const restore = source.slice(restoreStart, restoreEnd);
+  const restore = recoveryCoreSource();
   const finalResolution = restore.lastIndexOf(
     "terminalResolution = composerRecoveryResolution("
   );
@@ -295,9 +295,7 @@ test("late terminal delivery closes restored lineage before the composer is publ
 });
 
 test("cross-route recovery never mutates the next thread's singleton presence or busy state", () => {
-  const restoreStart = source.indexOf("const restorePendingComposerSend = useCallback(");
-  const restoreEnd = source.indexOf("const clearCapturedComposerAfterAcceptedAction", restoreStart);
-  const restore = source.slice(restoreStart, restoreEnd);
+  const restore = recoveryCoreSource();
   for (const marker of [
     "composerSessionPresentRef.current = Boolean(predecessorSession)",
     "composerSessionPresentRef.current = true"
@@ -367,9 +365,31 @@ test("a busy recovery queues the next durable failure instead of dropping it", (
   const restoreStart = source.indexOf("const restorePendingComposerSend = useCallback(");
   const restoreEnd = source.indexOf("restorePendingComposerSendRef.current =", restoreStart);
   const restore = source.slice(restoreStart, restoreEnd);
-  assert.match(restore, /queuedComposerRecoveriesRef\.current\.set/);
-  assert.match(restore, /queuedComposerRecoveriesRef\.current\.entries\(\)\.next/);
-  assert.match(restore, /restorePendingComposerSendRef\.current/);
+  assert.match(restore, /runSerializedComposerRecovery\(/);
+  assert.match(restore, /state: composerRecoveryQueueRef\.current/);
+  assert.match(restore, /wasQueued/);
+});
+
+test("terminal receipt recovery distinguishes scheduled acceptance from sent delivery", () => {
+  assert.match(source, /terminalRecordPending\?: "SENT" \| "SCHEDULED"/);
+  assert.match(
+    source,
+    /response\.status === "SCHEDULED" \? "SCHEDULED" : "SENT"/
+  );
+  assert.match(source, /scheduled, saving safety record/);
+  assert.doesNotMatch(
+    source.slice(
+      source.indexOf("const retainTerminalComposerReceipt"),
+      source.indexOf("// Load the operator voice profile")
+    ),
+    /DELIVERY_UNCERTAIN/
+  );
+});
+
+test("recovered successors carry a predecessor fence to the runner", () => {
+  assert.match(source, /recoveryPredecessorClientSendId:/);
+  assert.match(source, /runRecoveredSuccessorDispatchFence\(/);
+  assert.match(source, /terminalComposerSendFencesRef\.current\.has/);
 });
 
 test("namespace migration transforms authoritative state without reverting replay claims", () => {
@@ -530,12 +550,10 @@ test("scheduled acceptance clears only its captured composer and status failures
 });
 
 test("late delivery reconciliation cannot write thread A errors into thread B", () => {
-  const restoreStart = source.indexOf("const restorePendingComposerSend = useCallback(");
-  const restoreEnd = source.indexOf("const clearCapturedComposerAfterAcceptedAction", restoreStart);
   const statusStart = source.indexOf("const checkPendingDelivery = useCallback(");
   const statusEnd = source.indexOf("checkPendingDeliveryRef.current = checkPendingDelivery", statusStart);
   assert.match(
-    source.slice(restoreStart, restoreEnd),
+    recoveryCoreSource(),
     /routeThreadIdRef\.current === pending\.threadId/
   );
   assert.match(

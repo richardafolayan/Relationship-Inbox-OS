@@ -61,6 +61,7 @@ export interface SendQueueService {
      * dashboard renders the new bubble inline under its parent.
      */
     replyToMessageId?: string;
+    recoveryPredecessorClientSendId?: string;
     consumeDraft?: { text: string; updatedAt: Date };
   }): Promise<{
     clientSendId: string;
@@ -217,6 +218,7 @@ export function createSendQueue(deps: SendQueueDeps): SendQueueService {
      * dashboard renders the new bubble inline under its parent.
      */
     replyToMessageId?: string;
+    recoveryPredecessorClientSendId?: string;
     consumeDraft?: { text: string; updatedAt: Date };
   }): Promise<{
     clientSendId: string;

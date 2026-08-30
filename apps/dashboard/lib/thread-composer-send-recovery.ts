@@ -19,6 +19,7 @@ export interface ThreadComposerSendAttemptIntent {
   composerIntent: ThreadComposerIntentDraft;
   draftRevision: ThreadComposerDraftRevision | null;
   kind: ThreadComposerSendAttemptKind;
+  recoveryPredecessorClientSendId?: string;
   scheduledFor: string | null;
   sessionRevisionId?: string;
   threadId: string;
@@ -29,6 +30,7 @@ export interface ThreadComposerSendAttemptValue {
   attemptKind?: ThreadComposerSendAttemptKind;
   clientSendId: string;
   notFoundRecovery?: "blocked" | "replay" | "restore";
+  replayClaimId?: string;
   resolution?: "restored" | "sent";
   requestedAt: string;
   restoredSessionRevisionId?: string;
@@ -93,6 +95,11 @@ export function normalizeThreadComposerSendAttempt(
     !rawIntent.threadId ||
     !(rawIntent.scheduledFor === null || validIsoDate(rawIntent.scheduledFor)) ||
     !(
+      rawIntent.recoveryPredecessorClientSendId === undefined ||
+      (typeof rawIntent.recoveryPredecessorClientSendId === "string" &&
+        rawIntent.recoveryPredecessorClientSendId)
+    ) ||
+    !(
       rawIntent.sessionRevisionId === undefined ||
       (typeof rawIntent.sessionRevisionId === "string" && rawIntent.sessionRevisionId)
     ) ||
@@ -116,6 +123,10 @@ export function normalizeThreadComposerSendAttempt(
       rawValue.resolution === undefined ||
       rawValue.resolution === "restored" ||
       rawValue.resolution === "sent"
+    ) ||
+    !(
+      rawValue.replayClaimId === undefined ||
+      (typeof rawValue.replayClaimId === "string" && rawValue.replayClaimId)
     ) ||
     typeof rawValue.clientSendId !== "string" ||
     !rawValue.clientSendId ||
@@ -146,6 +157,12 @@ export function normalizeThreadComposerSendAttempt(
       composerIntent,
       draftRevision: normalizedDraftRevision,
       kind: rawIntent.kind,
+      ...(typeof rawIntent.recoveryPredecessorClientSendId === "string"
+        ? {
+            recoveryPredecessorClientSendId:
+              rawIntent.recoveryPredecessorClientSendId
+          }
+        : {}),
       scheduledFor: rawIntent.scheduledFor,
       ...(typeof rawIntent.sessionRevisionId === "string"
         ? { sessionRevisionId: rawIntent.sessionRevisionId }
@@ -167,6 +184,9 @@ export function normalizeThreadComposerSendAttempt(
         : {}),
       ...(rawValue.resolution === "restored" || rawValue.resolution === "sent"
         ? { resolution: rawValue.resolution }
+        : {}),
+      ...(typeof rawValue.replayClaimId === "string"
+        ? { replayClaimId: rawValue.replayClaimId }
         : {}),
       requestedAt: rawValue.requestedAt,
       ...(typeof rawValue.restoredSessionRevisionId === "string"
@@ -441,6 +461,7 @@ export async function runComposerReplayRouteFence<TClaim>({
   getActiveThreadId,
   moveToReview,
   prepare,
+  validateClaim,
   threadId
 }: {
   claim: () => Promise<TClaim | undefined>;
@@ -448,8 +469,12 @@ export async function runComposerReplayRouteFence<TClaim>({
   getActiveThreadId: () => string;
   moveToReview: (claimed?: TClaim) => Promise<void>;
   prepare: (claimed: TClaim) => Promise<void>;
+  validateClaim?: (claimed: TClaim) => Promise<boolean>;
   threadId: string;
-}): Promise<{ kind: "dispatched" | "not_claimed" | "off_route"; claimed?: TClaim }> {
+}): Promise<{
+  kind: "dispatched" | "not_claimed" | "off_route" | "revoked";
+  claimed?: TClaim;
+}> {
   if (getActiveThreadId() !== threadId) {
     await moveToReview();
     return { kind: "off_route" };
@@ -465,6 +490,102 @@ export async function runComposerReplayRouteFence<TClaim>({
     await moveToReview(claimed);
     return { kind: "off_route" };
   }
+  if (validateClaim && !(await validateClaim(claimed))) {
+    return { claimed, kind: "revoked" };
+  }
   await dispatch(claimed);
   return { claimed, kind: "dispatched" };
+}
+
+export interface SerializedComposerRecoveryState<T> {
+  active: boolean;
+  queued: Map<string, T>;
+}
+
+export function createSerializedComposerRecoveryState<T>(): SerializedComposerRecoveryState<T> {
+  return { active: false, queued: new Map() };
+}
+
+export async function runSerializedComposerRecovery<T>({
+  key,
+  run,
+  state,
+  value
+}: {
+  key: string;
+  run: (value: T, wasQueued: boolean) => Promise<void>;
+  state: SerializedComposerRecoveryState<T>;
+  value: T;
+}): Promise<"processed" | "queued"> {
+  if (state.active) {
+    state.queued.set(key, value);
+    return "queued";
+  }
+
+  state.active = true;
+  let current: { value: T; wasQueued: boolean } | undefined = {
+    value,
+    wasQueued: false
+  };
+  let firstError: unknown;
+  try {
+    while (current) {
+      try {
+        await run(current.value, current.wasQueued);
+      } catch (error) {
+        firstError ??= error;
+      }
+      const next = state.queued.entries().next().value as [string, T] | undefined;
+      if (!next) {
+        current = undefined;
+        continue;
+      }
+      state.queued.delete(next[0]);
+      current = { value: next[1], wasQueued: true };
+    }
+  } finally {
+    state.active = false;
+  }
+  if (firstError) throw firstError;
+  return "processed";
+}
+
+export function terminalComposerReceiptRetention(
+  status: "SENT" | "SCHEDULED"
+): { message: string; terminalStatus: "SENT" | "SCHEDULED" } {
+  return status === "SCHEDULED"
+    ? {
+        message:
+          "Tovi confirmed this reply is scheduled, but could not save the local safety record. Sending stays blocked while Tovi retries.",
+        terminalStatus: status
+      }
+    : {
+        message:
+          "Tovi confirmed this reply was sent, but could not save the local safety record. Sending stays blocked while Tovi retries.",
+        terminalStatus: status
+      };
+}
+
+export async function runRecoveredSuccessorDispatchFence<T>({
+  canDispatch,
+  dispatch,
+  release
+}: {
+  canDispatch: () => boolean;
+  dispatch: () => Promise<T>;
+  release: () => Promise<void>;
+}): Promise<
+  | { kind: "dispatched"; value: T }
+  | { kind: "superseded" }
+  | { kind: "superseded_release_failed" }
+> {
+  if (!canDispatch()) {
+    try {
+      await release();
+      return { kind: "superseded" };
+    } catch {
+      return { kind: "superseded_release_failed" };
+    }
+  }
+  return { kind: "dispatched", value: await dispatch() };
 }

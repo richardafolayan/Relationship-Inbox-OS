@@ -7,6 +7,7 @@ test("text-only scheduled replies preserve their reply parent", () => {
     buildScheduledSendRequest({
       attachments: [],
       clientSendId: "send-1",
+      recoveryPredecessorClientSendId: "predecessor-1",
       replyToMessageId: "parent-1",
       scheduledFor: "2026-09-01T09:00:00.000Z",
       text: "See you tomorrow"
@@ -15,6 +16,7 @@ test("text-only scheduled replies preserve their reply parent", () => {
       kind: "json",
       body: {
         clientSendId: "send-1",
+        recoveryPredecessorClientSendId: "predecessor-1",
         replyToMessageId: "parent-1",
         scheduledFor: "2026-09-01T09:00:00.000Z",
         text: "See you tomorrow"
@@ -28,6 +30,7 @@ test("attachment-only scheduled replies use multipart and preserve the parent", 
   const request = buildScheduledSendRequest({
     attachments: [{ file }],
     clientSendId: "send-2",
+    recoveryPredecessorClientSendId: "predecessor-2",
     replyToMessageId: "parent-2",
     scheduledFor: "2026-09-01T10:00:00.000Z",
     text: ""
@@ -35,6 +38,10 @@ test("attachment-only scheduled replies use multipart and preserve the parent", 
 
   assert.equal(request.kind, "multipart");
   assert.equal(request.body.get("clientSendId"), "send-2");
+  assert.equal(
+    request.body.get("recoveryPredecessorClientSendId"),
+    "predecessor-2"
+  );
   assert.equal(request.body.get("replyToMessageId"), "parent-2");
   assert.equal(request.body.get("scheduledFor"), "2026-09-01T10:00:00.000Z");
   const uploaded = request.body.get("attachments");
