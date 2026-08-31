@@ -6,6 +6,8 @@ import {
   PlatformSelectionSupersededError,
   createPlatformSelectionCoordinator
 } from "../apps/runner/src/services/platform-selection-coordinator.ts";
+import { createAdminResetCoordinator } from "../apps/runner/src/services/admin-reset-coordinator.ts";
+import { createKeyedMutex } from "../apps/runner/src/services/keyed-mutex.ts";
 
 function deferred() {
   let resolve;
@@ -20,6 +22,7 @@ test("a deselection aborts first and remains held against platform work until it
     platforms: ["IMESSAGE", "LINKEDIN"],
     getEnabledPlatforms: async () => enabled,
     requestAbort: (reason) => calls.push(`abort:${reason}`),
+    withGlobalResetLock: async (work) => work(),
     withPlatformLocks: async (platform, work) => {
       calls.push(`lock:${platform}`);
       return work();
@@ -47,6 +50,7 @@ test("an older reserved selection cannot overwrite a newer request", async () =>
     platforms: ["IMESSAGE", "LINKEDIN"],
     getEnabledPlatforms: async () => enabled,
     requestAbort: () => undefined,
+    withGlobalResetLock: async (work) => work(),
     withPlatformLocks: async (_platform, work) => work()
   });
 
@@ -72,6 +76,7 @@ test("cancelling pre-run work restores the authoritative selection when the rese
     platforms: ["LINKEDIN"],
     getEnabledPlatforms: async () => enabled,
     requestAbort: () => undefined,
+    withGlobalResetLock: async (work) => work(),
     withPlatformLocks: async (_platform, work) => work()
   });
 
@@ -91,6 +96,7 @@ test("cancelling an older reservation cannot overwrite a newer desired selection
     platforms: ["IMESSAGE", "LINKEDIN"],
     getEnabledPlatforms: async () => enabled,
     requestAbort: () => undefined,
+    withGlobalResetLock: async (work) => work(),
     withPlatformLocks: async (_platform, work) => work()
   });
 
@@ -115,6 +121,7 @@ test("a stale durable read cannot overwrite a newer platform opt-out", async () 
       return ["LINKEDIN"];
     },
     requestAbort: () => undefined,
+    withGlobalResetLock: async (work) => work(),
     withPlatformLocks: async (_platform, work) => work()
   });
 
@@ -137,6 +144,7 @@ test("cancel waits for older platform persistence before restoring durable state
     platforms: ["LINKEDIN"],
     getEnabledPlatforms: async () => enabled,
     requestAbort: () => undefined,
+    withGlobalResetLock: async (work) => work(),
     withPlatformLocks: async (_platform, work) => {
       const previous = lockTail;
       const release = deferred();
@@ -177,6 +185,7 @@ test("a failed platform restore cannot publish a stale read over a newer opt-out
       return ["LINKEDIN"];
     },
     requestAbort: () => undefined,
+    withGlobalResetLock: async (work) => work(),
     withPlatformLocks: async (_platform, work) => work()
   });
   const older = coordinator.reserveMutation([]);
@@ -202,6 +211,7 @@ test("a connect queued behind a newer deselection cannot reopen or reselect the 
     platforms: ["LINKEDIN"],
     getEnabledPlatforms: async () => enabled,
     requestAbort: () => undefined,
+    withGlobalResetLock: async (work) => work(),
     withPlatformLocks: async (_platform, work) => {
       entered.resolve();
       await locked.promise;
@@ -230,6 +240,7 @@ test("a reserved deselection rejects new target work while an earlier platform l
     platforms: ["GOOGLE_MESSAGES", "LINKEDIN"],
     getEnabledPlatforms: async () => enabled,
     requestAbort: () => undefined,
+    withGlobalResetLock: async (work) => work(),
     withPlatformLocks: async (platform, work) => {
       if (platform === "GOOGLE_MESSAGES") {
         googleEntered.resolve();
@@ -256,4 +267,69 @@ test("a reserved deselection rejects new target work while an earlier platform l
 
   releaseGoogle.resolve();
   await mutation;
+});
+
+test("platform selection and admin reset cannot deadlock across platform lock order", async () => {
+  const mutex = createKeyedMutex();
+  const resetHasWhatsApp = deferred();
+  const releaseReset = deferred();
+  let enabled = ["LINKEDIN", "WHATSAPP"];
+  const withGlobalResetLock = (work) => mutex.runExclusive("global-reset", work);
+  const withExternalActionLock = (platform, work) =>
+    mutex.runExclusive(`external:${platform}`, work);
+  const withPlatformLock = (platform, work) =>
+    mutex.runExclusive(`platform:${platform}`, work);
+
+  const admin = createAdminResetCoordinator({
+    platforms: ["LINKEDIN", "WHATSAPP"],
+    requestAbort: () => undefined,
+    clearAbort: () => undefined,
+    clearInFlight: () => undefined,
+    withGlobalResetLock,
+    withExternalActionLock: (platform, work) =>
+      withExternalActionLock(platform, async () => {
+        if (platform === "WHATSAPP") {
+          resetHasWhatsApp.resolve();
+          await releaseReset.promise;
+        }
+        return work();
+      }),
+    withPlatformLock,
+    resetGraph: async (platform) => ({
+      platform,
+      matchedThreadCount: 0,
+      deleted: {
+        sendRequests: 0,
+        drafts: 0,
+        messages: 0,
+        threads: 0,
+        orphanPeople: 0
+      }
+    }),
+    auditLog: async () => undefined
+  });
+  const selection = createPlatformSelectionCoordinator({
+    platforms: ["LINKEDIN", "WHATSAPP"],
+    getEnabledPlatforms: async () => enabled,
+    requestAbort: () => undefined,
+    withGlobalResetLock,
+    withPlatformLocks: (platform, work) =>
+      withExternalActionLock(platform, () => withPlatformLock(platform, work))
+  });
+
+  const reset = admin.reset({ platform: "WHATSAPP", requestId: "reset-lock-order" });
+  await resetHasWhatsApp.promise;
+  const mutation = selection.mutate([], async () => {
+    enabled = [];
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  releaseReset.resolve();
+
+  await Promise.race([
+    Promise.all([reset, mutation]),
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error("platform selection/admin reset deadlocked")), 500)
+    )
+  ]);
+  assert.deepEqual(enabled, []);
 });

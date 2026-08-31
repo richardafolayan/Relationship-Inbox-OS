@@ -4,6 +4,7 @@ interface PlatformSelectionCoordinatorDeps {
   platforms: readonly PlatformName[];
   getEnabledPlatforms(): Promise<readonly PlatformName[]>;
   requestAbort(reason: string): void;
+  withGlobalResetLock<T>(work: () => Promise<T>): Promise<T>;
   withPlatformLocks<T>(platform: PlatformName, work: () => Promise<T>): Promise<T>;
 }
 
@@ -48,13 +49,15 @@ export function createPlatformSelectionCoordinator(
   }
 
   async function restoreDurableSelection(version: number): Promise<void> {
-    await withAllPlatformLocks(async () => {
-      if (version !== latestMutationVersion) return;
-      const enabledPlatforms = await deps.getEnabledPlatforms().catch(() => []);
-      if (version === latestMutationVersion) {
-        desiredSelection = new Set(enabledPlatforms);
-      }
-    });
+    await deps.withGlobalResetLock(() =>
+      withAllPlatformLocks(async () => {
+        if (version !== latestMutationVersion) return;
+        const enabledPlatforms = await deps.getEnabledPlatforms().catch(() => []);
+        if (version === latestMutationVersion) {
+          desiredSelection = new Set(enabledPlatforms);
+        }
+      })
+    );
   }
 
   function reserveMutation(
@@ -71,12 +74,14 @@ export function createPlatformSelectionCoordinator(
         }
         state = "running";
         try {
-          return await withAllPlatformLocks(async () => {
-            if (version !== latestMutationVersion) {
-              throw new PlatformSelectionSupersededError();
-            }
-            return work();
-          });
+          return await deps.withGlobalResetLock(() =>
+            withAllPlatformLocks(async () => {
+              if (version !== latestMutationVersion) {
+                throw new PlatformSelectionSupersededError();
+              }
+              return work();
+            })
+          );
         } catch (error) {
           await restoreDurableSelection(version);
           throw error;

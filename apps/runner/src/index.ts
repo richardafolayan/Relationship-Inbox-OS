@@ -1880,6 +1880,7 @@ const platformSelectionCoordinator = createPlatformSelectionCoordinator({
   platforms: allPlatforms,
   getEnabledPlatforms: async () => (await settingsStore.getSettings()).enabledPlatforms,
   requestAbort: (reason) => scanQueue.requestAbort(reason),
+  withGlobalResetLock,
   withPlatformLocks: (platform, work) =>
     withExternalActionLock(platform, () => withPlatformControlLockUnchecked(platform, work))
 });
