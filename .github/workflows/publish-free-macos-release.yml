@@ -81,6 +81,7 @@ jobs:
       - name: Install and verify
         run: |
           npm ci
+          npx patchright install chromium
           npm run db:generate
           npm run lint
           npm run test:all
@@ -130,6 +131,93 @@ jobs:
           mv release-dist/macos/Tovi-*-mac.zip "release-dist/macos/$ZIP_NAME"
           mv release-dist/macos/Tovi-*.dmg "release-dist/macos/$DMG_NAME"
           mv release-dist/macos/latest-macos.json "release-dist/macos/$FEED_NAME"
+
+      - name: Smoke test signed clean first launch
+        run: |
+          APP="release-dist/macos/Tovi.app"
+          APP_SUPPORT="$HOME/Library/Application Support/Relationship Inbox OS"
+          DATABASE_PATH="$APP_SUPPORT/data/inbox-os.sqlite"
+          LOG_PATH="$RUNNER_TEMP/tovi-clean-first-launch.log"
+          test ! -e "$APP_SUPPORT"
+          ! lsof -nP -iTCP:3100 -sTCP:LISTEN
+          ! lsof -nP -iTCP:4001 -sTCP:LISTEN
+
+          export DASHBOARD_PORT=3100
+          export RUNNER_PORT=4001
+          export LINKEDIN_ENABLED=false
+          export LINKEDIN_AUTO_LOGIN=false
+          export INSTAGRAM_ENABLED=false
+          export IMESSAGE_ENABLED=false
+          export WHATSAPP_ENABLED=false
+          export GOOGLE_MESSAGES_ENABLED=false
+          export CONTACTS_BIRTHDAY_SYNC=false
+          export AUDIO_TRANSCRIPTION_ENABLED=false
+          export ENRICH_AUTO_ENABLED=false
+          export BROWSER_PROFILE_MODE=isolated
+          export RIOS_UPDATE_FEED_URL=
+
+          APP_PID=""
+          cleanup() {
+            if [ -n "$APP_PID" ] && kill -0 "$APP_PID" 2>/dev/null; then
+              osascript -e 'tell application id "com.relationshipinboxos.desktop" to quit' >/dev/null 2>&1 || true
+              sleep 2
+            fi
+            if [ -n "$APP_PID" ] && kill -0 "$APP_PID" 2>/dev/null; then
+              kill -TERM "$APP_PID" 2>/dev/null || true
+            fi
+          }
+          trap cleanup EXIT
+
+          "$APP/Contents/MacOS/Tovi" >"$LOG_PATH" 2>&1 &
+          APP_PID=$!
+          READY=false
+          for attempt in {1..180}; do
+            if ! kill -0 "$APP_PID" 2>/dev/null; then
+              cat "$LOG_PATH"
+              echo "::error::Signed Tovi exited before clean first launch became ready"
+              exit 1
+            fi
+            if curl -fsS http://127.0.0.1:4001/health >"$RUNNER_TEMP/tovi-health.json" \
+              && curl -fsS http://127.0.0.1:3100/today >"$RUNNER_TEMP/tovi-today.html"; then
+              READY=true
+              break
+            fi
+            sleep 1
+          done
+          if [ "$READY" != "true" ]; then
+            cat "$LOG_PATH"
+            echo "::error::Signed Tovi did not become healthy from a clean Application Support directory"
+            exit 1
+          fi
+
+          test -s "$DATABASE_PATH"
+          HEALTH_JSON="$(cat "$RUNNER_TEMP/tovi-health.json")" node -e '
+            const health = JSON.parse(process.env.HEALTH_JSON);
+            if (!Array.isArray(health.availablePlatforms) || health.availablePlatforms.length !== 0) {
+              throw new Error(`real adapters were available during clean launch: ${JSON.stringify(health.availablePlatforms)}`);
+            }
+          '
+          SETTINGS_JSON="$(curl -fsS http://127.0.0.1:4001/data/settings)" node -e '
+            const settings = JSON.parse(process.env.SETTINGS_JSON);
+            if (!Array.isArray(settings.enabledPlatforms) || settings.enabledPlatforms.length !== 0) {
+              throw new Error(`clean launch enabled platforms: ${JSON.stringify(settings.enabledPlatforms)}`);
+            }
+          '
+
+          osascript -e 'tell application id "com.relationshipinboxos.desktop" to quit'
+          for attempt in {1..30}; do
+            if ! kill -0 "$APP_PID" 2>/dev/null; then break; fi
+            sleep 1
+          done
+          if kill -0 "$APP_PID" 2>/dev/null; then
+            cat "$LOG_PATH"
+            echo "::error::Signed Tovi did not quit cleanly"
+            exit 1
+          fi
+          wait "$APP_PID"
+          APP_PID=""
+          ! lsof -nP -iTCP:3100 -sTCP:LISTEN
+          ! lsof -nP -iTCP:4001 -sTCP:LISTEN
 
       - name: Publish zip first and feed last
         env:

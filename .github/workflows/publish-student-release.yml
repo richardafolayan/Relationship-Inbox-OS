@@ -76,6 +76,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Install browser fixture runtime
+        run: npx patchright install --with-deps chromium
+
       - name: Generate Prisma client
         run: npx prisma generate --schema packages/core/prisma/schema.prisma
 

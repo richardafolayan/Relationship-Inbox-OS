@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createServer as createHttpServer, request as httpRequest } from "node:http";
 import { createServer as createHttpsServer } from "node:https";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createRequire } from "node:module";
@@ -14,7 +14,6 @@ import { chromium } from "patchright";
 const require = createRequire(import.meta.url);
 const phoneAccess = require("../apps/desktop/phone-access.cjs");
 const ROOT = resolve(new URL("..", import.meta.url).pathname);
-const CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 
 function listen(server) {
   return new Promise((resolveListen, rejectListen) => {
@@ -127,9 +126,7 @@ async function browserBundle() {
   return result.outputFiles[0].text;
 }
 
-test("phone-sized secure browser records, uploads through the token proxy, and never autosends", {
-  skip: !existsSync(CHROME)
-}, async () => {
+test("phone-sized secure browser records, uploads through the token proxy, and never autosends", async () => {
   const temp = mkdtempSync(join(tmpdir(), "tovi-secure-dictation-"));
   const keyPath = join(temp, "key.pem");
   const certPath = join(temp, "cert.pem");
@@ -205,7 +202,6 @@ test("phone-sized secure browser records, uploads through the token proxy, and n
   );
   const tlsPort = await listen(tls);
   const browser = await chromium.launch({
-    executablePath: CHROME,
     headless: true,
     args: [
       "--host-resolver-rules=MAP tovi.test 127.0.0.1",

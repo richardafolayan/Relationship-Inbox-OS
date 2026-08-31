@@ -558,3 +558,64 @@ test("CI provisions Chromium before the required browser fixtures run", () => {
   assert.ok(install >= 0, "CI does not install Patchright Chromium");
   assert.ok(install < tests, "CI installs Chromium after the required browser fixtures");
 });
+
+test("release workflows provision required Chromium before the full suite", () => {
+  const expectations = [
+    ["publish-dev-release.yml", "npx patchright install --with-deps chromium"],
+    ["publish-student-release.yml", "npx patchright install --with-deps chromium"],
+    ["student-release.yml", "npx patchright install --with-deps chromium"],
+    ["publish-free-macos-release.yml", "npx patchright install chromium"]
+  ];
+
+  for (const [name, installCommand] of expectations) {
+    const workflow = readFileSync(join(repoRoot, ".github/workflows", name), "utf8");
+    const install = workflow.indexOf(installCommand);
+    const tests = workflow.indexOf("npm run test:all");
+
+    assert.ok(install >= 0, `${name} does not install required Patchright Chromium`);
+    assert.ok(install < tests, `${name} installs Chromium after the required browser fixtures`);
+  }
+});
+
+test("iPhone browser fixture requires provisioned Chromium without a host Chrome skip", () => {
+  const fixture = readFileSync(join(repoRoot, "tests/iphone-dictation-browser.test.mjs"), "utf8");
+
+  assert.doesNotMatch(fixture, /Google Chrome\.app/);
+  assert.doesNotMatch(fixture, /skip:\s*!existsSync/);
+  assert.doesNotMatch(fixture, /executablePath:\s*CHROME/);
+  assert.match(fixture, /const browser = await chromium\.launch\(\{\s*headless: true,/s);
+});
+
+test("signed mac release proves a clean isolated launch before publication", () => {
+  const workflow = readFileSync(
+    join(repoRoot, ".github/workflows/publish-free-macos-release.yml"),
+    "utf8"
+  );
+  const build = workflow.indexOf("- name: Build the signed app, DMG, update zip, and feed");
+  const smoke = workflow.indexOf("- name: Smoke test signed clean first launch");
+  const publish = workflow.indexOf("- name: Publish zip first and feed last");
+
+  assert.ok(build >= 0 && build < smoke, "clean first-launch smoke does not follow the signed build");
+  assert.ok(smoke < publish, "signed artifacts can publish before clean first-launch passes");
+  assert.match(workflow, /APP_SUPPORT="\$HOME\/Library\/Application Support\/Relationship Inbox OS"/);
+  assert.match(workflow, /test ! -e "\$APP_SUPPORT"/);
+  for (const setting of [
+    "LINKEDIN_ENABLED=false",
+    "INSTAGRAM_ENABLED=false",
+    "IMESSAGE_ENABLED=false",
+    "WHATSAPP_ENABLED=false",
+    "GOOGLE_MESSAGES_ENABLED=false",
+    "CONTACTS_BIRTHDAY_SYNC=false",
+    "AUDIO_TRANSCRIPTION_ENABLED=false",
+    "ENRICH_AUTO_ENABLED=false"
+  ]) {
+    assert.match(workflow, new RegExp(`export ${setting}`));
+  }
+  assert.match(workflow, /APP="release-dist\/macos\/Tovi\.app"/);
+  assert.match(workflow, /"\$APP\/Contents\/MacOS\/Tovi"/);
+  assert.match(workflow, /http:\/\/127\.0\.0\.1:4001\/health/);
+  assert.match(workflow, /http:\/\/127\.0\.0\.1:3100\/today/);
+  assert.match(workflow, /test -s "\$DATABASE_PATH"/);
+  assert.match(workflow, /settings\.enabledPlatforms\.length !== 0/);
+  assert.match(workflow, /tell application id "com\.relationshipinboxos\.desktop" to quit/);
+});
