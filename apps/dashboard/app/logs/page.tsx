@@ -1,11 +1,18 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Check, Clock } from "lucide-react";
 import { apiGet } from "@/lib/api";
 import type { AuditLogRow } from "@/lib/types";
 import { Canvas, PageHead, CaughtUp } from "@/components/common/canvas";
 import { ReceiptsDrawer } from "@/components/common/receipts-drawer";
+import { BrandLoader } from "@/components/common/brand-loader";
+import {
+  activityReceiptPresentation,
+  createLatestActivityLoader,
+  type ActivityLoader,
+  initialActivityLoadState
+} from "@/lib/activity-load";
 
 // Activity - receipts list. The redesign drops the per-row "OK -" outcome
 // column entirely: success is a tiny green tick at the start, only
@@ -136,29 +143,39 @@ function collapseRuns(logs: AuditLogRow[]): Row[] {
 }
 
 export default function LogsPage() {
-  const [logs, setLogs] = useState<AuditLogRow[]>([]);
+  const [loadState, setLoadState] = useState(() =>
+    initialActivityLoadState<AuditLogRow>()
+  );
+  const logs = loadState.rows;
+  const receiptPresentation = activityReceiptPresentation(loadState);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const activityLoaderRef = useRef<ActivityLoader<AuditLogRow> | null>(null);
+  if (!activityLoaderRef.current) {
+    activityLoaderRef.current = createLatestActivityLoader(setLoadState);
+  }
 
-  const refresh = useCallback(async () => {
-    const rows = await apiGet<AuditLogRow[]>("/runner/data/logs?limit=300").catch(
-      () => [] as AuditLogRow[]
+  const refresh = useCallback(() => {
+    return activityLoaderRef.current!.refresh(
+      () => apiGet<AuditLogRow[]>("/runner/data/logs?limit=300")
     );
-    setLogs(rows);
   }, []);
 
   useEffect(() => {
     void refresh();
     const onResync = () => void refresh();
     window.addEventListener("runner-resync", onResync);
-    return () => window.removeEventListener("runner-resync", onResync);
+    return () => {
+      window.removeEventListener("runner-resync", onResync);
+      activityLoaderRef.current?.invalidate();
+    };
   }, [refresh]);
 
   // Group rows by day, then collapse runs within each day. Yields a flat
   // list of (day-label, rows[]) pairs in reverse-chronological order.
   const dayGroups = useMemo(() => {
     const grouped = new Map<string, AuditLogRow[]>();
-    for (const log of logs) {
+    for (const log of logs ?? []) {
       const key = dayKey(log.timestamp);
       const bucket = grouped.get(key) ?? [];
       bucket.push(log);
@@ -186,19 +203,53 @@ export default function LogsPage() {
         title="Activity"
         meta={
           <span>
-            <strong className="font-medium text-ink">{logs.length}</strong> events
-            <button
-              type="button"
-              onClick={() => setDrawerOpen(true)}
-              className="hidden hover:text-ink sm:inline"
-            >
-              {" · open drawer"}
-            </button>
+            {receiptPresentation.count === null ? (
+              <span className="text-ink-3">
+                {loadState.error ? "Events unavailable" : "Loading events…"}
+              </span>
+            ) : (
+              <>
+                <strong className="font-medium text-ink">
+                  {receiptPresentation.count}
+                </strong>{" "}
+                events
+                {receiptPresentation.drawerAvailable ? (
+                  <button
+                    type="button"
+                    onClick={() => setDrawerOpen(true)}
+                    className="hidden hover:text-ink sm:inline"
+                  >
+                    {" · open drawer"}
+                  </button>
+                ) : null}
+              </>
+            )}
           </span>
         }
       />
 
-      {logs.length === 0 ? (
+      {loadState.error ? (
+        <div
+          role="alert"
+          className="mb-4 rounded-row border border-hairline bg-paper-2 px-4 py-4 text-[13px] text-ink-2"
+        >
+          <p>Activity could not be loaded. {loadState.error}</p>
+          <button
+            type="button"
+            disabled={loadState.pending}
+            onClick={() => void refresh()}
+            className="mt-3 min-h-[44px] rounded-row border border-hairline-strong px-4 font-medium text-ink disabled:opacity-60"
+          >
+            {loadState.pending ? "Trying again…" : "Try again"}
+          </button>
+        </div>
+      ) : null}
+
+      {logs === null ? (
+        loadState.error ? null : (
+          <BrandLoader className="py-8" />
+        )
+      ) : logs.length === 0 ? (
         <CaughtUp title="Nothing logged yet." body="Every scan, send, and selector check will appear here." />
       ) : (
         <div className="-mx-1 overflow-hidden rounded-[14px] border border-hairline sm:mx-0">
@@ -230,9 +281,9 @@ export default function LogsPage() {
       )}
 
       <ReceiptsDrawer
-        open={drawerOpen}
+        open={receiptPresentation.drawerAvailable && drawerOpen}
         onClose={() => setDrawerOpen(false)}
-        rows={logs}
+        rows={logs ?? []}
         title="System receipts"
       />
     </Canvas>

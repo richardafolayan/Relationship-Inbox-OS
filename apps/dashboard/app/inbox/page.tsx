@@ -25,7 +25,11 @@ import { DegradedBanner } from "@/components/common/degraded-banner";
 import { MacContactsHint } from "@/components/common/mac-contacts-hint";
 import dynamic from "next/dynamic";
 import { PersonAvatar } from "@/components/common/person-avatar";
-import { readInboxQueryParam } from "@/lib/inbox-query";
+import {
+  inboxRowMatchesLookup,
+  readInboxPersonIdParam,
+  readInboxQueryParam
+} from "@/lib/inbox-query";
 import {
   INBOX_INITIAL_VISIBLE_ROWS,
   nextInboxVisibleCount,
@@ -264,6 +268,7 @@ export default function InboxPage() {
   // top of data we are already painting.
   const loaded = loadedState || inboxSeed !== undefined;
   const [query, setQuery] = useState("");
+  const [personFilterId, setPersonFilterId] = useState("");
   const [tab, setTab] = useState<RiskTab>("all");
   const [category, setCategory] = useState<CategoryFilter>("any");
   const [platformFilter, setPlatformFilter] = useState<PlatformFilter>("all");
@@ -329,7 +334,9 @@ export default function InboxPage() {
   // redesign dropped the original handling — see issue #211.
   useEffect(() => {
     const q = readInboxQueryParam(window.location.search);
+    const personId = readInboxPersonIdParam(window.location.search);
     if (q) setQuery(q);
+    if (personId) setPersonFilterId(personId);
   }, []);
 
   // Debounced refetch (mirrors Today): a multi-thread scan emits a burst of
@@ -484,7 +491,7 @@ export default function InboxPage() {
     //     (phase 2).
     // Both are lifted by an explicit "show all" toggle and by any active
     // search, so older or closed threads are still reachable.
-    const applyActiveOnly = !showAll && !q;
+    const applyActiveOnly = !showAll && !q && !personFilterId;
     return allRows.filter((row) => {
       if (!applyTab(row, tab)) return false;
       if (!applyCategory(row, category)) return false;
@@ -493,13 +500,9 @@ export default function InboxPage() {
       if (!applyPriorityGroup(row, priorityGroup)) return false;
       if (applyActiveOnly && !isWithinHorizon(row.lastMessageAt)) return false;
       if (applyActiveOnly && isLikelyClosed(row)) return false;
-      if (!q) return true;
-      return (
-        row.personName.toLowerCase().includes(q) ||
-        (row.preview ?? "").toLowerCase().includes(q)
-      );
+      return inboxRowMatchesLookup(row, { query: q, personId: personFilterId });
     });
-  }, [allRows, query, tab, category, platformFilter, favouritesOnly, priorityGroup, showAll]);
+  }, [allRows, query, personFilterId, tab, category, platformFilter, favouritesOnly, priorityGroup, showAll]);
 
   // How many threads the active-only filter is currently hiding, broken
   // down by reason. Only counts threads that would otherwise be visible
@@ -777,7 +780,10 @@ export default function InboxPage() {
           <input
             type="text"
             value={query}
-            onChange={(e) => setQuery(e.target.value)}
+            onChange={(e) => {
+              setPersonFilterId("");
+              setQuery(e.target.value);
+            }}
             placeholder="Search people, keywords…"
             autoComplete="off"
             className="min-w-0 flex-1 border-0 bg-transparent text-[14px] text-ink outline-none placeholder:text-ink-3"
@@ -785,7 +791,10 @@ export default function InboxPage() {
           {query ? (
             <button
               type="button"
-              onClick={() => setQuery("")}
+              onClick={() => {
+                setPersonFilterId("");
+                setQuery("");
+              }}
               aria-label="Clear search"
               className="shrink-0 p-[2px] text-ink-3 transition-colors duration-calm hover:text-ink"
             >
