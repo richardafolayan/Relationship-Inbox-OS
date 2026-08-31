@@ -16,6 +16,7 @@ jobs:
           node-version: 20.x
           cache: npm
       - run: npm ci
+      - run: npx patchright install --with-deps chromium
       - run: npx prisma generate --schema packages/core/prisma/schema.prisma
       - run: npm run docs:check
       - run: npm run lint

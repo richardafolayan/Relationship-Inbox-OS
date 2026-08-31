@@ -549,3 +549,12 @@ test("Electron browser fixtures are required and their skips fail closed", (t) =
   assert.equal(rejected.status, 1, `${rejected.stdout}\n${rejected.stderr}`);
   assert.match(rejected.stderr, /Required browser group skipped 1 test\(s\)/);
 });
+
+test("CI provisions Chromium before the required browser fixtures run", () => {
+  const workflow = readFileSync(join(repoRoot, ".github/workflows/ci.yml"), "utf8");
+  const install = workflow.indexOf("npx patchright install --with-deps chromium");
+  const tests = workflow.indexOf("npm run test:all");
+
+  assert.ok(install >= 0, "CI does not install Patchright Chromium");
+  assert.ok(install < tests, "CI installs Chromium after the required browser fixtures");
+});
