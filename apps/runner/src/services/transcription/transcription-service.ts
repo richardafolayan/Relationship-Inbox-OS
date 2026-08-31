@@ -807,6 +807,8 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
     let parent = await deps.prisma.messageAudioTranscription.findUnique({
       where: { messageId }
     });
+    const preserveParentTranscript =
+      parent?.status === "transcribed" && Boolean(parent.transcript?.trim());
     if (!shouldContinue()) return "skipped";
     const prepared = await prepareRequest(attachment, provider.modelLabel || deps.config.model);
     if (prepared.kind === "skipped") {
@@ -821,8 +823,13 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
             errorMessage: prepared.reason
           }
         });
-        maybeRetentionWarn(prepared.reason);
+      } else if (!preserveParentTranscript) {
+        await deps.prisma.messageAudioTranscription.update({
+          where: { id: parent.id },
+          data: { status: "skipped", errorMessage: prepared.reason }
+        });
       }
+      maybeRetentionWarn(prepared.reason);
       return "skipped";
     }
     if (!parent) {
@@ -898,7 +905,7 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
       const text = outcome.result.text?.trim() ?? "";
       if (text.length === 0) {
         await persistNonSuccessfulAttempt("skipped", "empty_output");
-        if (!parent.selectedTier) {
+        if (!preserveParentTranscript) {
           await deps.prisma.messageAudioTranscription.update({
             where: { id: parent.id },
             data: { status: "skipped", errorMessage: "empty_output" }
@@ -978,7 +985,7 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
       // If parent is still in `pending` state (this is the first tier
       // we ran and it skipped), record the skip on the parent so the
       // dashboard renders the right copy.
-      if (!parent.selectedTier) {
+      if (!preserveParentTranscript) {
         await deps.prisma.messageAudioTranscription.update({
           where: { id: parent.id },
           data: { status: "skipped", errorMessage: outcome.reason }
@@ -987,7 +994,7 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
       return "skipped";
     } else {
       await persistNonSuccessfulAttempt("failed", outcome.errorMessage);
-      if (!parent.selectedTier) {
+      if (!preserveParentTranscript) {
         await deps.prisma.messageAudioTranscription.update({
           where: { id: parent.id },
           data: { status: "failed", errorMessage: outcome.errorMessage }

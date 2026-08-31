@@ -738,6 +738,110 @@ test("progressive: force retry records the latest failure without a selected tra
   assert.equal(prisma.attemptRows[0].errorMessage, "current_provider_failure");
 });
 
+test("progressive: force retry records a current pre-provider failure", async () => {
+  const audioPath = makeAudioFile();
+  const prisma = makeFakePrisma();
+  prisma.message._messages.push(makeMessage("m1", "k1"));
+  const initial = makeProvider("local-whisper", "standard.bin", () => ({
+    kind: "failed",
+    errorMessage: "old_provider_failure"
+  }));
+  const firstService = createTranscriptionService({
+    prisma,
+    provider: null,
+    providers: { standard: initial.provider },
+    attachmentResolver: makeResolver(audioPath),
+    config: baseConfig,
+    warn: () => {}
+  });
+  await firstService.transcribeMessage("m1");
+  const retry = makeProvider("local-whisper", "standard.bin", () => ({
+    kind: "ok",
+    result: { text: "must not run", model: "standard.bin" }
+  }));
+  const retryService = createTranscriptionService({
+    prisma,
+    provider: null,
+    providers: { standard: retry.provider },
+    attachmentResolver: { async resolve() { return null; } },
+    config: baseConfig,
+    warn: () => {}
+  });
+
+  const outcome = await retryService.transcribeMessage("m1", { force: true });
+
+  assert.equal(outcome.kind, "processed");
+  assert.equal(outcome.skipped, 1);
+  assert.equal(retry.calls.length, 0);
+  assert.equal(prisma.parentRows.get("m1").status, "skipped");
+  assert.equal(prisma.parentRows.get("m1").errorMessage, "missing_file");
+});
+
+test("progressive: pre-provider failure preserves a successful parent from single mode", async () => {
+  const prisma = makeFakePrisma();
+  prisma.message._messages.push(makeMessage("m1", "k1"));
+  const original = {
+    id: "single-parent",
+    messageId: "m1",
+    status: "transcribed",
+    transcript: "single mode truth",
+    selectedTier: null,
+    selectedProvider: "openai",
+    selectedModel: "gpt-4o-mini-transcribe"
+  };
+  prisma.parentRows.set("m1", { ...original });
+  const retry = makeProvider("local-whisper", "standard.bin", () => ({
+    kind: "ok",
+    result: { text: "must not run", model: "standard.bin" }
+  }));
+  const service = createTranscriptionService({
+    prisma,
+    provider: null,
+    providers: { standard: retry.provider },
+    attachmentResolver: { async resolve() { return null; } },
+    config: baseConfig,
+    warn: () => {}
+  });
+
+  await service.transcribeMessage("m1", { force: true });
+
+  assert.equal(retry.calls.length, 0);
+  assert.deepEqual(prisma.parentRows.get("m1"), original);
+});
+
+test("progressive: provider failure preserves a successful parent from single mode", async () => {
+  const audioPath = makeAudioFile();
+  const prisma = makeFakePrisma();
+  prisma.message._messages.push(makeMessage("m1", "k1"));
+  const original = {
+    id: "single-parent",
+    messageId: "m1",
+    status: "transcribed",
+    transcript: "single mode truth",
+    selectedTier: null,
+    selectedProvider: "openai",
+    selectedModel: "gpt-4o-mini-transcribe"
+  };
+  prisma.parentRows.set("m1", { ...original });
+  const retry = makeProvider("local-whisper", "standard.bin", () => ({
+    kind: "failed",
+    errorMessage: "provider_failed"
+  }));
+  const service = createTranscriptionService({
+    prisma,
+    provider: null,
+    providers: { standard: retry.provider },
+    attachmentResolver: makeResolver(audioPath),
+    config: baseConfig,
+    warn: () => {}
+  });
+
+  await service.transcribeMessage("m1", { force: true });
+
+  assert.equal(retry.calls.length, 1);
+  assert.deepEqual(prisma.parentRows.get("m1"), original);
+});
+
 test("progressive: pre-tier missing_file writes a parent skip with no attempt rows", async () => {
   const prisma = makeFakePrisma();
   prisma.message._messages.push(makeMessage("m1", "k1"));
