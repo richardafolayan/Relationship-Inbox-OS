@@ -18,6 +18,17 @@ import { fileURLToPath } from "node:url";
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const runnerPath = join(repoRoot, "scripts/testing/run-tests.mjs");
 
+function npmCommandForPlatform(platform) {
+  return platform === "win32" ? "npm.cmd" : "npm";
+}
+
+function directoryLinkTypeForPlatform(platform) {
+  return platform === "win32" ? "junction" : "dir";
+}
+
+const npmCommand = npmCommandForPlatform(process.platform);
+const directoryLinkType = directoryLinkTypeForPlatform(process.platform);
+
 function fixtureTest(message, options = "") {
   return `import test from "node:test";
 ${options}
@@ -38,7 +49,11 @@ function createCleanEntrypointRepo(t, { includeCleanTests = true } = {}) {
 
   mkdirSync(join(fixtureRoot, "scripts/testing"), { recursive: true });
   copyFileSync(runnerPath, join(fixtureRoot, "scripts/testing/run-tests.mjs"));
-  symlinkSync(join(repoRoot, "node_modules"), join(fixtureRoot, "node_modules"), "dir");
+  symlinkSync(
+    join(repoRoot, "node_modules"),
+    join(fixtureRoot, "node_modules"),
+    directoryLinkType
+  );
 
   const rootScripts = JSON.parse(
     readFileSync(join(repoRoot, "package.json"), "utf8")
@@ -163,7 +178,7 @@ function runCleanEntrypoint(fixtureRoot, args) {
   const env = { ...process.env };
   delete env.NODE_TEST_CONTEXT;
   delete env.TOVI_TESTS_ROOT;
-  return spawnSync("npm", args, {
+  return spawnSync(npmCommand, args, {
     cwd: fixtureRoot,
     encoding: "utf8",
     env,
@@ -186,6 +201,13 @@ function runSyntheticGroup(fixtureRoot, group, extraEnv = {}) {
     }
   );
 }
+
+test("clean entrypoint fixtures use Windows-safe commands and directory links", () => {
+  assert.equal(npmCommandForPlatform("win32"), "npm.cmd");
+  assert.equal(npmCommandForPlatform("darwin"), "npm");
+  assert.equal(directoryLinkTypeForPlatform("win32"), "junction");
+  assert.equal(directoryLinkTypeForPlatform("linux"), "dir");
+});
 
 test("workspace test commands execute their real matching child tests", (t) => {
   const fixtureRoot = createCleanEntrypointRepo(t);
