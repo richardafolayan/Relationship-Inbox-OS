@@ -66,6 +66,7 @@ function makeFakeProvider(impl) {
     calls,
     provider: {
       id: "openai",
+      modelLabel: "gpt-4o-mini-transcribe",
       async transcribe(request) {
         calls.push(request);
         return impl(request, calls.length);
@@ -337,6 +338,56 @@ test("force retry provider failure preserves the existing transcript", async () 
   assert.equal(outcome.failed, 1);
   assert.equal(provider.calls.length, 1);
   assert.deepEqual(prisma.audioRows.get("k1|g-m1"), original);
+});
+
+test("force retry records the latest failure when no successful transcript exists", async () => {
+  const prisma = makeFakePrisma();
+  prisma.message._messages.push(makeMessage("m1", "k1"));
+  prisma.audioRows.set("k1|g-m1", {
+    id: "old",
+    status: "skipped",
+    errorMessage: "missing_file",
+    messageId: "m1"
+  });
+  const { writeFileSync, mkdtempSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dir = mkdtempSync(join(tmpdir(), "audio-force-latest-fail-"));
+  const realPath = join(dir, "voice.m4a");
+  writeFileSync(realPath, Buffer.from([0, 1, 2, 3]));
+  const provider = makeFakeProvider(() => ({
+    kind: "failed",
+    errorMessage: "current_provider_failure"
+  }));
+  const service = createTranscriptionService({
+    prisma,
+    provider: provider.provider,
+    attachmentResolver: {
+      async resolve() {
+        return {
+          absolutePath: realPath,
+          mimeType: "audio/mp4",
+          filename: "v.m4a",
+          transferName: "v.m4a"
+        };
+      }
+    },
+    config: baseConfig,
+    warn: () => {}
+  });
+
+  const outcome = await service.transcribeMessage("m1", { force: true });
+
+  assert.equal(outcome.kind, "processed");
+  assert.equal(outcome.failed, 1);
+  assert.deepEqual(prisma.audioRows.get("k1|g-m1"), {
+    id: "old",
+    status: "failed",
+    errorMessage: "current_provider_failure",
+    messageId: "m1",
+    provider: "openai",
+    model: "gpt-4o-mini-transcribe"
+  });
 });
 
 test("auto-path enqueueMessage still respects fingerprint dedup", async () => {

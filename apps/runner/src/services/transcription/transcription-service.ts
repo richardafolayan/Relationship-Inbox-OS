@@ -479,7 +479,7 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
 
     const existingForMessage = await deps.prisma.messageAudioTranscription.findUnique({
       where: { messageId },
-      select: { id: true, status: true }
+      select: { id: true, status: true, transcript: true }
     });
     if (existingForMessage && !options.force) {
       return {
@@ -519,6 +519,9 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
       message,
       attachments: audioAttachments,
       existingTranscriptionId: existingForMessage?.id,
+      preserveExistingTranscript:
+        existingForMessage?.status === "transcribed" &&
+        Boolean(existingForMessage.transcript?.trim()),
       shouldContinue: options.shouldContinue
     });
   }
@@ -531,6 +534,7 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
     message: { id: string; platformMessageKey: string };
     attachments: Array<{ attachment: AttachmentPlaceholder; index: number }>;
     existingTranscriptionId?: string;
+    preserveExistingTranscript?: boolean;
     shouldContinue?: () => boolean;
   }): Promise<TranscribeMessageOutcome> {
     const { message, attachments } = input;
@@ -542,7 +546,12 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
       const attachmentId = attachment.guid ?? `idx-${index}`;
       const prepared = await prepareRequest(attachment, deps.provider!.modelLabel);
       if (prepared.kind === "skipped") {
-        if (!input.existingTranscriptionId) {
+        if (input.existingTranscriptionId && !input.preserveExistingTranscript) {
+          await deps.prisma.messageAudioTranscription.update({
+            where: { id: input.existingTranscriptionId },
+            data: { status: "skipped", errorMessage: prepared.reason }
+          });
+        } else if (!input.existingTranscriptionId) {
           await createTranscriptionForCurrentMessageKey({
             messageId: message.id,
             attachmentGuid: attachment.guid,
@@ -563,7 +572,12 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
       if (outcome.kind === "ok") {
         const transcript = outcome.result.text?.trim() ?? "";
         if (transcript.length === 0) {
-          if (!input.existingTranscriptionId) {
+          if (input.existingTranscriptionId && !input.preserveExistingTranscript) {
+            await deps.prisma.messageAudioTranscription.update({
+              where: { id: input.existingTranscriptionId },
+              data: { status: "skipped", errorMessage: "empty_output" }
+            });
+          } else if (!input.existingTranscriptionId) {
             await createTranscriptionForCurrentMessageKey({
               messageId: message.id,
               attachmentGuid: attachment.guid,
@@ -606,7 +620,12 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
         notifyTranscriptSelected(message.id);
         ok += 1;
       } else if (outcome.kind === "skipped") {
-        if (!input.existingTranscriptionId) {
+        if (input.existingTranscriptionId && !input.preserveExistingTranscript) {
+          await deps.prisma.messageAudioTranscription.update({
+            where: { id: input.existingTranscriptionId },
+            data: { status: "skipped", errorMessage: outcome.reason }
+          });
+        } else if (!input.existingTranscriptionId) {
           await createTranscriptionForCurrentMessageKey({
             messageId: message.id,
             attachmentGuid: attachment.guid,
@@ -621,7 +640,17 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
         skipped += 1;
         maybeRetentionWarn(outcome.reason);
       } else {
-        if (!input.existingTranscriptionId) {
+        if (input.existingTranscriptionId && !input.preserveExistingTranscript) {
+          await deps.prisma.messageAudioTranscription.update({
+            where: { id: input.existingTranscriptionId },
+            data: {
+              status: "failed",
+              provider: deps.provider!.id,
+              model: deps.provider!.modelLabel,
+              errorMessage: outcome.errorMessage
+            }
+          });
+        } else if (!input.existingTranscriptionId) {
           await createTranscriptionForCurrentMessageKey({
             messageId: message.id,
             attachmentGuid: attachment.guid,
@@ -686,6 +715,7 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
         where: { transcriptionId: parent.id }
       });
       for (const row of attemptRows) {
+        if (row.tier === "refinement") continue;
         if (row.status === "transcribed" && row.transcript) {
           liveAttempts.push({
             tier: row.tier as AttemptTier,
@@ -838,13 +868,40 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
       model: provider.modelLabel,
       durationMs: elapsed
     };
+    const preserveExistingAttempt =
+      existingAttempt?.status === "transcribed" && Boolean(existingAttempt.transcript?.trim());
+    async function persistNonSuccessfulAttempt(
+      status: "failed" | "skipped",
+      errorMessage: string
+    ): Promise<void> {
+      if (preserveExistingAttempt) return;
+      await deps.prisma.messageAudioTranscriptionAttempt.upsert({
+        where: {
+          transcriptionId_tier_model: {
+            transcriptionId: attemptBase.transcriptionId,
+            tier,
+            model: attemptBase.model
+          }
+        },
+        update: {
+          provider: attemptBase.provider,
+          status,
+          transcript: null,
+          durationMs: elapsed,
+          errorMessage
+        },
+        create: { ...attemptBase, status, errorMessage }
+      });
+    }
 
     if (outcome.kind === "ok") {
       const text = outcome.result.text?.trim() ?? "";
       if (text.length === 0) {
-        if (!existingAttempt) {
-          await deps.prisma.messageAudioTranscriptionAttempt.create({
-            data: { ...attemptBase, status: "skipped", errorMessage: "empty_output" }
+        await persistNonSuccessfulAttempt("skipped", "empty_output");
+        if (!parent.selectedTier) {
+          await deps.prisma.messageAudioTranscription.update({
+            where: { id: parent.id },
+            data: { status: "skipped", errorMessage: "empty_output" }
           });
         }
         return "skipped";
@@ -917,15 +974,11 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
       }
       return "ok";
     } else if (outcome.kind === "skipped") {
-      if (!existingAttempt) {
-        await deps.prisma.messageAudioTranscriptionAttempt.create({
-          data: { ...attemptBase, status: "skipped", errorMessage: outcome.reason }
-        });
-      }
+      await persistNonSuccessfulAttempt("skipped", outcome.reason);
       // If parent is still in `pending` state (this is the first tier
       // we ran and it skipped), record the skip on the parent so the
       // dashboard renders the right copy.
-      if (!parent.selectedTier && parent.status === "pending") {
+      if (!parent.selectedTier) {
         await deps.prisma.messageAudioTranscription.update({
           where: { id: parent.id },
           data: { status: "skipped", errorMessage: outcome.reason }
@@ -933,12 +986,8 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
       }
       return "skipped";
     } else {
-      if (!existingAttempt) {
-        await deps.prisma.messageAudioTranscriptionAttempt.create({
-          data: { ...attemptBase, status: "failed", errorMessage: outcome.errorMessage }
-        });
-      }
-      if (!parent.selectedTier && parent.status === "pending") {
+      await persistNonSuccessfulAttempt("failed", outcome.errorMessage);
+      if (!parent.selectedTier) {
         await deps.prisma.messageAudioTranscription.update({
           where: { id: parent.id },
           data: { status: "failed", errorMessage: outcome.errorMessage }
