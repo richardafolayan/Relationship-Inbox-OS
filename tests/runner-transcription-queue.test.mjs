@@ -21,7 +21,7 @@ function makeFakePrisma() {
   const attemptRows = [];
   let parentCounter = 0;
   let attemptCounter = 0;
-  return {
+  const database = {
     parentRows,
     attemptRows,
     message: {
@@ -75,6 +75,23 @@ function makeFakePrisma() {
         attemptRows.push(row);
         return row;
       },
+      async upsert({ where, update, create }) {
+        const key = where.transcriptionId_tier_model;
+        const existing = attemptRows.find(
+          (row) =>
+            row.transcriptionId === key.transcriptionId &&
+            row.tier === key.tier &&
+            row.model === key.model
+        );
+        if (existing) {
+          Object.assign(existing, update);
+          return existing;
+        }
+        attemptCounter += 1;
+        const row = { id: `a-${attemptCounter}`, ...create };
+        attemptRows.push(row);
+        return row;
+      },
       async findFirst({ where } = {}) {
         return (
           attemptRows.find(
@@ -92,8 +109,12 @@ function makeFakePrisma() {
         }
         return [...attemptRows];
       }
+    },
+    async $transaction(work) {
+      return work(database);
     }
   };
+  return database;
 }
 
 function makeMessage(id, key) {
