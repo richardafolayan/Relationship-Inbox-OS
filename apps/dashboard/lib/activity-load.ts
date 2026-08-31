@@ -4,6 +4,19 @@ export interface ActivityLoadState<Row> {
   error: string | null;
 }
 
+export interface ActivityReceiptPresentation {
+  count: number | null;
+  drawerAvailable: boolean;
+}
+
+export function activityReceiptPresentation<Row>(
+  state: ActivityLoadState<Row>
+): ActivityReceiptPresentation {
+  return state.rows === null
+    ? { count: null, drawerAvailable: false }
+    : { count: state.rows.length, drawerAvailable: true };
+}
+
 export function initialActivityLoadState<Row>(): ActivityLoadState<Row> {
   return { rows: null, pending: false, error: null };
 }

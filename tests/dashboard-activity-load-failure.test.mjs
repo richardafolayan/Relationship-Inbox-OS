@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 const {
+  activityReceiptPresentation,
   beginActivityLoad,
   failActivityLoad,
   initialActivityLoadState,
@@ -28,6 +29,13 @@ test("a failed initial Activity load settles as retryable error, not empty or lo
     activitySource,
     /loadState\.pending \? "Trying again…" : "Try again"/
   );
+  assert.deepEqual(activityReceiptPresentation(failed), {
+    count: null,
+    drawerAvailable: false
+  });
+  assert.doesNotMatch(activitySource, /logs\?\.length \?\? 0/);
+  assert.match(activitySource, /receiptPresentation\.count === null/);
+  assert.match(activitySource, /receiptPresentation\.drawerAvailable \? \(/);
 });
 
 test("retry leaves the error state and every result settles pending", () => {
@@ -57,4 +65,12 @@ test("a failed refresh preserves previously loaded receipts", () => {
     pending: false,
     error: "Refresh failed"
   });
+  assert.deepEqual(activityReceiptPresentation(failed), {
+    count: 1,
+    drawerAvailable: true
+  });
+  assert.match(
+    activitySource,
+    /open=\{receiptPresentation\.drawerAvailable && drawerOpen\}/
+  );
 });

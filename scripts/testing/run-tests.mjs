@@ -27,7 +27,7 @@ for (const name of allFiles) {
   const source = await readFile(join(testsRoot, name), "utf8");
   if (
     /(?:^|\n)\s*\/\/\s*@tovi-browser\b/.test(source) ||
-    /(?:from\s*|import\s*\(\s*|require\s*\(\s*)["'](?:@playwright\/test|patchright|playwright|puppeteer)["']/.test(
+    /(?:from\s*|import\s*\(\s*|require\s*\(\s*)["'](?:@playwright\/test|electron|patchright|playwright|puppeteer)["']/.test(
       source
     )
   ) {
@@ -51,6 +51,49 @@ if (selected.length === 0) {
 const unitConcurrency = Number(process.env.TOVI_TEST_CONCURRENCY ?? 4);
 if (!Number.isInteger(unitConcurrency) || unitConcurrency < 1) {
   throw new Error("TOVI_TEST_CONCURRENCY must be a positive integer");
+}
+
+const npmCommand = process.platform === "win32" ? "npm.cmd" : "npm";
+
+async function runCommand(label, command, args) {
+  process.stdout.write(`[tests] ${label}\n`);
+  const childEnv = { ...process.env };
+  delete childEnv.NODE_TEST_CONTEXT;
+  const child = spawn(command, args, {
+    cwd: repoRoot,
+    env: childEnv,
+    stdio: "inherit"
+  });
+  const result = await new Promise((resolveResult, reject) => {
+    child.once("error", reject);
+    child.once("close", (code, signal) => resolveResult({ code, signal }));
+  });
+  if (result.code !== 0) {
+    process.stderr.write(
+      `[tests] ${label} failed${result.signal ? ` (${result.signal})` : ""}.\n`
+    );
+    process.exit(result.code ?? 1);
+  }
+}
+
+async function prepareTestArtifacts() {
+  if (group !== "core") {
+    await runCommand("generate Prisma client", npmCommand, ["run", "db:generate"]);
+  }
+  await runCommand("build core test artifacts", npmCommand, [
+    "run",
+    "build",
+    "--workspace",
+    "@inbox-os/core"
+  ]);
+  if (group !== "core") {
+    await runCommand("build runner test artifacts", npmCommand, [
+      "run",
+      "build",
+      "--workspace",
+      "@inbox-os/runner"
+    ]);
+  }
 }
 
 function skippedTestCount(output) {
@@ -108,5 +151,6 @@ async function runPhase(label, names, concurrency, rejectSkips) {
 const selectedUnitFiles = selected.filter((name) => !browserFiles.has(name));
 const selectedBrowserFiles = selected.filter((name) => browserFiles.has(name));
 
+await prepareTestArtifacts();
 await runPhase("unit", selectedUnitFiles, unitConcurrency, false);
 await runPhase("browser", selectedBrowserFiles, 1, true);

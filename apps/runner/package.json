@@ -9,7 +9,7 @@
     "build": "tsc -p tsconfig.json && node scripts/add-js-extensions.mjs",
     "start": "node dist/index.js",
     "lint": "tsc -p tsconfig.json --noEmit",
-    "test": "npm run db:generate --prefix ../.. && npm run build --workspace @inbox-os/core && npm run build && node ../../scripts/testing/run-tests.mjs runner",
+    "test": "node ../../scripts/testing/run-tests.mjs runner",
     "scan": "tsx src/cli.ts scan",
     "connect:linkedin": "tsx src/cli.ts connect LINKEDIN",
     "test:selectors:linkedin": "tsx src/cli.ts test-selectors LINKEDIN",

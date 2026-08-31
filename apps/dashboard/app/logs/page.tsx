@@ -8,6 +8,7 @@ import { Canvas, PageHead, CaughtUp } from "@/components/common/canvas";
 import { ReceiptsDrawer } from "@/components/common/receipts-drawer";
 import { BrandLoader } from "@/components/common/brand-loader";
 import {
+  activityReceiptPresentation,
   beginActivityLoad,
   failActivityLoad,
   finishActivityLoad,
@@ -147,6 +148,7 @@ export default function LogsPage() {
     initialActivityLoadState<AuditLogRow>()
   );
   const logs = loadState.rows;
+  const receiptPresentation = activityReceiptPresentation(loadState);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
@@ -206,14 +208,27 @@ export default function LogsPage() {
         title="Activity"
         meta={
           <span>
-            <strong className="font-medium text-ink">{logs?.length ?? 0}</strong> events
-            <button
-              type="button"
-              onClick={() => setDrawerOpen(true)}
-              className="hidden hover:text-ink sm:inline"
-            >
-              {" · open drawer"}
-            </button>
+            {receiptPresentation.count === null ? (
+              <span className="text-ink-3">
+                {loadState.error ? "Events unavailable" : "Loading events…"}
+              </span>
+            ) : (
+              <>
+                <strong className="font-medium text-ink">
+                  {receiptPresentation.count}
+                </strong>{" "}
+                events
+                {receiptPresentation.drawerAvailable ? (
+                  <button
+                    type="button"
+                    onClick={() => setDrawerOpen(true)}
+                    className="hidden hover:text-ink sm:inline"
+                  >
+                    {" · open drawer"}
+                  </button>
+                ) : null}
+              </>
+            )}
           </span>
         }
       />
@@ -271,7 +286,7 @@ export default function LogsPage() {
       )}
 
       <ReceiptsDrawer
-        open={drawerOpen}
+        open={receiptPresentation.drawerAvailable && drawerOpen}
         onClose={() => setDrawerOpen(false)}
         rows={logs ?? []}
         title="System receipts"
