@@ -1,5 +1,13 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  readdir,
+  readFile,
+  rename,
+  rm,
+  rmdir,
+  writeFile
+} from "node:fs/promises";
 import { join } from "node:path";
 
 function delay(milliseconds) {
@@ -15,6 +23,84 @@ function processIsAlive(pid) {
   }
 }
 
+async function reclaimAbandonedOwnedDirectory(directoryPath) {
+  let entries;
+  try {
+    entries = (await readdir(directoryPath)).filter(
+      (entry) => entry.startsWith("owner-") && entry.endsWith(".json")
+    );
+  } catch (error) {
+    if (["ENOENT", "EACCES", "EPERM"].includes(error?.code)) return false;
+    throw error;
+  }
+
+  for (const entry of entries) {
+    try {
+      const owner = JSON.parse(await readFile(join(directoryPath, entry), "utf8"));
+      if (Number.isInteger(owner.pid) && processIsAlive(owner.pid)) return false;
+    } catch (error) {
+      const isMissing = error?.code === "ENOENT";
+      if (!isMissing && !(error instanceof SyntaxError)) {
+        throw error;
+      }
+    }
+  }
+
+  for (const entry of entries) {
+    await rm(join(directoryPath, entry), { force: true });
+  }
+  try {
+    await rmdir(directoryPath);
+    return true;
+  } catch (error) {
+    if (["ENOENT", "ENOTEMPTY", "EEXIST", "EACCES", "EPERM"].includes(error?.code)) {
+      return false;
+    }
+    throw error;
+  }
+}
+
+async function acquireReclaimCoordinator(lockPath) {
+  const coordinatorPath = `${lockPath}.reclaim`;
+  const token = randomUUID();
+  const ownerFileName = `owner-${token}.json`;
+  const candidatePath = `${coordinatorPath}.candidate-${token}`;
+  await mkdir(candidatePath);
+  await writeFile(
+    join(candidatePath, ownerFileName),
+    JSON.stringify({ pid: process.pid, token })
+  );
+
+  while (true) {
+    try {
+      await rename(candidatePath, coordinatorPath);
+      break;
+    } catch (error) {
+      if (!["EEXIST", "ENOTEMPTY", "EACCES", "EPERM"].includes(error?.code)) {
+        await rm(candidatePath, { recursive: true, force: true });
+        throw error;
+      }
+    }
+    if (await reclaimAbandonedOwnedDirectory(coordinatorPath)) continue;
+    await rm(candidatePath, { recursive: true, force: true });
+    return null;
+  }
+
+  let released = false;
+  return async () => {
+    if (released) return;
+    released = true;
+    await rm(join(coordinatorPath, ownerFileName), { force: true });
+    try {
+      await rmdir(coordinatorPath);
+    } catch (error) {
+      if (!["ENOENT", "ENOTEMPTY", "EEXIST", "EACCES", "EPERM"].includes(error?.code)) {
+        throw error;
+      }
+    }
+  };
+}
+
 async function reclaimAbandonedLease(lockPath) {
   let owner;
   try {
@@ -24,17 +110,8 @@ async function reclaimAbandonedLease(lockPath) {
   }
   if (Number.isInteger(owner.pid) && processIsAlive(owner.pid)) return false;
 
-  // The stale read above is not authority to move the path: another waiter
-  // may already have replaced it. Serialize reclaimers, then re-read the owner.
-  const reclaimPath = `${lockPath}.reclaim`;
-  try {
-    await mkdir(reclaimPath);
-  } catch (error) {
-    if (["ENOENT", "EEXIST", "ENOTEMPTY", "EACCES", "EPERM"].includes(error?.code)) {
-      return false;
-    }
-    throw error;
-  }
+  const releaseCoordinator = await acquireReclaimCoordinator(lockPath);
+  if (!releaseCoordinator) return false;
 
   try {
     try {
@@ -56,7 +133,7 @@ async function reclaimAbandonedLease(lockPath) {
     await rm(abandonedPath, { recursive: true, force: true });
     return true;
   } finally {
-    await rm(reclaimPath, { recursive: true, force: true });
+    await releaseCoordinator();
   }
 }
 

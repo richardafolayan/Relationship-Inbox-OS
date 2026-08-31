@@ -354,7 +354,9 @@ test("stale lease recovery keeps three contenders mutually exclusive", async (t)
     `import * as real from "node:fs/promises";
 
 export const mkdir = real.mkdir;
+export const readdir = real.readdir;
 export const rm = real.rm;
+export const rmdir = real.rmdir;
 export const writeFile = real.writeFile;
 
 let staleOwnerReads = 0;
@@ -428,6 +430,46 @@ export async function rename(from, to) {
     active += 1;
     maximumActive = Math.max(maximumActive, active);
     await new Promise((resolveDelay) => setTimeout(resolveDelay, 25));
+    active -= 1;
+    await release();
+  };
+
+  await Promise.all([contender(), contender(), contender()]);
+
+  assert.equal(maximumActive, 1);
+  assert.equal(active, 0);
+});
+
+test("stale lease recovery survives an orphaned reclaim coordinator", async (t) => {
+  const fixtureRoot = mkdtempSync(join(tmpdir(), "tovi-orphaned-reclaim-"));
+  t.after(() => rmSync(fixtureRoot, { recursive: true, force: true }));
+
+  const lockPath = join(fixtureRoot, ".tovi-test-preparation.lock");
+  mkdirSync(lockPath);
+  writeFileSync(
+    join(lockPath, "owner.json"),
+    JSON.stringify({ pid: 2_147_483_647, token: "stale" })
+  );
+  const reclaimPath = `${lockPath}.reclaim`;
+  mkdirSync(reclaimPath);
+  writeFileSync(
+    join(reclaimPath, "owner-orphaned.json"),
+    JSON.stringify({ pid: 2_147_483_647, token: "orphaned" })
+  );
+
+  const { acquireRepositoryPreparationLease } = await import(
+    `${pathToFileURL(preparationLeasePath).href}?test=${Date.now()}`
+  );
+  let active = 0;
+  let maximumActive = 0;
+  const contender = async () => {
+    const release = await acquireRepositoryPreparationLease(fixtureRoot, {
+      pollMilliseconds: 1,
+      timeoutMilliseconds: 1_000
+    });
+    active += 1;
+    maximumActive = Math.max(maximumActive, active);
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 10));
     active -= 1;
     await release();
   };
