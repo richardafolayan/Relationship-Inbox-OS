@@ -9,3 +9,28 @@ export function readInboxQueryParam(search: string): string {
     return "";
   }
 }
+
+export function readInboxPersonIdParam(search: string): string {
+  try {
+    return new URLSearchParams(search).get("personId")?.trim() ?? "";
+  } catch {
+    return "";
+  }
+}
+
+export function inboxRowMatchesLookup(
+  row: {
+    personId?: string;
+    personName: string;
+    preview?: string | null;
+  },
+  lookup: { query: string; personId: string }
+): boolean {
+  if (lookup.personId) return row.personId === lookup.personId;
+  const query = lookup.query.trim().toLowerCase();
+  if (!query) return true;
+  return (
+    row.personName.toLowerCase().includes(query) ||
+    (row.preview ?? "").toLowerCase().includes(query)
+  );
+}

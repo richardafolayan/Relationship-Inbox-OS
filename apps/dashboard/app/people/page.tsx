@@ -13,6 +13,7 @@ import { createLatestRequestGate } from "@/lib/latest-request";
 import { Canvas, PageHead, CaughtUp } from "@/components/common/canvas";
 import { Button } from "@/components/ui/button";
 import { PersonAvatar } from "@/components/common/person-avatar";
+import { buildPersonInboxHref } from "@/lib/people-navigation";
 
 // People - list of relationship rows. Clicking a row expands an inline
 // two-column profile beneath it: a sticky `id-card` (avatar + name + role
@@ -341,7 +342,9 @@ export default function PeoplePage() {
                     onRefreshEnrichment={refreshEnrichment}
                     onStartConversation={fetchStarters}
                     startersLoading={startersLoading}
-                    onOpenInInbox={() => router.push(`/inbox?person=${person.id}`)}
+                    onOpenInInbox={() =>
+                      router.push(buildPersonInboxHref(person.id, person.name))
+                    }
                     notesDraft={notesDraft}
                     onNotesChange={onNotesChange}
                     notesStatus={notesStatus}

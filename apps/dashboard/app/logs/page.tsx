@@ -6,6 +6,13 @@ import { apiGet } from "@/lib/api";
 import type { AuditLogRow } from "@/lib/types";
 import { Canvas, PageHead, CaughtUp } from "@/components/common/canvas";
 import { ReceiptsDrawer } from "@/components/common/receipts-drawer";
+import { BrandLoader } from "@/components/common/brand-loader";
+import {
+  beginActivityLoad,
+  failActivityLoad,
+  finishActivityLoad,
+  initialActivityLoadState
+} from "@/lib/activity-load";
 
 // Activity - receipts list. The redesign drops the per-row "OK -" outcome
 // column entirely: success is a tiny green tick at the start, only
@@ -136,15 +143,28 @@ function collapseRuns(logs: AuditLogRow[]): Row[] {
 }
 
 export default function LogsPage() {
-  const [logs, setLogs] = useState<AuditLogRow[]>([]);
+  const [loadState, setLoadState] = useState(() =>
+    initialActivityLoadState<AuditLogRow>()
+  );
+  const logs = loadState.rows;
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
   const refresh = useCallback(async () => {
-    const rows = await apiGet<AuditLogRow[]>("/runner/data/logs?limit=300").catch(
-      () => [] as AuditLogRow[]
-    );
-    setLogs(rows);
+    setLoadState((current) => beginActivityLoad(current));
+    try {
+      const rows = await apiGet<AuditLogRow[]>("/runner/data/logs?limit=300");
+      setLoadState((current) => finishActivityLoad(current, rows));
+    } catch (error) {
+      setLoadState((current) =>
+        failActivityLoad(
+          current,
+          error instanceof Error && error.message
+            ? error.message
+            : "Failed to load activity"
+        )
+      );
+    }
   }, []);
 
   useEffect(() => {
@@ -158,7 +178,7 @@ export default function LogsPage() {
   // list of (day-label, rows[]) pairs in reverse-chronological order.
   const dayGroups = useMemo(() => {
     const grouped = new Map<string, AuditLogRow[]>();
-    for (const log of logs) {
+    for (const log of logs ?? []) {
       const key = dayKey(log.timestamp);
       const bucket = grouped.get(key) ?? [];
       bucket.push(log);
@@ -186,7 +206,7 @@ export default function LogsPage() {
         title="Activity"
         meta={
           <span>
-            <strong className="font-medium text-ink">{logs.length}</strong> events
+            <strong className="font-medium text-ink">{logs?.length ?? 0}</strong> events
             <button
               type="button"
               onClick={() => setDrawerOpen(true)}
@@ -198,7 +218,28 @@ export default function LogsPage() {
         }
       />
 
-      {logs.length === 0 ? (
+      {loadState.error ? (
+        <div
+          role="alert"
+          className="mb-4 rounded-row border border-hairline bg-paper-2 px-4 py-4 text-[13px] text-ink-2"
+        >
+          <p>Activity could not be loaded. {loadState.error}</p>
+          <button
+            type="button"
+            disabled={loadState.pending}
+            onClick={() => void refresh()}
+            className="mt-3 min-h-[44px] rounded-row border border-hairline-strong px-4 font-medium text-ink disabled:opacity-60"
+          >
+            {loadState.pending ? "Trying again…" : "Try again"}
+          </button>
+        </div>
+      ) : null}
+
+      {logs === null ? (
+        loadState.error ? null : (
+          <BrandLoader className="py-8" />
+        )
+      ) : logs.length === 0 ? (
         <CaughtUp title="Nothing logged yet." body="Every scan, send, and selector check will appear here." />
       ) : (
         <div className="-mx-1 overflow-hidden rounded-[14px] border border-hairline sm:mx-0">
@@ -232,7 +273,7 @@ export default function LogsPage() {
       <ReceiptsDrawer
         open={drawerOpen}
         onClose={() => setDrawerOpen(false)}
-        rows={logs}
+        rows={logs ?? []}
         title="System receipts"
       />
     </Canvas>
