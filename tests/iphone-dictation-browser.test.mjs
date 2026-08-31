@@ -1,3 +1,4 @@
+// @tovi-browser-platform darwin
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createServer as createHttpServer, request as httpRequest } from "node:http";

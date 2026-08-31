@@ -11,22 +11,24 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { planNpmInvocation } from "../scripts/testing/npm-invocation.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const runnerPath = join(repoRoot, "scripts/testing/run-tests.mjs");
-
-function npmCommandForPlatform(platform) {
-  return platform === "win32" ? "npm.cmd" : "npm";
-}
+const browserPolicyPath = join(repoRoot, "scripts/testing/browser-fixture-policy.mjs");
+const npmInvocationPath = join(repoRoot, "scripts/testing/npm-invocation.mjs");
+const preparationLeasePath = join(
+  repoRoot,
+  "scripts/testing/repository-preparation-lease.mjs"
+);
 
 function directoryLinkTypeForPlatform(platform) {
   return platform === "win32" ? "junction" : "dir";
 }
 
-const npmCommand = npmCommandForPlatform(process.platform);
 const directoryLinkType = directoryLinkTypeForPlatform(process.platform);
 
 function fixtureTest(message, options = "") {
@@ -43,12 +45,27 @@ function writeJson(path, value) {
   writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`);
 }
 
-function createCleanEntrypointRepo(t, { includeCleanTests = true } = {}) {
+function createCleanEntrypointRepo(
+  t,
+  { includeCleanTests = true, detectConcurrentPreparation = false } = {}
+) {
   const fixtureRoot = mkdtempSync(join(tmpdir(), "tovi-clean-entrypoints-"));
   t.after(() => rmSync(fixtureRoot, { recursive: true, force: true }));
 
   mkdirSync(join(fixtureRoot, "scripts/testing"), { recursive: true });
   copyFileSync(runnerPath, join(fixtureRoot, "scripts/testing/run-tests.mjs"));
+  copyFileSync(
+    browserPolicyPath,
+    join(fixtureRoot, "scripts/testing/browser-fixture-policy.mjs")
+  );
+  copyFileSync(
+    npmInvocationPath,
+    join(fixtureRoot, "scripts/testing/npm-invocation.mjs")
+  );
+  copyFileSync(
+    preparationLeasePath,
+    join(fixtureRoot, "scripts/testing/repository-preparation-lease.mjs")
+  );
   symlinkSync(
     join(repoRoot, "node_modules"),
     join(fixtureRoot, "node_modules"),
@@ -103,17 +120,37 @@ function createCleanEntrypointRepo(t, { includeCleanTests = true } = {}) {
   });
   writeFileSync(
     join(fixtureRoot, "scripts/fake-build.mjs"),
-    `import { mkdirSync, writeFileSync } from "node:fs";
+    `import {
+  appendFileSync,
+  closeSync,
+  mkdirSync,
+  openSync,
+  rmSync,
+  writeFileSync
+} from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const target = process.argv[2];
+${detectConcurrentPreparation ? `const activePath = join(root, ".fixture-preparation-active");
+let activeHandle;
+try {
+  activeHandle = openSync(activePath, "wx");
+} catch {
+  process.stderr.write("CONCURRENT_PREPARATION_DETECTED\\n");
+  process.exit(23);
+}
+appendFileSync(join(root, ".fixture-preparation-log"), \`start \${process.pid} \${target}\\n\`);
+await new Promise((resolveDelay) => setTimeout(resolveDelay, 120));` : ""}
 if (target === "core" || target === "runner") {
   const dist = target === "core" ? "packages/core/dist" : "apps/runner/dist";
   const distPath = join(root, dist);
   mkdirSync(distPath, { recursive: true });
   writeFileSync(join(distPath, "marker.mjs"), \`export const marker = "\${target.toUpperCase()}_BUILD_READY";\\n\`);
 }
+${detectConcurrentPreparation ? `appendFileSync(join(root, ".fixture-preparation-log"), \`end \${process.pid} \${target}\\n\`);
+closeSync(activeHandle);
+rmSync(activePath, { force: true });` : ""}
 console.log(\`FAKE_BUILD_\${target.toUpperCase()}\`);
 `
   );
@@ -178,11 +215,34 @@ function runCleanEntrypoint(fixtureRoot, args) {
   const env = { ...process.env };
   delete env.NODE_TEST_CONTEXT;
   delete env.TOVI_TESTS_ROOT;
-  return spawnSync(npmCommand, args, {
+  const invocation = planNpmInvocation(process.platform, args, env);
+  return spawnSync(invocation.command, invocation.args, {
     cwd: fixtureRoot,
     encoding: "utf8",
     env,
     maxBuffer: 20 * 1024 * 1024
+  });
+}
+
+function runCleanEntrypointAsync(fixtureRoot, args) {
+  const env = { ...process.env };
+  delete env.NODE_TEST_CONTEXT;
+  delete env.TOVI_TESTS_ROOT;
+  const invocation = planNpmInvocation(process.platform, args, env);
+  return new Promise((resolveResult, reject) => {
+    const child = spawn(invocation.command, invocation.args, {
+      cwd: fixtureRoot,
+      env,
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.once("error", reject);
+    child.once("close", (status, signal) => {
+      resolveResult({ status, signal, stdout, stderr });
+    });
   });
 }
 
@@ -202,9 +262,7 @@ function runSyntheticGroup(fixtureRoot, group, extraEnv = {}) {
   );
 }
 
-test("clean entrypoint fixtures use Windows-safe commands and directory links", () => {
-  assert.equal(npmCommandForPlatform("win32"), "npm.cmd");
-  assert.equal(npmCommandForPlatform("darwin"), "npm");
+test("clean entrypoint fixtures use portable directory links", () => {
   assert.equal(directoryLinkTypeForPlatform("win32"), "junction");
   assert.equal(directoryLinkTypeForPlatform("linux"), "dir");
 });
@@ -254,6 +312,34 @@ test("every direct root and dashboard entrypoint builds clean core and runner ar
   }
 });
 
+test("concurrent entrypoints serialize repository artifact preparation", async (t) => {
+  const fixtureRoot = createCleanEntrypointRepo(t, {
+    detectConcurrentPreparation: true
+  });
+  const [first, second] = await Promise.all([
+    runCleanEntrypointAsync(fixtureRoot, ["run", "test:unit"]),
+    runCleanEntrypointAsync(fixtureRoot, ["run", "test:unit"])
+  ]);
+
+  for (const result of [first, second]) {
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    assert.doesNotMatch(result.stderr, /CONCURRENT_PREPARATION_DETECTED/);
+  }
+
+  const events = readFileSync(
+    join(fixtureRoot, ".fixture-preparation-log"),
+    "utf8"
+  ).trim().split("\n");
+  let active = 0;
+  let maximumActive = 0;
+  for (const event of events) {
+    active += event.startsWith("start ") ? 1 : -1;
+    maximumActive = Math.max(maximumActive, active);
+  }
+  assert.equal(maximumActive, 1);
+  assert.equal(active, 0);
+});
+
 test("browser group includes explicit browser fixtures and runs them serially", (t) => {
   const fixtureRoot = createCleanEntrypointRepo(t, { includeCleanTests: false });
   const testsRoot = join(fixtureRoot, "tests");
@@ -266,6 +352,28 @@ test("browser group includes explicit browser fixtures and runs them serially", 
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
   assert.match(result.stdout, /BROWSER_ENTRYPOINT_RAN/);
   assert.match(result.stdout, /browser: 1 file\(s\), concurrency 1/);
+});
+
+test("browser group excludes fixtures scoped to another platform", (t) => {
+  const fixtureRoot = createCleanEntrypointRepo(t, { includeCleanTests: false });
+  const testsRoot = join(fixtureRoot, "tests");
+  const otherPlatform = process.platform === "linux" ? "darwin" : "linux";
+  writeFileSync(
+    join(testsRoot, "dashboard-applicable-browser.test.mjs"),
+    fixtureTest("APPLICABLE_BROWSER_RAN", "// @tovi-browser")
+  );
+  writeFileSync(
+    join(testsRoot, "dashboard-other-platform-browser.test.mjs"),
+    fixtureTest(
+      "OTHER_PLATFORM_BROWSER_RAN",
+      `// @tovi-browser\n// @tovi-browser-platform ${otherPlatform}\nconst SKIP_TEST = true;`
+    )
+  );
+
+  const result = runSyntheticGroup(fixtureRoot, "browser");
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  assert.match(result.stdout, /APPLICABLE_BROWSER_RAN/);
+  assert.doesNotMatch(result.stdout, /OTHER_PLATFORM_BROWSER_RAN/);
 });
 
 test("required browser skips fail closed unless the override is explicit", (t) => {

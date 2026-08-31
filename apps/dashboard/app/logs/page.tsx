@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Check, Clock } from "lucide-react";
 import { apiGet } from "@/lib/api";
 import type { AuditLogRow } from "@/lib/types";
@@ -9,9 +9,8 @@ import { ReceiptsDrawer } from "@/components/common/receipts-drawer";
 import { BrandLoader } from "@/components/common/brand-loader";
 import {
   activityReceiptPresentation,
-  beginActivityLoad,
-  failActivityLoad,
-  finishActivityLoad,
+  createLatestActivityLoader,
+  type ActivityLoader,
   initialActivityLoadState
 } from "@/lib/activity-load";
 
@@ -151,29 +150,25 @@ export default function LogsPage() {
   const receiptPresentation = activityReceiptPresentation(loadState);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const activityLoaderRef = useRef<ActivityLoader<AuditLogRow> | null>(null);
+  if (!activityLoaderRef.current) {
+    activityLoaderRef.current = createLatestActivityLoader(setLoadState);
+  }
 
-  const refresh = useCallback(async () => {
-    setLoadState((current) => beginActivityLoad(current));
-    try {
-      const rows = await apiGet<AuditLogRow[]>("/runner/data/logs?limit=300");
-      setLoadState((current) => finishActivityLoad(current, rows));
-    } catch (error) {
-      setLoadState((current) =>
-        failActivityLoad(
-          current,
-          error instanceof Error && error.message
-            ? error.message
-            : "Failed to load activity"
-        )
-      );
-    }
+  const refresh = useCallback(() => {
+    return activityLoaderRef.current!.refresh(
+      () => apiGet<AuditLogRow[]>("/runner/data/logs?limit=300")
+    );
   }, []);
 
   useEffect(() => {
     void refresh();
     const onResync = () => void refresh();
     window.addEventListener("runner-resync", onResync);
-    return () => window.removeEventListener("runner-resync", onResync);
+    return () => {
+      window.removeEventListener("runner-resync", onResync);
+      activityLoaderRef.current?.invalidate();
+    };
   }, [refresh]);
 
   // Group rows by day, then collapse runs within each day. Yields a flat

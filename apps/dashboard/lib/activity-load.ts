@@ -9,6 +9,15 @@ export interface ActivityReceiptPresentation {
   drawerAvailable: boolean;
 }
 
+export interface ActivityLoader<Row> {
+  refresh(loadRows: () => Promise<Row[]>): Promise<void>;
+  invalidate(): void;
+}
+
+type ActivityStateUpdater<Row> = (
+  update: (state: ActivityLoadState<Row>) => ActivityLoadState<Row>
+) => void;
+
 export function activityReceiptPresentation<Row>(
   state: ActivityLoadState<Row>
 ): ActivityReceiptPresentation {
@@ -39,4 +48,35 @@ export function failActivityLoad<Row>(
   error: string
 ): ActivityLoadState<Row> {
   return { rows: state.rows, pending: false, error };
+}
+
+export function createLatestActivityLoader<Row>(
+  updateState: ActivityStateUpdater<Row>
+): ActivityLoader<Row> {
+  let latestRequest = 0;
+
+  return {
+    async refresh(loadRows) {
+      const request = ++latestRequest;
+      updateState((state) => beginActivityLoad(state));
+      try {
+        const rows = await loadRows();
+        if (request !== latestRequest) return;
+        updateState((state) => finishActivityLoad(state, rows));
+      } catch (error) {
+        if (request !== latestRequest) return;
+        updateState((state) =>
+          failActivityLoad(
+            state,
+            error instanceof Error && error.message
+              ? error.message
+              : "Failed to load activity"
+          )
+        );
+      }
+    },
+    invalidate() {
+      latestRequest += 1;
+    }
+  };
 }

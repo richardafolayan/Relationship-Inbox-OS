@@ -5,10 +5,29 @@ import test from "node:test";
 const {
   activityReceiptPresentation,
   beginActivityLoad,
+  createLatestActivityLoader,
   failActivityLoad,
   initialActivityLoadState,
   finishActivityLoad
 } = await import("../apps/dashboard/lib/activity-load.ts");
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+function createActivityHarness() {
+  let state = initialActivityLoadState();
+  const loader = createLatestActivityLoader((update) => {
+    state = update(state);
+  });
+  return { loader, read: () => state };
+}
 
 const activitySource = readFileSync(
   new URL("../apps/dashboard/app/logs/page.tsx", import.meta.url),
@@ -73,4 +92,47 @@ test("a failed refresh preserves previously loaded receipts", () => {
     activitySource,
     /open=\{receiptPresentation\.drawerAvailable && drawerOpen\}/
   );
+});
+
+test("a late older Activity response cannot replace the newer result", async () => {
+  const first = deferred();
+  const second = deferred();
+  const activity = createActivityHarness();
+
+  const firstRefresh = activity.loader.refresh(() => first.promise);
+  const secondRefresh = activity.loader.refresh(() => second.promise);
+  second.resolve([{ id: "newest" }]);
+  await secondRefresh;
+  first.resolve([{ id: "stale" }]);
+  await firstRefresh;
+
+  assert.deepEqual(activity.read(), {
+    rows: [{ id: "newest" }],
+    pending: false,
+    error: null
+  });
+});
+
+test("an early older Activity response leaves the newer request pending", async () => {
+  const first = deferred();
+  const second = deferred();
+  const activity = createActivityHarness();
+
+  const firstRefresh = activity.loader.refresh(() => first.promise);
+  const secondRefresh = activity.loader.refresh(() => second.promise);
+  first.resolve([{ id: "stale" }]);
+  await firstRefresh;
+  assert.deepEqual(activity.read(), {
+    rows: null,
+    pending: true,
+    error: null
+  });
+
+  second.resolve([{ id: "newest" }]);
+  await secondRefresh;
+  assert.deepEqual(activity.read(), {
+    rows: [{ id: "newest" }],
+    pending: false,
+    error: null
+  });
 });

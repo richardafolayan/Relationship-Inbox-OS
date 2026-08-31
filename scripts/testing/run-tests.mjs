@@ -3,6 +3,9 @@ import { readdirSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { classifyBrowserFixture } from "./browser-fixture-policy.mjs";
+import { planNpmInvocation } from "./npm-invocation.mjs";
+import { acquireRepositoryPreparationLease } from "./repository-preparation-lease.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const configuredTestsRoot = process.env.TOVI_TESTS_ROOT;
@@ -22,20 +25,19 @@ const allFiles = readdirSync(testsRoot)
   .filter((name) => name.endsWith(".test.mjs"))
   .sort();
 const browserFiles = new Set();
+const applicableBrowserFiles = new Set();
 
 for (const name of allFiles) {
   const source = await readFile(join(testsRoot, name), "utf8");
-  if (
-    /(?:^|\n)\s*\/\/\s*@tovi-browser\b/.test(source) ||
-    /(?:from\s*|import\s*\(\s*|require\s*\(\s*)["'](?:@playwright\/test|electron|patchright|playwright|puppeteer)["']/.test(
-      source
-    )
-  ) {
+  const fixture = classifyBrowserFixture(source, process.platform);
+  if (fixture.browser) {
     browserFiles.add(name);
+    if (fixture.applicable) applicableBrowserFiles.add(name);
   }
 }
 
 const selected = allFiles.filter((name) => {
+  if (browserFiles.has(name) && !applicableBrowserFiles.has(name)) return false;
   if (group === "all") return true;
   if (group === "unit") return !browserFiles.has(name);
   if (group === "browser") return browserFiles.has(name);
@@ -53,13 +55,12 @@ if (!Number.isInteger(unitConcurrency) || unitConcurrency < 1) {
   throw new Error("TOVI_TEST_CONCURRENCY must be a positive integer");
 }
 
-const npmCommand = process.platform === "win32" ? "npm.cmd" : "npm";
-
-async function runCommand(label, command, args) {
+async function runNpmCommand(label, args) {
   process.stdout.write(`[tests] ${label}\n`);
   const childEnv = { ...process.env };
   delete childEnv.NODE_TEST_CONTEXT;
-  const child = spawn(command, args, {
+  const invocation = planNpmInvocation(process.platform, args, childEnv);
+  const child = spawn(invocation.command, invocation.args, {
     cwd: repoRoot,
     env: childEnv,
     stdio: "inherit"
@@ -69,25 +70,24 @@ async function runCommand(label, command, args) {
     child.once("close", (code, signal) => resolveResult({ code, signal }));
   });
   if (result.code !== 0) {
-    process.stderr.write(
-      `[tests] ${label} failed${result.signal ? ` (${result.signal})` : ""}.\n`
+    throw new Error(
+      `[tests] ${label} failed${result.signal ? ` (${result.signal})` : ""}.`
     );
-    process.exit(result.code ?? 1);
   }
 }
 
 async function prepareTestArtifacts() {
   if (group !== "core") {
-    await runCommand("generate Prisma client", npmCommand, ["run", "db:generate"]);
+    await runNpmCommand("generate Prisma client", ["run", "db:generate"]);
   }
-  await runCommand("build core test artifacts", npmCommand, [
+  await runNpmCommand("build core test artifacts", [
     "run",
     "build",
     "--workspace",
     "@inbox-os/core"
   ]);
   if (group !== "core") {
-    await runCommand("build runner test artifacts", npmCommand, [
+    await runNpmCommand("build runner test artifacts", [
       "run",
       "build",
       "--workspace",
@@ -136,14 +136,15 @@ async function runPhase(label, names, concurrency, rejectSkips) {
     child.once("close", (code, signal) => resolveResult({ code, signal }));
   });
   if (result.code !== 0) {
-    process.exit(result.code ?? 1);
+    throw new Error(
+      `[tests] ${label} failed${result.signal ? ` (${result.signal})` : ""}.`
+    );
   }
 
   if (rejectSkips && process.env.TOVI_ALLOW_BROWSER_SKIPS !== "1") {
     const skipped = skippedTestCount(output);
     if (skipped > 0) {
-      process.stderr.write(`Required browser group skipped ${skipped} test(s).\n`);
-      process.exit(1);
+      throw new Error(`Required browser group skipped ${skipped} test(s).`);
     }
   }
 }
@@ -151,6 +152,11 @@ async function runPhase(label, names, concurrency, rejectSkips) {
 const selectedUnitFiles = selected.filter((name) => !browserFiles.has(name));
 const selectedBrowserFiles = selected.filter((name) => browserFiles.has(name));
 
-await prepareTestArtifacts();
-await runPhase("unit", selectedUnitFiles, unitConcurrency, false);
-await runPhase("browser", selectedBrowserFiles, 1, true);
+const releasePreparationLease = await acquireRepositoryPreparationLease(repoRoot);
+try {
+  await prepareTestArtifacts();
+  await runPhase("unit", selectedUnitFiles, unitConcurrency, false);
+  await runPhase("browser", selectedBrowserFiles, 1, true);
+} finally {
+  await releasePreparationLease();
+}
