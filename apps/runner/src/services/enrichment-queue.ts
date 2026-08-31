@@ -66,6 +66,7 @@ interface EnrichmentQueueDeps {
    * extractProfile call return auth_required and never recover the session.
    */
   ensureConnected?: () => Promise<void>;
+  isPlatformSelected?: (platform: PlatformName) => Promise<boolean>;
 }
 
 export interface EnrichmentQueueService {
@@ -196,6 +197,9 @@ export function createEnrichmentQueue(deps: EnrichmentQueueDeps): EnrichmentQueu
 
   async function visitProfile(personId: string): Promise<ProfileExtractionResult> {
     const platform: PlatformName = "LINKEDIN";
+    if (deps.isPlatformSelected && !(await deps.isPlatformSelected(platform))) {
+      return { failed: true, reason: "navigation_error", detail: "platform_not_selected" };
+    }
     const person = await prisma.person.findUnique({ where: { id: personId } });
     if (!person) {
       return { failed: true, reason: "not_found", detail: "person row missing" };
@@ -215,7 +219,13 @@ export function createEnrichmentQueue(deps: EnrichmentQueueDeps): EnrichmentQueu
       const detail = error instanceof ProfileUrlPolicyError ? error.message : String(error);
       return { failed: true, reason: "navigation_error", detail };
     }
+    if (deps.isPlatformSelected && !(await deps.isPlatformSelected(platform))) {
+      return { failed: true, reason: "navigation_error", detail: "platform_not_selected" };
+    }
     const page = await deps.sessionManager.getManagedPage({ platform, personKey });
+    if (deps.isPlatformSelected && !(await deps.isPlatformSelected(platform))) {
+      return { failed: true, reason: "navigation_error", detail: "platform_not_selected" };
+    }
     if (deps.ensureConnected) {
       try {
         await deps.ensureConnected();
@@ -223,6 +233,9 @@ export function createEnrichmentQueue(deps: EnrichmentQueueDeps): EnrichmentQueu
         const detail = error instanceof Error ? error.message : String(error);
         return { failed: true, reason: "auth_required", detail };
       }
+    }
+    if (deps.isPlatformSelected && !(await deps.isPlatformSelected(platform))) {
+      return { failed: true, reason: "navigation_error", detail: "platform_not_selected" };
     }
     return extractProfile(page, safeProfileUrl);
   }

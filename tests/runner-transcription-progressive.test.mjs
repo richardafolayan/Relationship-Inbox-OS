@@ -11,7 +11,7 @@ function makeFakePrisma() {
   let parentCounter = 0;
   let attemptCounter = 0;
 
-  return {
+  const database = {
     parentRows,
     attemptRows,
     message: {
@@ -80,6 +80,23 @@ function makeFakePrisma() {
         attemptRows.push(row);
         return row;
       },
+      async upsert({ where, update, create }) {
+        const key = where.transcriptionId_tier_model;
+        const existing = attemptRows.find(
+          (row) =>
+            row.transcriptionId === key.transcriptionId &&
+            row.tier === key.tier &&
+            row.model === key.model
+        );
+        if (existing) {
+          Object.assign(existing, update);
+          return existing;
+        }
+        attemptCounter += 1;
+        const row = { id: `a-${attemptCounter}`, ...create };
+        attemptRows.push(row);
+        return row;
+      },
       async findFirst({ where } = {}) {
         if (!where) return attemptRows[0] ?? null;
         return (
@@ -98,8 +115,12 @@ function makeFakePrisma() {
         }
         return [...attemptRows];
       }
+    },
+    async $transaction(work) {
+      return work(database);
     }
   };
+  return database;
 }
 
 function makeProvider(id, label, impl) {
@@ -398,6 +419,117 @@ test("progressive: refinement enabled + standard success → refiner runs and wi
   assert.ok(prisma.attemptRows.find((a) => a.tier === "refinement"));
 });
 
+test("progressive: force refinement uses fresh local attempts, never prior AI output", async () => {
+  const audioPath = makeAudioFile();
+  const prisma = makeFakePrisma();
+  prisma.message._messages.push(makeMessage("m1", "k1"));
+  const initialStandard = makeProvider("local-whisper", "standard.bin", () => ({
+    kind: "ok",
+    result: { text: "old local transcript", model: "standard.bin" }
+  }));
+  const initialService = createTranscriptionService({
+    prisma,
+    provider: null,
+    providers: { standard: initialStandard.provider },
+    refiner: {
+      async refine() {
+        return {
+          kind: "ok",
+          result: {
+            correctedTranscript: "old AI hallucination",
+            confidence: "high",
+            changesMade: [],
+            uncertainPhrases: [],
+            model: "gpt-5-nano",
+            rawJson: "{}"
+          }
+        };
+      }
+    },
+    refinementEnabled: true,
+    attachmentResolver: makeResolver(audioPath),
+    config: baseConfig,
+    warn: () => {}
+  });
+  await initialService.transcribeMessage("m1");
+
+  let retryContext = null;
+  const retryStandard = makeProvider("local-whisper", "standard.bin", () => ({
+    kind: "ok",
+    result: { text: "new local truth", model: "standard.bin" }
+  }));
+  const retryService = createTranscriptionService({
+    prisma,
+    provider: null,
+    providers: { standard: retryStandard.provider },
+    refiner: {
+      async refine(context) {
+        retryContext = context;
+        return {
+          kind: "ok",
+          result: {
+            correctedTranscript: "new refined truth",
+            confidence: "high",
+            changesMade: [],
+            uncertainPhrases: [],
+            model: "gpt-5-nano",
+            rawJson: "{}"
+          }
+        };
+      }
+    },
+    refinementEnabled: true,
+    attachmentResolver: makeResolver(audioPath),
+    config: baseConfig,
+    warn: () => {}
+  });
+
+  await retryService.transcribeMessage("m1", { force: true });
+
+  assert.deepEqual(retryContext.attempts, [
+    { tier: "standard", model: "standard.bin", transcript: "new local truth" }
+  ]);
+  assert.equal(prisma.parentRows.get("m1").transcript, "new refined truth");
+});
+
+test("progressive: revocation after a local tier stops later providers and refinement", async () => {
+  const audioPath = makeAudioFile();
+  const prisma = makeFakePrisma();
+  prisma.message._messages.push(makeMessage("m1", "k1"));
+  let allowed = true;
+  const fast = makeProvider("local-whisper", "fast.bin", () => {
+    allowed = false;
+    return { kind: "ok", result: { text: "fast text", model: "fast.bin" } };
+  });
+  const standard = makeProvider("local-whisper", "standard.bin", () => ({
+    kind: "ok",
+    result: { text: "standard text", model: "standard.bin" }
+  }));
+  let refinerCalls = 0;
+  const service = createTranscriptionService({
+    prisma,
+    provider: null,
+    providers: { fast: fast.provider, standard: standard.provider },
+    refiner: {
+      async refine() {
+        refinerCalls += 1;
+        return { kind: "skipped", reason: "blocked" };
+      }
+    },
+    refinementEnabled: true,
+    nearbyMessages: { async fetch() { return []; } },
+    attachmentResolver: makeResolver(audioPath),
+    config: baseConfig,
+    warn: () => {}
+  });
+
+  await service.transcribeMessage("m1", { shouldContinue: () => allowed });
+
+  assert.equal(fast.calls.length, 1);
+  assert.equal(standard.calls.length, 0);
+  assert.equal(refinerCalls, 0);
+});
+
 test("progressive: refinement failure does not erase the local selected transcript", async () => {
   const audioPath = makeAudioFile();
   const prisma = makeFakePrisma();
@@ -433,7 +565,7 @@ test("progressive: refinement failure does not erase the local selected transcri
   assert.equal(parent.refinedTranscript, null ?? undefined);
 });
 
-test("progressive: force=true cascade-deletes attempts and restarts", async () => {
+test("progressive: force=true atomically replaces successful attempts in place", async () => {
   const audioPath = makeAudioFile();
   const prisma = makeFakePrisma();
   prisma.message._messages.push(makeMessage("m1", "k1"));
@@ -465,11 +597,249 @@ test("progressive: force=true cascade-deletes attempts and restarts", async () =
   });
   await service.transcribeMessage("m1", { force: true });
 
-  // Old parent row gone, new one written; attempts re-counted from scratch.
   const parent = prisma.parentRows.get("m1");
   assert.equal(parent.transcript, "second pass");
-  assert.equal(prisma.attemptRows.length, 1, "old attempts should have been cascaded out");
+  assert.equal(prisma.attemptRows.length, 1, "the successful retry should replace its attempt");
   assert.equal(prisma.attemptRows[0].transcript, "second pass");
+});
+
+test("progressive: force retry revocation preserves the parent and attempts", async () => {
+  const audioPath = makeAudioFile();
+  const prisma = makeFakePrisma();
+  prisma.message._messages.push(makeMessage("m1", "k1"));
+  const initial = makeProvider("local-whisper", "standard.bin", () => ({
+    kind: "ok",
+    result: { text: "keep this transcript", model: "standard.bin" }
+  }));
+  const firstService = createTranscriptionService({
+    prisma,
+    provider: null,
+    providers: { standard: initial.provider },
+    attachmentResolver: makeResolver(audioPath),
+    config: baseConfig,
+    warn: () => {}
+  });
+  await firstService.transcribeMessage("m1");
+  const originalParent = structuredClone(prisma.parentRows.get("m1"));
+  const originalAttempts = structuredClone(prisma.attemptRows);
+
+  let allowed = true;
+  const retry = makeProvider("local-whisper", "standard.bin", () => ({
+    kind: "ok",
+    result: { text: "must not run", model: "standard.bin" }
+  }));
+  const retryService = createTranscriptionService({
+    prisma,
+    provider: null,
+    providers: { standard: retry.provider },
+    attachmentResolver: {
+      async resolve() {
+        allowed = false;
+        return {
+          absolutePath: audioPath,
+          mimeType: "audio/mp4",
+          filename: "voice.m4a",
+          transferName: "voice.m4a"
+        };
+      }
+    },
+    config: baseConfig,
+    warn: () => {}
+  });
+
+  const outcome = await retryService.transcribeMessage("m1", {
+    force: true,
+    shouldContinue: () => allowed
+  });
+
+  assert.equal(outcome.kind, "processed");
+  assert.equal(retry.calls.length, 0);
+  assert.deepEqual(prisma.parentRows.get("m1"), originalParent);
+  assert.deepEqual(prisma.attemptRows, originalAttempts);
+});
+
+test("progressive: force retry provider failure preserves the parent and attempts", async () => {
+  const audioPath = makeAudioFile();
+  const prisma = makeFakePrisma();
+  prisma.message._messages.push(makeMessage("m1", "k1"));
+  const initial = makeProvider("local-whisper", "standard.bin", () => ({
+    kind: "ok",
+    result: { text: "keep this transcript", model: "standard.bin" }
+  }));
+  const firstService = createTranscriptionService({
+    prisma,
+    provider: null,
+    providers: { standard: initial.provider },
+    attachmentResolver: makeResolver(audioPath),
+    config: baseConfig,
+    warn: () => {}
+  });
+  await firstService.transcribeMessage("m1");
+  const originalParent = structuredClone(prisma.parentRows.get("m1"));
+  const originalAttempts = structuredClone(prisma.attemptRows);
+  const retry = makeProvider("local-whisper", "standard.bin", () => ({
+    kind: "failed",
+    errorMessage: "provider_failed"
+  }));
+  const retryService = createTranscriptionService({
+    prisma,
+    provider: null,
+    providers: { standard: retry.provider },
+    attachmentResolver: makeResolver(audioPath),
+    config: baseConfig,
+    warn: () => {}
+  });
+
+  const outcome = await retryService.transcribeMessage("m1", { force: true });
+
+  assert.equal(outcome.kind, "processed");
+  assert.equal(outcome.failed, 1);
+  assert.equal(retry.calls.length, 1);
+  assert.deepEqual(prisma.parentRows.get("m1"), originalParent);
+  assert.deepEqual(prisma.attemptRows, originalAttempts);
+});
+
+test("progressive: force retry records the latest failure without a selected transcript", async () => {
+  const audioPath = makeAudioFile();
+  const prisma = makeFakePrisma();
+  prisma.message._messages.push(makeMessage("m1", "k1"));
+  const initial = makeProvider("local-whisper", "standard.bin", () => ({
+    kind: "failed",
+    errorMessage: "first_failure"
+  }));
+  const firstService = createTranscriptionService({
+    prisma,
+    provider: null,
+    providers: { standard: initial.provider },
+    attachmentResolver: makeResolver(audioPath),
+    config: baseConfig,
+    warn: () => {}
+  });
+  await firstService.transcribeMessage("m1");
+  const retry = makeProvider("local-whisper", "standard.bin", () => ({
+    kind: "failed",
+    errorMessage: "current_provider_failure"
+  }));
+  const retryService = createTranscriptionService({
+    prisma,
+    provider: null,
+    providers: { standard: retry.provider },
+    attachmentResolver: makeResolver(audioPath),
+    config: baseConfig,
+    warn: () => {}
+  });
+
+  const outcome = await retryService.transcribeMessage("m1", { force: true });
+
+  assert.equal(outcome.kind, "processed");
+  assert.equal(outcome.failed, 1);
+  assert.equal(prisma.parentRows.get("m1").errorMessage, "current_provider_failure");
+  assert.equal(prisma.attemptRows.length, 1);
+  assert.equal(prisma.attemptRows[0].errorMessage, "current_provider_failure");
+});
+
+test("progressive: force retry records a current pre-provider failure", async () => {
+  const audioPath = makeAudioFile();
+  const prisma = makeFakePrisma();
+  prisma.message._messages.push(makeMessage("m1", "k1"));
+  const initial = makeProvider("local-whisper", "standard.bin", () => ({
+    kind: "failed",
+    errorMessage: "old_provider_failure"
+  }));
+  const firstService = createTranscriptionService({
+    prisma,
+    provider: null,
+    providers: { standard: initial.provider },
+    attachmentResolver: makeResolver(audioPath),
+    config: baseConfig,
+    warn: () => {}
+  });
+  await firstService.transcribeMessage("m1");
+  const retry = makeProvider("local-whisper", "standard.bin", () => ({
+    kind: "ok",
+    result: { text: "must not run", model: "standard.bin" }
+  }));
+  const retryService = createTranscriptionService({
+    prisma,
+    provider: null,
+    providers: { standard: retry.provider },
+    attachmentResolver: { async resolve() { return null; } },
+    config: baseConfig,
+    warn: () => {}
+  });
+
+  const outcome = await retryService.transcribeMessage("m1", { force: true });
+
+  assert.equal(outcome.kind, "processed");
+  assert.equal(outcome.skipped, 1);
+  assert.equal(retry.calls.length, 0);
+  assert.equal(prisma.parentRows.get("m1").status, "skipped");
+  assert.equal(prisma.parentRows.get("m1").errorMessage, "missing_file");
+});
+
+test("progressive: pre-provider failure preserves a successful parent from single mode", async () => {
+  const prisma = makeFakePrisma();
+  prisma.message._messages.push(makeMessage("m1", "k1"));
+  const original = {
+    id: "single-parent",
+    messageId: "m1",
+    status: "transcribed",
+    transcript: "single mode truth",
+    selectedTier: null,
+    selectedProvider: "openai",
+    selectedModel: "gpt-4o-mini-transcribe"
+  };
+  prisma.parentRows.set("m1", { ...original });
+  const retry = makeProvider("local-whisper", "standard.bin", () => ({
+    kind: "ok",
+    result: { text: "must not run", model: "standard.bin" }
+  }));
+  const service = createTranscriptionService({
+    prisma,
+    provider: null,
+    providers: { standard: retry.provider },
+    attachmentResolver: { async resolve() { return null; } },
+    config: baseConfig,
+    warn: () => {}
+  });
+
+  await service.transcribeMessage("m1", { force: true });
+
+  assert.equal(retry.calls.length, 0);
+  assert.deepEqual(prisma.parentRows.get("m1"), original);
+});
+
+test("progressive: provider failure preserves a successful parent from single mode", async () => {
+  const audioPath = makeAudioFile();
+  const prisma = makeFakePrisma();
+  prisma.message._messages.push(makeMessage("m1", "k1"));
+  const original = {
+    id: "single-parent",
+    messageId: "m1",
+    status: "transcribed",
+    transcript: "single mode truth",
+    selectedTier: null,
+    selectedProvider: "openai",
+    selectedModel: "gpt-4o-mini-transcribe"
+  };
+  prisma.parentRows.set("m1", { ...original });
+  const retry = makeProvider("local-whisper", "standard.bin", () => ({
+    kind: "failed",
+    errorMessage: "provider_failed"
+  }));
+  const service = createTranscriptionService({
+    prisma,
+    provider: null,
+    providers: { standard: retry.provider },
+    attachmentResolver: makeResolver(audioPath),
+    config: baseConfig,
+    warn: () => {}
+  });
+
+  await service.transcribeMessage("m1", { force: true });
+
+  assert.equal(retry.calls.length, 1);
+  assert.deepEqual(prisma.parentRows.get("m1"), original);
 });
 
 test("progressive: pre-tier missing_file writes a parent skip with no attempt rows", async () => {

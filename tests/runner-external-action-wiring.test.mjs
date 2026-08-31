@@ -207,19 +207,29 @@ test("send workers and every session reset share the same external-action lock v
   assert.doesNotMatch(reset, /resetPersonSession|operationMutex\.runExclusive/);
 });
 
-test("WhatsApp connect, QR refresh and reset use the shared action then platform fence", () => {
+test("WhatsApp connect, QR refresh and reset use the shared action then unchecked cleanup fence", () => {
   assert.match(
     source,
-    /function withWhatsAppSessionLocks[\s\S]*?withExternalActionLock\("WHATSAPP"[\s\S]*?withPlatformControlLock\("WHATSAPP"/
+    /function withWhatsAppSessionLocks[\s\S]*?withExternalActionLock\("WHATSAPP"[\s\S]*?withPlatformControlLockUnchecked\("WHATSAPP"/
+  );
+  assert.match(
+    source,
+    /createPlatformSelectionCoordinator\([\s\S]*?withExternalActionLock\(platform[\s\S]*?withPlatformControlLockUnchecked\(platform/
   );
   for (const [path, nextPath] of [
     ["/control/whatsapp/connect", "/control/whatsapp/refresh-qr"],
-    ["/control/whatsapp/refresh-qr", "/data/whatsapp/status"],
-    ["/control/whatsapp/reset", "/data/link-preview"]
+    ["/control/whatsapp/refresh-qr", "/data/whatsapp/status"]
   ]) {
     const block = route(path, nextPath);
-    assert.match(block, /withWhatsAppSessionLocks/);
+    assert.match(
+      block,
+      /platformSelectionCoordinator\.withSelectedPlatform\("WHATSAPP"/
+    );
   }
+  assert.match(
+    route("/control/whatsapp/reset", "/data/link-preview"),
+    /withWhatsAppSessionLocks/
+  );
 });
 
 test("presenter demo cleanup is centralized behind every affected external fence", () => {

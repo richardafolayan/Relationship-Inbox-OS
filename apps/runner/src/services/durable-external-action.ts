@@ -83,6 +83,7 @@ export function createDurableExternalActionService(deps: DurableExternalActionDe
     targetMessageId: string;
     actionType: ActionType;
     payload: unknown;
+    beforeDispatch?(): Promise<void>;
     dispatch(): Promise<void>;
     isPreDispatchFailure?(error: unknown): boolean;
     auditSuccess(): Promise<unknown>;
@@ -176,10 +177,13 @@ export function createDurableExternalActionService(deps: DurableExternalActionDe
       );
     }
 
+    let dispatchStarted = false;
     try {
+      await input.beforeDispatch?.();
+      dispatchStarted = true;
       await input.dispatch();
     } catch (error) {
-      if (input.isPreDispatchFailure?.(error)) {
+      if (!dispatchStarted || input.isPreDispatchFailure?.(error)) {
         await deps.prisma.externalActionRequest.update({
           where: { id: row.id },
           data: {

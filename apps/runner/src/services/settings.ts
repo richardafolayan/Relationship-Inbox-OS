@@ -13,21 +13,31 @@ import type {
   FocusWindowSource,
   FocusWindowState,
   OperatorProfile,
+  PersistedMutation,
   ReplyStyle,
   SettingsStore
 } from "../types/runtime";
 
-const APP_SETTINGS_KEY = "app_settings";
+export const APP_SETTINGS_KEY = "app_settings";
 const SELECTOR_OVERRIDES_KEY = "selector_overrides";
 const DEMO_SEED_MANIFEST_KEY = "demo_seed_manifest";
 // Kept at v1 deliberately: the voice/identity fields were added to the JSON
 // shape after about/interests. A pre-existing {about,interests} row parses
 // fine — the new fields just fall through to their defaults below.
-const OPERATOR_PROFILE_KEY = "operator_profile_v1";
+export const OPERATOR_PROFILE_KEY = "operator_profile_v1";
 
 const REPLY_STYLES: ReplyStyle[] = ["warm", "direct", "casual", "thoughtful", "concise"];
 const AI_HELP_LEVELS: AiHelpLevel[] = ["memory_only", "writing_support", "full_drafts"];
 const FOCUS_AUDIENCES: FocusAudience[] = ["favourites", "all_personal"];
+const LEGACY_ENABLED_PLATFORMS: PlatformName[] = ["LINKEDIN", "IMESSAGE"];
+const PLATFORM_NAMES: PlatformName[] = [
+  "LINKEDIN",
+  "INSTAGRAM",
+  "TIKTOK",
+  "IMESSAGE",
+  "WHATSAPP",
+  "GOOGLE_MESSAGES"
+];
 
 // Conservative default: full AI reply drafting is OFF until the operator
 // opts in. Summaries / open loops / "shorten" + "warmer" still work.
@@ -196,6 +206,114 @@ function cloneSettings(settings: AppSettings): AppSettings {
   };
 }
 
+export function mergePersistedAppSettings(value: unknown): {
+  settings: AppSettings;
+  shouldPersistUpgrade: boolean;
+} {
+  const isObject = value !== null && typeof value === "object" && !Array.isArray(value);
+  const raw = isObject ? (value as Partial<AppSettings>) : {};
+  const isRecognizedSettingsRow =
+    isObject &&
+    typeof raw.scanIntervalSeconds === "number" &&
+    Number.isInteger(raw.scanIntervalSeconds) &&
+    raw.scanIntervalSeconds >= 10 &&
+    raw.scanIntervalSeconds <= 3600 &&
+    (raw.automaticUpdates === undefined || typeof raw.automaticUpdates === "boolean") &&
+    typeof raw.amberHours === "number" &&
+    Number.isInteger(raw.amberHours) &&
+    raw.amberHours >= 1 &&
+    raw.amberHours <= 72 &&
+    typeof raw.redHours === "number" &&
+    Number.isInteger(raw.redHours) &&
+    raw.redHours >= 1 &&
+    raw.redHours <= 168 &&
+    typeof raw.headless === "boolean" &&
+    typeof raw.maxMessagesPerThread === "number" &&
+    Number.isInteger(raw.maxMessagesPerThread) &&
+    raw.maxMessagesPerThread >= 5 &&
+    raw.maxMessagesPerThread <= 100;
+  if (!isRecognizedSettingsRow) {
+    return {
+      settings: cloneSettings(defaultSettings),
+      shouldPersistUpgrade: true
+    };
+  }
+  const hasEnabledPlatforms = Object.prototype.hasOwnProperty.call(raw, "enabledPlatforms");
+  const hasAiEnabled = Object.prototype.hasOwnProperty.call(raw, "aiEnabled");
+  const persistedPlatforms = hasEnabledPlatforms && Array.isArray(raw.enabledPlatforms)
+    ? Array.from(new Set(raw.enabledPlatforms.filter(
+        (platform): platform is PlatformName =>
+          typeof platform === "string" && PLATFORM_NAMES.includes(platform as PlatformName)
+      )))
+    : [];
+  const enabledPlatformsAreValid =
+    !hasEnabledPlatforms ||
+    (Array.isArray(raw.enabledPlatforms) &&
+      raw.enabledPlatforms.length === persistedPlatforms.length);
+  const aiEnabledIsValid = !hasAiEnabled || typeof raw.aiEnabled === "boolean";
+  return {
+    settings: {
+      ...defaultSettings,
+      ...raw,
+      enabledPlatforms: hasEnabledPlatforms
+        ? persistedPlatforms
+        : [...LEGACY_ENABLED_PLATFORMS],
+      aiEnabled: hasAiEnabled && typeof raw.aiEnabled === "boolean"
+        ? raw.aiEnabled
+        : hasAiEnabled
+          ? defaultSettings.aiEnabled
+          : true
+    },
+    shouldPersistUpgrade:
+      raw.automaticUpdates === undefined ||
+      !hasEnabledPlatforms ||
+      !hasAiEnabled ||
+      !enabledPlatformsAreValid ||
+      !aiEnabledIsValid
+  };
+}
+
+function mergeOperatorProfile(
+  current: OperatorProfile,
+  partial: Partial<OperatorProfile>
+): OperatorProfile {
+  return {
+    displayName: typeof partial.displayName === "string" ? partial.displayName : current.displayName,
+    about: typeof partial.about === "string" ? partial.about : current.about,
+    interests: typeof partial.interests === "string" ? partial.interests : current.interests,
+    commonPhrases:
+      typeof partial.commonPhrases === "string" ? partial.commonPhrases : current.commonPhrases,
+    avoidedPhrases:
+      typeof partial.avoidedPhrases === "string" ? partial.avoidedPhrases : current.avoidedPhrases,
+    preferredStyle:
+      partial.preferredStyle !== undefined
+        ? asReplyStyle(partial.preferredStyle)
+        : current.preferredStyle,
+    aiHelpLevel:
+      partial.aiHelpLevel !== undefined ? asAiHelpLevel(partial.aiHelpLevel) : current.aiHelpLevel,
+    setupCompletedAt:
+      typeof partial.setupCompletedAt === "string"
+        ? partial.setupCompletedAt
+        : current.setupCompletedAt,
+    focusWindow:
+      partial.focusWindow !== undefined
+        ? mergeFocusWindowUpdate(current.focusWindow, partial.focusWindow)
+        : current.focusWindow,
+    ackTemplates:
+      partial.ackTemplates !== undefined
+        ? asAckTemplates(partial.ackTemplates)
+        : current.ackTemplates,
+    focusSettings:
+      partial.focusSettings !== undefined
+        ? asFocusSettings(partial.focusSettings)
+        : current.focusSettings,
+    calendarSync:
+      partial.calendarSync !== undefined
+        ? asCalendarSync(partial.calendarSync)
+        : current.calendarSync
+  };
+}
+
 function cloneSelectorOverrides(overrides: SelectorOverrideStore): SelectorOverrideStore {
   return Object.fromEntries(
     Object.entries(overrides).map(([platform, platformOverrides]) => [
@@ -205,7 +323,9 @@ function cloneSelectorOverrides(overrides: SelectorOverrideStore): SelectorOverr
   ) as SelectorOverrideStore;
 }
 
-export function createSettingsStore(): SettingsStore {
+export function createSettingsStore(
+  database: Pick<typeof prisma, "setting"> = prisma
+): SettingsStore {
   const writeMutex = createKeyedMutex();
   let settingsCache: AppSettings | null = null;
   let settingsLoadPromise: Promise<AppSettings> | null = null;
@@ -224,9 +344,9 @@ export function createSettingsStore(): SettingsStore {
     // `getSelectorOverrides`. The earlier in-place `settingsCache = ...`
     // had a real write-race here.
     settingsLoadPromise ??= (async () => {
-      const record = await prisma.setting.findUnique({ where: { key: APP_SETTINGS_KEY } });
+      const record = await database.setting.findUnique({ where: { key: APP_SETTINGS_KEY } });
       if (!record) {
-        await prisma.setting.upsert({
+        await database.setting.upsert({
           where: { key: APP_SETTINGS_KEY },
           update: {},
           create: {
@@ -238,12 +358,25 @@ export function createSettingsStore(): SettingsStore {
         return cloneSettings(settingsCache);
       }
 
-      const loaded: AppSettings = {
-        ...defaultSettings,
-        // A corrupt app_settings row must not throw out of getSettings — it's
-        // read at boot and on many control routes. Fall back to defaults.
-        ...safeJsonParse<Partial<AppSettings>>(record.valueJson, {})
-      };
+      let parsed: Partial<AppSettings> | null = null;
+      try {
+        const candidate: unknown = JSON.parse(record.valueJson);
+        if (candidate && typeof candidate === "object" && !Array.isArray(candidate)) {
+          parsed = candidate as Partial<AppSettings>;
+        }
+      } catch {
+        parsed = null;
+      }
+      const { settings: loaded, shouldPersistUpgrade } = parsed
+        ? mergePersistedAppSettings(parsed)
+        : { settings: cloneSettings(defaultSettings), shouldPersistUpgrade: true };
+      if (shouldPersistUpgrade) {
+        await database.setting.upsert({
+          where: { key: APP_SETTINGS_KEY },
+          update: { valueJson: JSON.stringify(loaded) },
+          create: { key: APP_SETTINGS_KEY, valueJson: JSON.stringify(loaded) }
+        });
+      }
       settingsCache ??= cloneSettings(loaded);
       return cloneSettings(settingsCache);
     })().finally(() => {
@@ -253,26 +386,38 @@ export function createSettingsStore(): SettingsStore {
     return cloneSettings(await settingsLoadPromise);
   }
 
-  async function updateSettings(partial: Partial<AppSettings>): Promise<AppSettings> {
-    const current = await getSettings();
-    const next: AppSettings = {
-      ...current,
-      ...partial
-    };
-
-    await prisma.setting.upsert({
-      where: { key: APP_SETTINGS_KEY },
-      update: { valueJson: JSON.stringify(next) },
-      create: { key: APP_SETTINGS_KEY, valueJson: JSON.stringify(next) }
+  async function mutateSettings<T>(
+    work: (mutation: PersistedMutation<AppSettings>) => Promise<T>
+  ): Promise<T> {
+    return writeMutex.runExclusive(APP_SETTINGS_KEY, async () => {
+      const current = await getSettings();
+      let committed = false;
+      return work({
+        current,
+        commit: async (partial, persist) => {
+          if (committed) {
+            throw new Error("Settings mutation already committed.");
+          }
+          const next: AppSettings = { ...current, ...partial };
+          const write = persist ?? (async (value: AppSettings) => {
+            await database.setting.upsert({
+              where: { key: APP_SETTINGS_KEY },
+              update: { valueJson: JSON.stringify(value) },
+              create: { key: APP_SETTINGS_KEY, valueJson: JSON.stringify(value) }
+            });
+          });
+          await write(next);
+          committed = true;
+          settingsCache = cloneSettings(next);
+          settingsLoadPromise = null;
+          return cloneSettings(settingsCache);
+        }
+      });
     });
+  }
 
-    // Set cache *and* drop any in-flight load promise so a concurrent
-    // load-in-progress doesn't seal a stale value over ours via the
-    // load promise's tail assignment (which now uses `??=`, but
-    // dropping the promise is belt-and-braces).
-    settingsCache = cloneSettings(next);
-    settingsLoadPromise = null;
-    return cloneSettings(settingsCache);
+  async function updateSettings(partial: Partial<AppSettings>): Promise<AppSettings> {
+    return mutateSettings(({ commit }) => commit(partial));
   }
 
   async function getSelectorOverrides(): Promise<SelectorOverrideStore> {
@@ -281,7 +426,7 @@ export function createSettingsStore(): SettingsStore {
     }
 
     selectorOverridesLoadPromise ??= (async () => {
-      const record = await prisma.setting.findUnique({ where: { key: SELECTOR_OVERRIDES_KEY } });
+      const record = await database.setting.findUnique({ where: { key: SELECTOR_OVERRIDES_KEY } });
       const loaded: SelectorOverrideStore = record
         ? safeJsonParse<SelectorOverrideStore>(record.valueJson, {})
         : {};
@@ -308,7 +453,7 @@ export function createSettingsStore(): SettingsStore {
       }
     };
 
-    await prisma.setting.upsert({
+    await database.setting.upsert({
       where: { key: SELECTOR_OVERRIDES_KEY },
       update: { valueJson: JSON.stringify(next) },
       create: { key: SELECTOR_OVERRIDES_KEY, valueJson: JSON.stringify(next) }
@@ -327,7 +472,7 @@ export function createSettingsStore(): SettingsStore {
       [platform]: platformOverrides
     };
 
-    await prisma.setting.upsert({
+    await database.setting.upsert({
       where: { key: SELECTOR_OVERRIDES_KEY },
       update: { valueJson: JSON.stringify(next) },
       create: { key: SELECTOR_OVERRIDES_KEY, valueJson: JSON.stringify(next) }
@@ -337,7 +482,7 @@ export function createSettingsStore(): SettingsStore {
   }
 
   async function getDemoSeedManifest(): Promise<DemoSeedManifest | null> {
-    const record = await prisma.setting.findUnique({ where: { key: DEMO_SEED_MANIFEST_KEY } });
+    const record = await database.setting.findUnique({ where: { key: DEMO_SEED_MANIFEST_KEY } });
     if (!record) {
       return null;
     }
@@ -346,11 +491,11 @@ export function createSettingsStore(): SettingsStore {
 
   async function setDemoSeedManifest(manifest: DemoSeedManifest | null): Promise<void> {
     if (!manifest) {
-      await prisma.setting.deleteMany({ where: { key: DEMO_SEED_MANIFEST_KEY } });
+      await database.setting.deleteMany({ where: { key: DEMO_SEED_MANIFEST_KEY } });
       return;
     }
 
-    await prisma.setting.upsert({
+    await database.setting.upsert({
       where: { key: DEMO_SEED_MANIFEST_KEY },
       update: { valueJson: JSON.stringify(manifest) },
       create: { key: DEMO_SEED_MANIFEST_KEY, valueJson: JSON.stringify(manifest) }
@@ -358,7 +503,7 @@ export function createSettingsStore(): SettingsStore {
   }
 
   async function getOperatorProfile(): Promise<OperatorProfile> {
-    const record = await prisma.setting.findUnique({ where: { key: OPERATOR_PROFILE_KEY } });
+    const record = await database.setting.findUnique({ where: { key: OPERATOR_PROFILE_KEY } });
     if (!record) return { ...emptyOperatorProfile };
     try {
       const parsed = JSON.parse(record.valueJson) as Record<string, unknown>;
@@ -381,51 +526,36 @@ export function createSettingsStore(): SettingsStore {
     }
   }
 
-  async function updateOperatorProfile(partial: Partial<OperatorProfile>): Promise<OperatorProfile> {
+  async function mutateOperatorProfile<T>(
+    work: (mutation: PersistedMutation<OperatorProfile>) => Promise<T>
+  ): Promise<T> {
     return writeMutex.runExclusive(OPERATOR_PROFILE_KEY, async () => {
       const current = await getOperatorProfile();
-      const next: OperatorProfile = {
-        displayName: typeof partial.displayName === "string" ? partial.displayName : current.displayName,
-        about: typeof partial.about === "string" ? partial.about : current.about,
-        interests: typeof partial.interests === "string" ? partial.interests : current.interests,
-        commonPhrases:
-          typeof partial.commonPhrases === "string" ? partial.commonPhrases : current.commonPhrases,
-        avoidedPhrases:
-          typeof partial.avoidedPhrases === "string" ? partial.avoidedPhrases : current.avoidedPhrases,
-        preferredStyle:
-          partial.preferredStyle !== undefined
-            ? asReplyStyle(partial.preferredStyle)
-            : current.preferredStyle,
-        aiHelpLevel:
-          partial.aiHelpLevel !== undefined ? asAiHelpLevel(partial.aiHelpLevel) : current.aiHelpLevel,
-        setupCompletedAt:
-          typeof partial.setupCompletedAt === "string"
-            ? partial.setupCompletedAt
-            : current.setupCompletedAt,
-        focusWindow:
-          partial.focusWindow !== undefined
-            ? mergeFocusWindowUpdate(current.focusWindow, partial.focusWindow)
-            : current.focusWindow,
-        ackTemplates:
-          partial.ackTemplates !== undefined
-            ? asAckTemplates(partial.ackTemplates)
-            : current.ackTemplates,
-        focusSettings:
-          partial.focusSettings !== undefined
-            ? asFocusSettings(partial.focusSettings)
-            : current.focusSettings,
-        calendarSync:
-          partial.calendarSync !== undefined
-            ? asCalendarSync(partial.calendarSync)
-            : current.calendarSync
-      };
-      await prisma.setting.upsert({
-        where: { key: OPERATOR_PROFILE_KEY },
-        update: { valueJson: JSON.stringify(next) },
-        create: { key: OPERATOR_PROFILE_KEY, valueJson: JSON.stringify(next) }
+      let committed = false;
+      return work({
+        current,
+        commit: async (partial, persist) => {
+          if (committed) {
+            throw new Error("Operator profile mutation already committed.");
+          }
+          const next = mergeOperatorProfile(current, partial);
+          const write = persist ?? (async (value: OperatorProfile) => {
+            await database.setting.upsert({
+              where: { key: OPERATOR_PROFILE_KEY },
+              update: { valueJson: JSON.stringify(value) },
+              create: { key: OPERATOR_PROFILE_KEY, valueJson: JSON.stringify(value) }
+            });
+          });
+          await write(next);
+          committed = true;
+          return next;
+        }
       });
-      return next;
     });
+  }
+
+  async function updateOperatorProfile(partial: Partial<OperatorProfile>): Promise<OperatorProfile> {
+    return mutateOperatorProfile(({ commit }) => commit(partial));
   }
 
   async function acknowledgeFocusWindowPerson(
@@ -445,7 +575,7 @@ export function createSettingsStore(): SettingsStore {
           ackedPersonIds: [...current.focusWindow.ackedPersonIds, personId]
         }
       };
-      await prisma.setting.upsert({
+      await database.setting.upsert({
         where: { key: OPERATOR_PROFILE_KEY },
         update: { valueJson: JSON.stringify(next) },
         create: { key: OPERATOR_PROFILE_KEY, valueJson: JSON.stringify(next) }
@@ -457,6 +587,7 @@ export function createSettingsStore(): SettingsStore {
   return {
     getSettings,
     updateSettings,
+    mutateSettings,
     getSelectorOverrides,
     saveSelectorOverride,
     resetSelectorOverride,
@@ -464,6 +595,7 @@ export function createSettingsStore(): SettingsStore {
     setDemoSeedManifest,
     getOperatorProfile,
     updateOperatorProfile,
+    mutateOperatorProfile,
     acknowledgeFocusWindowPerson
   };
 }

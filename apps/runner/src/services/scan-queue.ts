@@ -108,7 +108,11 @@ interface ScanQueueDeps {
    * forget; the service dedupes against any prior transcription row.
    * Scans must not block on transcription.
    */
-  onAudioMessage?: (input: { messageId: string }) => void;
+  onAudioMessage?: (input: {
+    messageId: string;
+    platform: PlatformName;
+    shouldContinue: () => boolean;
+  }) => void;
   /**
    * Optional gate consulted by the scheduler tick and the ALL-scan platform
    * expansion. Return false to skip a platform this pass without recording a
@@ -119,6 +123,8 @@ interface ScanQueueDeps {
    * (the /control/scan route already 409s an unlinked WhatsApp scan).
    */
   isPlatformScannable?: (platform: PlatformName) => boolean;
+  /** Immediate reserved-selection gate for work created after an opt-out intent. */
+  isPlatformSelectedForNewWork?: (platform: PlatformName) => boolean;
   recordLatency?: (input: {
     metric: MessageSyncMetric;
     durationMs: number;
@@ -263,6 +269,22 @@ const allPlatforms: PlatformName[] = [
   "WHATSAPP",
   "GOOGLE_MESSAGES"
 ];
+
+export function resolveSelectedScanPlatforms(input: {
+  requestedPlatform?: PlatformName;
+  enabledPlatforms: readonly PlatformName[];
+  adapters: Partial<Record<PlatformName, unknown>>;
+  isPlatformScannable?: (platform: PlatformName) => boolean;
+}): PlatformName[] {
+  const enabled = new Set(input.enabledPlatforms);
+  const candidates = input.requestedPlatform ? [input.requestedPlatform] : allPlatforms;
+  return candidates.filter(
+    (platform) =>
+      enabled.has(platform) &&
+      Boolean(input.adapters[platform]) &&
+      (!input.isPlatformScannable || input.isPlatformScannable(platform))
+  );
+}
 
 type EnqueueScanOptions = {
   respectCooldown?: boolean;
@@ -738,6 +760,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
   const queue: ScanJob[] = [];
   let processing = false;
   let currentJob: ScanJob | null = null;
+  let currentScanPlatform: PlatformName | null = null;
   let currentScanProgress:
     | {
         platform: PlatformName;
@@ -1302,11 +1325,12 @@ export function createScanQueue(deps: ScanQueueDeps) {
         // with active backoff (#403) are skipped this tick and picked
         // up on a later one. The queue serialises jobs so this never
         // produces parallel scans of different platforms.
-        const enabledPlatforms = allPlatforms.filter((platform) => Boolean(deps.adapters[platform]));
+        const enabledPlatforms = resolveSelectedScanPlatforms({
+          enabledPlatforms: settings.enabledPlatforms,
+          adapters: deps.adapters,
+          isPlatformScannable: deps.isPlatformScannable
+        });
         for (const platform of enabledPlatforms) {
-          if (deps.isPlatformScannable && !deps.isPlatformScannable(platform)) {
-            continue;
-          }
           if (!isPlatformDueForScheduledScan(platform, intervalMs, now)) {
             continue;
           }
@@ -1393,13 +1417,12 @@ export function createScanQueue(deps: ScanQueueDeps) {
 
     await ensurePlatformRows();
     const settings = await deps.settingsStore.getSettings();
-    const scanPlatforms = job.platform
-      ? [job.platform]
-      : allPlatforms.filter(
-          (platform) =>
-            Boolean(deps.adapters[platform]) &&
-            (!deps.isPlatformScannable || deps.isPlatformScannable(platform))
-        );
+    const scanPlatforms = resolveSelectedScanPlatforms({
+      requestedPlatform: job.platform,
+      enabledPlatforms: settings.enabledPlatforms,
+      adapters: deps.adapters,
+      isPlatformScannable: deps.isPlatformScannable
+    });
 
     let updatedThreads = 0;
     let aborted = false;
@@ -1451,7 +1474,17 @@ export function createScanQueue(deps: ScanQueueDeps) {
     };
 
     for (const platform of scanPlatforms) {
+      if (deps.isPlatformSelectedForNewWork?.(platform) === false) continue;
+      const beforeLockSettings = await deps.settingsStore.getSettings();
+      if (!beforeLockSettings.enabledPlatforms.includes(platform)) {
+        continue;
+      }
       await deps.platformMutex.runWithQueueOne(lockKey(platform), async () => {
+        if (deps.isPlatformSelectedForNewWork?.(platform) === false) return;
+        const authoritativeSettings = await deps.settingsStore.getSettings();
+        if (!authoritativeSettings.enabledPlatforms.includes(platform)) {
+          return;
+        }
         const runLogger = createRunLogger({
           requestId: job.jobId,
           platform,
@@ -1498,6 +1531,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
           return;
         }
         const linkedInAdapter = platform === "LINKEDIN" ? (adapter as LinkedInScanAdapter) : null;
+        currentScanPlatform = platform;
         const traceAwareAdapter = toTraceAwareAdapter(adapter);
         traceAwareAdapter.setRunLogger?.(runLogger);
 
@@ -2546,7 +2580,8 @@ export function createScanQueue(deps: ScanQueueDeps) {
                 candidateToSync.messages,
                 markedFullBackfill,
                 false,
-                job.trigger
+                job.trigger,
+                () => !shouldAbort()
               );
               updatedThreads += syncResult.updatedThreads;
               platformUpdatedThreads += syncResult.updatedThreads;
@@ -2979,6 +3014,9 @@ export function createScanQueue(deps: ScanQueueDeps) {
           if (currentScanProgress?.platform === platform) {
             currentScanProgress = null;
           }
+          if (currentScanPlatform === platform) {
+            currentScanPlatform = null;
+          }
           runLogger.mergeCounters({
             threadsScannedCount,
             candidatesToOpenCount: candidatesCount,
@@ -3145,7 +3183,8 @@ export function createScanQueue(deps: ScanQueueDeps) {
     // dormant backfill threads just rate-limits the AI provider and is not
     // what the backfill is for.
     skipAi = false,
-    trigger?: ScanTrigger
+    trigger?: ScanTrigger,
+    shouldContinue?: () => boolean
   ): Promise<{
     updatedThreads: number;
     parsedMessages: number;
@@ -3187,6 +3226,9 @@ export function createScanQueue(deps: ScanQueueDeps) {
     });
 
     const messages = preParsedMessages ?? (await adapter.fetchThreadMessages(candidate, maxMessages));
+    if (shouldContinue && !shouldContinue()) {
+      return { updatedThreads: 0, parsedMessages: 0, persistedMessages: 0, quarantinedMessages: 0 };
+    }
     const canonicalPlatformThreadId = resolvePlatformThreadId(platform, candidate);
 
     if (platform === "LINKEDIN" && !canonicalPlatformThreadId) {
@@ -3229,6 +3271,9 @@ export function createScanQueue(deps: ScanQueueDeps) {
 
     const candidateAvatarUrl = candidate.avatarUrl?.trim() || null;
     const candidateProfileUrl = candidate.profileUrl?.trim() || null;
+    if (shouldContinue && !shouldContinue()) {
+      return { updatedThreads: 0, parsedMessages: 0, persistedMessages: 0, quarantinedMessages: 0 };
+    }
     // Person identity priority: profileUrl > displayName. profileUrl is a
     // stable per-person identifier on LinkedIn; displayName-only lookups
     // can false-positive across two LinkedIn contacts who share a name,
@@ -3727,7 +3772,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
           sourceChangedAt: trigger.sourceChangedAt,
           persistedAt,
           trigger: trigger.kind
-        }
+      }
       : undefined;
     if (syncTiming && persistedMessages > 0) {
       deps.recordLatency?.({
@@ -3743,13 +3788,20 @@ export function createScanQueue(deps: ScanQueueDeps) {
         syncTiming
       });
     }
+    const optionalWorkStillAllowed = (): boolean =>
+      !shouldContinue || shouldContinue();
+    if (!optionalWorkStillAllowed()) skipAi = true;
 
     // Transcription enqueue. We resolve the persisted Message ids in a
     // single query rather than per-message lookups, then hand each one to
     // the optional hook. Fire-and-forget: scans never block on OpenAI
     // latency, and the transcription service's audioFingerprint dedup
     // means re-scans of the same audio are free.
-    if (audioBearingMessageKeys.length > 0 && deps.onAudioMessage) {
+    if (
+      audioBearingMessageKeys.length > 0 &&
+      deps.onAudioMessage &&
+      optionalWorkStillAllowed()
+    ) {
       try {
         const persistedAudioRows = await prisma.message.findMany({
           where: {
@@ -3758,9 +3810,18 @@ export function createScanQueue(deps: ScanQueueDeps) {
           },
           select: { id: true }
         });
+        if (!optionalWorkStillAllowed()) skipAi = true;
         for (const row of persistedAudioRows) {
+          if (!optionalWorkStillAllowed()) {
+            skipAi = true;
+            break;
+          }
           try {
-            deps.onAudioMessage({ messageId: row.id });
+            deps.onAudioMessage({
+              messageId: row.id,
+              platform,
+              shouldContinue: optionalWorkStillAllowed
+            });
           } catch (error) {
             console.warn(
               `[scan-queue] onAudioMessage hook threw for message ${row.id}: ${
@@ -3952,7 +4013,10 @@ export function createScanQueue(deps: ScanQueueDeps) {
       : null;
 
     const shouldRefreshSummary =
-      !skipAi && !!lastInboundHash && lastInboundHash !== thread.lastInboundHash;
+      !skipAi &&
+      optionalWorkStillAllowed() &&
+      !!lastInboundHash &&
+      lastInboundHash !== thread.lastInboundHash;
 
     let summary = thread.rollingSummary;
     let whatTheyWant = thread.whatTheyWant;
@@ -3973,22 +4037,27 @@ export function createScanQueue(deps: ScanQueueDeps) {
           ? (JSON.parse(thread.rememberJson) as RememberItem[])
           : [],
         messages: latestMessages.map(prismaMessageToPrompt).filter(isAiVisibleMessage),
-        needsReply: resolvedNeedsReply
+        needsReply: resolvedNeedsReply,
+        shouldContinue: optionalWorkStillAllowed
       });
 
       // Defensive sanitiser: AI output (or its fallback path) can contain
       // unpaired surrogates if a slice landed mid-emoji. Strip them before
       // writing — the SQLite driver rejects the resulting JSON otherwise.
-      summary = stripUnpairedSurrogates(aiSummary.summary);
-      whatTheyWant = stripUnpairedSurrogates(aiSummary.what_they_want);
-      openLoopsJson = JSON.stringify(aiSummary.open_loops.map((s) => stripUnpairedSurrogates(s)));
-      toneNotesJson = JSON.stringify(aiSummary.tone_notes.map((s) => stripUnpairedSurrogates(s)));
-      // remember notes are already surrogate-stripped inside updateThreadSummary.
-      rememberJson = JSON.stringify(aiSummary.remember);
-      // Reply Brief is already sanitised + sub-fields surrogate-stripped
-      // inside updateThreadSummary. Persisted as a single JSON blob; the
-      // dashboard parses on read.
-      replyBriefJson = aiSummary.reply_brief ? JSON.stringify(aiSummary.reply_brief) : null;
+      if (optionalWorkStillAllowed()) {
+        summary = stripUnpairedSurrogates(aiSummary.summary);
+        whatTheyWant = stripUnpairedSurrogates(aiSummary.what_they_want);
+        openLoopsJson = JSON.stringify(aiSummary.open_loops.map((s) => stripUnpairedSurrogates(s)));
+        toneNotesJson = JSON.stringify(aiSummary.tone_notes.map((s) => stripUnpairedSurrogates(s)));
+        // remember notes are already surrogate-stripped inside updateThreadSummary.
+        rememberJson = JSON.stringify(aiSummary.remember);
+        // Reply Brief is already sanitised + sub-fields surrogate-stripped
+        // inside updateThreadSummary. Persisted as a single JSON blob; the
+        // dashboard parses on read.
+        replyBriefJson = aiSummary.reply_brief ? JSON.stringify(aiSummary.reply_brief) : null;
+      } else {
+        skipAi = true;
+      }
     }
 
     // Phase 3: classify on first encounter only. Once a thread has a
@@ -3996,18 +4065,21 @@ export function createScanQueue(deps: ScanQueueDeps) {
     // can be triggered via /control/classify-uncategorized after a wrong
     // verdict is corrected manually.
     let categoryUpdate: string | null | undefined = undefined;
-    if (!skipAi && !thread.category && hasPersistedMessages) {
+    if (!skipAi && optionalWorkStillAllowed() && !thread.category && hasPersistedMessages) {
       const classified = await deps.aiService
         .classifyThreadCategory({
           platform: thread.platform as PlatformName,
           displayName: person.displayName,
           messages: latestMessages.map(prismaMessageToPrompt).filter(isAiVisibleMessage),
           summary: summary ?? null,
-          whatTheyWant: whatTheyWant ?? null
+          whatTheyWant: whatTheyWant ?? null,
+          shouldContinue: optionalWorkStillAllowed
         })
         .catch(() => null);
-      if (classified) {
+      if (classified && optionalWorkStillAllowed()) {
         categoryUpdate = classified;
+      } else if (!optionalWorkStillAllowed()) {
+        skipAi = true;
       }
     }
 
@@ -4032,7 +4104,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
     // operator can pick a quieter tier without losing summaries.
     const operatorProfile = await deps.settingsStore.getOperatorProfile();
     const allowClassification = operatorProfile.aiHelpLevel !== "memory_only";
-    if (!skipAi && lastInboundMessage && allowClassification) {
+    if (!skipAi && optionalWorkStillAllowed() && lastInboundMessage && allowClassification) {
       const closedKey = stableHash(
         `closed-v3|${lastInboundMessage.timestamp.toISOString()}|${cleanText(lastInboundMessage.text)}`
       );
@@ -4053,10 +4125,11 @@ export function createScanQueue(deps: ScanQueueDeps) {
           .classifyThreadClosed({
             displayName: person.displayName,
             messages: classifierMessages,
-            summary: summary ?? null
+            summary: summary ?? null,
+            shouldContinue: optionalWorkStillAllowed
           })
           .catch(() => null);
-        if (verdict) {
+        if (verdict && optionalWorkStillAllowed()) {
           closedStatusUpdate = verdict.status;
           closedStatusReasonUpdate = verdict.reason;
           closedStatusCacheKeyUpdate = closedKey;
@@ -4248,7 +4321,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
     processNext,
     getQueueDepth,
     isScanning: () => processing,
-    getCurrentScanPlatform: () => currentJob?.platform,
+    getCurrentScanPlatform: () => currentScanPlatform ?? currentJob?.platform,
     /**
      * Live snapshot of the LinkedIn streaming scan in flight, or `null` when
      * no scan is running. Drives the system status bar's determinate progress
@@ -4282,6 +4355,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
         messages?: NormalizedMessage[];
         skipAi?: boolean;
         trigger?: ScanTrigger;
+        shouldContinue?: () => boolean;
       }
     ) =>
       syncThread(
@@ -4293,8 +4367,13 @@ export function createScanQueue(deps: ScanQueueDeps) {
         input.messages,
         false,
         input.skipAi ?? false,
-        input.trigger
+        input.trigger,
+        input.shouldContinue
       ),
+    createContinueGate: () => {
+      const baseline = abortVersion;
+      return () => abortVersion === baseline;
+    },
     clearAbort
   };
 

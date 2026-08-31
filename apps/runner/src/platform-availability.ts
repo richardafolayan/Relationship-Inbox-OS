@@ -36,6 +36,13 @@ export function availablePlatformNames(availability: PlatformAvailability): Plat
   return CONFIGURABLE_PLATFORMS.filter((platform) => availability[platform]);
 }
 
+export function isPlatformEnabled(
+  enabledPlatforms: readonly PlatformName[],
+  platform: PlatformName
+): boolean {
+  return enabledPlatforms.includes(platform);
+}
+
 export function effectivePlatformStatus(
   platform: PlatformName,
   storedStatus: StoredPlatformStatus | undefined,

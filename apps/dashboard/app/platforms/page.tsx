@@ -19,8 +19,10 @@ import {
   platformScanEligible,
   resolvePlatformPrimaryAction
 } from "@/lib/platform-setup";
+import { resolvePlatformSelectionControls } from "@/lib/platform-selection-controls";
 import { ReceiptsDrawer } from "@/components/common/receipts-drawer";
 import { cn } from "@/lib/utils";
+import { startSetupWizard } from "@/lib/setup-wizard";
 
 const PLATFORM_DISPLAY: Record<PlatformCard["platform"], string> = {
   LINKEDIN: "LinkedIn",
@@ -102,7 +104,9 @@ export default function PlatformsPage() {
   );
 
   const visibleRows = rows;
-  const connected = visibleRows.filter((row) => row.status === "CONNECTED").length;
+  const connected = visibleRows.filter(
+    (row) => row.enabled !== false && row.status === "CONNECTED"
+  ).length;
   const total = visibleRows.length;
 
   return (
@@ -126,7 +130,7 @@ export default function PlatformsPage() {
       <MacContactsHint />
 
       {visibleRows
-        .filter((row) => row.status === "DEGRADED")
+        .filter((row) => row.enabled !== false && row.status === "DEGRADED")
         .map((row) => (
           <DegradedBanner
             key={row.platform}
@@ -221,6 +225,8 @@ function PlatformCardView({
   const statusToken =
     !supported
       ? { className: "text-ink-3", label: "Not available" }
+      : row.enabled === false
+        ? { className: "text-ink-3", label: "Off" }
       : connected
         ? { className: "text-risk-fresh", label: "Connected" }
         : row.status === "DEGRADED"
@@ -238,7 +244,9 @@ function PlatformCardView({
         : null;
 
   const connectHint =
-    !row.lastScanAt && row.lastError && !scanEligible
+    row.enabled === false
+      ? "Choose this source in setup"
+      : !row.lastScanAt && row.lastError && !scanEligible
       ? classifyConsumerFailure(new Error(row.lastError), {
           path: "/runner/control/platform/connect",
           method: "POST"
@@ -251,7 +259,7 @@ function PlatformCardView({
   const passes = report?.results.filter((r) => r.status === "PASS").length ?? 0;
   const totalSelectors = report?.results.length ?? 0;
 
-  const primaryLabel = !supported
+  const configuredPrimaryLabel = !supported
     ? "Not available"
     : primaryAction === "scan"
       ? "Scan now"
@@ -294,7 +302,7 @@ function PlatformCardView({
       `${display} scan failed`
     );
 
-  const runPrimary = () => {
+  const runConfiguredPrimary = () => {
     if (!supported) return;
     if (primaryAction === "scan") {
       runScan();
@@ -372,6 +380,13 @@ function PlatformCardView({
       }
     }
   ];
+  const controls = resolvePlatformSelectionControls({
+    enabled: row.enabled !== false,
+    primaryLabel: configuredPrimaryLabel,
+    primaryAction: runConfiguredPrimary,
+    setupAction: startSetupWizard,
+    secondaryActions: moreItems
+  });
 
   return (
     <article className="rounded-[16px] border border-hairline bg-paper">
@@ -432,17 +447,17 @@ function PlatformCardView({
             <Button
               variant="quiet"
               className="min-h-[40px] px-[14px] py-[8px] text-[12.5px]"
-              onClick={runPrimary}
+              onClick={controls.primaryAction}
               disabled={actionRunning}
             >
-              {actionState?.phase === "running" ? actionState.label : primaryLabel}
+              {actionState?.phase === "running" ? actionState.label : controls.primaryLabel}
             </Button>
           ) : (
             <Button variant="quiet" className="min-h-[40px] px-[14px] py-[8px] text-[12.5px]" disabled>
               Not available
             </Button>
           )}
-          {supported ? (
+          {supported && controls.secondaryActions.length > 0 ? (
             <Menu
               trigger={
                 <button
@@ -455,7 +470,7 @@ function PlatformCardView({
                   <MoreVertical className="h-[14px] w-[14px]" strokeWidth={2} />
                 </button>
               }
-              items={moreItems}
+              items={controls.secondaryActions}
             />
           ) : null}
         </div>

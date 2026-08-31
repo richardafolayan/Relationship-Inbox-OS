@@ -98,6 +98,7 @@ import {
   platformScanEligible,
   resolvePlatformPrimaryAction
 } from "@/lib/platform-setup";
+import { resolvePlatformSelectionControls } from "@/lib/platform-selection-controls";
 import { startSetupWizard } from "@/lib/setup-wizard";
 import { OptionalComponents } from "@/components/settings/OptionalComponents";
 import { formatRelative } from "@/lib/time";
@@ -1227,7 +1228,18 @@ function PlatformSettingsSection({
             }
           />
         ) : null}
-        {whatsappRow ? (
+        {whatsappRow && whatsappRow.enabled === false ? (
+          <PlatformSetupCard
+            row={whatsappRow}
+            title="WhatsApp"
+            body="Choose WhatsApp in setup before linking this computer."
+            primaryLabel="Add in setup"
+            remoteDisabled={remoteDisabled}
+            offlineExplanation={host.offlineExplanation}
+            busy={false}
+            onPrimary={startSetupWizard}
+          />
+        ) : whatsappRow ? (
           <div className="rounded-[8px] bg-paper-2/45 px-4 py-4">
             <WhatsAppConnect
               scanBusy={busy === "WHATSAPP"}
@@ -1302,7 +1314,14 @@ function PlatformSetupCard({
       : status === "ERROR"
         ? "Not scanned yet"
         : null;
-  const secondaryItems = moreItems ?? [];
+  const controls = resolvePlatformSelectionControls({
+    enabled,
+    primaryLabel,
+    primaryAction: onPrimary,
+    setupAction: startSetupWizard,
+    secondaryActions: moreItems ?? []
+  });
+  const secondaryItems = controls.secondaryActions;
 
   return (
     <article className="rounded-[8px] bg-paper-2/45 px-4 py-4">
@@ -1311,7 +1330,7 @@ function PlatformSetupCard({
         <p
           className={cn(
             "m-0 mt-1 text-[13px] font-medium",
-            connected ? "text-risk-fresh" : "text-ink-2"
+            enabled && connected ? "text-risk-fresh" : "text-ink-2"
           )}
           data-testid="platform-connection-status"
         >
@@ -1323,6 +1342,11 @@ function PlatformSetupCard({
           </p>
         ) : null}
         <p className="m-0 mt-2 text-[13.5px] leading-[1.45] text-ink-3">{body}</p>
+        {!enabled ? (
+          <p className="m-0 mt-1 text-[12px] leading-[1.4] text-ink-3">
+            Choose this source in setup.
+          </p>
+        ) : null}
         {deviceLabel ? (
           <p className="m-0 mt-1.5 text-[12px] leading-[1.4] text-ink-3">{deviceLabel}</p>
         ) : null}
@@ -1340,9 +1364,9 @@ function PlatformSetupCard({
       ) : null}
       <div className="mt-4 flex flex-wrap items-center gap-2">
         <InlineActionButton
-          onClick={onPrimary}
-          disabled={busy || !enabled || !supported || remoteDisabled}
-          idleLabel={primaryLabel}
+          onClick={controls.primaryAction}
+          disabled={busy || !supported || remoteDisabled}
+          idleLabel={controls.primaryLabel}
           state={actionState ?? (busy ? { phase: "running", label: busyLabel } : null)}
           title={remoteDisabled ? offlineExplanation : undefined}
           className="inline-flex min-h-[40px] items-center rounded-pill bg-ink px-4 py-[8px] text-[12.5px] font-medium text-paper hover:bg-ink-2 disabled:cursor-not-allowed disabled:opacity-50"

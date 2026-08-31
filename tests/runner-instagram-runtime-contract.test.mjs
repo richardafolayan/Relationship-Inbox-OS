@@ -18,6 +18,13 @@ const scanQueueSource = await readFile(
   new URL("../apps/runner/src/services/scan-queue.ts", import.meta.url),
   "utf8"
 );
+const setupCoordinatorSource = await readFile(
+  new URL(
+    "../apps/runner/src/services/setup-preferences-coordinator.ts",
+    import.meta.url
+  ),
+  "utf8"
+);
 const resetCoordinatorSource = await readFile(
   new URL(
     "../apps/runner/src/services/platform-session-reset-coordinator.ts",
@@ -38,7 +45,7 @@ const selectors = JSON.parse(
 
 test("server setup validation and interactive connection include Instagram", () => {
   assert.match(
-    runnerSource,
+    setupCoordinatorSource,
     /z\.enum\(\["IMESSAGE", "LINKEDIN", "INSTAGRAM", "WHATSAPP", "GOOGLE_MESSAGES"\]\)/
   );
   assert.match(
@@ -51,6 +58,16 @@ test("server setup validation and interactive connection include Instagram", () 
   );
   assert.match(factorySource, /preferInstalledChrome: true/);
   assert.match(factorySource, /connectTimeoutMs: resolveConnectTimeoutMs\("personal"\)/);
+});
+
+test("connection completion cannot resurrect a source removed while login was open", () => {
+  const route = runnerSource.slice(
+    runnerSource.indexOf('app.post("/control/platform/connect"'),
+    runnerSource.indexOf('app.post("/control/platform/test-selectors"')
+  );
+  assert.ok(route.indexOf("withSelectedPlatform(platform") < route.indexOf("connectPromise"));
+  assert.doesNotMatch(route, /ensurePlatformEnabledInSettings|updateSettings\(/);
+  assert.match(route, /settings\.enabledPlatforms\.includes\("LINKEDIN"\)/);
 });
 
 test("session reset uses the isolated-platform reset plan", () => {

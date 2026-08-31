@@ -98,7 +98,8 @@ test("scan queue keeps incomplete and capped adapters degraded without advancing
         demoMode: false,
         recentThreadSweepCount: 10,
         maxMessagesPerThread: 20,
-        scanIntervalSeconds: 60
+        scanIntervalSeconds: 60,
+        enabledPlatforms: ["INSTAGRAM", "IMESSAGE"]
       })
     },
     aiService: {},

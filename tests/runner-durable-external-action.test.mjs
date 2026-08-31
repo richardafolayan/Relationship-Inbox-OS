@@ -224,6 +224,25 @@ test("a proven pre-dispatch failure releases the durable claim for a safe retry"
   assert.equal(dispatches, 1);
 });
 
+test("selection revocation before reaction, edit, or vote dispatch releases the claim", async () => {
+  for (const actionType of ["message_reaction", "message_edit", "poll_vote"]) {
+    const h = harness();
+    let dispatches = 0;
+    const revoked = new Error("platform not selected");
+    const action = input({
+      clientActionId: `${actionType}-1111-4111-8111-111111111111`,
+      actionType,
+      beforeDispatch: async () => { throw revoked; },
+      dispatch: async () => { dispatches += 1; }
+    });
+
+    await assert.rejects(() => h.service.execute(action), (error) => error === revoked);
+    assert.equal(dispatches, 0);
+    assert.equal(h.rows[0].status, "PENDING");
+    assert.equal(h.rows[0].receiptJson, null);
+  }
+});
+
 test("concurrent identical actions have one claim winner and one physical dispatch", async () => {
   const h = harness();
   let dispatches = 0;

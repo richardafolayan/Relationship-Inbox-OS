@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -9,10 +9,19 @@ const {
   normalizeSetupPreferences
 } = await import("../apps/runner/dist/services/setup-preferences.js");
 const {
+  applyPreparedTranscriptionSetup,
   createTranscriptionSetupManager,
+  sweepTranscriptionDownloadOrphans,
+  TranscriptionSetupBusyError,
   transcriptionModeForModel,
   TRANSCRIPTION_MODELS
 } = await import("../apps/runner/dist/services/transcription-setup.js");
+
+function deferred() {
+  let resolve;
+  const promise = new Promise((nextResolve) => { resolve = nextResolve; });
+  return { promise, resolve };
+}
 
 test("setup preferences accept only supported pilot sources and explicit options", () => {
   assert.deepEqual(normalizeSetupPreferences({
@@ -26,7 +35,8 @@ test("setup preferences accept only supported pilot sources and explicit options
     aiEnabled: true,
     transcriptionMode: "enhanced",
     startedAt: "start",
-    completedAt: "done"
+    completedAt: "done",
+    revision: 0
   });
 });
 
@@ -54,8 +64,8 @@ test("transcription setup stays off until a download succeeds, then can remove i
     downloadScript: "/unused",
     initialEnabled: () => enabled,
     initialModelId: () => modelId,
-    persist: (mode, nextEnabled, nextModelId) => persisted.push([mode, nextEnabled, nextModelId]),
     applyRuntime: (_mode, nextEnabled, nextModelId) => {
+      persisted.push([_mode, nextEnabled, nextModelId]);
       enabled = nextEnabled;
       modelId = nextModelId;
     },
@@ -69,7 +79,9 @@ test("transcription setup stays off until a download succeeds, then can remove i
     }
   });
   try {
-    assert.equal(manager.configure("enhanced").phase, "downloading");
+    const prepared = manager.prepare("enhanced");
+    assert.equal(manager.status().mode, "off");
+    assert.equal(prepared.commit().phase, "downloading");
     assert.equal(enabled, false);
     for (let attempt = 0; attempt < 20 && manager.status().phase === "downloading"; attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 5));
@@ -79,7 +91,7 @@ test("transcription setup stays off until a download succeeds, then can remove i
     assert.equal(enabled, true);
     assert.deepEqual(persisted.at(-1), ["enhanced", true, TRANSCRIPTION_MODELS.enhanced.modelId]);
 
-    const off = manager.configure("off", true);
+    const off = manager.prepare("off", true).commit();
     assert.equal(off.mode, "off");
     assert.equal(off.installedMode, "off");
     assert.equal(off.downloadedBytes, 0);
@@ -97,18 +109,243 @@ test("a failed model download never enables transcription", async () => {
     downloadScript: "/unused",
     initialEnabled: () => enabled,
     initialModelId: () => TRANSCRIPTION_MODELS.standard.modelId,
-    persist: () => undefined,
     applyRuntime: (_mode, nextEnabled) => { enabled = nextEnabled; },
     download: async () => { throw new Error("network unavailable"); }
   });
   try {
-    manager.configure("standard");
+    manager.prepare("standard").commit();
     for (let attempt = 0; attempt < 20 && manager.status().phase === "downloading"; attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 5));
     }
     assert.equal(manager.status().phase, "error");
     assert.match(manager.status().error, /network unavailable/);
     assert.equal(enabled, false);
+  } finally {
+    rmSync(modelDir, { recursive: true, force: true });
+  }
+});
+
+test("a second-tab mode change is rejected before preferences advance during download", async () => {
+  const modelDir = mkdtempSync(join(tmpdir(), "tovi-transcription-"));
+  let finishDownload;
+  const download = new Promise((resolve) => { finishDownload = resolve; });
+  let preferenceWrites = 0;
+  const manager = createTranscriptionSetupManager({
+    modelDir,
+    downloadScript: "/unused",
+    initialEnabled: () => false,
+    initialModelId: () => TRANSCRIPTION_MODELS.standard.modelId,
+    applyRuntime: () => undefined,
+    download: async () => download
+  });
+  try {
+    await applyPreparedTranscriptionSetup({
+      manager,
+      mode: "standard",
+      persistPreferences: async () => {
+        preferenceWrites += 1;
+        return { revision: 1, transcriptionMode: "standard" };
+      }
+    });
+
+    await assert.rejects(
+      applyPreparedTranscriptionSetup({
+        manager,
+        mode: "off",
+        persistPreferences: async () => {
+          preferenceWrites += 1;
+          return { revision: 2, transcriptionMode: "off" };
+        }
+      }),
+      (error) => error instanceof TranscriptionSetupBusyError
+    );
+    assert.equal(preferenceWrites, 1);
+    assert.equal(manager.status().mode, "standard");
+  } finally {
+    finishDownload();
+    rmSync(modelDir, { recursive: true, force: true });
+  }
+});
+
+test("transcription preparation owns the full persistence boundary", async () => {
+  const modelDir = mkdtempSync(join(tmpdir(), "tovi-transcription-"));
+  const holdPersistence = deferred();
+  let firstWrites = 0;
+  let secondWrites = 0;
+  const manager = createTranscriptionSetupManager({
+    modelDir,
+    downloadScript: "/unused",
+    initialEnabled: () => false,
+    initialModelId: () => TRANSCRIPTION_MODELS.standard.modelId,
+    applyRuntime: () => undefined,
+    download: async () => undefined
+  });
+  try {
+    const first = applyPreparedTranscriptionSetup({
+      manager,
+      mode: "standard",
+      persistPreferences: async () => {
+        firstWrites += 1;
+        await holdPersistence.promise;
+        return { revision: 1, transcriptionMode: "standard" };
+      }
+    });
+    await Promise.resolve();
+
+    await assert.rejects(
+      applyPreparedTranscriptionSetup({
+        manager,
+        mode: "enhanced",
+        persistPreferences: async () => {
+          secondWrites += 1;
+          return { revision: 2, transcriptionMode: "enhanced" };
+        }
+      }),
+      (error) => error instanceof TranscriptionSetupBusyError
+    );
+    assert.equal(firstWrites, 1);
+    assert.equal(secondWrites, 0);
+    holdPersistence.resolve();
+    await first;
+  } finally {
+    holdPersistence.resolve();
+    rmSync(modelDir, { recursive: true, force: true });
+  }
+});
+
+test("startup removes only orphaned transcription download stages", () => {
+  const root = mkdtempSync(join(tmpdir(), "tovi-transcription-orphans-"));
+  const modelDir = join(root, "models");
+  const orphan = join(root, ".models-download-orphan");
+  const active = join(root, ".models-download-active");
+  mkdirSync(orphan);
+  mkdirSync(active);
+  writeFileSync(join(orphan, ".tovi-transcription-download-lease.json"), JSON.stringify({ pid: 999999, startedAt: new Date(0).toISOString() }));
+  writeFileSync(join(active, ".tovi-transcription-download-lease.json"), JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }));
+  try {
+    assert.equal(sweepTranscriptionDownloadOrphans(modelDir), 1);
+    assert.deepEqual(readdirSync(root).sort(), [".models-download-active"]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a startup sweep cannot delete a completed download while activation owns its live lease", async () => {
+  const root = mkdtempSync(join(tmpdir(), "tovi-transcription-activation-"));
+  const modelDir = join(root, "models");
+  let enabled = false;
+  let swept = -1;
+  const manager = createTranscriptionSetupManager({
+    modelDir,
+    downloadScript: "/unused",
+    initialEnabled: () => enabled,
+    initialModelId: () => TRANSCRIPTION_MODELS.standard.modelId,
+    applyRuntime: (_mode, nextEnabled) => { enabled = nextEnabled; },
+    download: async (modelId, stagedDir) => {
+      writeFileSync(join(stagedDir, "model.onnx"), "model");
+      writeFileSync(join(stagedDir, ".tovi-transcription-model.json"), JSON.stringify({
+        modelId,
+        downloadedAt: new Date().toISOString(),
+        bytes: 5
+      }));
+    },
+    activateDownloadedModel: (stagedDir, targetDir) => {
+      swept = sweepTranscriptionDownloadOrphans(targetDir);
+      renameSync(stagedDir, targetDir);
+    }
+  });
+  try {
+    manager.prepare("standard").commit();
+    for (let attempt = 0; attempt < 20 && manager.status().phase === "downloading"; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert.equal(swept, 0);
+    assert.equal(manager.status().phase, "idle");
+    assert.equal(manager.status().installedMode, "standard");
+    assert.equal(enabled, true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("failed transcription preparation leaves preferences, runtime, status, and revision unchanged", async () => {
+  const modelDir = mkdtempSync(join(tmpdir(), "tovi-transcription-"));
+  let enabled = true;
+  let preferenceWrites = 0;
+  const manager = createTranscriptionSetupManager({
+    modelDir,
+    downloadScript: "/unused",
+    initialEnabled: () => enabled,
+    initialModelId: () => TRANSCRIPTION_MODELS.standard.modelId,
+    applyRuntime: (_mode, nextEnabled) => { enabled = nextEnabled; },
+    prepareDownloadDirectory: () => {
+      throw new Error("model directory unavailable");
+    }
+  });
+  try {
+    const before = manager.status();
+    await assert.rejects(
+      applyPreparedTranscriptionSetup({
+        manager,
+        mode: "enhanced",
+        persistPreferences: async () => {
+          preferenceWrites += 1;
+          return { revision: 6, transcriptionMode: "enhanced" };
+        }
+      }),
+      /model directory unavailable/
+    );
+    assert.equal(preferenceWrites, 0);
+    assert.equal(enabled, true);
+    assert.deepEqual(manager.status(), before);
+  } finally {
+    rmSync(modelDir, { recursive: true, force: true });
+  }
+});
+
+test("a failed preference transaction discards prepared transcription work", async () => {
+  const modelDir = mkdtempSync(join(tmpdir(), "tovi-transcription-"));
+  let enabled = false;
+  let downloads = 0;
+  const manager = createTranscriptionSetupManager({
+    modelDir,
+    downloadScript: "/unused",
+    initialEnabled: () => enabled,
+    initialModelId: () => TRANSCRIPTION_MODELS.standard.modelId,
+    applyRuntime: (_mode, nextEnabled) => { enabled = nextEnabled; },
+    download: async () => { downloads += 1; }
+  });
+  try {
+    await assert.rejects(
+      applyPreparedTranscriptionSetup({
+        manager,
+        mode: "standard",
+        persistPreferences: async () => { throw new Error("database failed"); }
+      }),
+      /database failed/
+    );
+    assert.equal(enabled, false);
+    assert.equal(downloads, 0);
+    assert.equal(manager.status().mode, "off");
+  } finally {
+    rmSync(modelDir, { recursive: true, force: true });
+  }
+});
+
+test("restore makes persisted setup preference authoritative after restart", () => {
+  const modelDir = mkdtempSync(join(tmpdir(), "tovi-transcription-"));
+  let enabled = true;
+  const manager = createTranscriptionSetupManager({
+    modelDir,
+    downloadScript: "/unused",
+    initialEnabled: () => enabled,
+    initialModelId: () => TRANSCRIPTION_MODELS.standard.modelId,
+    applyRuntime: (_mode, nextEnabled) => { enabled = nextEnabled; }
+  });
+  try {
+    manager.restore("off");
+    assert.equal(enabled, false);
+    assert.equal(manager.status().mode, "off");
   } finally {
     rmSync(modelDir, { recursive: true, force: true });
   }

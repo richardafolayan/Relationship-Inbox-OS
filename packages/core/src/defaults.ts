@@ -15,8 +15,8 @@ export const defaultSettings: AppSettings = {
   // force true headless for CI/debug, but it must never be the default.
   headless: false,
   maxMessagesPerThread: 15,
-  enabledPlatforms: ["LINKEDIN", "IMESSAGE"],
-  aiEnabled: true,
+  enabledPlatforms: [],
+  aiEnabled: false,
   demoMode: false,
   presenterDemoMode: "off",
   presenterReadOnly: false,

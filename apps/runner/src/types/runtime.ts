@@ -89,6 +89,9 @@ export interface EventBus {
 export interface SettingsStore {
   getSettings(): Promise<AppSettings>;
   updateSettings(partial: Partial<AppSettings>): Promise<AppSettings>;
+  mutateSettings<T>(
+    work: (mutation: PersistedMutation<AppSettings>) => Promise<T>
+  ): Promise<T>;
   getSelectorOverrides(): Promise<SelectorOverrideStore>;
   saveSelectorOverride(platform: PlatformName, key: keyof SelectorRegistry, selector: string): Promise<void>;
   resetSelectorOverride(platform: PlatformName, key: keyof SelectorRegistry): Promise<void>;
@@ -96,7 +99,18 @@ export interface SettingsStore {
   setDemoSeedManifest(manifest: DemoSeedManifest | null): Promise<void>;
   getOperatorProfile(): Promise<OperatorProfile>;
   updateOperatorProfile(partial: Partial<OperatorProfile>): Promise<OperatorProfile>;
+  mutateOperatorProfile<T>(
+    work: (mutation: PersistedMutation<OperatorProfile>) => Promise<T>
+  ): Promise<T>;
   acknowledgeFocusWindowPerson(windowId: string, personId: string): Promise<boolean>;
+}
+
+export interface PersistedMutation<T> {
+  current: T;
+  commit(
+    partial: Partial<T>,
+    persist?: (next: T) => Promise<void>
+  ): Promise<T>;
 }
 
 /** Reply tone the operator picks during voice setup. "" = not chosen yet. */
@@ -339,6 +353,8 @@ export interface AiService {
      * spend per raced call.
      */
     race?: boolean;
+    /** Final privacy gate checked immediately before provider dispatch. */
+    shouldContinue?: () => boolean;
   }): Promise<SummaryOutput>;
   generateSuggestedReplies(input: {
     /** Group chat flags (#753). */
@@ -444,6 +460,8 @@ export interface AiService {
      * #382 — pilot R-0029). Operator-initiated paths only.
      */
     race?: boolean;
+    /** Final privacy gate checked immediately before provider dispatch. */
+    shouldContinue?: () => boolean;
   }): Promise<"outreach" | "genuine" | null>;
   /**
    * Conversation-end verdict (#287 phase 2.5). "closed" = last inbound
@@ -456,6 +474,8 @@ export interface AiService {
     displayName: string;
     messages: MessageForPrompt[];
     summary?: string | null;
+    /** Final privacy gate checked immediately before provider dispatch. */
+    shouldContinue?: () => boolean;
   }): Promise<{ status: "closed" | "open"; reason: string } | null>;
   /**
    * Reconnect-worthy scorer (#287 phase 3.5). Returns a 0-100 integer

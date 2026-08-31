@@ -158,6 +158,9 @@ function harness(overrides = {}) {
   if (overrides.isPreDispatchFailure) {
     input.isPreDispatchFailure = overrides.isPreDispatchFailure;
   }
+  if (overrides.beforeDispatch) {
+    input.beforeDispatch = overrides.beforeDispatch;
+  }
 
   return {
     service,
@@ -182,6 +185,16 @@ test("replaying a completed poll client id never sends a second poll", async () 
   assert.equal(h.physicalSends(), 1);
   assert.equal(h.rows[0].source, POLL_SEND_SOURCE);
   assert.equal(h.rows[0].status, "SENT");
+});
+
+test("poll dispatch remains unclaimed when source selection is revoked", async () => {
+  const revoked = new Error("platform not selected");
+  const h = harness({ beforeDispatch: async () => { throw revoked; } });
+
+  await assert.rejects(() => h.service.send(h.input), /not sent|try again|failed/i);
+  assert.equal(h.physicalSends(), 0);
+  assert.equal(h.rows[0].status, "PENDING");
+  assert.equal(h.rows[0].receiptJson, null);
 });
 
 test("a poll remains SENT when local projection or success audit fails", async () => {
