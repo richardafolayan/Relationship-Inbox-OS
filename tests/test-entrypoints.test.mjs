@@ -13,7 +13,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { planNpmInvocation } from "../scripts/testing/npm-invocation.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -336,6 +336,104 @@ test("concurrent entrypoints serialize repository artifact preparation", async (
     active += event.startsWith("start ") ? 1 : -1;
     maximumActive = Math.max(maximumActive, active);
   }
+  assert.equal(maximumActive, 1);
+  assert.equal(active, 0);
+});
+
+test("stale lease recovery keeps three contenders mutually exclusive", async (t) => {
+  const fixtureRoot = mkdtempSync(join(tmpdir(), "tovi-stale-lease-"));
+  t.after(() => rmSync(fixtureRoot, { recursive: true, force: true }));
+
+  const leaseSource = readFileSync(preparationLeasePath, "utf8").replace(
+    'from "node:fs/promises"',
+    'from "./barrier-fs.mjs"'
+  );
+  writeFileSync(join(fixtureRoot, "repository-preparation-lease.mjs"), leaseSource);
+  writeFileSync(
+    join(fixtureRoot, "barrier-fs.mjs"),
+    `import * as real from "node:fs/promises";
+
+export const mkdir = real.mkdir;
+export const rm = real.rm;
+export const writeFile = real.writeFile;
+
+let staleOwnerReads = 0;
+let releaseStaleReaders;
+const staleReadersReady = new Promise((resolve) => {
+  releaseStaleReaders = resolve;
+});
+let abandonedRenameCalls = 0;
+let releaseDelayedRenames;
+const firstReplacementAcquired = new Promise((resolve) => {
+  releaseDelayedRenames = resolve;
+});
+
+function normalized(path) {
+  return String(path).replaceAll("\\\\", "/");
+}
+
+export async function readFile(path, ...args) {
+  const value = await real.readFile(path, ...args);
+  if (
+    normalized(path).endsWith("/.tovi-test-preparation.lock/owner.json") &&
+    String(value).includes('"token":"stale"')
+  ) {
+    staleOwnerReads += 1;
+    if (staleOwnerReads === 3) releaseStaleReaders();
+    await staleReadersReady;
+  }
+  return value;
+}
+
+export async function rename(from, to) {
+  const source = normalized(from);
+  const destination = normalized(to);
+  if (
+    source.endsWith("/.tovi-test-preparation.lock") &&
+    destination.includes("/.tovi-test-preparation.lock.abandoned-")
+  ) {
+    abandonedRenameCalls += 1;
+    if (abandonedRenameCalls > 1) await firstReplacementAcquired;
+  }
+  const result = await real.rename(from, to);
+  if (
+    staleOwnerReads === 3 &&
+    source.includes("/.tovi-test-preparation.lock.candidate-") &&
+    destination.endsWith("/.tovi-test-preparation.lock")
+  ) {
+    releaseDelayedRenames();
+  }
+  return result;
+}
+`
+  );
+
+  const lockPath = join(fixtureRoot, ".tovi-test-preparation.lock");
+  mkdirSync(lockPath);
+  writeFileSync(
+    join(lockPath, "owner.json"),
+    JSON.stringify({ pid: 2_147_483_647, token: "stale" })
+  );
+
+  const { acquireRepositoryPreparationLease } = await import(
+    `${pathToFileURL(join(fixtureRoot, "repository-preparation-lease.mjs")).href}?test=${Date.now()}`
+  );
+  let active = 0;
+  let maximumActive = 0;
+  const contender = async () => {
+    const release = await acquireRepositoryPreparationLease(fixtureRoot, {
+      pollMilliseconds: 1,
+      timeoutMilliseconds: 5_000
+    });
+    active += 1;
+    maximumActive = Math.max(maximumActive, active);
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 25));
+    active -= 1;
+    await release();
+  };
+
+  await Promise.all([contender(), contender(), contender()]);
+
   assert.equal(maximumActive, 1);
   assert.equal(active, 0);
 });

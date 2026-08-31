@@ -24,17 +24,40 @@ async function reclaimAbandonedLease(lockPath) {
   }
   if (Number.isInteger(owner.pid) && processIsAlive(owner.pid)) return false;
 
-  const abandonedPath = `${lockPath}.abandoned-${randomUUID()}`;
+  // The stale read above is not authority to move the path: another waiter
+  // may already have replaced it. Serialize reclaimers, then re-read the owner.
+  const reclaimPath = `${lockPath}.reclaim`;
   try {
-    await rename(lockPath, abandonedPath);
+    await mkdir(reclaimPath);
   } catch (error) {
     if (["ENOENT", "EEXIST", "ENOTEMPTY", "EACCES", "EPERM"].includes(error?.code)) {
       return false;
     }
     throw error;
   }
-  await rm(abandonedPath, { recursive: true, force: true });
-  return true;
+
+  try {
+    try {
+      owner = JSON.parse(await readFile(join(lockPath, "owner.json"), "utf8"));
+    } catch {
+      return false;
+    }
+    if (Number.isInteger(owner.pid) && processIsAlive(owner.pid)) return false;
+
+    const abandonedPath = `${lockPath}.abandoned-${randomUUID()}`;
+    try {
+      await rename(lockPath, abandonedPath);
+    } catch (error) {
+      if (["ENOENT", "EEXIST", "ENOTEMPTY", "EACCES", "EPERM"].includes(error?.code)) {
+        return false;
+      }
+      throw error;
+    }
+    await rm(abandonedPath, { recursive: true, force: true });
+    return true;
+  } finally {
+    await rm(reclaimPath, { recursive: true, force: true });
+  }
 }
 
 export async function acquireRepositoryPreparationLease(
