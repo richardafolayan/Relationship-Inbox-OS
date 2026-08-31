@@ -7,10 +7,13 @@ runner modules through `tsx`.
 ## Standard gates
 
 Run from the repository root with Node 20 or newer. Pilot and release paths are
-tested against Node 22.
+tested against Node 22. Install Patchright's managed Chromium before the first
+suite run. Use `npx patchright install chromium` on macOS or Windows, and
+`npx patchright install --with-deps chromium` on Linux.
 
 ```bash
 npm ci
+npx patchright install chromium
 npm run db:generate
 npm run docs:check
 npm run lint
@@ -26,6 +29,12 @@ What they cover:
 | `npm run lint` | Builds core, then runs each workspace TypeScript no-emit check |
 | `npm run test:all` | Builds core and runner, then runs every `tests/*.test.mjs` with `tsx` import support |
 | `npm run build` | Turbo build of core, runner, and production dashboard |
+
+The runner executes browser fixtures serially and rejects any applicable
+browser test that reports a skip. Do not set `TOVI_ALLOW_BROWSER_SKIPS=1` for a
+verification or release gate. Platform-scoped fixtures are excluded on other
+operating systems, so Linux CI does not replace the macOS Electron and iPhone
+browser fixtures.
 
 The merged interaction-latency harness is available separately:
 
