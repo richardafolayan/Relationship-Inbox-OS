@@ -27,11 +27,9 @@ test("app update card identifies the host device being updated", () => {
   assert.match(SOURCE, /remoteAvailable/);
 });
 
-test("desktop text-size copy follows the host platform", () => {
-  assert.match(
-    SETTINGS_SOURCE,
-    /host\.platform === "win32"[\s\S]*Scale the whole interface on this PC\.[\s\S]*host\.platform === "darwin"[\s\S]*Scale the whole interface on this Mac\.[\s\S]*Scale the whole interface on this computer\./
-  );
+test("text-size copy remains local on wide remote clients", () => {
+  assert.match(SETTINGS_SOURCE, /Scale the whole interface on this device only\./);
+  assert.doesNotMatch(SETTINGS_SOURCE, /Text size[\s\S]{0,400}host\.platform/);
 });
 
 test("app update card keeps pilot copy away from terminal commands", () => {
