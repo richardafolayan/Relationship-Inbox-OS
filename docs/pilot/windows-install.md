@@ -3,13 +3,18 @@
 The Windows pilot supports Google Messages, WhatsApp, and LinkedIn. iMessage
 is shown as not available because Apple does not provide it on Windows.
 
+Before describing a candidate as ready for a Windows student pilot, complete
+the [physical Windows validation checklist](./windows-physical-validation-checklist.md).
+Installer CI is necessary but does not replace this installed-device gate.
+
 ## Install
 
 1. Install the current version of Google Chrome. Tovi uses it for LinkedIn
    and WhatsApp on Windows.
 2. Download the `tovi-windows-pilot-installer` artifact from the successful
    Windows installer workflow run for the pilot commit.
-3. Unzip the artifact and open `Tovi-Setup-0.1.15-x64.exe`.
+3. Unzip the artifact. Recompute the installer's SHA-256 and confirm it matches
+   the adjacent `.sha256` file before opening `Tovi-Setup-0.1.15-x64.exe`.
 4. If Windows SmartScreen appears, choose **More info**, then **Run anyway**.
    The pilot installer is not yet code-signed.
 5. Keep the default per-user install location and finish setup.
@@ -49,3 +54,14 @@ and documents the desktop quoted-reply limitation in
 
 If startup fails, open **Tovi > Show Logs** and attach the log to a bug report.
 Do not paste private message content into the report.
+
+## Uninstall
+
+Uninstalling Tovi removes the app, shortcuts, and its background processes. It
+keeps the local Tovi data in `%APPDATA%\Relationship Inbox OS`, including the
+database, settings, and saved browser sessions, so a reinstall can restore the
+same state. A platform may still require sign-in again if its own session has
+expired.
+
+To remove the local data as well, quit Tovi, uninstall it, then delete
+`%APPDATA%\Relationship Inbox OS`. This deletion cannot be undone.

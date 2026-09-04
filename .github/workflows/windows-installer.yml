@@ -91,9 +91,18 @@ jobs:
           } finally {
             if (-not $process.HasExited) { & taskkill.exe /PID $process.Id /T /F | Out-Null }
           }
+      - name: Generate installer checksum
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem "dist/windows/Tovi-Setup-*.exe" | Select-Object -First 1
+          if (-not $installer) { throw "Windows installer is missing" }
+          $digest = (Get-FileHash $installer.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$digest  $($installer.Name)" | Set-Content -Path "$($installer.FullName).sha256" -Encoding ascii -NoNewline
       - uses: actions/upload-artifact@v4
         with:
           name: tovi-windows-pilot-installer
-          path: dist/windows/Tovi-Setup-*.exe
+          path: |
+            dist/windows/Tovi-Setup-*.exe
+            dist/windows/Tovi-Setup-*.exe.sha256
           if-no-files-found: error
           retention-days: 14
