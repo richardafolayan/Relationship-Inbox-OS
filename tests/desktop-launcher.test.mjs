@@ -133,6 +133,28 @@ test("packaged defaults replace blank template values but preserve explicit choi
   assert.match(defaults, /^GOOGLE_MESSAGES_ENABLED=false$/m);
 });
 
+test("packaged feature defaults replace blanks only while creating the environment", () => {
+  assert.deepEqual(launcher.packagedFeatureMergeOptions(false), {
+    keepExisting: true,
+    replaceBlank: true
+  });
+  assert.deepEqual(launcher.packagedFeatureMergeOptions(true), {
+    keepExisting: true,
+    replaceBlank: false
+  });
+
+  const savedChoice = launcher.mergeEnvValues(
+    "WHATSAPP_ENABLED=\nBROWSER_PROFILE_MODE=\n",
+    {
+      WHATSAPP_ENABLED: "true",
+      BROWSER_PROFILE_MODE: "isolated"
+    },
+    launcher.packagedFeatureMergeOptions(true)
+  );
+  assert.match(savedChoice, /^WHATSAPP_ENABLED=$/m);
+  assert.match(savedChoice, /^BROWSER_PROFILE_MODE=$/m);
+});
+
 test("fresh Windows template enables the intended packaged platform defaults", () => {
   const template = readFileSync(resolve(".env.example"), "utf8");
   const featureDefaults = launcher.packagedFeatureDefaults("win32");

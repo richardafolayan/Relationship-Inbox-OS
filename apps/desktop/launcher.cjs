@@ -187,6 +187,13 @@ function packagedFeatureDefaults(platform = process.platform) {
   return defaults;
 }
 
+function packagedFeatureMergeOptions(envAlreadyExists) {
+  return {
+    keepExisting: true,
+    replaceBlank: !envAlreadyExists
+  };
+}
+
 function startAppArgs(appDir) {
   return [join(appDir, "scripts", "start-app.mjs")];
 }
@@ -281,6 +288,7 @@ module.exports = {
   mergeEnvValues,
   nodeCandidates,
   packagedFeatureDefaults,
+  packagedFeatureMergeOptions,
   parseNodeMajor,
   resolveAppDir,
   runnerPort,
