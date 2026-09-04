@@ -187,11 +187,18 @@ function packagedFeatureDefaults(platform = process.platform) {
   return defaults;
 }
 
+function packagedFeatureMergeOptions(envAlreadyExists) {
+  return {
+    keepExisting: true,
+    replaceBlank: !envAlreadyExists
+  };
+}
+
 function startAppArgs(appDir) {
   return [join(appDir, "scripts", "start-app.mjs")];
 }
 
-function mergeEnvValues(input, values, { keepExisting = false } = {}) {
+function mergeEnvValues(input, values, { keepExisting = false, replaceBlank = false } = {}) {
   const pending = new Map(Object.entries(values));
   const lines = String(input).split(/\r?\n/).map((line) => {
     if (line.trimStart().startsWith("#")) return line;
@@ -201,7 +208,8 @@ function mergeEnvValues(input, values, { keepExisting = false } = {}) {
     if (!pending.has(key)) return line;
     const value = pending.get(key);
     pending.delete(key);
-    return keepExisting ? line : `${key}=${value}`;
+    const existingValue = line.slice(separator + 1).trim();
+    return keepExisting && !(replaceBlank && existingValue === "") ? line : `${key}=${value}`;
   });
   while (lines.length && lines.at(-1) === "") lines.pop();
   for (const [key, value] of pending) lines.push(`${key}=${value}`);
@@ -280,6 +288,7 @@ module.exports = {
   mergeEnvValues,
   nodeCandidates,
   packagedFeatureDefaults,
+  packagedFeatureMergeOptions,
   parseNodeMajor,
   resolveAppDir,
   runnerPort,

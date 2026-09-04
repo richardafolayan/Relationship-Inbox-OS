@@ -30,6 +30,7 @@ const {
   mergeEnvValues,
   nodeCandidates,
   packagedFeatureDefaults,
+  packagedFeatureMergeOptions,
   resolveAppDir,
   runnerPort,
   startAppArgs,
@@ -199,8 +200,9 @@ async function preparePackagedStorage() {
 
   const envPath = join(paths.configDir, ".env");
   const examplePath = join(APP_DIR, ".env.example");
+  const envAlreadyExists = existsSync(envPath);
   let envText = "";
-  if (existsSync(envPath)) envText = readFileSync(envPath, "utf8");
+  if (envAlreadyExists) envText = readFileSync(envPath, "utf8");
   else if (existsSync(examplePath)) envText = readFileSync(examplePath, "utf8");
   // Path keys must always point outside the signed bundle; feature keys are
   // set-once defaults so a user's later .env edits survive relaunches.
@@ -225,7 +227,7 @@ async function preparePackagedStorage() {
     ...(featureDefaults.GOOGLE_MESSAGES_ENABLED
       ? { GOOGLE_MESSAGES_ENABLED: featureDefaults.GOOGLE_MESSAGES_ENABLED }
       : {})
-  }, { keepExisting: true });
+  }, packagedFeatureMergeOptions(envAlreadyExists));
   writePrivateTextAtomically(envPath, envText);
   return true;
 }
