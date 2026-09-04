@@ -1,9 +1,18 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import {
-  platformSupportsScheduledSend
-} from "../apps/dashboard/lib/platform-send-capabilities.ts";
+import ts from "typescript";
+
+const capabilitySource = await readFile(
+  new URL("../apps/dashboard/lib/platform-send-capabilities.ts", import.meta.url),
+  "utf8"
+);
+const capabilityJavascript = ts.transpileModule(capabilitySource, {
+  compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 }
+}).outputText;
+const { platformSupportsScheduledSend } = await import(
+  `data:text/javascript;base64,${Buffer.from(capabilityJavascript).toString("base64")}`
+);
 
 test("Instagram does not advertise scheduled sends", () => {
   assert.equal(platformSupportsScheduledSend("INSTAGRAM"), false);

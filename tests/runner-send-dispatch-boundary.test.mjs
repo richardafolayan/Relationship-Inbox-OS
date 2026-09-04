@@ -34,7 +34,23 @@ test("browser adapters authorize immediately before their first outbound mutatio
   assert.ok(googleBlock.indexOf("await authorizeDispatch()") < googleBlock.indexOf("await send.click()"));
 
   const instagramBlock = instagram.slice(instagram.indexOf("async sendMessage("), instagram.indexOf("async openThread(", instagram.indexOf("async sendMessage(")));
-  assert.match(instagramBlock, /performClick: async \(\) => \{\s*await beforeDispatch\?\.\(\);\s*submissionMayHaveOccurred = true;/);
+  const instagramAuthorization = instagramBlock.indexOf("await beforeDispatch?.()");
+  const instagramCaptureStart = instagramBlock.indexOf(
+    "sendCaptureGeneration = this.beginNetworkSendCapture",
+    instagramAuthorization
+  );
+  const instagramUncertainty = instagramBlock.indexOf(
+    "submissionMayHaveOccurred = true",
+    instagramCaptureStart
+  );
+  const instagramSendMutation = instagramBlock.indexOf(
+    'action: "send"',
+    instagramUncertainty
+  );
+  assert.ok(instagramAuthorization >= 0);
+  assert.ok(instagramAuthorization < instagramCaptureStart);
+  assert.ok(instagramCaptureStart < instagramUncertainty);
+  assert.ok(instagramUncertainty < instagramSendMutation);
 });
 
 test("iMessage stages attachments before authorization and mutates Messages only afterwards", async () => {

@@ -68,17 +68,15 @@ test("desktop toolbar remains available at md+ and is not the mobile row", () =>
 });
 
 test("thread switch closes the mobile more sheet", () => {
-  const effectBodies = [
-    ...src.matchAll(
-      /useLayoutEffect\(\(\)\s*=>\s*\{([\s\S]*?)\},\s*\[composerAttachmentStore, externalActionAttempts, threadId\]\)/g
-    )
-  ].map((m) => m[1]);
-  const reset = effectBodies.find(
-    (body) =>
-      body.includes("setComposer(restoredIntent.text)") &&
-      body.includes("setComposerMoreOpen(false)")
-  );
-  assert.ok(reset, "expected threadId reset to close composerMoreOpen");
+  const generation = src.indexOf("const generation = ++composerRestoreGenerationRef.current;");
+  assert.notEqual(generation, -1, "located the per-thread composer restoration effect");
+  const start = src.lastIndexOf("useLayoutEffect(() => {", generation);
+  const end = src.indexOf("\n\n  useEffect(() => {", generation);
+  assert.notEqual(start, -1, "located the start of the restoration effect");
+  assert.notEqual(end, -1, "located the end of the restoration effect");
+  const reset = src.slice(start, end);
+  assert.match(reset, /setComposer\(restoredIntent\.text\)/);
+  assert.match(reset, /setComposerMoreOpen\(false\)/);
   assert.match(reset, /setMobileSuggestionsOpen\(false\)/);
   assert.match(reset, /setMobileScheduleOpen\(false\)/);
 });

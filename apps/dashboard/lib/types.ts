@@ -562,6 +562,7 @@ export interface ThreadResponse {
   id: string;
   personId: string;
   personName: string;
+  recipientVerificationLabel?: string | null;
   personAvatarUrl?: string | null;
   /**
    * Group chat flag straight from the Thread row (#753). Optional so the

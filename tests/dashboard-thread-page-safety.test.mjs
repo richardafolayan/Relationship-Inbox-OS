@@ -16,19 +16,17 @@ const src = readFileSync(
 // App Router dynamic segment), so thread-local intent must be saved/restored
 // on threadId change and pending sends must be filtered to their owner thread.
 test("a thread-keyed layout effect restores intent and isolates pending sends", () => {
-  const effectBodies = [
-    ...src.matchAll(
-      /useLayoutEffect\(\(\)\s*=>\s*\{([\s\S]*?)\},\s*\[composerAttachmentStore, externalActionAttempts, threadId\]\)/g
-    )
-  ].map((m) => m[1]);
-  const reset = effectBodies.find(
-    (body) =>
-      body.includes("readThreadComposerSession(threadId)") &&
-      body.includes("setComposer(restoredIntent.text)") &&
-      body.includes("setSnoozeSuggestions(null)") &&
-      body.includes("setComposerAttachments(")
-  );
-  assert.ok(reset, "expected per-thread composer restoration and local UI reset");
+  const generation = src.indexOf("const generation = ++composerRestoreGenerationRef.current;");
+  assert.notEqual(generation, -1, "located the per-thread composer restoration effect");
+  const start = src.lastIndexOf("useLayoutEffect(() => {", generation);
+  const end = src.indexOf("\n\n  useEffect(() => {", generation);
+  assert.notEqual(start, -1, "located the start of the restoration effect");
+  assert.notEqual(end, -1, "located the end of the restoration effect");
+  const reset = src.slice(start, end);
+  assert.match(reset, /readThreadComposerSession\(threadId\)/);
+  assert.match(reset, /setComposer\(restoredIntent\.text\)/);
+  assert.match(reset, /setSnoozeSuggestions\(null\)/);
+  assert.match(reset, /setComposerAttachments\(/);
   assert.match(reset, /URL\.revokeObjectURL\(a\.previewUrl\)/);
   assert.doesNotMatch(reset, /setPendingSends\(\[\]\)/);
   assert.match(

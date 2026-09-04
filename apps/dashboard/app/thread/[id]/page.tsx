@@ -206,6 +206,7 @@ import {
 import { buildScheduledSendRequest } from "@/lib/scheduled-send";
 import { nextMorningSendSlot, shouldOfferLateNightSchedule } from "@/lib/late-night-send";
 import { platformSupportsScheduledSend } from "@/lib/platform-send-capabilities";
+import { instagramRecipientSafety } from "@/lib/instagram-recipient-safety";
 import {
   afterNextPaint,
   recordMessageSyncLatency
@@ -824,6 +825,7 @@ export default function ThreadPage() {
   const [loading, setLoading] = useState(
     () => peekCache<ThreadResponse>(`/runner/data/thread/${threadId}`) === undefined
   );
+  const durableComposerRecoveryReady = !loading && thread?.id === threadId;
   const [loadingOlderMessages, setLoadingOlderMessages] = useState(false);
   const [sending, setSending] = useState(false);
   // Synchronous re-entrancy guard. The `sending` state lags a render, so a
@@ -1685,6 +1687,15 @@ export default function ThreadPage() {
       value: ThreadComposerSendAttemptValue,
       attachments: ComposerAttachment[]
     ): Promise<SendStatusResponse> => {
+      if (!thread || thread.id !== attempt.threadId) {
+        throw new Error("This conversation is no longer available.");
+      }
+      const recipientSafety = instagramRecipientSafety(thread);
+      if (recipientSafety.blocked) {
+        throw new Error(
+          recipientSafety.blockReason ?? "Tovi could not verify the Instagram recipient."
+        );
+      }
       if (attempt.kind === "scheduled" && attempt.scheduledFor) {
         const request = buildScheduledSendRequest({
           attachments,
@@ -1751,7 +1762,7 @@ export default function ThreadPage() {
           : {})
       });
     },
-    []
+    [thread]
   );
 
   // Sibling cohort for SSE routing (iMessage phone + email handle rows). Held
@@ -4337,6 +4348,7 @@ export default function ThreadPage() {
   checkPendingDeliveryRef.current = checkPendingDelivery;
 
   useEffect(() => {
+    if (!durableComposerRecoveryReady) return undefined;
     let disposed = false;
     const publishAndCheck = (pending: PendingSend) => {
       const next = [
@@ -4493,9 +4505,14 @@ export default function ThreadPage() {
       window.removeEventListener("focus", reconcileDurableAttempts);
       document.removeEventListener("visibilitychange", reconcileWhenVisible);
     };
-  }, [composerAttachmentStore, externalActionAttempts]);
+  }, [
+    composerAttachmentStore,
+    durableComposerRecoveryReady,
+    externalActionAttempts
+  ]);
 
   useEffect(() => {
+    if (!durableComposerRecoveryReady) return undefined;
     let cancelled = false;
     let attempt: ThreadComposerSendAttempt | null = null;
     try {
@@ -4684,7 +4701,12 @@ export default function ThreadPage() {
     return () => {
       cancelled = true;
     };
-  }, [composerAttachmentStore, externalActionAttempts, threadId]);
+  }, [
+    composerAttachmentStore,
+    durableComposerRecoveryReady,
+    externalActionAttempts,
+    threadId
+  ]);
 
   // Suggestions-spinner safety timer. When the runner-side status is
   // "generating", arm a 30s ceiling. If real chips arrive sooner the
@@ -4755,6 +4777,11 @@ export default function ThreadPage() {
       sendingRef.current ||
       composerActionRef.current
     ) return;
+    const recipientSafety = instagramRecipientSafety(thread);
+    if (recipientSafety.blocked) {
+      setError(recipientSafety.blockReason);
+      return;
+    }
     if (!composer.trim() && composerAttachments.length === 0) return;
     if (composerAttachmentsRestoringRef.current) {
       setError("Wait for Tovi to finish restoring this reply's attachments before sending.");
@@ -5704,6 +5731,12 @@ export default function ThreadPage() {
 
   const sendDictationMessage = useCallback(async (messageId: string, text: string) => {
     if (!thread) throw new Error("This conversation is no longer available.");
+    const recipientSafety = instagramRecipientSafety(thread);
+    if (recipientSafety.blocked) {
+      throw new Error(
+        recipientSafety.blockReason ?? "Tovi could not verify the Instagram recipient."
+      );
+    }
     const trimmed = text.trim();
     if (!trimmed) throw new Error("An empty message cannot be sent.");
     const scope = `dictation-send:${thread.id}:${messageId}`;
@@ -5808,6 +5841,11 @@ export default function ThreadPage() {
         sendingRef.current ||
         composerActionRef.current
       ) {
+        return;
+      }
+      const recipientSafety = instagramRecipientSafety(thread);
+      if (recipientSafety.blocked) {
+        setError(recipientSafety.blockReason);
         return;
       }
       if (missingComposerAttachmentsRef.current.length > 0) {
@@ -6307,6 +6345,12 @@ export default function ThreadPage() {
   const retryPendingSend = (clientSendId: string) => {
     const target = pendingSends.find((p) => p.clientSendId === clientSendId);
     if (!target || target.threadId !== routeThreadIdRef.current || target.uncertain) return;
+    if (!thread || thread.id !== target.threadId) return;
+    const recipientSafety = instagramRecipientSafety(thread);
+    if (recipientSafety.blocked) {
+      setError(recipientSafety.blockReason);
+      return;
+    }
     // Re-queue the existing failed SendRequest under a fresh clientSendId
     // via the runner's /retry-send endpoint (the runner keeps the failed
     // row for receipts and inserts a new PENDING row with the same text).
@@ -7293,7 +7337,8 @@ export default function ThreadPage() {
     );
   }
 
-  const firstName = thread.personName.split(/\s+/)[0] ?? thread.personName;
+  const recipientSafety = instagramRecipientSafety(thread);
+  const firstName = recipientSafety.displayName.split(/\s+/)[0] ?? recipientSafety.displayName;
   const risk = toDisplayRisk(thread.riskLevel);
 
   // Favourite star in the header (R-0066 / #483). Optimistic: flip locally,
@@ -7490,7 +7535,10 @@ export default function ThreadPage() {
     }
   ];
   const composerExternalActionBlocked =
-    composerAttachmentsRestoring || composerRecoveryBlocked || composerRecoveryVisible;
+    composerAttachmentsRestoring ||
+    composerRecoveryBlocked ||
+    composerRecoveryVisible ||
+    recipientSafety.blocked;
   const mobileScheduleGroups: ActionSheetGroup[] = [
     {
       id: "presets",
@@ -8131,12 +8179,12 @@ export default function ThreadPage() {
                   </span>
                 ) : (
                   <span className="grid h-9 w-9 place-items-center rounded-full bg-gradient-to-br from-[oklch(72%_0.10_35)] to-[oklch(60%_0.13_22)] font-display text-[12px] font-semibold text-white">
-                    {initials(thread.personName)}
+                    {initials(recipientSafety.displayName)}
                   </span>
                 )}
                 <div className="flex min-w-0 flex-1 flex-col leading-tight">
                   <h2 className="m-0 truncate font-display text-[16px] font-semibold tracking-[-0.02em]">
-                    {thread.personName}
+                    {recipientSafety.displayName}
                   </h2>
                   {/* Single clipped line, never wraps: on a crushed phone
                       header the old flex-wrap stacked "overdue · last reply
@@ -9318,7 +9366,9 @@ export default function ThreadPage() {
             {/* Focus Reply Buffer: when this thread arrived during the active
                 window, a one-tap acknowledgement sits above the composer. The
                 proper reply still gets written in the composer below. */}
-            <FocusThreadStrip thread={thread} onSent={refresh} />
+            {thread.platform !== "INSTAGRAM" && !recipientSafety.blocked ? (
+              <FocusThreadStrip thread={thread} onSent={refresh} />
+            ) : null}
             <div
               data-thread-composer="true"
               data-demo-target="composer-input"
@@ -9338,6 +9388,32 @@ export default function ThreadPage() {
                   : "border-hairline"
               }`}
             >
+              {thread.platform === "INSTAGRAM" ? (
+                <div
+                  data-testid="instagram-recipient-safety"
+                  role={recipientSafety.blocked ? "alert" : undefined}
+                  className={cn(
+                    "mb-2 rounded-[10px] border px-2.5 py-2 text-[11px] leading-[1.45]",
+                    recipientSafety.blocked
+                      ? "border-risk-overdue/40 bg-risk-overdue/5 text-ink-2"
+                      : "border-hairline bg-paper-2 text-ink-2"
+                  )}
+                >
+                  <div className="flex min-w-0 items-baseline gap-2">
+                    <span className="shrink-0 font-mono text-[9.5px] uppercase tracking-[0.06em] text-ink-3">
+                      Instagram recipient
+                    </span>
+                    <strong className="min-w-0 truncate font-medium text-ink">
+                      {recipientSafety.displayName}
+                    </strong>
+                  </div>
+                  {recipientSafety.linkedContactName ? (
+                    <p className="m-0 mt-1">
+                      Linked contact: {recipientSafety.linkedContactName}.
+                    </p>
+                  ) : null}
+                </div>
+              ) : null}
               {focusedParentMessage ? (
                 <div className="mb-2 flex items-start gap-2 rounded-[10px] border border-hairline bg-paper-2/60 px-2 py-1.5 text-[12px] leading-snug text-ink-2">
                   <span className="font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3">

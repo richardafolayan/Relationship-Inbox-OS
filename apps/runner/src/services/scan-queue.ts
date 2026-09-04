@@ -82,6 +82,7 @@ interface ScanQueueDeps {
   aiService: AiService;
   platformMutex: Pick<KeyedMutex, "runWithQueueOne" | "getQueueDepth">;
   personKey?: string;
+  platformLockKey?: (platform: PlatformName) => string;
   screenshotDir: string;
   domDumpDir: string;
   auditLog: (input: {
@@ -820,7 +821,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
   });
 
   function lockKey(platform: PlatformName): string {
-    return `${personKey}:${platform}`;
+    return deps.platformLockKey?.(platform) ?? `${personKey}:${platform}`;
   }
 
   function isPlatformDueForScheduledScan(
