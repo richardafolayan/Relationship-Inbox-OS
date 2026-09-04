@@ -8098,7 +8098,7 @@ export default function ThreadPage() {
             fragility on mobile (#896). */}
         <div
           data-testid="thread-header-band"
-          className="shrink-0 border-b border-hairline bg-[color-mix(in_oklch,var(--paper)_96%,transparent)] backdrop-blur-md backdrop-saturate-150 px-2 py-2 sm:px-6 sm:py-2.5 lg:px-8"
+          className="relative z-20 shrink-0 border-b border-hairline bg-[color-mix(in_oklch,var(--paper)_96%,transparent)] backdrop-blur-md backdrop-saturate-150 px-2 py-2 sm:px-6 sm:py-2.5 lg:px-8"
         >
           <header className="flex items-center gap-1 sm:gap-2">
               <button
