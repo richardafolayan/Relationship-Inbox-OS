@@ -9,6 +9,10 @@ const SOURCE = readFileSync(
   join(ROOT, "apps/dashboard/components/settings/AppUpdates.tsx"),
   "utf8"
 );
+const SETUP_SOURCE = readFileSync(
+  join(ROOT, "apps/dashboard/components/common/SetupWizard.tsx"),
+  "utf8"
+);
 
 test("app update card identifies the host device being updated", () => {
   assert.match(SOURCE, /hostAppTitle/);
@@ -67,4 +71,11 @@ test("version and update state are preserved across navigation", () => {
 
 test("UI copy avoids em and en dashes", () => {
   assert.doesNotMatch(SOURCE, /[—–]/);
+});
+
+test("replacement instructions use runner host data instead of browser guessing", () => {
+  assert.match(SOURCE, /replaceAppUpdateInstructions\(APP_NAME, LEGACY_APP_NAME, hostKind\)/);
+  assert.match(SETUP_SOURCE, /apiGetRaw<HealthResponse>\("\/runner\/health"\)/);
+  assert.match(SETUP_SOURCE, /setupUpdateInstructions\(APP_NAME, hostKind\)/);
+  assert.doesNotMatch(SETUP_SOURCE, /navigator\.userAgent|navigator\.platform/);
 });

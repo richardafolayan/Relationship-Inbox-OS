@@ -39,6 +39,12 @@ import {
   persistCompletedSetup,
   setupNavigationDisabled
 } from "@/lib/setup-preference-writes";
+import {
+  hostPlatformToKind,
+  setupUpdateInstructions,
+  type HostDeviceKind
+} from "@/lib/app-update-presentation";
+import type { HealthResponse } from "@/lib/types";
 
 type SetupPlatform =
   | "IMESSAGE"
@@ -114,6 +120,7 @@ export function SetupWizard() {
   const [connectingSource, setConnectingSource] = useState(false);
   const [stepBusy, setStepBusy] = useState(false);
   const [persistenceError, setPersistenceError] = useState("");
+  const [hostKind, setHostKind] = useState<HostDeviceKind>("mac");
   const pendingPreferenceWrites = useRef(0);
   const preferenceWriter = useMemo(
     () =>
@@ -137,10 +144,17 @@ export function SetupWizard() {
   }, []);
 
   const load = useCallback(async () => {
-    const [setup, ai] = await Promise.all([
+    const [setup, ai, health] = await Promise.all([
       apiGetRaw<SetupStatus>("/runner/data/setup/status"),
-      apiGetRaw<AiStatus>("/runner/data/ai-status")
+      apiGetRaw<AiStatus>("/runner/data/ai-status"),
+      apiGetRaw<HealthResponse>("/runner/health").catch(() => null)
     ]);
+    const detectedHostKind = health?.hostDevice?.kind;
+    if (detectedHostKind) {
+      setHostKind(detectedHostKind);
+    } else if (health?.hostDevice?.platform) {
+      setHostKind(hostPlatformToKind(health.hostDevice.platform) ?? "computer");
+    }
     const availablePlatforms = new Set(setup.platforms.map((platform) => platform.name));
     const preferences = {
       ...setup.preferences,
@@ -387,7 +401,7 @@ export function SetupWizard() {
         {step === "transcription" ? <TranscriptionStep initial={status?.transcription} onConfigure={configureTranscription} onBack={back} onNext={next} /> : null}
 
         {step === "review" ? (
-          <ReviewStep selected={selected} aiEnabled={aiEnabled} aiConfigured={aiConfigured} automaticUpdates={status?.settings.automaticUpdates !== false} version={status?.version ?? ""} finishing={finishing || savingPreferences} onBack={back} onRefresh={load} onFinish={async () => { if (await finish(false)) next(); }} />
+          <ReviewStep selected={selected} aiEnabled={aiEnabled} aiConfigured={aiConfigured} automaticUpdates={status?.settings.automaticUpdates !== false} version={status?.version ?? ""} hostKind={hostKind} finishing={finishing || savingPreferences} onBack={back} onRefresh={load} onFinish={async () => { if (await finish(false)) next(); }} />
         ) : null}
 
         {step === "done" ? (
@@ -583,7 +597,7 @@ function TranscriptionStep({ initial, onConfigure, onBack, onNext }: { initial?:
   </Card>;
 }
 
-function ReviewStep({ selected, aiEnabled, aiConfigured, automaticUpdates, version, finishing, onBack, onRefresh, onFinish }: { selected: SetupPlatform[]; aiEnabled: boolean; aiConfigured: boolean; automaticUpdates: boolean; version: string; finishing: boolean; onBack: () => void; onRefresh: () => Promise<unknown>; onFinish: () => Promise<void> }) {
+function ReviewStep({ selected, aiEnabled, aiConfigured, automaticUpdates, version, hostKind, finishing, onBack, onRefresh, onFinish }: { selected: SetupPlatform[]; aiEnabled: boolean; aiConfigured: boolean; automaticUpdates: boolean; version: string; hostKind: HostDeviceKind; finishing: boolean; onBack: () => void; onRefresh: () => Promise<unknown>; onFinish: () => Promise<void> }) {
   const [setup, setSetup] = useState<SetupStatus | null>(null);
   const [busy, setBusy] = useState(false);
   const refresh = async () => { setBusy(true); const value = await onRefresh().catch(() => null) as { setup?: SetupStatus } | null; if (value?.setup) setSetup(value.setup); setBusy(false); };
@@ -598,7 +612,7 @@ function ReviewStep({ selected, aiEnabled, aiConfigured, automaticUpdates, versi
       <Summary label="Automatic updates" value={automaticUpdates ? "On" : "Off"} ok={automaticUpdates} />
       <Summary label="Installed version" value={version || "Current install"} ok />
     </div>
-    <p className="mt-4 text-[12.5px] leading-5 text-ink-3">When an update is ready, {APP_NAME} checks automatically. Keep automatic updates on in Settings. If {APP_NAME} asks you to replace the app, download the new installer, open it, and drag {APP_NAME} into Applications again. Your data and choices stay in place.</p>
+    <p className="mt-4 text-[12.5px] leading-5 text-ink-3">{setupUpdateInstructions(APP_NAME, hostKind)}</p>
         <Actions><Back disabled={finishing} onClick={onBack} /><Primary disabled={finishing} onClick={() => void onFinish()}>{finishing ? "Saving..." : "Finish setup"}</Primary><Quiet disabled={finishing} onClick={() => void refresh()}>{busy ? "Checking..." : "Check again"}</Quiet></Actions>
   </Card>;
 }

@@ -10,10 +10,12 @@ import {
   extractPullRequestRef,
   hostAppTitle,
   hostKindToPlatform,
+  hostPlatformToKind,
   hostOfflineCheckMessage,
   installLocationCopy,
   presentReleaseNotes,
   readAppUpdatesSnapshot,
+  replaceAppUpdateInstructions,
   technicalDetailsOpenByDefault,
   updateRestartNotice,
   writeAppUpdatesSnapshot,
@@ -103,13 +105,6 @@ function snapshotFromState(input: {
   };
 }
 
-function platformToKind(platform?: HostPlatformId | null): HostDeviceKind | null {
-  if (platform === "darwin") return "mac";
-  if (platform === "win32") return "pc";
-  if (platform === "linux") return "computer";
-  return null;
-}
-
 export function AppUpdates({
   hostDeviceLabel: hostDeviceLabelProp,
   hostPlatform,
@@ -156,7 +151,7 @@ export function AppUpdates({
   const [automaticUpdatesMsg, setAutomaticUpdatesMsg] = useState("");
   const [hostLabel, setHostLabel] = useState(cached?.hostLabel ?? "your Mac");
   const [hostKind, setHostKind] = useState<HostDeviceKind>(
-    cached?.hostKind ?? platformToKind(hostPlatform) ?? "mac"
+    cached?.hostKind ?? hostPlatformToKind(hostPlatform) ?? "mac"
   );
   const [statusOverride, setStatusOverride] = useState<UpdateUiState | null>(
     cached && (cached.status === "updating" || cached.status === "restart_required")
@@ -177,7 +172,7 @@ export function AppUpdates({
   }, []);
 
   useEffect(() => {
-    const kind = platformToKind(hostPlatform);
+    const kind = hostPlatformToKind(hostPlatform);
     if (kind) setHostKind(kind);
   }, [hostPlatform]);
 
@@ -288,9 +283,7 @@ export function AppUpdates({
       return;
     }
     if (info?.applyMode === "replace_app") {
-      setInstallHelp(
-        `Quit ${APP_NAME}, open the latest DMG, drag ${APP_NAME} into Applications and choose Replace, then reopen it. If an app named ${LEGACY_APP_NAME} is still in Applications, remove it. Your messages and settings are kept.`
-      );
+      setInstallHelp(replaceAppUpdateInstructions(APP_NAME, LEGACY_APP_NAME, hostKind));
       return;
     }
     setUpdating(true);
@@ -316,7 +309,7 @@ export function AppUpdates({
     } finally {
       setUpdating(false);
     }
-  }, [hostOffline, info, offlineMessage]);
+  }, [hostKind, hostOffline, info, offlineMessage]);
 
   const startRunner = useCallback(async () => {
     setRunnerStarting(true);
