@@ -90,3 +90,27 @@ Use commas, full stops, colons, brackets, slashes, or normal hyphens instead.
 
 - **LinkedIn adapter has two row-extraction paths.** New fields must be wired through both `snapshotStreamingRows` (~line 5505) AND the `ThreadStub` at ~line 7147, not just `captureThreadRowsSnapshot`.
 - **Turbo daemon ignores worktree cwd.** Running `npm run dev` from a git worktree may silently serve files from the main project. If edits aren't appearing, check `lsof` cwd of the dev process.
+
+<!-- RICHARD_REPOSITORY_RULES_BEGIN -->
+## Richard repository delivery rules
+
+- Read the repository's current documentation, tests and live configuration before changing behaviour.
+- Confirm the worktree, branch, base branch, exact base commit and working tree before editing.
+- Preserve unrelated local changes.
+- Reproduce bugs before fixing them where practical.
+- Run focused tests, affected broader tests and the build before opening a pull request.
+- Never create a draft pull request. Open a normal ready-for-review pull request and verify `isDraft` is false live.
+- A pull request may be blocked from merge. Record the blocker in its body.
+- Do not merge, promote to `main`, migrate data, change credentials or deploy unless the user's current instruction explicitly authorises that action.
+- Never expose secrets in code, logs, commits, issues, pull requests, documentation or AI messages.
+<!-- RICHARD_REPOSITORY_RULES_END -->
+
+## Agent skills
+
+### Issue tracker
+
+Issues and specs are tracked in GitHub Issues. See `docs/agents/issue-tracker.md`. Pull requests are not a request or triage surface.
+
+### Domain docs
+
+This repository uses a multi-context domain layout. See `docs/agents/domain.md`.
