@@ -32,7 +32,9 @@ shared evidence.
 
 1. Use a fresh Windows user account where practical. Otherwise, record any
    prior Tovi installation, process, shortcut, data, or platform state.
-2. Download the exact candidate installer and verify its SHA-256.
+2. Download the exact candidate installer and its adjacent `.sha256` file from
+   the same successful workflow artifact. Recompute the installer SHA-256 and
+   confirm it matches the published digest before running it.
 3. Start a timer. Count every action, external application, prompt, and point
    where Richard must intervene.
 4. Run the NSIS installer and record Windows SmartScreen behaviour.
@@ -123,7 +125,10 @@ shared evidence.
 
 ## Update and uninstall
 
-46. Install a known earlier candidate with synthetic data and a saved draft.
+46. Start from a fresh Windows user account, or fully remove the current
+    synthetic test installation and its app data, before installing a known
+    earlier candidate. Create the synthetic data and saved draft with that
+    earlier candidate so its original database schema is the upgrade source.
 47. Install the newer Windows installer over it.
 48. Confirm the database, settings, included platform sessions, and draft
     survive.

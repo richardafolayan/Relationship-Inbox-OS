@@ -13,7 +13,8 @@ Installer CI is necessary but does not replace this installed-device gate.
    and WhatsApp on Windows.
 2. Download the `tovi-windows-pilot-installer` artifact from the successful
    Windows installer workflow run for the pilot commit.
-3. Unzip the artifact and open `Tovi-Setup-0.1.15-x64.exe`.
+3. Unzip the artifact. Recompute the installer's SHA-256 and confirm it matches
+   the adjacent `.sha256` file before opening `Tovi-Setup-0.1.15-x64.exe`.
 4. If Windows SmartScreen appears, choose **More info**, then **Run anyway**.
    The pilot installer is not yet code-signed.
 5. Keep the default per-user install location and finish setup.

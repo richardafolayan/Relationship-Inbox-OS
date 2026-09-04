@@ -102,3 +102,10 @@ test("Windows builder applies the configured display name", () => {
   assert.ok(args.includes("--config.win.artifactName=Lumen-Setup-${version}-${arch}.${ext}"));
   assert.ok(args.includes("--config.nsis.shortcutName=Lumen"));
 });
+
+test("Windows installer workflow publishes a SHA-256 beside the exact installer", () => {
+  const workflow = readFileSync(resolve(".github/workflows/windows-installer.yml"), "utf8");
+  assert.match(workflow, /Get-FileHash \$installer\.FullName -Algorithm SHA256/);
+  assert.match(workflow, /dist\/windows\/Tovi-Setup-\*\.exe\.sha256/);
+  assert.match(workflow, /Generate installer checksum/);
+});
