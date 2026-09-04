@@ -151,6 +151,12 @@ Pilots see an update only when the manifest version is strictly newer.
    canary Mac, run doctor, launch, and verify the core reply loop.
 9. Record a meaningful release tag after the release commit is known good.
 
+For a Windows student-pilot candidate, the operator must also complete the
+[physical Windows validation checklist](../pilot/windows-physical-validation-checklist.md)
+on the exact installer commit. A successful Windows installer workflow is not
+evidence that the clean install, update, uninstall, platform sessions, or core
+reply journey passed on a physical Windows computer.
+
 ## Electron macOS app and DMG
 
 Builds must run on macOS. The builder:

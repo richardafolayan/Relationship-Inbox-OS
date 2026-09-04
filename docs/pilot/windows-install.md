@@ -3,6 +3,10 @@
 The Windows pilot supports Google Messages, WhatsApp, and LinkedIn. iMessage
 is shown as not available because Apple does not provide it on Windows.
 
+Before describing a candidate as ready for a Windows student pilot, complete
+the [physical Windows validation checklist](./windows-physical-validation-checklist.md).
+Installer CI is necessary but does not replace this installed-device gate.
+
 ## Install
 
 1. Install the current version of Google Chrome. Tovi uses it for LinkedIn

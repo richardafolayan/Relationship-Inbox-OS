@@ -95,7 +95,9 @@ shared evidence.
     message before continuing.
 32. Immediately before pressing Send, confirm the recipient, thread, platform,
     message text, reply target, attachments, and schedule state.
-33. Rapidly press Send twice as the repeated-input test.
+33. Exercise repeated input against a non-dispatching test path or synthetic
+    harness first. Never press the live platform Send control twice. Then
+    press Send once for the authorised recipient and message.
 34. Confirm one visible pending state, one physical platform action, one sent
     message, and one honest delivery result.
 35. Confirm the draft clears and Today or Inbox updates only at the safe
