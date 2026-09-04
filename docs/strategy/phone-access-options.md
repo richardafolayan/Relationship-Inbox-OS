@@ -12,8 +12,10 @@ Use the existing private Tailscale path for the assisted 3 to 5 student pilot,
 but move its diagnosis and recovery into Tovi. Do not describe it as the final
 public phone experience.
 
-Develop the existing iPhone companion as the next client surface, initially on
-the same Tailscale transport. After it passes physical iPhone testing, add
+Do not start the iPhone companion phase without Richard's explicit product
+approval. If that exception is approved after the assisted pilot work, develop
+the existing companion as the next client surface, initially on the same
+Tailscale transport. After it passes physical iPhone testing, add
 certificate-pinned same-Wi-Fi pairing to the companion. This is the shortest
 credible route to a no-Tailscale experience while the Mac and iPhone are on the
 same network.
@@ -260,7 +262,11 @@ promise from a local app to an operated service.
 This phase keeps the transport that already exists and directly removes the
 operator knowledge currently hidden in the install guide.
 
-### Phase 2: iPhone companion through TestFlight
+### Phase 2: iPhone companion through TestFlight, explicit approval required
+
+This phase is outside the current pilot-only build direction. It must not begin
+unless Richard explicitly approves the companion as an exception to
+[`current-product-direction.md`](./current-product-direction.md).
 
 1. Complete the existing physical dictation checklist before distribution.
 2. Move the pairing credential out of `AppStorage` and into Keychain.
