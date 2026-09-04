@@ -2551,6 +2551,63 @@ test("send verification requires a new stable outgoing platform acknowledgement 
   );
 });
 
+test("exact Instagram transport identifiers survive server clock offset", () => {
+  const dispatchedAt = Date.parse("2026-08-24T08:00:00.000Z");
+  const serverTimestamp = "2026-08-24T07:57:00.000Z";
+  const after = normalizeInstagramMessageSnapshots("thread-clock-offset", [
+    {
+      nativeId: "acknowledged-message",
+      nativeIdStable: true,
+      offlineThreadingId: "offline-current-dispatch",
+      direction: "OUT",
+      text: "Approved smoke message",
+      sourceTimestamp: serverTimestamp
+    }
+  ]);
+
+  assert.equal(
+    findNewAcknowledgedInstagramOutgoing(
+      [],
+      after,
+      "Approved smoke message",
+      dispatchedAt,
+      Date.parse("2026-08-24T08:00:05.000Z"),
+      0,
+      after[0].platformMessageKey,
+      "offline-current-dispatch",
+      String(Date.parse(serverTimestamp))
+    )?.platformMessageKey,
+    after[0].platformMessageKey
+  );
+  assert.equal(
+    findNewAcknowledgedInstagramOutgoing(
+      [],
+      after,
+      "Approved smoke message",
+      dispatchedAt,
+      Date.parse("2026-08-24T08:00:05.000Z"),
+      0,
+      after[0].platformMessageKey,
+      "offline-different-dispatch"
+    ),
+    null
+  );
+  assert.equal(
+    findNewAcknowledgedInstagramOutgoing(
+      [],
+      after,
+      "Approved smoke message",
+      dispatchedAt,
+      Date.parse("2026-08-24T08:00:05.000Z"),
+      0,
+      after[0].platformMessageKey,
+      "offline-current-dispatch",
+      String(Date.parse(serverTimestamp) + 60_000)
+    ),
+    null
+  );
+});
+
 test("Instagram refuses to send through a disabled composer", async () => {
   let evaluateCalls = 0;
   const headerLocator = {

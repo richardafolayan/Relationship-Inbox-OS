@@ -322,6 +322,30 @@ test("all durable composer attempts reconcile and terminal SSE cleanup precedes 
   assert.doesNotMatch(sse.slice(0, terminalSend), /if \(!shouldRefetchForThreadEvent/);
 });
 
+test("durable composer recovery waits for the routed thread payload before replay", () => {
+  assert.match(
+    source,
+    /const durableComposerRecoveryReady =\s*!loading && thread\?\.id === threadId/
+  );
+
+  const inventoryStart = source.indexOf(
+    "useEffect(() => {\n    if (!durableComposerRecoveryReady) return undefined;\n    let disposed = false;"
+  );
+  const resumeStart = source.indexOf(
+    "useEffect(() => {\n    if (!durableComposerRecoveryReady) return undefined;\n    let cancelled = false;"
+  );
+  assert.notEqual(inventoryStart, -1);
+  assert.notEqual(resumeStart, -1);
+
+  const inventoryEnd = source.indexOf("  useEffect(() => {", inventoryStart + 1);
+  const inventory = source.slice(inventoryStart, inventoryEnd);
+  assert.match(inventory, /durableComposerRecoveryReady/);
+
+  const resumeEnd = source.indexOf("// Suggestions-spinner safety timer", resumeStart);
+  const resume = source.slice(resumeStart, resumeEnd);
+  assert.match(resume, /durableComposerRecoveryReady/);
+});
+
 test("late terminal delivery closes restored lineage before the composer is published", () => {
   const restore = recoveryCoreSource();
   const finalResolution = restore.lastIndexOf(

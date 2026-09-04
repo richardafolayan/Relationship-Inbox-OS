@@ -20,6 +20,7 @@ const INSTAGRAM_TEXT_SEND_OPERATION = "IGDirectTextSendMutation";
 const INSTAGRAM_TEXT_SEND_DOC_ID = "26911679871773184";
 const INSTAGRAM_TEXT_SEND_RESPONSE_FIELD =
   "xig_direct_text_send_with_slide_messaging_response";
+const INSTAGRAM_ACK_TIMESTAMP_TOLERANCE_MS = 5_000;
 const INSTAGRAM_RUNTIME_SHIM_SOURCE =
   "globalThis.__name=globalThis.__name||function(n){return n;};" +
   "globalThis.__defProp=globalThis.__defProp||Object.defineProperty;";
@@ -687,7 +688,8 @@ export function findNewAcknowledgedInstagramOutgoing(
   observedAtMs = Date.now(),
   clockSkewMs = 0,
   expectedPlatformMessageKey?: string,
-  expectedOfflineThreadingId?: string
+  expectedOfflineThreadingId?: string,
+  expectedAcknowledgedTimestampMs?: string
 ): NormalizedMessage | null {
   const normalizedText = cleanMessageText(text);
   const knownMessageKeys = new Set(
@@ -695,6 +697,12 @@ export function findNewAcknowledgedInstagramOutgoing(
   );
   const earliestAcceptedTimestamp = dispatchedAtMs - Math.max(0, clockSkewMs);
   const latestAcceptedTimestamp = observedAtMs + Math.max(0, clockSkewMs);
+  const causallyBoundToCurrentDispatch = Boolean(
+    expectedPlatformMessageKey && expectedOfflineThreadingId
+  );
+  const acknowledgedTimestamp = expectedAcknowledgedTimestampMs
+    ? Date.parse(parseInstagramSourceTimestamp(expectedAcknowledgedTimestampMs) ?? "")
+    : null;
 
   return (
     after.find((message) => {
@@ -712,6 +720,19 @@ export function findNewAcknowledgedInstagramOutgoing(
         return false;
       }
       const sourceTimestamp = Date.parse(message.timestamp);
+      if (causallyBoundToCurrentDispatch) {
+        // The exact native ID and outbound offline ID bind this readback to the
+        // captured mutation; compare server timestamps to each other, not to
+        // the local dispatch clock. The caller's deadline bounds the readback.
+        return (
+          Number.isFinite(sourceTimestamp) &&
+          observedAtMs >= dispatchedAtMs &&
+          (acknowledgedTimestamp === null ||
+            (Number.isFinite(acknowledgedTimestamp) &&
+              Math.abs(sourceTimestamp - acknowledgedTimestamp) <=
+                INSTAGRAM_ACK_TIMESTAMP_TOLERANCE_MS))
+        );
+      }
       return (
         Number.isFinite(sourceTimestamp) &&
         sourceTimestamp >= earliestAcceptedTimestamp &&
@@ -3982,7 +4003,8 @@ export class InstagramAdapter extends BetaAdapter {
           Date.now(),
           0,
           expectedPlatformMessageKey,
-          sendCapture.offlineThreadingId
+          sendCapture.offlineThreadingId,
+          sendCapture.acknowledgedTimestampMs
         );
         if (sent) {
           const finalRemainingMs = deadline - Date.now();

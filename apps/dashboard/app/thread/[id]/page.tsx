@@ -825,6 +825,7 @@ export default function ThreadPage() {
   const [loading, setLoading] = useState(
     () => peekCache<ThreadResponse>(`/runner/data/thread/${threadId}`) === undefined
   );
+  const durableComposerRecoveryReady = !loading && thread?.id === threadId;
   const [loadingOlderMessages, setLoadingOlderMessages] = useState(false);
   const [sending, setSending] = useState(false);
   // Synchronous re-entrancy guard. The `sending` state lags a render, so a
@@ -4347,6 +4348,7 @@ export default function ThreadPage() {
   checkPendingDeliveryRef.current = checkPendingDelivery;
 
   useEffect(() => {
+    if (!durableComposerRecoveryReady) return undefined;
     let disposed = false;
     const publishAndCheck = (pending: PendingSend) => {
       const next = [
@@ -4503,9 +4505,14 @@ export default function ThreadPage() {
       window.removeEventListener("focus", reconcileDurableAttempts);
       document.removeEventListener("visibilitychange", reconcileWhenVisible);
     };
-  }, [composerAttachmentStore, externalActionAttempts]);
+  }, [
+    composerAttachmentStore,
+    durableComposerRecoveryReady,
+    externalActionAttempts
+  ]);
 
   useEffect(() => {
+    if (!durableComposerRecoveryReady) return undefined;
     let cancelled = false;
     let attempt: ThreadComposerSendAttempt | null = null;
     try {
@@ -4694,7 +4701,12 @@ export default function ThreadPage() {
     return () => {
       cancelled = true;
     };
-  }, [composerAttachmentStore, externalActionAttempts, threadId]);
+  }, [
+    composerAttachmentStore,
+    durableComposerRecoveryReady,
+    externalActionAttempts,
+    threadId
+  ]);
 
   // Suggestions-spinner safety timer. When the runner-side status is
   // "generating", arm a 30s ceiling. If real chips arrive sooner the
