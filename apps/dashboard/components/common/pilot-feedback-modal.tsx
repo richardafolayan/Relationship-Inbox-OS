@@ -4,7 +4,6 @@ import { useCallback, useEffect, useRef, useState, type CSSProperties } from "re
 import { usePathname } from "next/navigation";
 import { ChevronLeft, ImageUp } from "lucide-react";
 import { apiGet, apiPost } from "@/lib/api";
-import { installClientErrorCapture } from "@/lib/client-error-log";
 import { showToast } from "@/lib/feedback";
 import { signalReportSendStart } from "@/lib/pilot-report-status";
 import {
@@ -19,6 +18,7 @@ import {
   formatPilotReportType,
   onPilotFeedback,
   mergeScreenshots,
+  runPilotReportSubmission,
   validateScreenshotFile,
   type PilotReportType
 } from "@/lib/pilot";
@@ -68,10 +68,8 @@ export function PilotFeedbackModal() {
   const [screenshotError, setScreenshotError] = useState<string | null>(null);
   const [privacyAck, setPrivacyAck] = useState(false);
   const [dragOver, setDragOver] = useState(false);
-
-  // Submit closes the modal immediately and runs the POST in the
-  // background (issue #383 / R-0030). Result lands as a success / error
-  // toast so the operator can do other things while it sends.
+  const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
 
   const [reports, setReports] = useState<StatusReport[] | null>(null);
   const [reportsError, setReportsError] = useState<string | null>(null);
@@ -79,6 +77,7 @@ export function PilotFeedbackModal() {
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const screenshotIdRef = useRef(0);
+  const submittingRef = useRef(false);
 
   const requestClose = useCallback(() => {
     setOpen(false);
@@ -98,6 +97,7 @@ export function PilotFeedbackModal() {
     setScreenshots([]);
     setScreenshotError(null);
     setPrivacyAck(false);
+    setSubmitError(null);
   }, []);
 
   useEffect(
@@ -109,11 +109,6 @@ export function PilotFeedbackModal() {
       }),
     []
   );
-
-  // Capture uncaught client errors from app start (this modal is mounted once
-  // in the shell), so a report submitted right after an error can carry what
-  // it was. See R-0077 (#709).
-  useEffect(() => installClientErrorCapture(), []);
 
   // When the last screenshot is removed, the privacy note unmounts; drop the
   // acknowledgement so re-attaching an image asks for it again.
@@ -207,8 +202,8 @@ export function PilotFeedbackModal() {
     description.trim().length > 0 &&
     (screenshots.length === 0 || privacyAck);
 
-  const submit = useCallback(() => {
-    if (!canSubmit) return;
+  const submit = useCallback(async () => {
+    if (!canSubmit || submittingRef.current) return;
     const payload = buildPilotReportPayload({
       type,
       title,
@@ -218,30 +213,42 @@ export function PilotFeedbackModal() {
       meta: collectPilotMeta(pathname),
       screenshots: screenshots.map((shot) => ({ name: shot.name, dataUrl: shot.dataUrl }))
     });
-    // Issue #383 / R-0030: close immediately; send in the background.
-    // Issue #421 / R-0047: signal in-flight to the TopStatus ticker.
-    setOpen(false);
-    resetForm();
+    submittingRef.current = true;
+    setSubmitting(true);
+    setSubmitError(null);
     const stopReportSendSignal = signalReportSendStart();
-    apiPost<{ ok: boolean; reportId?: string; error?: string }>(
-      "/runner/control/pilot-feedback",
-      payload
-    )
-      .then((res) => {
-        if (!res.ok || !res.reportId) {
-          throw new Error(res.error || "Could not send the report.");
+    try {
+      await runPilotReportSubmission({
+        request: async () => {
+          const res = await apiPost<{ ok: boolean; reportId?: string; error?: string }>(
+            "/runner/control/pilot-feedback",
+            payload
+          );
+          if (!res.ok || !res.reportId) {
+            throw new Error(res.error || "Could not send the report.");
+          }
+          return res.reportId;
+        },
+        onAccepted: (reportId) => {
+          showToast({ kind: "success", title: `Report sent: ${reportId}` });
+          setOpen(false);
+          resetForm();
+        },
+        onFailure: (message) => {
+          setSubmitError(message);
+          showToast({
+            kind: "error",
+            title: "Couldn't send pilot feedback",
+            description: message,
+            durationMs: 9000
+          });
         }
-        showToast({ kind: "success", title: `Report sent: ${res.reportId}` });
-      })
-      .catch((err) => {
-        showToast({
-          kind: "error",
-          title: "Couldn't send pilot feedback",
-          description: err instanceof Error ? err.message : String(err),
-          durationMs: 9000
-        });
-      })
-      .finally(() => stopReportSendSignal());
+      });
+    } finally {
+      submittingRef.current = false;
+      setSubmitting(false);
+      stopReportSendSignal();
+    }
   }, [canSubmit, type, title, description, expected, privacyAck, screenshots, pathname, resetForm]);
 
   const openReports = useCallback(async () => {
@@ -321,11 +328,11 @@ export function PilotFeedbackModal() {
             <button
               type="button"
               onClick={() => void submit()}
-              disabled={!canSubmit}
+              disabled={!canSubmit || submitting}
               data-pilot-feedback-submit="header"
               className="min-h-[40px] text-[13px] font-semibold text-ink disabled:cursor-not-allowed disabled:text-ink-4"
             >
-              Submit
+              {submitting ? "Sending..." : "Submit"}
             </button>
           ) : (
             <button
@@ -573,17 +580,26 @@ export function PilotFeedbackModal() {
             </div>
 
             <footer
-              className="flex shrink-0 flex-col gap-2 border-t border-hairline px-4 py-3 sm:flex-row sm:items-center sm:gap-[10px] sm:px-5 sm:py-[14px]"
+              className="flex shrink-0 flex-col gap-2 border-t border-hairline px-4 py-3 sm:flex-row sm:flex-wrap sm:items-center sm:gap-[10px] sm:px-5 sm:py-[14px]"
               data-pilot-feedback-footer="true"
             >
+              {submitError ? (
+                <p
+                  role="alert"
+                  data-pilot-feedback-error="true"
+                  className="m-0 w-full text-[12px] leading-[1.45] text-risk-overdue"
+                >
+                  Couldn't send this report. Your details are still here, so you can try again.
+                </p>
+              ) : null}
               <button
                 type="button"
                 onClick={() => void submit()}
-                disabled={!canSubmit}
+                disabled={!canSubmit || submitting}
                 data-pilot-feedback-submit="footer"
                 className="inline-flex w-full items-center justify-center gap-2 rounded-pill bg-ink px-[18px] py-[11px] text-[13px] font-medium text-paper transition-colors duration-calm hover:bg-ink-2 disabled:cursor-not-allowed disabled:opacity-50 sm:w-auto sm:py-[9px] sm:text-[12.5px]"
               >
-                Submit report
+                {submitting ? "Sending report..." : "Submit report"}
               </button>
               <div className="flex items-center justify-between gap-3 sm:contents">
                 <span className="text-[11.5px] leading-[1.45] text-ink-3">

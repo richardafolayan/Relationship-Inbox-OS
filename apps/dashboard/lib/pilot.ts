@@ -9,7 +9,6 @@
 
 // Relative (not "@/lib/...") so the tsx test runner, which imports this .ts
 // directly without the Next.js path-alias plugin, can resolve it.
-import { getRecentClientError } from "./client-error-log";
 import { APP_NAME } from "./branding";
 
 // localStorage flag: once the first-run welcome card on Today is dismissed,
@@ -198,10 +197,6 @@ export interface PilotReportMeta {
   appVersion: string;
   userAgent: string;
   timestamp: string;
-  // The most recent uncaught client error (exception message only), if one
-  // fired in the couple of minutes before submitting. Null when none. Lets a
-  // vague report ("Got an error?") still say what the error actually was.
-  lastError: string | null;
 }
 
 export interface PilotReportPayload {
@@ -236,7 +231,14 @@ export function buildPilotReportPayload(input: {
     description: input.description.trim(),
     expected: input.expected.trim(),
     privacyAck: input.privacyAck,
-    meta: input.meta,
+    meta: {
+      route: input.meta.route,
+      pathname: input.meta.pathname,
+      threadId: input.meta.threadId,
+      appVersion: input.meta.appVersion,
+      userAgent: input.meta.userAgent,
+      timestamp: input.meta.timestamp
+    },
     screenshots: input.screenshots ?? []
   };
 }
@@ -260,7 +262,6 @@ export function formatReportForCopy(payload: PilotReportPayload): string {
     `Page: ${payload.meta.route}`
   );
   if (payload.meta.threadId) lines.push(`Thread: ${payload.meta.threadId}`);
-  if (payload.meta.lastError) lines.push(`Last client error: ${payload.meta.lastError}`);
   lines.push(`Version: ${payload.meta.appVersion}`, `Time: ${payload.meta.timestamp}`);
   return lines.join("\n");
 }
@@ -302,9 +303,27 @@ export function collectPilotMeta(pathname: string): PilotReportMeta {
     threadId: extractThreadId(pathname),
     appVersion,
     userAgent: typeof navigator !== "undefined" ? navigator.userAgent : "",
-    timestamp: new Date().toISOString(),
-    lastError: typeof window !== "undefined" ? getRecentClientError(Date.now()) : null
+    timestamp: new Date().toISOString()
   };
+}
+
+export async function runPilotReportSubmission<T>({
+  request,
+  onAccepted,
+  onFailure
+}: {
+  request: () => Promise<T>;
+  onAccepted: (result: T) => void;
+  onFailure: (message: string) => void;
+}): Promise<boolean> {
+  try {
+    const result = await request();
+    onAccepted(result);
+    return true;
+  } catch (error) {
+    onFailure(error instanceof Error ? error.message : String(error));
+    return false;
+  }
 }
 
 // --- Window-event bridge -------------------------------------------------
