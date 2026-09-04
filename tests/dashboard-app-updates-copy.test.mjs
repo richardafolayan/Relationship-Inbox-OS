@@ -79,3 +79,12 @@ test("replacement instructions use runner host data instead of browser guessing"
   assert.match(SETUP_SOURCE, /setupUpdateInstructions\(APP_NAME, hostKind\)/);
   assert.doesNotMatch(SETUP_SOURCE, /navigator\.userAgent|navigator\.platform/);
 });
+
+test("unknown runner host metadata starts with neutral computer copy", () => {
+  assert.match(SETUP_SOURCE, /useState<HostDeviceKind>\("computer"\)/);
+  assert.match(SOURCE, /cached\?\.hostLabel \?\? "your computer"/);
+  assert.match(
+    SOURCE,
+    /cached\?\.hostKind \?\? hostPlatformToKind\(hostPlatform\) \?\? "computer"/
+  );
+});

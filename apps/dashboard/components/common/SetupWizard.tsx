@@ -120,7 +120,7 @@ export function SetupWizard() {
   const [connectingSource, setConnectingSource] = useState(false);
   const [stepBusy, setStepBusy] = useState(false);
   const [persistenceError, setPersistenceError] = useState("");
-  const [hostKind, setHostKind] = useState<HostDeviceKind>("mac");
+  const [hostKind, setHostKind] = useState<HostDeviceKind>("computer");
   const pendingPreferenceWrites = useRef(0);
   const preferenceWriter = useMemo(
     () =>

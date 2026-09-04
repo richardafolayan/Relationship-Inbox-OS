@@ -28,7 +28,7 @@ const {
 
 test("hostAppTitle names the app and the host device", () => {
   assert.equal(hostAppTitle("Tovi", "Richard's MacBook"), "Tovi on Richard's MacBook");
-  assert.equal(hostAppTitle("Tovi", "  "), "Tovi on your Mac");
+  assert.equal(hostAppTitle("Tovi", "  "), "Tovi on your computer");
 });
 
 test("install location copy points at the host, not the phone", () => {
@@ -42,6 +42,17 @@ test("runner platform identifiers map to update copy device kinds", () => {
   assert.equal(hostPlatformToKind("win32"), "pc");
   assert.equal(hostPlatformToKind("linux"), "computer");
   assert.equal(hostPlatformToKind("freebsd"), null);
+});
+
+test("unknown host metadata stays neutral until the runner identifies its platform", () => {
+  assert.equal(installLocationCopy(), "Updates install on your computer");
+  assert.doesNotMatch(setupUpdateInstructions("Tovi"), /DMG|Applications|Windows|Start menu/);
+  assert.doesNotMatch(
+    replaceAppUpdateInstructions("Tovi", "Relationship Inbox OS"),
+    /DMG|Applications|Windows|Start menu/
+  );
+  assert.match(hostOfflineCheckMessage(), /host is offline/i);
+  assert.match(updateRestartNotice("Tovi"), /this computer/i);
 });
 
 test("host offline copy explains why Check for updates is unavailable", () => {

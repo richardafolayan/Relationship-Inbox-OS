@@ -9,7 +9,7 @@ import {
 
 export type HostDeviceKind = "mac" | "pc" | "computer";
 
-export function hostKindToPlatform(kind: HostDeviceKind = "mac"): HostPlatformId {
+export function hostKindToPlatform(kind: HostDeviceKind = "computer"): HostPlatformId {
   if (kind === "mac") return "darwin";
   if (kind === "pc") return "win32";
   return "linux";
@@ -164,18 +164,18 @@ export function presentReleaseNotes(notes: string[]): PresentedReleaseNotes {
 }
 
 export function hostAppTitle(appName: string, hostLabel: string): string {
-  const label = hostLabel.trim() || "your Mac";
+  const label = hostLabel.trim() || "your computer";
   return `${appName} on ${label}`;
 }
 
-export function installLocationCopy(kind: HostDeviceKind = "mac"): string {
+export function installLocationCopy(kind: HostDeviceKind = "computer"): string {
   return updatesInstallLabel(hostKindToPlatform(kind));
 }
 
 export function replaceAppUpdateInstructions(
   appName: string,
   legacyAppName: string,
-  kind: HostDeviceKind = "mac"
+  kind: HostDeviceKind = "computer"
 ): string {
   if (kind === "pc") {
     return (
@@ -198,7 +198,7 @@ export function replaceAppUpdateInstructions(
 
 export function setupUpdateInstructions(
   appName: string,
-  kind: HostDeviceKind = "mac"
+  kind: HostDeviceKind = "computer"
 ): string {
   const opening =
     `When an update is ready, ${appName} checks automatically. ` +
@@ -224,7 +224,7 @@ export function setupUpdateInstructions(
   );
 }
 
-export function hostOfflineCheckMessage(kind: HostDeviceKind = "mac"): string {
+export function hostOfflineCheckMessage(kind: HostDeviceKind = "computer"): string {
   if (kind === "pc") {
     return "Check for updates is unavailable while this PC is offline. Open the app on the PC, then try again.";
   }
@@ -234,7 +234,7 @@ export function hostOfflineCheckMessage(kind: HostDeviceKind = "mac"): string {
   return "Check for updates is unavailable while your Mac is offline. Open the app on your Mac, then try again.";
 }
 
-export function updateRestartNotice(appName: string, kind: HostDeviceKind = "mac"): string {
+export function updateRestartNotice(appName: string, kind: HostDeviceKind = "computer"): string {
   const where =
     kind === "pc" ? "this PC" : kind === "computer" ? "this computer" : "your Mac";
   return (

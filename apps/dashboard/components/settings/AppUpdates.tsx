@@ -149,9 +149,9 @@ export function AppUpdates({
   const [automaticUpdates, setAutomaticUpdates] = useState(cached?.automaticUpdates ?? true);
   const [savingAutomaticUpdates, setSavingAutomaticUpdates] = useState(false);
   const [automaticUpdatesMsg, setAutomaticUpdatesMsg] = useState("");
-  const [hostLabel, setHostLabel] = useState(cached?.hostLabel ?? "your Mac");
+  const [hostLabel, setHostLabel] = useState(cached?.hostLabel ?? "your computer");
   const [hostKind, setHostKind] = useState<HostDeviceKind>(
-    cached?.hostKind ?? hostPlatformToKind(hostPlatform) ?? "mac"
+    cached?.hostKind ?? hostPlatformToKind(hostPlatform) ?? "computer"
   );
   const [statusOverride, setStatusOverride] = useState<UpdateUiState | null>(
     cached && (cached.status === "updating" || cached.status === "restart_required")
