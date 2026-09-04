@@ -697,9 +697,7 @@ export function findNewAcknowledgedInstagramOutgoing(
   );
   const earliestAcceptedTimestamp = dispatchedAtMs - Math.max(0, clockSkewMs);
   const latestAcceptedTimestamp = observedAtMs + Math.max(0, clockSkewMs);
-  const causallyBoundToCurrentDispatch = Boolean(
-    expectedPlatformMessageKey && expectedOfflineThreadingId
-  );
+  const causallyBoundToCurrentDispatch = Boolean(expectedOfflineThreadingId);
   const acknowledgedTimestamp = expectedAcknowledgedTimestampMs
     ? Date.parse(parseInstagramSourceTimestamp(expectedAcknowledgedTimestampMs) ?? "")
     : null;
@@ -721,9 +719,10 @@ export function findNewAcknowledgedInstagramOutgoing(
       }
       const sourceTimestamp = Date.parse(message.timestamp);
       if (causallyBoundToCurrentDispatch) {
-        // The exact native ID and outbound offline ID bind this readback to the
-        // captured mutation; compare server timestamps to each other, not to
-        // the local dispatch clock. The caller's deadline bounds the readback.
+        // The outbound offline ID binds this readback to the captured relay or
+        // realtime dispatch. Compare server timestamps to each other when the
+        // relay supplies one, not to the local clock. The caller's deadline
+        // bounds the readback.
         return (
           Number.isFinite(sourceTimestamp) &&
           observedAtMs >= dispatchedAtMs &&

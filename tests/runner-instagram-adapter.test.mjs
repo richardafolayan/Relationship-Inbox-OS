@@ -2608,6 +2608,47 @@ test("exact Instagram transport identifiers survive server clock offset", () => 
   );
 });
 
+test("Instagram realtime offline ID survives server clock offset without a relay message ID", () => {
+  const dispatchedAt = Date.parse("2026-08-24T08:00:00.000Z");
+  const after = normalizeInstagramMessageSnapshots("thread-realtime-clock-offset", [
+    {
+      nativeId: "realtime-readback-message",
+      nativeIdStable: true,
+      offlineThreadingId: "offline-realtime-current-dispatch",
+      direction: "OUT",
+      text: "Approved realtime message",
+      sourceTimestamp: "2026-08-24T07:57:00.000Z"
+    }
+  ]);
+
+  assert.equal(
+    findNewAcknowledgedInstagramOutgoing(
+      [],
+      after,
+      "Approved realtime message",
+      dispatchedAt,
+      Date.parse("2026-08-24T08:00:05.000Z"),
+      0,
+      undefined,
+      "offline-realtime-current-dispatch"
+    )?.platformMessageKey,
+    after[0].platformMessageKey
+  );
+  assert.equal(
+    findNewAcknowledgedInstagramOutgoing(
+      [],
+      after,
+      "Approved realtime message",
+      dispatchedAt,
+      Date.parse("2026-08-24T08:00:05.000Z"),
+      0,
+      undefined,
+      "offline-other-dispatch"
+    ),
+    null
+  );
+});
+
 test("Instagram refuses to send through a disabled composer", async () => {
   let evaluateCalls = 0;
   const headerLocator = {

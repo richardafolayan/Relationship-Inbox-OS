@@ -89,10 +89,7 @@ test("the thread-change reset effect clears the suggestions timeout flag", () =>
   // Scope to the per-thread restoration layout effect.
   const start = SRC.indexOf("const generation = ++composerRestoreGenerationRef.current;");
   assert.notEqual(start, -1, "located the thread-change reset effect");
-  const end = SRC.indexOf(
-    "}, [composerAttachmentStore, externalActionAttempts, threadId]);",
-    start
-  );
+  const end = SRC.indexOf("\n\n  useEffect(() => {", start);
   assert.notEqual(end, -1, "located the end of the thread-change reset effect");
   const resetEffect = SRC.slice(start, end);
   assert.match(
