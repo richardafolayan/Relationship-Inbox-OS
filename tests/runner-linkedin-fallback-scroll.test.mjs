@@ -238,8 +238,10 @@ test("LinkedIn fallback follows real list growth across a filtered-row gap", asy
       const list = document.querySelector("ul");
       let phase = 0;
       let loading = false;
+      let lastHandledScrollTop = Number.NaN;
       list.addEventListener("scroll", () => {
-        if (loading || phase >= 2) return;
+        if (loading || phase >= 2 || list.scrollTop === lastHandledScrollTop) return;
+        lastHandledScrollTop = list.scrollTop;
         loading = true;
         setTimeout(() => {
           if (phase === 0) {
