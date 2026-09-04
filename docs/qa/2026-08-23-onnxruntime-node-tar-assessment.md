@@ -110,11 +110,12 @@ for `tar@7.5.21`. Independent review recorded PASS with this evidence:
   selection tests pass.
 
 PR #1066 merged this correction into `develop` at
-`a5a64b25b08946d10d1e08d91bc63d17c65f26d5`. The current `origin/develop` lock
-at `33896960` still contains `tar@7.5.21`. The PR evidence records zero critical
-production advisories after the change, with 18 high and 4 moderate advisories
-remaining outside this focused remediation. Before broader pilot or production
-distribution, retain the remaining release evidence listed below.
+`a5a64b25b08946d10d1e08d91bc63d17c65f26d5`. The `origin/develop` lock inspected
+on 2026-08-31 at `33896960` still contained `tar@7.5.21`. The PR evidence records
+zero critical production advisories after the change, with 18 high and 4
+moderate advisories remaining outside this focused remediation. Before broader
+pilot or production distribution, retain the remaining release evidence listed
+below.
 
 ## Longer-term dependency options
 

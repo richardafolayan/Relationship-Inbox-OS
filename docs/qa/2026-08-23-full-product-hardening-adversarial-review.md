@@ -148,6 +148,10 @@ above. The integrated baseline inspected for this update is `origin/develop` at
 ### Release boundary after the corrective work
 
 - Instagram PR #1045 is merged into `develop` at `905103e8`.
+- Instagram hardening PR #1070 is merged into `develop` at `b35ca610`. Its
+  exact-head evidence covers adapter, recovery, dashboard, CI, Windows
+  installer, and adversarial review gates without claiming a successful live
+  provider send.
 - Setup persistence PR #1065 is merged into `develop` at `a2be0798`.
 - Dependency remediation PR #1066 is merged into `develop` at `a5a64b25`.
 - Remaining correctness and test-entrypoint PR #1067 is merged into `develop`
