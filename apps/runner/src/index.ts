@@ -1246,6 +1246,7 @@ const scanQueue = createScanQueue({
   aiService,
   platformMutex: operationMutex,
   personKey: defaultPersonKey,
+  platformLockKey,
   screenshotDir: runnerConfig.screenshotDir,
   domDumpDir: runnerConfig.domDumpDir,
   auditLog: (input) => auditService.log(input),
@@ -7111,6 +7112,7 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
     id: thread.id,
     personId: thread.person.id,
     personName: thread.person.displayName,
+    recipientVerificationLabel: thread.recipientVerificationLabel ?? null,
     personAvatarUrl: thread.person.avatarUrl ?? null,
     // R-0066 / #483. Whether the operator has favourited this contact, so the
     // thread header can render (and toggle) the favourite star in the right

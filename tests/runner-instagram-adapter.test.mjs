@@ -6,8 +6,14 @@ import {
   canonicalInstagramThreadUrl,
   classifyInstagramAuthRequirement,
   classifyInstagramThreadCollectionError,
+  extractInstagramMessageSnapshotsFromPayload,
+  extractInstagramRealtimeTextSend,
+  extractInstagramTextSendMutationRequest,
+  extractInstagramTextSendMutationResponse,
   extractInstagramThreadSnapshotsFromPayload,
-  findNewVerifiedInstagramOutgoing,
+  findNewAcknowledgedInstagramOutgoing,
+  InstagramNetworkMessageCapture,
+  InstagramNetworkSendCapture,
   InstagramNetworkThreadCapture,
   instagramEmptyInboxText,
   isInstagramExplicitEmptyInbox,
@@ -577,6 +583,109 @@ test("fetchRecentThreads waits for an in-flight network-only unread thread befor
   );
 });
 
+test("one collection cycle reuses its authoritative network snapshot across unread and recent views", async (t) => {
+  let browser;
+  try {
+    browser = await chromium.launch({ headless: true });
+  } catch (error) {
+    t.skip(
+      `Playwright Chromium unavailable: ${error instanceof Error ? error.message : String(error)}`
+    );
+    return;
+  }
+
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  let inboxNavigations = 0;
+  t.after(async () => {
+    await context.close();
+    await browser.close();
+  });
+  await page.route("https://www.instagram.com/**", async (route) => {
+    const url = new URL(route.request().url());
+    if (/\/api\/graphql$/.test(url.pathname)) {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          data: {
+            get_slide_mailbox_for_iris_subscription: {
+              threads_by_folder: {
+                edges: [
+                  {
+                    node: {
+                      __typename: "SlideThread",
+                      id: "opaque-wrapper-one",
+                      as_ig_direct_thread: {
+                        id: "canonical-one",
+                        users: [{ username: "Person One" }],
+                        has_unread: true
+                      }
+                    }
+                  },
+                  {
+                    node: {
+                      __typename: "SlideThread",
+                      id: "opaque-wrapper-two",
+                      as_ig_direct_thread: {
+                        id: "canonical-two",
+                        users: [{ username: "Person Two" }],
+                        has_unread: false
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        })
+      });
+      return;
+    }
+    inboxNavigations += 1;
+    await route.fulfill({
+      contentType: "text/html",
+      body: `<!doctype html><main>${
+        inboxNavigations === 1
+          ? "<script>fetch('/api/graphql', { method: 'POST' })</script>"
+          : ""
+      }</main>`
+    });
+  });
+
+  const adapter = new InstagramAdapter({
+    screenshotDir: "/tmp",
+    domDumpDir: "/tmp",
+    resolveSelectors: async () => ({
+      inbox_url: "https://www.instagram.com/direct/inbox/",
+      thread_list: "main",
+      thread_item: "[data-thread]",
+      thread_link: "a[href*='/direct/t/']",
+      thread_identity: "span[title]",
+      unread_badge: "[data-unread]",
+      message_container: "main",
+      message_item: "[data-message]",
+      message_text: "[data-text]",
+      composer_input: "[contenteditable='true']",
+      send_button: "[aria-label='Send']"
+    }),
+    sessionManager: { getManagedPage: async () => page },
+    personKey: "instagram",
+    connectTimeoutMs: 50
+  });
+
+  adapter.collectionBoundary.beginCycle();
+  const unread = await adapter.scanUnreadThreads();
+  const recent = await adapter.fetchRecentThreads(10);
+
+  assert.deepEqual(unread.map((thread) => thread.platformThreadId), ["canonical-one"]);
+  assert.deepEqual(
+    recent.map((thread) => thread.platformThreadId),
+    ["canonical-one", "canonical-two"]
+  );
+  assert.equal(inboxNavigations, 1);
+});
+
 test("Instagram collection stays incomplete unless every collection view proves empty", () => {
   assert.equal(
     resolveInstagramCollectionStopReason({
@@ -618,6 +727,121 @@ test("Instagram exposes its collection boundary through the typed adapter capabi
   assert.deepEqual(adapter.collectionBoundary.getMetrics(), {
     totalFound: 0,
     unreadFound: 0,
+    failures: 0,
+    completeness: "incomplete",
+    nativeStopReason: "instagram_bounded_snapshot"
+  });
+});
+
+test("same-cycle collection replay is browser-free, limit-aware, and preserves empty proof", async () => {
+  let pageRequested = false;
+  const adapter = new InstagramAdapter({
+    screenshotDir: "/tmp",
+    domDumpDir: "/tmp",
+    resolveSelectors: async () => ({}),
+    sessionManager: {
+      getManagedPage: async () => {
+        pageRequested = true;
+        throw new Error("cached collection unexpectedly requested a page");
+      }
+    },
+    personKey: "instagram",
+    connectTimeoutMs: 50
+  });
+
+  adapter.collectionBoundary.beginCycle();
+  adapter.cachedCollectionThreads = {
+    cycleId: adapter.collectionCycleId,
+    explicitlyEmpty: false,
+    threads: [
+      {
+        platformThreadId: "unread-thread",
+        displayName: "Unread",
+        recipientVerificationLabel: "Unread",
+        unreadCount: 1,
+        lastMessagePreview: "",
+        threadUrl: "https://www.instagram.com/direct/t/unread-thread/"
+      },
+      {
+        platformThreadId: "recent-thread",
+        displayName: "Recent",
+        recipientVerificationLabel: "Recent",
+        unreadCount: 0,
+        lastMessagePreview: "",
+        threadUrl: "https://www.instagram.com/direct/t/recent-thread/"
+      }
+    ]
+  };
+
+  assert.deepEqual(
+    (await adapter.scanUnreadThreads()).map((thread) => thread.platformThreadId),
+    ["unread-thread"]
+  );
+  assert.deepEqual(
+    (await adapter.fetchRecentThreads(1)).map((thread) => thread.platformThreadId),
+    ["unread-thread"]
+  );
+  assert.equal(pageRequested, false);
+  assert.deepEqual(adapter.collectionBoundary.getMetrics(), {
+    totalFound: 2,
+    unreadFound: 1,
+    failures: 0,
+    completeness: "incomplete",
+    nativeStopReason: "instagram_bounded_snapshot"
+  });
+
+  adapter.collectionBoundary.beginCycle();
+  adapter.cachedCollectionThreads = {
+    cycleId: adapter.collectionCycleId,
+    explicitlyEmpty: true,
+    threads: []
+  };
+  assert.deepEqual(await adapter.scanUnreadThreads(), []);
+  assert.deepEqual(await adapter.fetchRecentThreads(10), []);
+  assert.deepEqual(adapter.collectionBoundary.getMetrics(), {
+    totalFound: 0,
+    unreadFound: 0,
+    failures: 0,
+    completeness: "complete",
+    nativeStopReason: "zero_threads_found"
+  });
+  assert.equal(pageRequested, false);
+});
+
+test("same-cycle collection metrics describe the full snapshot beyond per-view limits", async () => {
+  const adapter = new InstagramAdapter({
+    screenshotDir: "/tmp",
+    domDumpDir: "/tmp",
+    resolveSelectors: async () => ({}),
+    sessionManager: {
+      getManagedPage: async () => {
+        throw new Error("cached collection unexpectedly requested a page");
+      }
+    },
+    personKey: "instagram",
+    connectTimeoutMs: 50
+  });
+  const threads = Array.from({ length: 95 }, (_, index) => ({
+    platformThreadId: `thread-${index}`,
+    displayName: `Thread ${index}`,
+    recipientVerificationLabel: `Thread ${index}`,
+    unreadCount: index % 10 === 0 ? 1 : 0,
+    lastMessagePreview: "",
+    threadUrl: `https://www.instagram.com/direct/t/thread-${index}/`
+  }));
+
+  adapter.collectionBoundary.beginCycle();
+  adapter.cachedCollectionThreads = {
+    cycleId: adapter.collectionCycleId,
+    explicitlyEmpty: false,
+    threads
+  };
+
+  assert.equal((await adapter.scanUnreadThreads()).length, 8);
+  assert.equal((await adapter.fetchRecentThreads(3)).length, 3);
+  assert.deepEqual(adapter.collectionBoundary.getMetrics(), {
+    totalFound: 95,
+    unreadFound: 10,
     failures: 0,
     completeness: "incomplete",
     nativeStopReason: "instagram_bounded_snapshot"
@@ -710,6 +934,269 @@ test("GraphQL thread payloads use only typed thread IDs and ignore unsupported f
   );
   assert.equal(first.some((thread) => thread.platformThreadId === "thread-one"), false);
   assert.equal(first.find((thread) => thread.platformThreadId === "typed-thread")?.unreadCount, 1);
+});
+
+test("SlideMailbox wrappers expose only the nested direct-thread canonical ID", () => {
+  const snapshots = extractInstagramThreadSnapshotsFromPayload({
+    data: {
+      get_slide_mailbox_for_iris_subscription: {
+        __typename: "SlideMailbox",
+        threads_by_folder: {
+          edges: [
+            {
+              node: {
+                __typename: "SlideThread",
+                id: "opaque-slide-wrapper",
+                as_ig_direct_thread: {
+                  id: "canonical-thread-id",
+                  thread_id: "internal-thread-id",
+                  thread_fbid: "internal-thread-fbid",
+                  thread_key: "internal-thread-key",
+                  thread_title: "Verified recipient",
+                  usersWithoutViewer: [{ username: "verified-recipient" }],
+                  marked_as_unread: true,
+                  slide_messages: {
+                    edges: [
+                      {
+                        node: {
+                          __typename: "SlideMessage",
+                          id: "message-id",
+                          message_id: "message-native-id",
+                          thread_fbid: "internal-thread-fbid"
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          ]
+        },
+        unrelated_edges: [
+          {
+            node: {
+              __typename: "SlideThread",
+              as_ig_direct_thread: {
+                id: "false-positive-inside-mailbox",
+                thread_title: "Wrong collection",
+                slide_messages: { edges: [] }
+              }
+            }
+          }
+        ]
+      },
+      unrelated_mailbox: {
+        edges: [
+          {
+            node: {
+              __typename: "SlideThread",
+              as_ig_direct_thread: {
+                id: "false-positive-other-mailbox",
+                thread_title: "Wrong mailbox",
+                slide_messages: { edges: [] }
+              }
+            }
+          }
+        ]
+      }
+    }
+  });
+
+  assert.deepEqual(snapshots, [
+    {
+      stableId: "canonical-thread-id",
+      displayName: "Verified recipient",
+      unread: true
+    }
+  ]);
+});
+
+test("SlideThread detail payloads expose exact-thread messages with explicit identity and direction", () => {
+  const extracted = extractInstagramMessageSnapshotsFromPayload(
+    {
+      data: {
+        get_slide_thread_nullable: {
+          id: "opaque-wrapper",
+          as_ig_direct_thread: {
+            id: "canonical-thread-id",
+            viewer_id: "viewer-id",
+            slide_messages: {
+              edges: [
+                {
+                  node: {
+                    __typename: "SlideMessage",
+                    id: "opaque-message-wrapper-one",
+                    message_id: "stable-message-one",
+                    offline_threading_id: "offline-message-one",
+                    timestamp_ms: "1700000000000",
+                    sender: {
+                      id: "sender-wrapper-one",
+                      name: "Me",
+                      user_dict: { id: "viewer-id" }
+                    },
+                    text_body: "Outgoing text",
+                    content: { __typename: "SlideMessageText", text_body: "Outgoing text" }
+                  }
+                },
+                {
+                  node: {
+                    __typename: "SlideMessage",
+                    id: "opaque-message-wrapper-two",
+                    message_id: "stable-message-two",
+                    timestamp_ms: "1700000001000",
+                    sender: {
+                      id: "sender-wrapper-two",
+                      name: "Recipient",
+                      user_dict: { id: "recipient-id" }
+                    },
+                    text_body: null,
+                    content: { __typename: "SlideMessageText", text_body: "Incoming text" }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    "canonical-thread-id"
+  );
+
+  assert.equal(extracted.matchedThread, true);
+  assert.equal(extracted.explicitlyEmpty, false);
+  assert.deepEqual(extracted.snapshots, [
+    {
+      nativeId: "stable-message-one",
+      nativeIdStable: true,
+      offlineThreadingId: "offline-message-one",
+      direction: "OUT",
+      text: "Outgoing text",
+      senderName: "Me",
+      sourceTimestamp: "1700000000000"
+    },
+    {
+      nativeId: "stable-message-two",
+      nativeIdStable: true,
+      direction: "IN",
+      text: "Incoming text",
+      senderName: "Recipient",
+      sourceTimestamp: "1700000001000"
+    }
+  ]);
+  assert.deepEqual(
+    normalizeInstagramMessageSnapshots("canonical-thread-id", extracted.snapshots).map(
+      (message) => [message.direction, message.text, message.timestamp]
+    ),
+    [
+      ["OUT", "Outgoing text", "2023-11-14T22:13:20.000Z"],
+      ["IN", "Incoming text", "2023-11-14T22:13:21.000Z"]
+    ]
+  );
+  assert.equal(
+    normalizeInstagramMessageSnapshots("canonical-thread-id", extracted.snapshots)[0]?.raw
+      ?.instagramOfflineThreadingId,
+    "offline-message-one"
+  );
+});
+
+test("SlideThread message extraction fails closed on mismatched, ambiguous, and false-empty payloads", () => {
+  const directThread = {
+    id: "different-thread-id",
+    viewer_id: "viewer-id",
+    slide_messages: { edges: [] }
+  };
+  assert.deepEqual(
+    extractInstagramMessageSnapshotsFromPayload(
+      { data: { get_slide_thread_nullable: { as_ig_direct_thread: directThread } } },
+      "expected-thread-id"
+    ),
+    { matchedThread: false, explicitlyEmpty: false, snapshots: [] }
+  );
+
+  assert.deepEqual(
+    extractInstagramMessageSnapshotsFromPayload(
+      {
+        data: {
+          get_slide_thread_nullable: {
+            as_ig_direct_thread: {
+              ...directThread,
+              id: "expected-thread-id"
+            }
+          }
+        }
+      },
+      "expected-thread-id"
+    ),
+    { matchedThread: true, explicitlyEmpty: false, snapshots: [] }
+  );
+
+  const ambiguous = extractInstagramMessageSnapshotsFromPayload(
+    {
+      data: {
+        get_slide_thread_nullable: {
+          as_ig_direct_thread: {
+            id: "expected-thread-id",
+            viewer_id: "viewer-id",
+            slide_messages: {
+              edges: [
+                {
+                  node: {
+                    __typename: "SlideMessage",
+                    message_id: "stable-message",
+                    timestamp_ms: "1700000000000",
+                    sender: {},
+                    text_body: "Direction unknown"
+                  }
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    "expected-thread-id"
+  );
+  assert.equal(ambiguous.snapshots[0]?.direction, "AMBIGUOUS");
+  assert.throws(
+    () => normalizeInstagramMessageSnapshots("expected-thread-id", ambiguous.snapshots),
+    (error) => error instanceof InstagramParsingError && error.reason === "ambiguous_message_direction"
+  );
+});
+
+test("SlideThread direction accepts either exact viewer identity and timestamps reject ambiguous epochs", () => {
+  const extracted = extractInstagramMessageSnapshotsFromPayload(
+    {
+      data: {
+        get_slide_thread_nullable: {
+          as_ig_direct_thread: {
+            id: "expected-thread-id",
+            viewer_id: "viewer-id",
+            slide_messages: {
+              edges: [
+                {
+                  node: {
+                    __typename: "SlideMessage",
+                    message_id: "stable-message",
+                    timestamp_ms: "170000000000",
+                    sender: {
+                      user_dict: { id: "different-namespace-id" },
+                      igid: "viewer-id"
+                    },
+                    text_body: "Outgoing text"
+                  }
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    "expected-thread-id"
+  );
+
+  assert.equal(extracted.snapshots[0]?.direction, "OUT");
+  assert.equal(parseInstagramSourceTimestamp("17000000000"), undefined);
+  assert.equal(parseInstagramSourceTimestamp("170000000000"), undefined);
 });
 
 test("GraphQL message records cannot impersonate direct-thread identities", () => {
@@ -805,7 +1292,6 @@ test("selector parsing failures are classified without inventing thread identity
     personKey: "instagram",
     connectTimeoutMs: 50
   });
-
   await assert.rejects(
     () => adapter.scanUnreadThreads(),
     (error) =>
@@ -946,6 +1432,166 @@ test("opening Instagram uses the exact thread URL and rejects identity mismatche
     (error) =>
       error?.kind === "THREAD_NOT_FOUND" &&
       error?.details?.reason === "invalid_thread_id"
+  );
+});
+
+test("opening Instagram accepts any ready conversation selector when another selector rejects", async () => {
+  const headerLocator = {
+    getAttribute: async () => "Safe thread",
+    textContent: async () => "Safe thread"
+  };
+  const page = withBrowserRuntime({
+    goto: async () => undefined,
+    bringToFront: async () => undefined,
+    waitForTimeout: async () => undefined,
+    waitForSelector: async (selector) => {
+      if (selector === "main") throw new Error("selector unavailable");
+      return undefined;
+    },
+    evaluate: async () => ({ fieldNames: [], bodyText: "" }),
+    url: () => "https://www.instagram.com/direct/t/safe-thread/",
+    locator: () => ({ first: () => headerLocator })
+  });
+  const adapter = new InstagramAdapter({
+    screenshotDir: "/tmp",
+    domDumpDir: "/tmp",
+    resolveSelectors: async () => ({
+      inbox_url: "https://www.instagram.com/direct/inbox/",
+      thread_list: "main",
+      thread_item: "a[href^='/direct/t/']",
+      unread_badge: "[data-unread]",
+      conversation_header: "header h1",
+      message_container: "main",
+      message_item: "[data-message]",
+      message_text: "[data-text]",
+      composer_input: "[contenteditable='true']",
+      send_button: "[aria-label='Send']"
+    }),
+    sessionManager: { getManagedPage: async () => page },
+    personKey: "instagram",
+    connectTimeoutMs: 50
+  });
+
+  await adapter.openThread({
+    platformThreadId: "safe-thread",
+    displayName: "Operator alias",
+    recipientVerificationLabel: "Safe thread"
+  });
+});
+
+test("exact-thread navigation respects a caller deadline budget", { timeout: 15_000 }, async () => {
+  const observedTimeouts = [];
+  const headerLocator = {
+    getAttribute: async () => "Safe thread",
+    textContent: async () => "Safe thread"
+  };
+  const page = withBrowserRuntime({
+    goto: async (_url, options) => {
+      observedTimeouts.push(options.timeout);
+    },
+    waitForTimeout: async () => undefined,
+    waitForSelector: async (_selector, options) => {
+      observedTimeouts.push(options.timeout);
+    },
+    evaluate: async () => ({ fieldNames: [], bodyText: "" }),
+    url: () => "https://www.instagram.com/direct/t/safe-thread/",
+    locator: () => ({ first: () => headerLocator })
+  });
+  const selectors = {
+    inbox_url: "https://www.instagram.com/direct/inbox/",
+    thread_list: "main",
+    thread_item: "a[href^='/direct/t/']",
+    unread_badge: "[data-unread]",
+    conversation_header: "header h1",
+    message_container: "main",
+    message_item: "[data-message]",
+    message_text: "[data-text]",
+    composer_input: "[contenteditable='true']",
+    send_button: "[aria-label='Send']"
+  };
+  const adapter = new InstagramAdapter({
+    screenshotDir: "/tmp",
+    domDumpDir: "/tmp",
+    resolveSelectors: async () => selectors,
+    sessionManager: { getManagedPage: async () => page },
+    personKey: "instagram",
+    connectTimeoutMs: 50
+  });
+
+  await adapter.openExactThread(
+    page,
+    selectors,
+    {
+      platformThreadId: "safe-thread",
+      displayName: "Operator alias",
+      recipientVerificationLabel: "Safe thread"
+    },
+    false,
+    "before_send",
+    Date.now() + 1_000
+  );
+
+  assert.ok(observedTimeouts.length >= 4);
+  assert.ok(observedTimeouts.every((timeout) => timeout > 0 && timeout <= 1_000));
+
+  adapter.authRequirementForPage = async () => new Promise(() => undefined);
+  await assert.rejects(
+    () =>
+      adapter.openExactThread(
+        page,
+        selectors,
+        {
+          platformThreadId: "safe-thread",
+          displayName: "Operator alias",
+          recipientVerificationLabel: "Safe thread"
+        },
+        false,
+        "before_send",
+        Date.now() + 25
+    ),
+    (error) => error?.reason === "send_verification_timeout"
+  );
+});
+
+test("recipient evidence captured for thread A cannot reject a later exact open of thread B", async () => {
+  const header = {
+    getAttribute: async () => "Thread B",
+    textContent: async () => "Thread B"
+  };
+  const page = withBrowserRuntime({
+    url: () => "https://www.instagram.com/direct/t/thread-b/",
+    locator: () => ({ first: () => header })
+  });
+  const adapter = new InstagramAdapter({
+    screenshotDir: "/tmp",
+    domDumpDir: "/tmp",
+    resolveSelectors: async () => ({}),
+    sessionManager: { getManagedPage: async () => page },
+    personKey: "instagram",
+    connectTimeoutMs: 50
+  });
+  adapter.networkMessageCaptureStatus = () => ({
+    expectedThreadId: "thread-a",
+    pendingRequests: 0,
+    successfulResponses: 1,
+    failedRequests: 0,
+    matchedThread: true,
+    explicitlyEmpty: false,
+    recipientVerificationLabel: "Thread A",
+    snapshots: []
+  });
+
+  await adapter.verifyCurrentThreadIdentity(
+    page,
+    { conversation_header: "header h1" },
+    {
+      platformThreadId: "thread-b",
+      displayName: "Thread B",
+      recipientVerificationLabel: "Thread B"
+    },
+    "thread-b",
+    false,
+    "open"
   );
 });
 
@@ -1107,6 +1753,142 @@ test("Instagram cannot certify an empty inbox after a GraphQL application error"
     (error) =>
       error?.kind === "SELECTOR_MISMATCH" &&
       error?.details?.reason === "thread_selector_returned_no_rows"
+  );
+});
+
+test("fetchThreadMessages uses the exact SlideThread network transcript when DOM rows are absent", async (t) => {
+  let browser;
+  try {
+    browser = await chromium.launch({ headless: true });
+  } catch (error) {
+    t.skip(`Playwright Chromium unavailable: ${error instanceof Error ? error.message : String(error)}`);
+    return;
+  }
+
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  t.after(async () => {
+    await context.close();
+    await browser.close();
+  });
+  await page.route("https://www.instagram.com/**", async (route) => {
+    const url = new URL(route.request().url());
+    if (/\/api\/graphql$/.test(url.pathname)) {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          data: {
+            get_slide_thread_nullable: {
+              as_ig_direct_thread: {
+                id: "safe-thread",
+                thread_title: "Safe thread",
+                viewer_id: "viewer-id",
+                slide_messages: {
+                  edges: [
+                    {
+                      node: {
+                        __typename: "SlideMessage",
+                        message_id: "network-out",
+                        timestamp_ms: "1700000000000",
+                        sender: {
+                          id: "sender-wrapper",
+                          name: "Me",
+                          user_dict: { id: "viewer-id" }
+                        },
+                        text_body: "Network message"
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        })
+      });
+      return;
+    }
+    await route.fulfill({
+      contentType: "text/html",
+      body: `<!doctype html>
+        <main>
+          <header><h1>Safe thread</h1></header>
+          <div role="textbox" contenteditable="true"></div>
+        </main>
+        <script>fetch('/api/graphql', { method: 'POST' })</script>`
+    });
+  });
+
+  const adapter = new InstagramAdapter({
+    screenshotDir: "/tmp",
+    domDumpDir: "/tmp",
+    resolveSelectors: async () => ({
+      inbox_url: "https://www.instagram.com/direct/inbox/",
+      conversation_header: "header h1",
+      message_container: "main",
+      message_item: "[data-message]",
+      message_text: "[data-text]",
+      composer_input: "[contenteditable='true']",
+      send_button: "[aria-label='Send']"
+    }),
+    sessionManager: { getManagedPage: async () => page },
+    personKey: "instagram",
+    connectTimeoutMs: 50
+  });
+
+  const thread = {
+    platformThreadId: "safe-thread",
+    displayName: "Operator alias"
+  };
+  const messages = await adapter.fetchThreadMessages(thread, 20);
+
+  assert.deepEqual(
+    messages.map((message) => [message.direction, message.text, message.timestamp]),
+    [["OUT", "Network message", "2023-11-14T22:13:20.000Z"]]
+  );
+  assert.equal(thread.recipientVerificationLabel, "Safe thread");
+});
+
+test("a loaded composer cannot certify an empty Instagram transcript", async () => {
+  const page = withBrowserRuntime({
+    evaluate: async () => undefined,
+    locator: () => ({
+      first: () => ({
+        getAttribute: async () => null,
+        textContent: async () => ""
+      })
+    })
+  });
+  const adapter = new InstagramAdapter({
+    screenshotDir: "/tmp",
+    domDumpDir: "/tmp",
+    resolveSelectors: async () => ({
+      message_container: "main",
+      message_item: "[data-message]",
+      message_text: "[data-text]",
+      composer_input: "[contenteditable='true']"
+    }),
+    sessionManager: { getManagedPage: async () => page },
+    personKey: "instagram",
+    connectTimeoutMs: 50
+  });
+  adapter.openExactThread = async () => "safe-thread";
+  adapter.waitForNetworkMessageCapture = async () => false;
+  adapter.snapshotMessages = async () => [];
+
+  await assert.rejects(
+    () =>
+      adapter.fetchThreadMessages(
+        {
+          platformThreadId: "safe-thread",
+          displayName: "Safe thread",
+          recipientVerificationLabel: "Safe thread"
+        },
+        20
+      ),
+    (error) =>
+      error?.kind === "THREAD_FETCH_FAILED" &&
+      error?.details?.reason === "message_selector_returned_no_rows"
   );
 });
 
@@ -1523,7 +2305,15 @@ test("volatile Instagram message metadata cannot impersonate a new outgoing mess
   ]);
 
   assert.equal(before[0].platformMessageKey, after[0].platformMessageKey);
-  assert.equal(findNewVerifiedInstagramOutgoing(before, after, "Reply"), null);
+  assert.equal(
+    findNewAcknowledgedInstagramOutgoing(
+      before,
+      after,
+      "Reply",
+      Date.parse("2026-08-24T08:00:01.000Z")
+    ),
+    null
+  );
 });
 
 test("exact-layout receipt fallback keys are deterministic and occurrence-scoped", () => {
@@ -1589,34 +2379,175 @@ test("Instagram rejects scheduled and attachment sends", () => {
   );
 });
 
-test("send verification requires a new exact outgoing bubble", () => {
+test("send verification requires a new stable outgoing platform acknowledgement after dispatch", () => {
+  const dispatchedAt = Date.parse("2026-08-24T08:00:00.000Z");
   const before = normalizeInstagramMessageSnapshots("thread-5", [
-    { nativeId: "old", nativeIdStable: true, direction: "OUT", text: "Approved smoke message" }
+    {
+      nativeId: "old",
+      nativeIdStable: true,
+      direction: "OUT",
+      text: "Approved smoke message",
+      sourceTimestamp: "2026-08-24T07:59:00.000Z"
+    }
   ]);
   const unchanged = normalizeInstagramMessageSnapshots("thread-5", [
-    { nativeId: "old", nativeIdStable: true, direction: "OUT", text: "Approved smoke message" }
+    {
+      nativeId: "old",
+      nativeIdStable: true,
+      direction: "OUT",
+      text: "Approved smoke message",
+      sourceTimestamp: "2026-08-24T07:59:00.000Z"
+    }
   ]);
   const submitted = normalizeInstagramMessageSnapshots("thread-5", [
-    { nativeId: "old", nativeIdStable: true, direction: "OUT", text: "Approved smoke message" },
-    { nativeId: "new", nativeIdStable: true, direction: "OUT", text: "Approved smoke message" }
+    {
+      nativeId: "old",
+      nativeIdStable: true,
+      direction: "OUT",
+      text: "Approved smoke message",
+      sourceTimestamp: "2026-08-24T07:59:00.000Z"
+    },
+    {
+      nativeId: "new",
+      nativeIdStable: true,
+      direction: "OUT",
+      text: "Approved smoke message",
+      sourceTimestamp: "2026-08-24T08:00:01.000Z"
+    }
   ]);
   const wrongDirection = normalizeInstagramMessageSnapshots("thread-5", [
-    { nativeId: "old", nativeIdStable: true, direction: "OUT", text: "Approved smoke message" },
-    { nativeId: "new", nativeIdStable: true, direction: "IN", text: "Approved smoke message" }
+    {
+      nativeId: "old",
+      nativeIdStable: true,
+      direction: "OUT",
+      text: "Approved smoke message",
+      sourceTimestamp: "2026-08-24T07:59:00.000Z"
+    },
+    {
+      nativeId: "new",
+      nativeIdStable: true,
+      direction: "IN",
+      text: "Approved smoke message",
+      sourceTimestamp: "2026-08-24T08:00:01.000Z"
+    }
+  ]);
+  const stale = normalizeInstagramMessageSnapshots("thread-5", [
+    {
+      nativeId: "new",
+      nativeIdStable: true,
+      direction: "OUT",
+      text: "Approved smoke message",
+      sourceTimestamp: "2026-08-24T07:59:00.000Z"
+    }
+  ]);
+  const immediatelyBeforeDispatch = normalizeInstagramMessageSnapshots("thread-5", [
+    {
+      nativeId: "pre-click",
+      nativeIdStable: true,
+      direction: "OUT",
+      text: "Approved smoke message",
+      sourceTimestamp: "2026-08-24T07:59:59.999Z"
+    }
+  ]);
+  const farFuture = normalizeInstagramMessageSnapshots("thread-5", [
+    {
+      nativeId: "future",
+      nativeIdStable: true,
+      direction: "OUT",
+      text: "Approved smoke message",
+      sourceTimestamp: "2026-08-25T08:00:00.000Z"
+    }
   ]);
 
   assert.equal(
-    findNewVerifiedInstagramOutgoing(before, unchanged, "Approved smoke message"),
+    findNewAcknowledgedInstagramOutgoing(
+      before,
+      unchanged,
+      "Approved smoke message",
+      dispatchedAt
+    ),
     null
   );
   assert.equal(
-    findNewVerifiedInstagramOutgoing(before, wrongDirection, "Approved smoke message"),
+    findNewAcknowledgedInstagramOutgoing(
+      before,
+      wrongDirection,
+      "Approved smoke message",
+      dispatchedAt
+    ),
     null
   );
   assert.equal(
-    findNewVerifiedInstagramOutgoing(before, submitted, "Approved smoke message")
+    findNewAcknowledgedInstagramOutgoing(
+      [],
+      stale,
+      "Approved smoke message",
+      dispatchedAt
+    ),
+    null
+  );
+  assert.equal(
+    findNewAcknowledgedInstagramOutgoing(
+      [],
+      immediatelyBeforeDispatch,
+      "Approved smoke message",
+      dispatchedAt
+    ),
+    null
+  );
+  assert.equal(
+    findNewAcknowledgedInstagramOutgoing(
+      [],
+      farFuture,
+      "Approved smoke message",
+      dispatchedAt,
+      Date.parse("2026-08-24T08:00:05.000Z")
+    ),
+    null
+  );
+  assert.equal(
+    findNewAcknowledgedInstagramOutgoing(
+      before,
+      submitted,
+      "Approved smoke message",
+      dispatchedAt
+    )
       ?.platformMessageKey,
     submitted[1].platformMessageKey
+  );
+
+  const expectedCausalMessage = normalizeInstagramMessageSnapshots("thread-5", [
+    {
+      nativeId: "causal-message",
+      nativeIdStable: true,
+      offlineThreadingId: "offline-causal",
+      direction: "OUT",
+      text: "Approved smoke message",
+      sourceTimestamp: "2026-08-24T08:00:01.000Z"
+    }
+  ])[0];
+  const concurrentIdenticalMessage = normalizeInstagramMessageSnapshots("thread-5", [
+    {
+      nativeId: "concurrent-message",
+      nativeIdStable: true,
+      offlineThreadingId: "offline-other-device",
+      direction: "OUT",
+      text: "Approved smoke message",
+      sourceTimestamp: "2026-08-24T08:00:01.000Z"
+    }
+  ]);
+  assert.equal(
+    findNewAcknowledgedInstagramOutgoing(
+      [],
+      concurrentIdenticalMessage,
+      "Approved smoke message",
+      dispatchedAt,
+      Date.parse("2026-08-24T08:00:05.000Z"),
+      0,
+      expectedCausalMessage.platformMessageKey,
+      "offline-causal"
+    ),
+    null
   );
 });
 
@@ -1665,6 +2596,17 @@ test("Instagram refuses to send through a disabled composer", async () => {
     sessionManager: { getManagedPage: async () => page },
     personKey: "instagram",
     connectTimeoutMs: 50
+  });
+  adapter.waitForNetworkMessageCapture = async () => true;
+  adapter.networkMessageCaptureStatus = () => ({
+    expectedThreadId: "safe-thread",
+    pendingRequests: 0,
+    successfulResponses: 1,
+    failedRequests: 0,
+    matchedThread: true,
+    explicitlyEmpty: false,
+    recipientVerificationLabel: "Safe thread",
+    snapshots: []
   });
 
   await assert.rejects(
@@ -1842,8 +2784,7 @@ test("Instagram atomic composer actions validate and mutate in one browser task"
   );
   assert.equal(await page.evaluate(() => window.submitted), 0);
   await sendButton.evaluate((button) => button.setAttribute("aria-disabled", "false"));
-  assert.deepEqual(
-    await adapter.runAtomicComposerAction({
+  const successfulSend = await adapter.runAtomicComposerAction({
       composer,
       ...composerOwnership,
       sendButton,
@@ -1857,9 +2798,9 @@ test("Instagram atomic composer actions validate and mutate in one browser task"
       platformThreadId: "safe-thread",
       action: "send",
       expectedText: "hi"
-    }),
-    { ok: true }
-  );
+    });
+  assert.equal(successfulSend.ok, true);
+  assert.equal(typeof successfulSend.clickedAtMs, "number");
   assert.equal(await page.evaluate(() => window.submitted), 1);
 });
 
@@ -2448,18 +3389,17 @@ test("Instagram sendMessage rejects composer ownership moved during its first po
     sendVerificationTimeoutMs: 50
   });
   adapter.openExactThread = async () => "safe-thread";
-  adapter.countExactOutgoingBubbles = async () => 0;
-  adapter.snapshotMessages = async () =>
-    (await page.evaluate(() => window.submitted > 0))
-      ? [
-          {
-            nativeId: "new-out",
-            nativeIdStable: true,
-            direction: "OUT",
-            text: "x"
-          }
-        ]
-      : [];
+  adapter.waitForNetworkMessageCapture = async () => true;
+  adapter.networkMessageCaptureStatus = () => ({
+    expectedThreadId: "safe-thread",
+    pendingRequests: 0,
+    successfulResponses: 1,
+    failedRequests: 0,
+    matchedThread: true,
+    explicitlyEmpty: false,
+    recipientVerificationLabel: "Safe thread",
+    snapshots: []
+  });
 
   await assert.rejects(
     () =>
@@ -2575,6 +3515,8 @@ test("Instagram atomic composer actions bind recipient evidence to the active co
 function sendTestHarness({
   observeSubmittedBubble,
   observeExactLayoutBubble = false,
+  networkAcknowledgement = "none",
+  preNetworkSnapshots = [],
   switchThreadBeforeClick = false,
   switchThreadDuringComposerHandle = false,
   switchThreadAfterComposerBound = false,
@@ -2593,11 +3535,16 @@ function sendTestHarness({
   sendButtonBox = { x: 850, y: 900, width: 80, height: 40 }
 }) {
   let currentUrl = "about:blank";
+  let originalNavigations = 0;
+  let verificationNavigations = 0;
+  let verificationPageClosed = 0;
   let submitted = false;
   let typed = "";
   const typedUnits = [];
   const composerMutations = [];
   let messageSnapshots = 0;
+  let networkCaptureGeneration = 0;
+  let sendCaptureGeneration = 0;
   let composerTextReads = 0;
   let headerReads = 0;
   const headerLocator = {
@@ -2694,8 +3641,9 @@ function sendTestHarness({
           currentUrl = "https://www.instagram.com/direct/t/wrong-thread/";
           throw new Error("Execution context was destroyed");
         }
+        const clickedAtMs = Date.now();
         submitted = true;
-        return { ok: true };
+        return { ok: true, clickedAtMs };
       }
       throw new Error(`Unexpected atomic action ${action}`);
     },
@@ -2827,6 +3775,7 @@ function sendTestHarness({
   };
   const page = withBrowserRuntime({
     goto: async (url) => {
+      originalNavigations += 1;
       currentUrl = url;
     },
     waitForTimeout: async () => undefined,
@@ -2877,6 +3826,16 @@ function sendTestHarness({
       }
     }
   });
+  const verificationPage = {
+    ...page,
+    goto: async (url) => {
+      verificationNavigations += 1;
+      currentUrl = url;
+    },
+    close: async () => {
+      verificationPageClosed += 1;
+    }
+  };
   const adapter = new InstagramAdapter({
     screenshotDir: "/tmp",
     domDumpDir: "/tmp",
@@ -2898,19 +3857,359 @@ function sendTestHarness({
     },
     personKey: "instagram",
     connectTimeoutMs: 50,
-    sendVerificationTimeoutMs: 5
+    sendVerificationTimeoutMs: 1_000
   });
+  adapter.beginNetworkMessageCapture = () => {
+    networkCaptureGeneration += 1;
+  };
+  adapter.beginNetworkSendCapture = () => {
+    sendCaptureGeneration += 1;
+    return sendCaptureGeneration;
+  };
+  adapter.commitNetworkSendClick = () => true;
+  adapter.waitForNetworkSendCapture = async () => true;
+  adapter.networkSendCaptureStatus = () => ({
+    generation: sendCaptureGeneration,
+    expectedThreadId: "safe-thread",
+    clickCommitted: true,
+    observedRequests: 1,
+    unverifiableRequests: 0,
+    matchingRequests: 1,
+    pendingRequests: 0,
+    failedRequests: 0,
+    outboundTransportBound: true,
+    offlineThreadingId: "offline-test-send",
+    acknowledgedMessageId: "new-network-out",
+    acknowledgedTimestampMs: new Date().toISOString()
+  });
+  adapter.createSendVerificationPage = async () => verificationPage;
+  adapter.waitForNetworkMessageCapture = async () => {
+    if (submitted && failAfterClick && networkCaptureGeneration > 1) {
+      throw new Error("Network capture unavailable after submit");
+    }
+    return true;
+  };
+  adapter.networkMessageCaptureStatus = () => {
+    const snapshots = [...preNetworkSnapshots];
+    if (submitted && networkCaptureGeneration > 1 && networkAcknowledgement !== "none") {
+      snapshots.push({
+        nativeId: "new-network-out",
+        nativeIdStable: true,
+        offlineThreadingId: "offline-test-send",
+        direction: "OUT",
+        text: typed,
+        sourceTimestamp:
+          networkAcknowledgement === "stale"
+            ? new Date(Date.now() - 60_000).toISOString()
+            : new Date().toISOString()
+      });
+    }
+    return {
+      expectedThreadId: "safe-thread",
+      pendingRequests: 0,
+      successfulResponses: 1,
+      failedRequests: 0,
+      matchedThread: true,
+      explicitlyEmpty: false,
+      recipientVerificationLabel: headerLabel,
+      snapshots
+    };
+  };
   return {
     adapter,
     wasSubmitted: () => submitted,
     typedUnits: () => [...typedUnits],
     composerMutations: () => [...composerMutations],
-    bindingDisposals: () => [...bindingDisposals]
+    bindingDisposals: () => [...bindingDisposals],
+    originalNavigations: () => originalNavigations,
+    verificationNavigations: () => verificationNavigations,
+    verificationPageClosed: () => verificationPageClosed
   };
 }
 
-test("Instagram adapter reports success only after an exact new outgoing bubble", async () => {
-  const harness = sendTestHarness({ observeSubmittedBubble: true });
+test("Instagram send binds an intercepted Relay mutation to authoritative two-page readback", async (t) => {
+  let browser;
+  try {
+    browser = await chromium.launch({ headless: true });
+  } catch (error) {
+    t.skip(`Playwright Chromium unavailable: ${error instanceof Error ? error.message : String(error)}`);
+    return;
+  }
+
+  const context = await browser.newContext();
+  const originalPage = await context.newPage();
+  let mutationCount = 0;
+  let serverSent = false;
+  let sentAtMs = 0;
+  const preexistingAtMs = Date.now() - 10_000;
+  const offlineThreadingId = "1788512400000000001";
+  t.after(async () => {
+    await context.close();
+    await browser.close();
+  });
+
+  const threadPayload = () => ({
+    data: {
+      get_slide_thread_nullable: {
+        as_ig_direct_thread: {
+          id: "safe-thread",
+          thread_title: "Safe thread",
+          viewer_id: "viewer-id",
+          slide_messages: {
+            edges: [
+              {
+                node: {
+                  __typename: "SlideMessage",
+                  message_id: "preexisting-identical",
+                  offline_threading_id: "offline-preexisting",
+                  timestamp_ms: String(preexistingAtMs),
+                  sender: {
+                    igid: "viewer-id",
+                    user_dict: { id: "viewer-id" }
+                  },
+                  text_body: "x"
+                }
+              },
+              ...(serverSent
+                ? [
+                  {
+                    node: {
+                      __typename: "SlideMessage",
+                      message_id: "concurrent-identical",
+                      offline_threading_id: "offline-other-device",
+                      timestamp_ms: String(sentAtMs),
+                      sender: {
+                        igid: "viewer-id",
+                        user_dict: { id: "viewer-id" }
+                      },
+                      text_body: "x"
+                    }
+                  },
+                  {
+                    node: {
+                      __typename: "SlideMessage",
+                      message_id: "server-message-1",
+                      offline_threading_id: offlineThreadingId,
+                      timestamp_ms: String(sentAtMs),
+                      sender: {
+                        igid: "viewer-id",
+                        user_dict: { id: "viewer-id" }
+                      },
+                      text_body: "x"
+                    }
+                  }
+                ]
+                : [])
+            ]
+          }
+        }
+      }
+    }
+  });
+  const sendBody = instagramTextSendRequestBody({
+    offline_threading_id: offlineThreadingId,
+    text: { sensitive_string_value: "x" }
+  });
+  const detailBody = new URLSearchParams({
+    fb_api_req_friendly_name: "IGDThreadDetailQuery",
+    doc_id: "thread-detail-fixture",
+    variables: JSON.stringify({ thread_id: "safe-thread" })
+  }).toString();
+  const html = `<!doctype html>
+    <style>
+      main { display: block; width: 1000px; height: 800px; }
+      header { height: 80px; }
+      .composer-row { display: flex; align-items: center; width: 900px; height: 60px; }
+      [contenteditable='true'] { display: block; width: 700px; height: 40px; }
+      button { display: block; width: 80px; height: 40px; }
+    </style>
+    <main>
+      <header><h1 title="Safe thread">Safe thread</h1></header>
+      <div class="composer-row">
+        <div id="composer" role="textbox" contenteditable="true"></div>
+        <button id="send" type="button" aria-label="Send">Send</button>
+      </div>
+    </main>
+    <script>
+      fetch("/api/graphql/", {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: ${JSON.stringify(detailBody)}
+      });
+      document.querySelector("#send").addEventListener("click", () => {
+        fetch("/api/graphql/", {
+          method: "POST",
+          headers: { "content-type": "application/x-www-form-urlencoded" },
+          body: ${JSON.stringify(sendBody)}
+        });
+      });
+    </script>`;
+
+  await context.route("https://www.instagram.com/**", async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    if (/^\/direct\/t\/safe-thread\/?$/.test(url.pathname)) {
+      await route.fulfill({ status: 200, contentType: "text/html", body: html });
+      return;
+    }
+    if (/\/api\/graphql\/?$/.test(url.pathname)) {
+      const fields = new URLSearchParams(request.postData() ?? "");
+      if (fields.get("fb_api_req_friendly_name") === "IGDirectTextSendMutation") {
+        mutationCount += 1;
+        sentAtMs = Date.now();
+        serverSent = true;
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            data: {
+              xig_direct_text_send_with_slide_messaging_response: {
+                message_id: "server-message-1",
+                timestamp_ms: String(sentAtMs),
+                id: "relay-node-id"
+              }
+            }
+          })
+        });
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(threadPayload())
+      });
+      return;
+    }
+    await route.fulfill({ status: 200, contentType: "text/html", body: "<!doctype html>" });
+  });
+
+  const adapter = new InstagramAdapter({
+    screenshotDir: "/tmp",
+    domDumpDir: "/tmp",
+    resolveSelectors: async () => ({
+      inbox_url: "https://www.instagram.com/direct/inbox/",
+      thread_list: "main",
+      thread_item: "a[href^='/direct/t/']",
+      unread_badge: "[data-unread]",
+      conversation_header: "header h1",
+      message_container: "main",
+      message_item: "[data-message]",
+      message_text: "[data-text]",
+      composer_input: "[contenteditable='true']",
+      send_button: "[aria-label='Send']"
+    }),
+    sessionManager: {
+      getManagedPage: async () => originalPage,
+      revealWindow: async () => undefined
+    },
+    personKey: "instagram",
+    connectTimeoutMs: 50,
+    sendVerificationTimeoutMs: 15_000
+  });
+
+  const receipt = await adapter.sendMessage(
+    {
+      platformThreadId: "safe-thread",
+      displayName: "Safe thread",
+      recipientVerificationLabel: "Safe thread"
+    },
+    "x"
+  );
+  assert.equal(mutationCount, 1);
+  assert.equal(receipt.verifiedBy, "platform_acknowledged");
+  assert.equal(
+    receipt.platformMessageKey,
+    normalizeInstagramMessageSnapshots("safe-thread", [
+      {
+        nativeId: "server-message-1",
+        nativeIdStable: true,
+        offlineThreadingId,
+        direction: "OUT",
+        text: "x",
+        sourceTimestamp: String(sentAtMs)
+      }
+    ])[0].platformMessageKey
+  );
+  assert.equal(context.pages().length, 1);
+});
+
+test("Instagram send capture fails closed on an aborted Relay mutation", async (t) => {
+  let browser;
+  try {
+    browser = await chromium.launch({ headless: true });
+  } catch (error) {
+    t.skip(`Playwright Chromium unavailable: ${error instanceof Error ? error.message : String(error)}`);
+    return;
+  }
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  t.after(async () => {
+    await context.close();
+    await browser.close();
+  });
+  const body = instagramTextSendRequestBody({
+    offline_threading_id: "offline-aborted",
+    text: { sensitive_string_value: "approved" }
+  });
+  await context.route("https://www.instagram.com/**", async (route) => {
+    const url = new URL(route.request().url());
+    if (/^\/send-capture-fixture\/?$/.test(url.pathname)) {
+      await route.fulfill({
+        status: 200,
+        contentType: "text/html",
+        body: `<!doctype html><script>
+          window.sendFixture = () => fetch("/api/graphql/", {
+            method: "POST",
+            headers: { "content-type": "application/x-www-form-urlencoded" },
+            body: ${JSON.stringify(body)}
+          }).catch(() => null);
+        </script>`
+      });
+      return;
+    }
+    if (/\/api\/graphql\/?$/.test(url.pathname)) {
+      await route.abort("failed");
+      return;
+    }
+    await route.fulfill({ status: 404, body: "" });
+  });
+  const adapter = new InstagramAdapter({
+    screenshotDir: "/tmp",
+    domDumpDir: "/tmp",
+    resolveSelectors: async () => ({}),
+    sessionManager: { getManagedPage: async () => page },
+    personKey: "instagram",
+    connectTimeoutMs: 50
+  });
+  await adapter.getPage();
+  await page.goto("https://www.instagram.com/send-capture-fixture");
+  await page.setContent("<!doctype html>");
+  await page.evaluate((requestBody) => {
+    window.sendFixture = () =>
+      fetch("/api/graphql/", {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: requestBody
+      }).catch(() => null);
+  }, body);
+  const generation = adapter.beginNetworkSendCapture(page, "safe-thread", "approved");
+  const clickedAtMs = Date.now();
+  await page.evaluate(() => window.sendFixture());
+  assert.equal(adapter.commitNetworkSendClick(page, generation, clickedAtMs), true);
+  assert.equal(await adapter.waitForNetworkSendCapture(page, 1_000), false);
+  const capture = adapter.networkSendCaptureStatus(page);
+  assert.equal(capture.observedRequests, 1);
+  assert.equal(capture.unverifiableRequests, 1);
+  assert.equal(capture.matchingRequests, 0);
+  assert.equal(capture.outboundTransportBound, false);
+  assert.equal(capture.acknowledgedMessageId, null);
+});
+
+test("Instagram adapter reports success only after a fresh stable network acknowledgement", async () => {
+  const harness = sendTestHarness({
+    observeSubmittedBubble: true,
+    networkAcknowledgement: "fresh"
+  });
   const receipt = await harness.adapter.sendMessage(
     {
       platformThreadId: "safe-thread",
@@ -2921,11 +4220,20 @@ test("Instagram adapter reports success only after an exact new outgoing bubble"
   );
 
   assert.equal(harness.wasSubmitted(), true);
-  assert.equal(receipt.verifiedBy, "bubble_detected");
+  assert.equal(harness.originalNavigations(), 1);
+  assert.equal(harness.verificationNavigations() > 0, true);
+  assert.equal(harness.verificationPageClosed(), 1);
+  assert.equal(receipt.verifiedBy, "platform_acknowledged");
   assert.equal(
     receipt.platformMessageKey,
     normalizeInstagramMessageSnapshots("safe-thread", [
-      { nativeId: "new-out", nativeIdStable: true, direction: "OUT", text: "x" }
+      {
+        nativeId: "new-network-out",
+        nativeIdStable: true,
+        direction: "OUT",
+        text: "x",
+        sourceTimestamp: new Date().toISOString()
+      }
     ])[0].platformMessageKey
   );
   assert.deepEqual(
@@ -3007,6 +4315,74 @@ test("Instagram adapter fails when submission produces no outgoing bubble", asyn
   assert.equal(harness.wasSubmitted(), true);
 });
 
+test("Instagram treats an optimistic DOM bubble without a stable platform acknowledgement as uncertain", async () => {
+  const harness = sendTestHarness({ observeSubmittedBubble: true });
+
+  await assert.rejects(
+    () =>
+      harness.adapter.sendMessage(
+        {
+          platformThreadId: "safe-thread",
+          displayName: "Safe thread",
+          recipientVerificationLabel: "Safe thread"
+        },
+        "x"
+      ),
+    (error) => error?.details?.reason === "delivery_uncertain_after_submit"
+  );
+  assert.equal(harness.wasSubmitted(), true);
+});
+
+test("Instagram rejects a new stable message whose platform timestamp predates dispatch", async () => {
+  const harness = sendTestHarness({
+    observeSubmittedBubble: true,
+    networkAcknowledgement: "stale"
+  });
+
+  await assert.rejects(
+    () =>
+      harness.adapter.sendMessage(
+        {
+          platformThreadId: "safe-thread",
+          displayName: "Safe thread",
+          recipientVerificationLabel: "Safe thread"
+        },
+        "x"
+      ),
+    (error) => error?.details?.reason === "delivery_uncertain_after_submit"
+  );
+  assert.equal(harness.wasSubmitted(), true);
+});
+
+test("partial pre-send history cannot turn an old identical DOM message into acknowledgement", async () => {
+  const harness = sendTestHarness({
+    observeSubmittedBubble: true,
+    preNetworkSnapshots: [
+      {
+        nativeId: "known-different-message",
+        nativeIdStable: true,
+        direction: "OUT",
+        text: "Different",
+        sourceTimestamp: "2026-08-24T07:00:00.000Z"
+      }
+    ]
+  });
+
+  await assert.rejects(
+    () =>
+      harness.adapter.sendMessage(
+        {
+          platformThreadId: "safe-thread",
+          displayName: "Safe thread",
+          recipientVerificationLabel: "Safe thread"
+        },
+        "x"
+      ),
+    (error) => error?.details?.reason === "delivery_uncertain_after_submit"
+  );
+  assert.equal(harness.wasSubmitted(), true);
+});
+
 test("Instagram rejects multiline text before typing can trigger an Enter-key send", async () => {
   const harness = sendTestHarness({
     observeSubmittedBubble: false,
@@ -3031,27 +4407,25 @@ test("Instagram rejects multiline text before typing can trigger an Enter-key se
   assert.equal(harness.wasSubmitted(), false);
 });
 
-test("Instagram adapter verifies an exact new outgoing layout bubble", async () => {
+test("Instagram treats an exact new outgoing layout bubble without server evidence as uncertain", async () => {
   const harness = sendTestHarness({
     observeSubmittedBubble: false,
     observeExactLayoutBubble: true
   });
-  const receipt = await harness.adapter.sendMessage(
-    {
-      platformThreadId: "safe-thread",
-      displayName: "Safe thread",
-      recipientVerificationLabel: "Safe thread"
-    },
-    "x"
+  await assert.rejects(
+    () =>
+      harness.adapter.sendMessage(
+        {
+          platformThreadId: "safe-thread",
+          displayName: "Safe thread",
+          recipientVerificationLabel: "Safe thread"
+        },
+        "x"
+      ),
+    (error) => error?.details?.reason === "delivery_uncertain_after_submit"
   );
 
   assert.equal(harness.wasSubmitted(), true);
-  assert.equal(receipt.verifiedBy, "bubble_detected");
-  assert.equal(receipt.raw?.verification, "exact_outgoing_layout_bubble");
-  assert.equal(
-    receipt.platformMessageKey,
-    instagramMessageFallbackKey("safe-thread", "OUT", "x", undefined, 0)
-  );
 });
 
 test("Instagram revalidates the exact thread after typing and before clicking Send", async () => {
@@ -3234,7 +4608,7 @@ test("Instagram cannot type after the route changes at the mutation boundary", a
 test("Instagram catches navigation during a mid-typing recipient-header check", async () => {
   const harness = sendTestHarness({
     observeSubmittedBubble: false,
-    switchThreadDuringHeaderReadAt: 6
+    switchThreadDuringHeaderReadAt: 7
   });
 
   await assert.rejects(
@@ -3435,7 +4809,7 @@ test("Instagram cannot submit after the route changes at the click boundary", as
 test("Instagram catches navigation during the final recipient-header check", async () => {
   const harness = sendTestHarness({
     observeSubmittedBubble: false,
-    switchThreadDuringHeaderReadAt: 6
+    switchThreadDuringHeaderReadAt: 7
   });
 
   await assert.rejects(
@@ -3491,6 +4865,381 @@ test("Instagram thread snapshots reject conflicting URL and record identities", 
   );
 });
 
+function instagramTextSendRequestBody(overrides = {}) {
+  return new URLSearchParams({
+    fb_api_req_friendly_name: "IGDirectTextSendMutation",
+    doc_id: "26911679871773184",
+    variables: JSON.stringify({
+      ig_thread_igid: "safe-thread",
+      offline_threading_id: "offline-1",
+      recipient_igids: null,
+      text: { sensitive_string_value: "approved" },
+      ...overrides
+    })
+  }).toString();
+}
+
+test("Instagram text-send mutation parsing requires the exact current Relay contract", () => {
+  const request = extractInstagramTextSendMutationRequest({
+    url: "https://www.instagram.com/api/graphql/",
+    method: "POST",
+    postData: instagramTextSendRequestBody(),
+    expectedThreadId: "safe-thread",
+    expectedText: "approved"
+  });
+  assert.deepEqual(request, { offlineThreadingId: "offline-1" });
+
+  assert.equal(
+    extractInstagramTextSendMutationRequest({
+      url: "https://www.instagram.com/api/graphql/",
+      method: "POST",
+      postData: instagramTextSendRequestBody({ ig_thread_igid: "wrong-thread" }),
+      expectedThreadId: "safe-thread",
+      expectedText: "approved"
+    }),
+    null
+  );
+  const wrongOperation = new URLSearchParams(instagramTextSendRequestBody());
+  wrongOperation.set("fb_api_req_friendly_name", "IGDirectReactionSendMutation");
+  assert.equal(
+    extractInstagramTextSendMutationRequest({
+      url: "https://www.instagram.com/api/graphql/",
+      method: "POST",
+      postData: wrongOperation.toString(),
+      expectedThreadId: "safe-thread",
+      expectedText: "approved"
+    }),
+    null
+  );
+
+  assert.deepEqual(
+    extractInstagramTextSendMutationResponse({
+      data: {
+        xig_direct_text_send_with_slide_messaging_response: {
+          message_id: "server-message-1",
+          timestamp_ms: "1788512400000",
+          id: "relay-node-id"
+        }
+      }
+    }),
+    { messageId: "server-message-1", timestampMs: "1788512400000" }
+  );
+  assert.equal(
+    extractInstagramTextSendMutationResponse({
+      data: {
+        xig_direct_text_send_with_slide_messaging_response: {
+          timestamp_ms: "1788512400000",
+          id: "relay-node-id"
+        }
+      }
+    }),
+    null
+  );
+});
+
+test("Instagram send capture excludes pre-click requests and fails closed on duplicates", () => {
+  const capture = new InstagramNetworkSendCapture();
+  const generation = capture.begin("safe-thread", "approved");
+  const preClick = capture.stageRequest({
+    generation,
+    url: "https://www.instagram.com/api/graphql/",
+    method: "POST",
+    postData: instagramTextSendRequestBody({ offline_threading_id: "before-click" }),
+    requestStartedAtMs: 999
+  });
+  const postClick = capture.stageRequest({
+    generation,
+    url: "https://www.instagram.com/api/graphql/",
+    method: "POST",
+    postData: instagramTextSendRequestBody({ offline_threading_id: "after-click" }),
+    requestStartedAtMs: 1_001
+  });
+  assert.ok(preClick);
+  assert.ok(postClick);
+  capture.settleRequest(preClick, true, {
+    data: {
+      xig_direct_text_send_with_slide_messaging_response: {
+        message_id: "unrelated-before-click"
+      }
+    }
+  });
+  capture.settleRequest(postClick, true, {
+    data: {
+      xig_direct_text_send_with_slide_messaging_response: {
+        message_id: "server-message-1"
+      }
+    }
+  });
+  assert.equal(capture.commitClick(generation, 1_000), true);
+  assert.deepEqual(capture.status(), {
+    generation,
+    expectedThreadId: "safe-thread",
+    clickCommitted: true,
+    observedRequests: 2,
+    unverifiableRequests: 0,
+    matchingRequests: 1,
+    pendingRequests: 0,
+    failedRequests: 0,
+    outboundTransportBound: true,
+    offlineThreadingId: "after-click",
+    acknowledgedMessageId: "server-message-1"
+  });
+
+  const duplicate = capture.stageRequest({
+    generation,
+    url: "https://www.instagram.com/api/graphql/",
+    method: "POST",
+    postData: instagramTextSendRequestBody({ offline_threading_id: "duplicate" }),
+    requestStartedAtMs: 1_002
+  });
+  assert.ok(duplicate);
+  capture.settleRequest(duplicate, true, {
+    data: {
+      xig_direct_text_send_with_slide_messaging_response: {
+        message_id: "server-message-2"
+      }
+    }
+  });
+  assert.equal(capture.status().matchingRequests, 2);
+  assert.equal(capture.status().acknowledgedMessageId, null);
+});
+
+test("Instagram send capture waits through a quiet window and rejects a late duplicate", async () => {
+  const capture = new InstagramNetworkSendCapture();
+  const generation = capture.begin("safe-thread", "approved");
+  const first = capture.stageRequest({
+    generation,
+    url: "https://www.instagram.com/api/graphql/",
+    method: "POST",
+    postData: instagramTextSendRequestBody({ offline_threading_id: "first" }),
+    requestStartedAtMs: 1_001
+  });
+  assert.ok(first);
+  capture.settleRequest(first, true, {
+    data: {
+      xig_direct_text_send_with_slide_messaging_response: {
+        message_id: "server-message-1"
+      }
+    }
+  });
+  assert.equal(capture.commitClick(generation, 1_000), true);
+
+  const adapter = new InstagramAdapter({
+    screenshotDir: "/tmp",
+    domDumpDir: "/tmp",
+    resolveSelectors: async () => ({}),
+    sessionManager: { getManagedPage: async () => ({}) },
+    personKey: "instagram",
+    connectTimeoutMs: 50
+  });
+  adapter.networkSendCaptureStatus = () => capture.status();
+  const page = {
+    waitForTimeout: async (delayMs) =>
+      new Promise((resolve) => setTimeout(resolve, delayMs))
+  };
+  setTimeout(() => {
+    const duplicate = capture.stageRequest({
+      generation,
+      url: "https://www.instagram.com/api/graphql/",
+      method: "POST",
+      postData: instagramTextSendRequestBody({ offline_threading_id: "late-duplicate" }),
+      requestStartedAtMs: 1_002
+    });
+    assert.ok(duplicate);
+    capture.settleRequest(duplicate, true, {
+      data: {
+        xig_direct_text_send_with_slide_messaging_response: {
+          message_id: "server-message-2"
+        }
+      }
+    });
+  }, 50);
+
+  assert.equal(await adapter.waitForNetworkSendCapture(page, 700), false);
+  assert.equal(capture.status().matchingRequests, 2);
+});
+
+test("Instagram send capture rejects a mixed unverifiable exact request", async () => {
+  const capture = new InstagramNetworkSendCapture();
+  const generation = capture.begin("safe-thread", "approved");
+  const unknown = capture.stageRequest({
+    generation,
+    url: "https://www.instagram.com/api/graphql/",
+    method: "POST",
+    postData: instagramTextSendRequestBody({ offline_threading_id: "unknown" }),
+    requestStartedAtMs: 0
+  });
+  const timed = capture.stageRequest({
+    generation,
+    url: "https://www.instagram.com/api/graphql/",
+    method: "POST",
+    postData: instagramTextSendRequestBody({ offline_threading_id: "timed" }),
+    requestStartedAtMs: 1_001
+  });
+  assert.ok(unknown);
+  assert.ok(timed);
+  capture.settleRequest(timed, true, {
+    data: {
+      xig_direct_text_send_with_slide_messaging_response: {
+        message_id: "server-message-1"
+      }
+    }
+  });
+  assert.equal(capture.commitClick(generation, 1_000), true);
+  assert.equal(capture.status().matchingRequests, 1);
+  assert.equal(capture.status().unverifiableRequests, 1);
+  assert.equal(capture.status().outboundTransportBound, true);
+
+  const adapter = new InstagramAdapter({
+    screenshotDir: "/tmp",
+    domDumpDir: "/tmp",
+    resolveSelectors: async () => ({}),
+    sessionManager: { getManagedPage: async () => ({}) },
+    personKey: "instagram",
+    connectTimeoutMs: 50
+  });
+  adapter.networkSendCaptureStatus = () => capture.status();
+  const page = {
+    waitForTimeout: async (delayMs) =>
+      new Promise((resolve) => setTimeout(resolve, delayMs))
+  };
+  assert.equal(await adapter.waitForNetworkSendCapture(page, 350), false);
+});
+
+test("Instagram realtime send parsing binds the exact offline token in an embedded DGW payload", () => {
+  const payload = JSON.stringify({
+    action: "send_item",
+    client_context: "offline-realtime-1",
+    commands: null,
+    device_id: "device",
+    item_type: "text",
+    mentioned_user_ids: null,
+    mentions: null,
+    mutation_token: "offline-realtime-1",
+    reply_to_message_id: null,
+    text: "approved",
+    thread_id: "safe-thread"
+  });
+  const frame = Buffer.concat([
+    Buffer.from([0x19, 0x02, 0x00, 0x7f]),
+    Buffer.from(payload),
+    Buffer.from([0x00, 0x04])
+  ]);
+  assert.deepEqual(
+    extractInstagramRealtimeTextSend({
+      frame,
+      expectedThreadId: "safe-thread",
+      expectedText: "approved"
+    }),
+    { offlineThreadingId: "offline-realtime-1" }
+  );
+  assert.equal(
+    extractInstagramRealtimeTextSend({
+      frame,
+      expectedThreadId: "wrong-thread",
+      expectedText: "approved"
+    }),
+    null
+  );
+
+  const capture = new InstagramNetworkSendCapture();
+  const generation = capture.begin("safe-thread", "approved");
+  assert.ok(
+    capture.stageRealtimeFrame({
+      generation,
+      frame,
+      frameSentAtMs: 1_001
+    })
+  );
+  assert.equal(capture.commitClick(generation, 1_000), true);
+  assert.deepEqual(capture.status(), {
+    generation,
+    expectedThreadId: "safe-thread",
+    clickCommitted: true,
+    observedRequests: 1,
+    unverifiableRequests: 0,
+    matchingRequests: 1,
+    pendingRequests: 0,
+    failedRequests: 0,
+    outboundTransportBound: true,
+    offlineThreadingId: "offline-realtime-1",
+    acknowledgedMessageId: null
+  });
+});
+
+test("Instagram realtime capture stays page-keyed across interleaved WebSocket sends", () => {
+  const eventTarget = () => {
+    const listeners = new Map();
+    return {
+      on(event, listener) {
+        const existing = listeners.get(event) ?? [];
+        existing.push(listener);
+        listeners.set(event, existing);
+      },
+      emit(event, payload) {
+        for (const listener of listeners.get(event) ?? []) {
+          listener(payload);
+        }
+      }
+    };
+  };
+  const originalPage = eventTarget();
+  const decoyPage = eventTarget();
+  const originalSocket = eventTarget();
+  const decoySocket = eventTarget();
+  const adapter = new InstagramAdapter({
+    screenshotDir: "/tmp",
+    domDumpDir: "/tmp",
+    resolveSelectors: async () => ({}),
+    sessionManager: {},
+    personKey: "instagram",
+    connectTimeoutMs: 50
+  });
+  adapter.ensureNetworkThreadCapture(originalPage);
+  adapter.ensureNetworkThreadCapture(decoyPage);
+  originalPage.emit("websocket", originalSocket);
+  decoyPage.emit("websocket", decoySocket);
+  const frame = (offlineThreadingId) =>
+    JSON.stringify({
+      action: "send_item",
+      client_context: offlineThreadingId,
+      commands: null,
+      device_id: "device",
+      item_type: "text",
+      mentioned_user_ids: null,
+      mentions: null,
+      mutation_token: offlineThreadingId,
+      reply_to_message_id: null,
+      text: "approved",
+      thread_id: "safe-thread"
+    });
+  const generation = adapter.beginNetworkSendCapture(
+    originalPage,
+    "safe-thread",
+    "approved"
+  );
+  const clickedAtMs = Date.now();
+  decoySocket.emit("framesent", { payload: frame("offline-decoy") });
+  originalSocket.emit("framesent", { payload: frame("offline-original") });
+  assert.equal(
+    adapter.commitNetworkSendClick(originalPage, generation, clickedAtMs),
+    true
+  );
+  assert.deepEqual(adapter.networkSendCaptureStatus(originalPage), {
+    generation,
+    expectedThreadId: "safe-thread",
+    clickCommitted: true,
+    observedRequests: 1,
+    unverifiableRequests: 0,
+    matchingRequests: 1,
+    pendingRequests: 0,
+    failedRequests: 0,
+    outboundTransportBound: true,
+    offlineThreadingId: "offline-original",
+    acknowledgedMessageId: null
+  });
+});
+
 test("Instagram GraphQL capture isolates generations without promoting later partial responses", () => {
   const capture = new InstagramNetworkThreadCapture();
   const firstGeneration = capture.begin();
@@ -3513,6 +5262,126 @@ test("Instagram GraphQL capture isolates generations without promoting later par
     capture.current(2).map((snapshot) => snapshot.stableId),
     ["current-1", "current-2"]
   );
+});
+
+test("Instagram message capture merges stable ids and lets later responses replace the same message", () => {
+  const capture = new InstagramNetworkMessageCapture();
+  const generation = capture.begin("safe-thread");
+  const firstRequest = capture.startRequest(generation);
+  const laterRequest = capture.startRequest(generation);
+
+  capture.accept(
+    generation,
+    {
+      matchedThread: true,
+      explicitlyEmpty: false,
+      recipientVerificationLabel: "Safe thread",
+      snapshots: [
+        {
+          nativeId: "shared",
+          nativeIdStable: true,
+          direction: "OUT",
+          text: "Original",
+          sourceTimestamp: "1700000001000"
+        },
+        {
+          nativeId: "recent-only",
+          nativeIdStable: true,
+          direction: "IN",
+          text: "Recent",
+          sourceTimestamp: "1700000002000"
+        }
+      ]
+    },
+    firstRequest
+  );
+  capture.accept(
+    generation,
+    {
+      matchedThread: true,
+      explicitlyEmpty: false,
+      recipientVerificationLabel: "Safe thread",
+      snapshots: [
+        {
+          nativeId: "older-only",
+          nativeIdStable: true,
+          direction: "IN",
+          text: "Older",
+          sourceTimestamp: "1700000000000"
+        },
+        {
+          nativeId: "shared",
+          nativeIdStable: true,
+          direction: "OUT",
+          text: "Edited",
+          sourceTimestamp: "1700000001000"
+        }
+      ]
+    },
+    laterRequest
+  );
+  capture.finishRequest(generation, true);
+  capture.finishRequest(generation, true);
+
+  const status = capture.status();
+  assert.equal(status.matchedThread, true);
+  assert.equal(status.explicitlyEmpty, false);
+  assert.equal(status.failedRequests, 0);
+  assert.deepEqual(
+    status.snapshots.map((snapshot) => [snapshot.nativeId, snapshot.text]),
+    [
+      ["older-only", "Older"],
+      ["shared", "Edited"],
+      ["recent-only", "Recent"]
+    ]
+  );
+});
+
+test("Instagram message capture never promotes an empty page to an authoritative empty transcript", () => {
+  const capture = new InstagramNetworkMessageCapture();
+  const generation = capture.begin("safe-thread");
+  const request = capture.startRequest(generation);
+  capture.accept(
+    generation,
+    {
+      matchedThread: true,
+      explicitlyEmpty: true,
+      recipientVerificationLabel: "Safe thread",
+      snapshots: []
+    },
+    request
+  );
+  capture.finishRequest(generation, true);
+
+  assert.deepEqual(capture.status().snapshots, []);
+  assert.equal(capture.status().explicitlyEmpty, false);
+});
+
+test("Instagram message capture readiness rejects a matched response when any request failed", async () => {
+  const adapter = new InstagramAdapter({
+    screenshotDir: "/tmp",
+    domDumpDir: "/tmp",
+    resolveSelectors: async () => ({}),
+    sessionManager: { getManagedPage: async () => ({}) },
+    personKey: "instagram",
+    connectTimeoutMs: 50
+  });
+  adapter.networkMessageCaptureStatus = () => ({
+    expectedThreadId: "safe-thread",
+    pendingRequests: 0,
+    successfulResponses: 1,
+    failedRequests: 1,
+    matchedThread: true,
+    explicitlyEmpty: false,
+    recipientVerificationLabel: "Safe thread",
+    snapshots: []
+  });
+
+  const ready = await adapter.waitForNetworkMessageCapture(
+    { waitForTimeout: async () => new Promise((resolve) => setTimeout(resolve, 1)) },
+    5
+  );
+  assert.equal(ready, false);
 });
 
 test("Instagram GraphQL capture preserves request order when responses complete out of order", () => {

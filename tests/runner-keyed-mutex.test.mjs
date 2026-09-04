@@ -62,3 +62,25 @@ test("KeyedMutex runWithQueueOne collapses multiple pending runs to one", async 
   assert.deepEqual(results, ["running", "pending-one", "pending-one"]);
   assert.deepEqual(executed, ["running", "pending-one"]);
 });
+
+test("Instagram control work waits while a scan owns the shared page lock", async () => {
+  const mutex = createKeyedMutex();
+  const gate = createDeferred();
+  const order = [];
+
+  const scan = mutex.runWithQueueOne("instagram:INSTAGRAM", async () => {
+    order.push("scan:start");
+    await gate.promise;
+    order.push("scan:end");
+  });
+  const control = mutex.runExclusive("instagram:INSTAGRAM", async () => {
+    order.push("control:start");
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.deepEqual(order, ["scan:start"]);
+
+  gate.resolve();
+  await Promise.all([scan, control]);
+  assert.deepEqual(order, ["scan:start", "scan:end", "control:start"]);
+});

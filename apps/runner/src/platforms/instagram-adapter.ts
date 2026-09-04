@@ -16,6 +16,10 @@ import { sanitizePlatformDiagnosticValue } from "../services/platform-diagnostic
 
 const INSTAGRAM_ORIGIN = "https://www.instagram.com";
 const THREAD_PATH = /^\/direct\/t\/([^/?#]+)\/?$/i;
+const INSTAGRAM_TEXT_SEND_OPERATION = "IGDirectTextSendMutation";
+const INSTAGRAM_TEXT_SEND_DOC_ID = "26911679871773184";
+const INSTAGRAM_TEXT_SEND_RESPONSE_FIELD =
+  "xig_direct_text_send_with_slide_messaging_response";
 const INSTAGRAM_RUNTIME_SHIM_SOURCE =
   "globalThis.__name=globalThis.__name||function(n){return n;};" +
   "globalThis.__defProp=globalThis.__defProp||Object.defineProperty;";
@@ -43,6 +47,7 @@ export type InstagramDirectionEvidence = "IN" | "OUT" | "AMBIGUOUS";
 export interface InstagramMessageSnapshot {
   nativeId?: string;
   nativeIdStable?: boolean;
+  offlineThreadingId?: string;
   direction: InstagramDirectionEvidence;
   text?: string;
   senderName?: string;
@@ -254,6 +259,177 @@ export function instagramGraphQlPayloadHasErrors(payload: unknown): boolean {
   });
 }
 
+export interface InstagramTextSendMutationRequest {
+  offlineThreadingId: string;
+}
+
+export interface InstagramTextSendMutationResponse {
+  messageId: string;
+  timestampMs?: string;
+}
+
+export function extractInstagramTextSendMutationRequest(input: {
+  url: string;
+  method: string;
+  postData: string | null;
+  expectedThreadId: string;
+  expectedText: string;
+}): InstagramTextSendMutationRequest | null {
+  let url: URL;
+  try {
+    url = new URL(input.url);
+  } catch {
+    return null;
+  }
+  if (
+    input.method.toUpperCase() !== "POST" ||
+    (url.hostname !== "www.instagram.com" && url.hostname !== "instagram.com") ||
+    !/\/api\/graphql\/?$|\/graphql\/query\/?$/i.test(url.pathname) ||
+    !input.postData
+  ) {
+    return null;
+  }
+
+  const fields = new URLSearchParams(input.postData);
+  if (
+    fields.get("fb_api_req_friendly_name") !== INSTAGRAM_TEXT_SEND_OPERATION ||
+    fields.get("doc_id") !== INSTAGRAM_TEXT_SEND_DOC_ID
+  ) {
+    return null;
+  }
+
+  const serializedVariables = fields.get("variables");
+  if (!serializedVariables) {
+    return null;
+  }
+  let variables: Record<string, unknown> | null;
+  try {
+    variables = instagramRecord(JSON.parse(serializedVariables));
+  } catch {
+    return null;
+  }
+  if (!variables) {
+    return null;
+  }
+  const threadId = instagramString(variables, ["ig_thread_igid"]);
+  const text = instagramString(instagramRecord(variables.text) ?? {}, [
+    "sensitive_string_value"
+  ]);
+  const offlineThreadingId = instagramString(variables, ["offline_threading_id"]);
+  if (
+    threadId !== input.expectedThreadId ||
+    cleanMessageText(text ?? "") !== cleanMessageText(input.expectedText) ||
+    !offlineThreadingId
+  ) {
+    return null;
+  }
+  return { offlineThreadingId };
+}
+
+export function extractInstagramTextSendMutationResponse(
+  payload: unknown
+): InstagramTextSendMutationResponse | null {
+  if (instagramGraphQlPayloadHasErrors(payload)) {
+    return null;
+  }
+  const matches: InstagramTextSendMutationResponse[] = [];
+  for (const entry of Array.isArray(payload) ? payload : [payload]) {
+    const data = instagramRecord(instagramRecord(entry)?.data);
+    const mutation = instagramRecord(data?.[INSTAGRAM_TEXT_SEND_RESPONSE_FIELD]);
+    const messageId = instagramString(mutation ?? {}, ["message_id"]);
+    if (!messageId) {
+      continue;
+    }
+    const match: InstagramTextSendMutationResponse = { messageId };
+    const timestampMs = instagramString(mutation ?? {}, ["timestamp_ms"]);
+    if (timestampMs !== undefined) match.timestampMs = timestampMs;
+    matches.push(match);
+  }
+  if (matches.length !== 1) {
+    return null;
+  }
+  return matches[0]!;
+}
+
+export interface InstagramRealtimeTextSend {
+  offlineThreadingId: string;
+}
+
+function embeddedJsonObjectAt(source: string, start: number): Record<string, unknown> | null {
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = start; index < source.length; index += 1) {
+    const character = source[index]!;
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (character === "\\") {
+        escaped = true;
+      } else if (character === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (character === '"') {
+      inString = true;
+      continue;
+    }
+    if (character === "{") {
+      depth += 1;
+      continue;
+    }
+    if (character !== "}") {
+      continue;
+    }
+    depth -= 1;
+    if (depth !== 0) {
+      continue;
+    }
+    try {
+      return instagramRecord(JSON.parse(source.slice(start, index + 1)));
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+export function extractInstagramRealtimeTextSend(input: {
+  frame: string | Uint8Array;
+  expectedThreadId: string;
+  expectedText: string;
+}): InstagramRealtimeTextSend | null {
+  const source =
+    typeof input.frame === "string"
+      ? input.frame
+      : Buffer.from(input.frame).toString("utf8");
+  const marker = '"action":"send_item"';
+  const matches: InstagramRealtimeTextSend[] = [];
+  let offset = 0;
+  while (offset < source.length) {
+    const markerIndex = source.indexOf(marker, offset);
+    if (markerIndex < 0) break;
+    const objectStart = source.lastIndexOf("{", markerIndex);
+    const record = objectStart >= 0 ? embeddedJsonObjectAt(source, objectStart) : null;
+    const clientContext = instagramString(record ?? {}, ["client_context"]);
+    const mutationToken = instagramString(record ?? {}, ["mutation_token"]);
+    if (
+      record?.action === "send_item" &&
+      record.item_type === "text" &&
+      instagramString(record, ["thread_id"]) === input.expectedThreadId &&
+      cleanMessageText(instagramString(record, ["text"]) ?? "") ===
+        cleanMessageText(input.expectedText) &&
+      clientContext &&
+      mutationToken === clientContext
+    ) {
+      matches.push({ offlineThreadingId: clientContext });
+    }
+    offset = markerIndex + marker.length;
+  }
+  return matches.length === 1 ? matches[0]! : null;
+}
+
 export function extractInstagramThreadSnapshotsFromPayload(
   payload: unknown
 ): InstagramThreadSnapshot[] {
@@ -267,6 +443,7 @@ export function extractInstagramThreadSnapshotsFromPayload(
       inInboxPayload: boolean;
       inThreadCollection: boolean;
       insideThreadRecord: boolean;
+      path: string[];
     }
   ): void => {
     if (!value || typeof value !== "object" || seen.has(value) || visited >= 25_000) {
@@ -283,7 +460,15 @@ export function extractInstagramThreadSnapshotsFromPayload(
 
     const record = value as Record<string, unknown>;
     const typeName = instagramString(record, ["__typename", "type", "item_type"]);
-    const hasDirectThreadType = /direct.*thread/i.test(typeName ?? "");
+    const wrappedDirectThread =
+      typeName === "SlideThread" ? instagramRecord(record.as_ig_direct_thread) : null;
+    const threadRecord = wrappedDirectThread ?? record;
+    const directThreadTypeName = instagramString(threadRecord, [
+      "__typename",
+      "type",
+      "item_type"
+    ]);
+    const hasDirectThreadType = /direct.*thread/i.test(directThreadTypeName ?? "");
     const hasThreadStructure = [
       "thread_title",
       "usersWithoutViewer",
@@ -295,16 +480,21 @@ export function extractInstagramThreadSnapshotsFromPayload(
       "has_unread",
       "hasUnread",
       "marked_as_unread"
-    ].some((key) => key in record);
+    ].some((key) => key in threadRecord);
+    const isWrappedSlideThread = Boolean(wrappedDirectThread) && hasThreadStructure;
     const isThreadRecord =
       context.inThreadCollection &&
-      (hasDirectThreadType || (!typeName && hasThreadStructure));
+      (isWrappedSlideThread || hasDirectThreadType || (!directThreadTypeName && hasThreadStructure));
     const typedThreadId = isThreadRecord
-      ? instagramString(record, ["id"])
+      ? instagramString(threadRecord, ["id"])
       : undefined;
     const stableId = typedThreadId;
     if (isStableInstagramId(stableId)) {
-      const participants = [record.users, record.participants]
+      const participants = [
+        threadRecord.users,
+        threadRecord.participants,
+        threadRecord.usersWithoutViewer
+      ]
         .flatMap((candidate) => (Array.isArray(candidate) ? candidate : []))
         .map(instagramRecord)
         .filter((candidate): candidate is Record<string, unknown> => Boolean(candidate))
@@ -312,17 +502,17 @@ export function extractInstagramThreadSnapshotsFromPayload(
           instagramString(candidate, ["username", "full_name", "fullName", "name"])
         )
         .filter((candidate): candidate is string => Boolean(candidate));
-      const unreadCount = [record.unread_count, record.unreadCount].find(
+      const unreadCount = [threadRecord.unread_count, threadRecord.unreadCount].find(
         (candidate) => typeof candidate === "number" && Number.isFinite(candidate)
       ) as number | undefined;
       const explicitUnread = [
-        record.unread,
-        record.has_unread,
-        record.hasUnread,
-        record.marked_as_unread,
-        record.markedAsUnread
+        threadRecord.unread,
+        threadRecord.has_unread,
+        threadRecord.hasUnread,
+        threadRecord.marked_as_unread,
+        threadRecord.markedAsUnread
       ].find((candidate) => typeof candidate === "boolean") as boolean | undefined;
-      const readState = instagramString(record, ["read_state", "readState"]);
+      const readState = instagramString(threadRecord, ["read_state", "readState"]);
       const unread =
         typeof unreadCount === "number"
           ? unreadCount > 0
@@ -334,26 +524,32 @@ export function extractInstagramThreadSnapshotsFromPayload(
       snapshots.push({
         stableId,
         displayName:
-          instagramString(record, ["thread_title", "threadTitle", "title", "name"]) ??
+          instagramString(threadRecord, ["thread_title", "threadTitle", "title", "name"]) ??
           (participants.slice(0, 3).join(", ") || undefined),
         unread
       });
     }
 
     for (const [key, child] of Object.entries(record)) {
+      const childPath = [...context.path, key];
       const inInboxPayload = context.inInboxPayload || /inbox/i.test(key);
+      const isCanonicalSlideMailboxEdges =
+        Array.isArray(child) &&
+        childPath.join(".") ===
+          "data.get_slide_mailbox_for_iris_subscription.threads_by_folder.edges";
       const startsThreadCollection =
-        inInboxPayload &&
         !context.inThreadCollection &&
         !context.insideThreadRecord &&
         Array.isArray(child) &&
-        /(?:^|_)(?:threads?|edges|items)(?:$|_)/i.test(key);
+        (isCanonicalSlideMailboxEdges ||
+          (inInboxPayload && /(?:^|_)threads?(?:$|_)/i.test(key)));
       visit(child, {
         inInboxPayload,
         inThreadCollection:
           startsThreadCollection ||
           (context.inThreadCollection && /^(?:node|item|thread)$/i.test(key)),
-        insideThreadRecord: context.insideThreadRecord || isThreadRecord
+        insideThreadRecord: context.insideThreadRecord || isThreadRecord,
+        path: childPath
       });
     }
   };
@@ -361,17 +557,121 @@ export function extractInstagramThreadSnapshotsFromPayload(
   visit(payload, {
     inInboxPayload: false,
     inThreadCollection: false,
-    insideThreadRecord: false
+    insideThreadRecord: false,
+    path: []
   });
   return snapshots;
 }
 
+export interface InstagramMessagePayloadExtraction {
+  matchedThread: boolean;
+  explicitlyEmpty: boolean;
+  recipientVerificationLabel?: string;
+  snapshots: InstagramMessageSnapshot[];
+}
+
+export function extractInstagramMessageSnapshotsFromPayload(
+  payload: unknown,
+  expectedThreadId: string
+): InstagramMessagePayloadExtraction {
+  const snapshots: InstagramMessageSnapshot[] = [];
+  let matchedThread = false;
+  let recipientVerificationLabel: string | undefined;
+
+  for (const entry of Array.isArray(payload) ? payload : [payload]) {
+    const data = instagramRecord(entry)?.data;
+    const detail = instagramRecord(instagramRecord(data)?.get_slide_thread_nullable);
+    const directThread = instagramRecord(detail?.as_ig_direct_thread);
+    if (instagramString(directThread ?? {}, ["id"]) !== expectedThreadId) {
+      continue;
+    }
+    const edges = instagramRecord(directThread?.slide_messages)?.edges;
+    if (!Array.isArray(edges)) {
+      continue;
+    }
+
+    matchedThread = true;
+    recipientVerificationLabel ??= instagramString(directThread ?? {}, ["thread_title"]);
+    const viewerId = instagramString(directThread ?? {}, ["viewer_id"]);
+    for (const edge of edges) {
+      const node = instagramRecord(instagramRecord(edge)?.node);
+      if (instagramString(node ?? {}, ["__typename"]) !== "SlideMessage") {
+        continue;
+      }
+      const nativeId = instagramString(node ?? {}, ["message_id"]);
+      if (!nativeId) {
+        throw new InstagramParsingError("message_missing_stable_identity");
+      }
+      const sender = instagramRecord(node?.sender);
+      const senderUser = instagramRecord(sender?.user_dict);
+      const senderIds = [
+        instagramString(senderUser ?? {}, ["id"]),
+        instagramString(sender ?? {}, ["igid"])
+      ].filter((candidate): candidate is string => Boolean(candidate));
+      const direction: InstagramDirectionEvidence =
+        viewerId && senderIds.length > 0
+          ? senderIds.includes(viewerId)
+            ? "OUT"
+            : "IN"
+          : "AMBIGUOUS";
+      const content = instagramRecord(node?.content);
+      const text =
+        instagramString(node ?? {}, ["text_body"]) ??
+        instagramString(content ?? {}, ["text_body"]);
+      const contentType = instagramString(content ?? {}, ["__typename"]) ?? "";
+      const mediaKind: InstagramMessageSnapshot["mediaKind"] = text
+        ? undefined
+        : /voice|audio/i.test(contentType)
+          ? "voice_message"
+          : /video/i.test(contentType)
+            ? "video"
+            : /photo|image/i.test(contentType)
+              ? "photo"
+              : /xma/i.test(contentType)
+                ? "attachment"
+                : "unsupported";
+      const tombstoneReason = instagramString(node ?? {}, ["tombstone_reason"]);
+      const snapshot: InstagramMessageSnapshot = {
+        nativeId,
+        nativeIdStable: true,
+        direction,
+        sourceTimestamp: instagramString(node ?? {}, ["timestamp_ms"])
+      };
+      const offlineThreadingId = instagramString(node ?? {}, ["offline_threading_id"]);
+      if (offlineThreadingId !== undefined) {
+        snapshot.offlineThreadingId = offlineThreadingId;
+      }
+      if (text !== undefined) snapshot.text = text;
+      const senderName = instagramString(sender ?? {}, ["name"]);
+      if (senderName !== undefined) snapshot.senderName = senderName;
+      if (mediaKind !== undefined) snapshot.mediaKind = mediaKind;
+      if (tombstoneReason !== undefined) snapshot.deleted = true;
+      snapshots.push(snapshot);
+    }
+  }
+
+  const result: InstagramMessagePayloadExtraction = {
+    matchedThread,
+    explicitlyEmpty: false,
+    snapshots
+  };
+  if (recipientVerificationLabel !== undefined) {
+    result.recipientVerificationLabel = recipientVerificationLabel;
+  }
+  return result;
+}
+
 export function parseInstagramSourceTimestamp(value: string | undefined): string | undefined {
   const trimmed = value?.trim();
-  if (!trimmed || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(trimmed)) {
+  if (!trimmed) {
     return undefined;
   }
-  const parsed = new Date(trimmed);
+  const epoch = /^(?:\d{10}|\d{13})$/.test(trimmed) ? Number(trimmed) : null;
+  const parsed = epoch === null
+    ? /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(trimmed)
+      ? new Date(trimmed)
+      : new Date(Number.NaN)
+    : new Date(trimmed.length === 10 ? epoch * 1_000 : epoch);
   return Number.isNaN(parsed.getTime()) ? undefined : parsed.toISOString();
 }
 
@@ -379,23 +679,46 @@ export function instagramThreadUrlMatches(url: string, expectedThreadId: string)
   return instagramThreadIdFromUrl(url) === expectedThreadId;
 }
 
-export function findNewVerifiedInstagramOutgoing(
+export function findNewAcknowledgedInstagramOutgoing(
   before: NormalizedMessage[],
   after: NormalizedMessage[],
-  text: string
+  text: string,
+  dispatchedAtMs: number,
+  observedAtMs = Date.now(),
+  clockSkewMs = 0,
+  expectedPlatformMessageKey?: string,
+  expectedOfflineThreadingId?: string
 ): NormalizedMessage | null {
   const normalizedText = cleanMessageText(text);
-  const beforeMatches = before.filter(
-    (message) =>
-      message.direction === "OUT" && cleanMessageText(message.text) === normalizedText
+  const knownMessageKeys = new Set(
+    before.map((message) => message.platformMessageKey).filter(Boolean)
   );
-  const afterMatches = after.filter(
-    (message) =>
-      message.direction === "OUT" && cleanMessageText(message.text) === normalizedText
+  const earliestAcceptedTimestamp = dispatchedAtMs - Math.max(0, clockSkewMs);
+  const latestAcceptedTimestamp = observedAtMs + Math.max(0, clockSkewMs);
+
+  return (
+    after.find((message) => {
+      if (
+        message.direction !== "OUT" ||
+        cleanMessageText(message.text) !== normalizedText ||
+        !message.platformMessageKey ||
+        knownMessageKeys.has(message.platformMessageKey) ||
+        (expectedPlatformMessageKey !== undefined &&
+          message.platformMessageKey !== expectedPlatformMessageKey) ||
+        (expectedOfflineThreadingId !== undefined &&
+          message.raw?.instagramOfflineThreadingId !== expectedOfflineThreadingId) ||
+        !message.timestamp
+      ) {
+        return false;
+      }
+      const sourceTimestamp = Date.parse(message.timestamp);
+      return (
+        Number.isFinite(sourceTimestamp) &&
+        sourceTimestamp >= earliestAcceptedTimestamp &&
+        sourceTimestamp <= latestAcceptedTimestamp
+      );
+    }) ?? null
   );
-  return afterMatches.length > beforeMatches.length
-    ? afterMatches[beforeMatches.length] ?? afterMatches.at(-1) ?? null
-    : null;
 }
 
 export function instagramMessageFallbackKey(
@@ -547,7 +870,8 @@ export function normalizeInstagramMessageSnapshots(
       raw: {
         timestampSource: item.sourceTimestamp ? "source" : "first_seen",
         contentKind: item.placeholder?.attachmentType ?? "text",
-        messageIdentityVersion: "instagram_stable_v2"
+        messageIdentityVersion: "instagram_stable_v2",
+        instagramOfflineThreadingId: item.snapshot.offlineThreadingId
       },
       attachments: item.placeholder?.attachmentType
         ? [
@@ -722,6 +1046,354 @@ export class InstagramNetworkThreadCapture {
   }
 }
 
+export class InstagramNetworkMessageCapture {
+  private generation = 0;
+  private expectedThreadId: string | null = null;
+  private nextRequestOrder = 0;
+  private pendingRequests = 0;
+  private successfulResponses = 0;
+  private failedRequests = 0;
+  private matchedResponses = 0;
+  private recipientVerificationLabel: string | null = null;
+  private recipientLabelConflict = false;
+  private readonly byNativeId = new Map<
+    string,
+    {
+      snapshot: InstagramMessageSnapshot;
+      requestOrder: number;
+      position: number;
+    }
+  >();
+
+  begin(expectedThreadId: string): number {
+    this.generation += 1;
+    this.expectedThreadId = expectedThreadId;
+    this.nextRequestOrder = 0;
+    this.pendingRequests = 0;
+    this.successfulResponses = 0;
+    this.failedRequests = 0;
+    this.matchedResponses = 0;
+    this.recipientVerificationLabel = null;
+    this.recipientLabelConflict = false;
+    this.byNativeId.clear();
+    return this.generation;
+  }
+
+  currentGeneration(): number {
+    return this.generation;
+  }
+
+  threadIdForGeneration(generation: number): string | null {
+    return generation === this.generation ? this.expectedThreadId : null;
+  }
+
+  startRequest(generation: number): number | null {
+    if (generation !== this.generation || !this.expectedThreadId) {
+      return null;
+    }
+    const requestOrder = this.nextRequestOrder;
+    this.nextRequestOrder += 1;
+    this.pendingRequests += 1;
+    return requestOrder;
+  }
+
+  finishRequest(generation: number, succeeded: boolean): void {
+    if (generation !== this.generation) {
+      return;
+    }
+    this.pendingRequests = Math.max(0, this.pendingRequests - 1);
+    if (succeeded) {
+      this.successfulResponses += 1;
+    } else {
+      this.failedRequests += 1;
+    }
+  }
+
+  accept(
+    generation: number,
+    extraction: InstagramMessagePayloadExtraction,
+    requestOrder: number
+  ): void {
+    if (generation !== this.generation || !extraction.matchedThread) {
+      return;
+    }
+    this.matchedResponses += 1;
+    const incomingRecipient = extraction.recipientVerificationLabel
+      ?.replace(/\s+/g, " ")
+      .trim();
+    if (incomingRecipient) {
+      if (
+        this.recipientVerificationLabel &&
+        this.recipientVerificationLabel.normalize("NFKC").toLocaleLowerCase() !==
+          incomingRecipient.normalize("NFKC").toLocaleLowerCase()
+      ) {
+        this.recipientLabelConflict = true;
+      } else {
+        this.recipientVerificationLabel = incomingRecipient;
+      }
+    }
+    for (let position = 0; position < extraction.snapshots.length; position += 1) {
+      const snapshot = extraction.snapshots[position]!;
+      const nativeId = snapshot.nativeId?.trim();
+      if (!snapshot.nativeIdStable || !nativeId) {
+        continue;
+      }
+      const existing = this.byNativeId.get(nativeId);
+      if (
+        !existing ||
+        requestOrder > existing.requestOrder ||
+        (requestOrder === existing.requestOrder && position >= existing.position)
+      ) {
+        this.byNativeId.set(nativeId, { snapshot, requestOrder, position });
+      }
+    }
+  }
+
+  status(): {
+    expectedThreadId: string | null;
+    pendingRequests: number;
+    successfulResponses: number;
+    failedRequests: number;
+    matchedThread: boolean;
+    explicitlyEmpty: boolean;
+    recipientVerificationLabel?: string;
+    snapshots: InstagramMessageSnapshot[];
+  } {
+    const result: {
+      expectedThreadId: string | null;
+      pendingRequests: number;
+      successfulResponses: number;
+      failedRequests: number;
+      matchedThread: boolean;
+      explicitlyEmpty: boolean;
+      recipientVerificationLabel?: string;
+      snapshots: InstagramMessageSnapshot[];
+    } = {
+      expectedThreadId: this.expectedThreadId,
+      pendingRequests: this.pendingRequests,
+      successfulResponses: this.successfulResponses,
+      failedRequests: this.failedRequests,
+      matchedThread: this.matchedResponses > 0,
+      explicitlyEmpty: false,
+      snapshots: [...this.byNativeId.values()]
+        .sort((left, right) => {
+          const leftTimestamp = parseInstagramSourceTimestamp(left.snapshot.sourceTimestamp);
+          const rightTimestamp = parseInstagramSourceTimestamp(right.snapshot.sourceTimestamp);
+          if (leftTimestamp && rightTimestamp && leftTimestamp !== rightTimestamp) {
+            return Date.parse(leftTimestamp) - Date.parse(rightTimestamp);
+          }
+          if (leftTimestamp && !rightTimestamp) return -1;
+          if (!leftTimestamp && rightTimestamp) return 1;
+          return (
+            left.requestOrder - right.requestOrder ||
+            left.position - right.position
+          );
+        })
+        .map((entry) => entry.snapshot)
+    };
+    if (!this.recipientLabelConflict && this.recipientVerificationLabel) {
+      result.recipientVerificationLabel = this.recipientVerificationLabel;
+    }
+    return result;
+  }
+}
+
+interface InstagramSendMutationCandidate {
+  generation: number;
+  transport: "relay" | "realtime";
+  requestStartedAtMs: number;
+  offlineThreadingId: string;
+  settled: boolean;
+  succeeded: boolean;
+  response: InstagramTextSendMutationResponse | null;
+}
+
+export class InstagramNetworkSendCapture {
+  private generation = 0;
+  private expectedThreadId: string | null = null;
+  private expectedText = "";
+  private clickedAtMs: number | null = null;
+  private readonly candidates: InstagramSendMutationCandidate[] = [];
+
+  begin(expectedThreadId: string, expectedText: string): number {
+    this.generation += 1;
+    this.expectedThreadId = expectedThreadId;
+    this.expectedText = cleanMessageText(expectedText);
+    this.clickedAtMs = null;
+    this.candidates.length = 0;
+    return this.generation;
+  }
+
+  currentGeneration(): number {
+    return this.generation;
+  }
+
+  stageRequest(input: {
+    generation: number;
+    url: string;
+    method: string;
+    postData: string | null;
+    requestStartedAtMs: number;
+  }): InstagramSendMutationCandidate | null {
+    if (input.generation !== this.generation || !this.expectedThreadId) {
+      return null;
+    }
+    const matched = extractInstagramTextSendMutationRequest({
+      url: input.url,
+      method: input.method,
+      postData: input.postData,
+      expectedThreadId: this.expectedThreadId,
+      expectedText: this.expectedText
+    });
+    if (!matched) {
+      return null;
+    }
+    const candidate: InstagramSendMutationCandidate = {
+      generation: input.generation,
+      transport: "relay",
+      requestStartedAtMs: input.requestStartedAtMs,
+      offlineThreadingId: matched.offlineThreadingId,
+      settled: false,
+      succeeded: false,
+      response: null
+    };
+    this.candidates.push(candidate);
+    return candidate;
+  }
+
+  stageRealtimeFrame(input: {
+    generation: number;
+    frame: string | Uint8Array;
+    frameSentAtMs: number;
+  }): InstagramSendMutationCandidate | null {
+    if (input.generation !== this.generation || !this.expectedThreadId) {
+      return null;
+    }
+    const matched = extractInstagramRealtimeTextSend({
+      frame: input.frame,
+      expectedThreadId: this.expectedThreadId,
+      expectedText: this.expectedText
+    });
+    if (!matched) {
+      return null;
+    }
+    const candidate: InstagramSendMutationCandidate = {
+      generation: input.generation,
+      transport: "realtime",
+      requestStartedAtMs: input.frameSentAtMs,
+      offlineThreadingId: matched.offlineThreadingId,
+      settled: true,
+      succeeded: true,
+      response: null
+    };
+    this.candidates.push(candidate);
+    return candidate;
+  }
+
+  commitClick(generation: number, clickedAtMs: number): boolean {
+    if (
+      generation !== this.generation ||
+      !Number.isFinite(clickedAtMs) ||
+      clickedAtMs <= 0
+    ) {
+      return false;
+    }
+    this.clickedAtMs = clickedAtMs;
+    return true;
+  }
+
+  updateRequestStart(
+    candidate: InstagramSendMutationCandidate,
+    requestStartedAtMs: number
+  ): void {
+    if (
+      candidate.generation === this.generation &&
+      Number.isFinite(requestStartedAtMs) &&
+      requestStartedAtMs > 0
+    ) {
+      candidate.requestStartedAtMs = requestStartedAtMs;
+    }
+  }
+
+  settleRequest(
+    candidate: InstagramSendMutationCandidate,
+    succeeded: boolean,
+    payload?: unknown
+  ): void {
+    if (candidate.generation !== this.generation || candidate.settled) {
+      return;
+    }
+    candidate.settled = true;
+    candidate.response = succeeded
+      ? extractInstagramTextSendMutationResponse(payload)
+      : null;
+    candidate.succeeded = succeeded && candidate.response !== null;
+  }
+
+  status(): {
+    generation: number;
+    expectedThreadId: string | null;
+    clickCommitted: boolean;
+    observedRequests: number;
+    unverifiableRequests: number;
+    matchingRequests: number;
+    pendingRequests: number;
+    failedRequests: number;
+    outboundTransportBound: boolean;
+    offlineThreadingId: string | null;
+    acknowledgedMessageId: string | null;
+    acknowledgedTimestampMs?: string;
+  } {
+    const eligible = this.clickedAtMs === null
+      ? []
+      : this.candidates.filter(
+          (candidate) =>
+            Number.isFinite(candidate.requestStartedAtMs) &&
+            candidate.requestStartedAtMs >= this.clickedAtMs!
+        );
+    const sole = eligible.length === 1 ? eligible[0]! : null;
+    const result: {
+      generation: number;
+      expectedThreadId: string | null;
+      clickCommitted: boolean;
+      observedRequests: number;
+      unverifiableRequests: number;
+      matchingRequests: number;
+      pendingRequests: number;
+      failedRequests: number;
+      outboundTransportBound: boolean;
+      offlineThreadingId: string | null;
+      acknowledgedMessageId: string | null;
+      acknowledgedTimestampMs?: string;
+    } = {
+      generation: this.generation,
+      expectedThreadId: this.expectedThreadId,
+      clickCommitted: this.clickedAtMs !== null,
+      observedRequests: this.candidates.length,
+      unverifiableRequests: this.candidates.filter(
+        (candidate) =>
+          !Number.isFinite(candidate.requestStartedAtMs) ||
+          candidate.requestStartedAtMs <= 0
+      ).length,
+      matchingRequests: eligible.length,
+      pendingRequests: eligible.filter((candidate) => !candidate.settled).length,
+      failedRequests: eligible.filter(
+        (candidate) => candidate.settled && !candidate.succeeded
+      ).length,
+      outboundTransportBound: Boolean(sole?.settled && sole.succeeded),
+      offlineThreadingId: sole?.offlineThreadingId ?? null,
+      acknowledgedMessageId:
+        sole?.transport === "relay" && sole.settled && sole.succeeded
+          ? sole.response?.messageId ?? null
+          : null
+    };
+    if (sole?.settled && sole.succeeded && sole.response?.timestampMs !== undefined) {
+      result.acknowledgedTimestampMs = sole.response.timestampMs;
+    }
+    return result;
+  }
+}
+
 export function instagramEmptyInboxText(bodyText: string): boolean {
   const normalized = bodyText.replace(/\s+/g, " ").trim().toLocaleLowerCase();
   return normalized === "no messages" || normalized === "no conversations";
@@ -769,11 +1441,28 @@ export class InstagramAdapter extends BetaAdapter {
   private readonly shimmedContexts = new WeakSet<BrowserContext>();
   private readonly networkCapturePages = new WeakSet<Page>();
   private readonly networkThreadCaptures = new WeakMap<Page, InstagramNetworkThreadCapture>();
+  private readonly networkMessageCaptures = new WeakMap<Page, InstagramNetworkMessageCapture>();
+  private readonly networkSendCaptures = new WeakMap<Page, InstagramNetworkSendCapture>();
   private readonly networkRequestTokens = new WeakMap<
     object,
     { generation: number; requestOrder: number }
   >();
+  private readonly networkMessageRequestTokens = new WeakMap<
+    object,
+    { generation: number; requestOrder: number }
+  >();
+  private readonly networkSendRequestTokens = new WeakMap<
+    object,
+    { capture: InstagramNetworkSendCapture; candidate: InstagramSendMutationCandidate }
+  >();
   private readonly settledNetworkRequests = new WeakSet<object>();
+  private readonly settledNetworkMessageRequests = new WeakSet<object>();
+  private collectionCycleId = 0;
+  private cachedCollectionThreads: {
+    cycleId: number;
+    threads: ThreadStub[];
+    explicitlyEmpty: boolean;
+  } | null = null;
   private collectionCalls = 0;
   private collectionObservedRows = false;
   private collectionExplicitlyEmpty = true;
@@ -801,7 +1490,11 @@ export class InstagramAdapter extends BetaAdapter {
     }
     this.networkCapturePages.add(page);
     const capture = new InstagramNetworkThreadCapture();
+    const messageCapture = new InstagramNetworkMessageCapture();
+    const sendCapture = new InstagramNetworkSendCapture();
     this.networkThreadCaptures.set(page, capture);
+    this.networkMessageCaptures.set(page, messageCapture);
+    this.networkSendCaptures.set(page, sendCapture);
     page.on("request", (request: any) => {
       let url: URL;
       try {
@@ -809,9 +1502,11 @@ export class InstagramAdapter extends BetaAdapter {
       } catch {
         return;
       }
+      const sameInstagramOrigin =
+        url.hostname === "www.instagram.com" || url.hostname === "instagram.com";
       if (
-        (url.hostname !== "www.instagram.com" && url.hostname !== "instagram.com") ||
-        !/\/api\/graphql$|\/graphql\/query$/i.test(url.pathname)
+        !sameInstagramOrigin ||
+        !/\/api\/graphql\/?$|\/graphql\/query\/?$/i.test(url.pathname)
       ) {
         return;
       }
@@ -819,6 +1514,27 @@ export class InstagramAdapter extends BetaAdapter {
       const requestOrder = capture.startRequest(generation);
       if (requestOrder !== null) {
         this.networkRequestTokens.set(request, { generation, requestOrder });
+      }
+      const messageGeneration = messageCapture.currentGeneration();
+      const messageRequestOrder = messageCapture.startRequest(messageGeneration);
+      if (messageRequestOrder !== null) {
+        this.networkMessageRequestTokens.set(request, {
+          generation: messageGeneration,
+          requestOrder: messageRequestOrder
+        });
+      }
+      const sendCandidate = sendCapture.stageRequest({
+        generation: sendCapture.currentGeneration(),
+        url: request.url(),
+        method: request.method(),
+        postData: request.postData(),
+        requestStartedAtMs: request.timing().startTime
+      });
+      if (sendCandidate) {
+        this.networkSendRequestTokens.set(request, {
+          capture: sendCapture,
+          candidate: sendCandidate
+        });
       }
     });
     page.on("response", (response: any) => {
@@ -830,52 +1546,129 @@ export class InstagramAdapter extends BetaAdapter {
       }
       if (
         (url.hostname !== "www.instagram.com" && url.hostname !== "instagram.com") ||
-        !/\/api\/graphql$|\/graphql\/query$/i.test(url.pathname)
+        !/\/api\/graphql\/?$|\/graphql\/query\/?$/i.test(url.pathname)
       ) {
         return;
       }
       const request = typeof response.request === "function" ? response.request() : null;
       const token = request ? this.networkRequestTokens.get(request) : undefined;
-      if (!request || !token) {
+      const messageToken = request
+        ? this.networkMessageRequestTokens.get(request)
+        : undefined;
+      const sendToken = request ? this.networkSendRequestTokens.get(request) : undefined;
+      if (!request || (!token && !messageToken && !sendToken)) {
         return;
       }
-      const settle = (succeeded: boolean): void => {
-        if (this.settledNetworkRequests.has(request)) {
+      const settleThread = (succeeded: boolean): void => {
+        if (!token || this.settledNetworkRequests.has(request)) {
           return;
         }
         this.settledNetworkRequests.add(request);
         capture.finishRequest(token.generation, succeeded);
       };
+      const settleMessage = (succeeded: boolean): void => {
+        if (!messageToken || this.settledNetworkMessageRequests.has(request)) {
+          return;
+        }
+        this.settledNetworkMessageRequests.add(request);
+        messageCapture.finishRequest(messageToken.generation, succeeded);
+      };
+      const settleSend = (succeeded: boolean, payload?: unknown): void => {
+        if (!sendToken) {
+          return;
+        }
+        sendToken.capture.updateRequestStart(
+          sendToken.candidate,
+          request.timing().startTime
+        );
+        sendToken.capture.settleRequest(sendToken.candidate, succeeded, payload);
+      };
       if (response.status() < 200 || response.status() >= 300) {
-        settle(false);
+        settleThread(false);
+        settleMessage(false);
+        settleSend(false);
         return;
       }
       void response
         .json()
         .then((payload: unknown) => {
-          if (this.settledNetworkRequests.has(request)) {
+          if (
+            (!token || this.settledNetworkRequests.has(request)) &&
+            (!messageToken || this.settledNetworkMessageRequests.has(request)) &&
+            !sendToken
+          ) {
             return;
           }
           if (instagramGraphQlPayloadHasErrors(payload)) {
-            settle(false);
+            settleThread(false);
+            settleMessage(false);
+            settleSend(false);
             return;
           }
-          capture.accept(
-            token.generation,
-            extractInstagramThreadSnapshotsFromPayload(payload),
-            token?.requestOrder
-          );
-          settle(true);
+          const snapshots = token
+            ? extractInstagramThreadSnapshotsFromPayload(payload)
+            : [];
+          if (token) {
+            capture.accept(token.generation, snapshots, token.requestOrder);
+          }
+          let messageSucceeded = true;
+          if (messageToken) {
+            const expectedThreadId = messageCapture.threadIdForGeneration(
+              messageToken.generation
+            );
+            if (expectedThreadId) {
+              try {
+                messageCapture.accept(
+                  messageToken.generation,
+                  extractInstagramMessageSnapshotsFromPayload(payload, expectedThreadId),
+                  messageToken.requestOrder
+                );
+              } catch {
+                messageSucceeded = false;
+              }
+            }
+          }
+          settleThread(true);
+          settleMessage(messageSucceeded);
+          settleSend(true, payload);
         })
-        .catch(() => settle(false));
+        .catch(() => {
+          settleThread(false);
+          settleMessage(false);
+          settleSend(false);
+        });
     });
     page.on("requestfailed", (request: object) => {
       const token = this.networkRequestTokens.get(request);
-      if (!token || this.settledNetworkRequests.has(request)) {
-        return;
+      if (token && !this.settledNetworkRequests.has(request)) {
+        this.settledNetworkRequests.add(request);
+        capture.finishRequest(token.generation, false);
       }
-      this.settledNetworkRequests.add(request);
-      capture.finishRequest(token.generation, false);
+      const messageToken = this.networkMessageRequestTokens.get(request);
+      if (messageToken && !this.settledNetworkMessageRequests.has(request)) {
+        this.settledNetworkMessageRequests.add(request);
+        messageCapture.finishRequest(messageToken.generation, false);
+      }
+      const sendToken = this.networkSendRequestTokens.get(request);
+      if (sendToken) {
+        sendToken.capture.updateRequestStart(
+          sendToken.candidate,
+          (request as any).timing().startTime
+        );
+        sendToken.capture.settleRequest(sendToken.candidate, false);
+      }
+    });
+    page.on("websocket", (webSocket: any) => {
+      webSocket.on("framesent", (event: { payload?: string | Uint8Array }) => {
+        if (event.payload === undefined) {
+          return;
+        }
+        sendCapture.stageRealtimeFrame({
+          generation: sendCapture.currentGeneration(),
+          frame: event.payload,
+          frameSentAtMs: Date.now()
+        });
+      });
     });
   }
 
@@ -929,6 +1722,142 @@ export class InstagramAdapter extends BetaAdapter {
         return;
       }
     }
+  }
+
+  private beginNetworkMessageCapture(page: Page, platformThreadId: string): void {
+    this.networkMessageCaptures.get(page)?.begin(platformThreadId);
+  }
+
+  private networkMessageCaptureStatus(page: Page): ReturnType<InstagramNetworkMessageCapture["status"]> {
+    return this.networkMessageCaptures.get(page)?.status() ?? {
+      expectedThreadId: null,
+      pendingRequests: 0,
+      successfulResponses: 0,
+      failedRequests: 0,
+      matchedThread: false,
+      explicitlyEmpty: false,
+      snapshots: []
+    };
+  }
+
+  private async waitForNetworkMessageCapture(page: Page, timeoutMs: number): Promise<boolean> {
+    const deadline = Date.now() + Math.max(0, timeoutMs);
+    const quietWindowMs = 200;
+    let previousStatus = this.networkMessageCaptureStatus(page);
+    let quietSince = Date.now();
+    while (Date.now() < deadline) {
+      await page.waitForTimeout(Math.min(100, Math.max(1, deadline - Date.now())));
+      const status = this.networkMessageCaptureStatus(page);
+      if (
+        status.pendingRequests !== previousStatus.pendingRequests ||
+        status.successfulResponses !== previousStatus.successfulResponses ||
+        status.failedRequests !== previousStatus.failedRequests ||
+        status.matchedThread !== previousStatus.matchedThread ||
+        status.snapshots.length !== previousStatus.snapshots.length
+      ) {
+        quietSince = Date.now();
+        previousStatus = status;
+      }
+      if (
+        status.matchedThread &&
+        status.pendingRequests === 0 &&
+        status.failedRequests === 0 &&
+        Date.now() - quietSince >= quietWindowMs
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private beginNetworkSendCapture(
+    page: Page,
+    platformThreadId: string,
+    text: string
+  ): number {
+    const capture = this.networkSendCaptures.get(page);
+    if (!capture) {
+      throw new InstagramParsingError("send_network_capture_unavailable");
+    }
+    return capture.begin(platformThreadId, text);
+  }
+
+  private commitNetworkSendClick(
+    page: Page,
+    generation: number,
+    clickedAtMs: number
+  ): boolean {
+    return this.networkSendCaptures.get(page)?.commitClick(generation, clickedAtMs) ?? false;
+  }
+
+  private networkSendCaptureStatus(
+    page: Page
+  ): ReturnType<InstagramNetworkSendCapture["status"]> {
+    return this.networkSendCaptures.get(page)?.status() ?? {
+      generation: 0,
+      expectedThreadId: null,
+      clickCommitted: false,
+      observedRequests: 0,
+      unverifiableRequests: 0,
+      matchingRequests: 0,
+      pendingRequests: 0,
+      failedRequests: 0,
+      outboundTransportBound: false,
+      offlineThreadingId: null,
+      acknowledgedMessageId: null
+    };
+  }
+
+  private async waitForNetworkSendCapture(page: Page, timeoutMs: number): Promise<boolean> {
+    const deadline = Date.now() + Math.max(0, timeoutMs);
+    const quietWindowMs = 250;
+    let stableSignature = "";
+    let quietSince = 0;
+    while (Date.now() < deadline) {
+      const status = this.networkSendCaptureStatus(page);
+      const signature = [
+        status.generation,
+        status.observedRequests,
+        status.unverifiableRequests,
+        status.matchingRequests,
+        status.pendingRequests,
+        status.failedRequests,
+        status.outboundTransportBound,
+        status.offlineThreadingId ?? "",
+        status.acknowledgedMessageId ?? ""
+      ].join("\u001f");
+      if (signature !== stableSignature) {
+        stableSignature = signature;
+        quietSince = Date.now();
+      }
+      if (
+        status.clickCommitted &&
+        status.unverifiableRequests === 0 &&
+        status.matchingRequests === 1 &&
+        status.pendingRequests === 0 &&
+        status.failedRequests === 0 &&
+        status.outboundTransportBound &&
+        status.offlineThreadingId &&
+        Date.now() - quietSince >= quietWindowMs
+      ) {
+        return true;
+      }
+      if (
+        status.clickCommitted &&
+        (status.matchingRequests > 1 || status.failedRequests > 0)
+      ) {
+        return false;
+      }
+      await page.waitForTimeout(Math.min(50, Math.max(1, deadline - Date.now())));
+    }
+    return false;
+  }
+
+  private async createSendVerificationPage(page: Page): Promise<Page> {
+    const verificationPage = await page.context().newPage();
+    await this.ensurePageRuntimeShims(verificationPage);
+    this.ensureNetworkThreadCapture(verificationPage);
+    return verificationPage;
   }
 
   private async ensurePageRuntimeShims(page: Page): Promise<void> {
@@ -1020,8 +1949,35 @@ export class InstagramAdapter extends BetaAdapter {
     });
   }
 
-  private async throwIfInstagramAuthRequired(page: Page, context: string): Promise<void> {
-    const requirement = await this.authRequirementForPage(page);
+  private async throwIfInstagramAuthRequired(
+    page: Page,
+    context: string,
+    deadlineAtMs?: number
+  ): Promise<void> {
+    const authCheck = this.authRequirementForPage(page);
+    const requirement = deadlineAtMs === undefined
+      ? await authCheck
+      : await new Promise<InstagramAuthRequirement | null>((resolve, reject) => {
+          const remainingMs = deadlineAtMs - Date.now();
+          if (remainingMs <= 0) {
+            reject(new InstagramParsingError("send_verification_timeout"));
+            return;
+          }
+          const timeout = setTimeout(
+            () => reject(new InstagramParsingError("send_verification_timeout")),
+            remainingMs
+          );
+          authCheck.then(
+            (value) => {
+              clearTimeout(timeout);
+              resolve(value);
+            },
+            (error) => {
+              clearTimeout(timeout);
+              reject(error);
+            }
+          );
+        });
     if (requirement) {
       throw new AdapterFailure("Instagram auth required", {
         kind: "AUTH_REQUIRED",
@@ -1344,6 +2300,20 @@ export class InstagramAdapter extends BetaAdapter {
   }
 
   private async collectThreads(limit: number): Promise<ThreadStub[]> {
+    const cachedCollection = this.cachedCollectionThreads;
+    if (
+      this.collectionCycleId > 0 &&
+      cachedCollection?.cycleId === this.collectionCycleId
+    ) {
+      const threads = cachedCollection.threads.slice(0, Math.max(0, limit));
+      this.recordCollectionView(
+        threads,
+        cachedCollection.explicitlyEmpty,
+        cachedCollection.threads
+      );
+      return threads;
+    }
+
     const selectors = await this.deps.resolveSelectors();
     const page = await this.getPage();
     try {
@@ -1360,7 +2330,12 @@ export class InstagramAdapter extends BetaAdapter {
         page,
         captureReadyDeadline - Date.now()
       );
-      const threads = await this.snapshotThreads(page, selectors, limit);
+      const collectedThreads = await this.snapshotThreads(
+        page,
+        selectors,
+        Number.MAX_SAFE_INTEGER
+      );
+      const threads = collectedThreads.slice(0, Math.max(0, limit));
       let explicitlyEmpty = false;
       if (threads.length === 0) {
         const domEvidence = await page
@@ -1446,14 +2421,14 @@ export class InstagramAdapter extends BetaAdapter {
           );
         }
       }
-      this.collectionCalls += 1;
-      this.collectionObservedRows ||= threads.length > 0;
-      this.collectionExplicitlyEmpty &&= explicitlyEmpty;
-      this.collectionTotalFound = Math.max(this.collectionTotalFound, threads.length);
-      this.collectionUnreadFound = Math.max(
-        this.collectionUnreadFound,
-        threads.filter((thread) => (thread.unreadCount ?? 0) > 0).length
-      );
+      if (this.collectionCycleId > 0) {
+        this.cachedCollectionThreads = {
+          cycleId: this.collectionCycleId,
+          threads: collectedThreads,
+          explicitlyEmpty
+        };
+      }
+      this.recordCollectionView(threads, explicitlyEmpty, collectedThreads);
       return threads;
     } catch (error) {
       if (error instanceof AdapterFailure) {
@@ -1476,7 +2451,24 @@ export class InstagramAdapter extends BetaAdapter {
     return threads.map((thread) => ({ ...thread, isRecentCandidate: true }));
   }
 
+  private recordCollectionView(
+    threads: ThreadStub[],
+    explicitlyEmpty: boolean,
+    metricThreads: ThreadStub[] = threads
+  ): void {
+    this.collectionCalls += 1;
+    this.collectionObservedRows ||= metricThreads.length > 0;
+    this.collectionExplicitlyEmpty &&= explicitlyEmpty;
+    this.collectionTotalFound = Math.max(this.collectionTotalFound, metricThreads.length);
+    this.collectionUnreadFound = Math.max(
+      this.collectionUnreadFound,
+      metricThreads.filter((thread) => (thread.unreadCount ?? 0) > 0).length
+    );
+  }
+
   beginCollectionCycle(): void {
+    this.collectionCycleId += 1;
+    this.cachedCollectionThreads = null;
     this.collectionCalls = 0;
     this.collectionObservedRows = false;
     this.collectionExplicitlyEmpty = true;
@@ -1510,19 +2502,38 @@ export class InstagramAdapter extends BetaAdapter {
     selectors: SelectorRegistry,
     thread: ThreadStub,
     requireRecipientHeader = false,
-    verificationPhase: "open" | "before_send" = "open"
+    verificationPhase: "open" | "before_send" = "open",
+    deadlineAtMs?: number
   ): Promise<string> {
+    const remainingOpenTimeout = (): number => {
+      if (deadlineAtMs === undefined) {
+        return 12_000;
+      }
+      const remainingMs = deadlineAtMs - Date.now();
+      if (remainingMs <= 0) {
+        throw new InstagramParsingError("send_verification_timeout");
+      }
+      return Math.min(12_000, remainingMs);
+    };
     const platformThreadId = threadIdForStub(thread);
     await page.goto(canonicalInstagramThreadUrl(platformThreadId), {
       waitUntil: "domcontentloaded",
-      timeout: 12_000
+      timeout: remainingOpenTimeout()
     });
-    await page.waitForTimeout(350);
-    await this.throwIfInstagramAuthRequired(page, "open_thread");
-    await Promise.race([
-      page.waitForSelector(selectors.message_container, { timeout: 12_000 }),
-      page.waitForSelector(selectors.composer_input, { timeout: 12_000 }),
-      page.waitForSelector(selectors.message_item, { timeout: 12_000 })
+    const settleDelayMs =
+      deadlineAtMs === undefined
+        ? 350
+        : Math.min(350, Math.max(0, deadlineAtMs - Date.now()));
+    if (settleDelayMs <= 0) {
+      throw new InstagramParsingError("send_verification_timeout");
+    }
+    await page.waitForTimeout(settleDelayMs);
+    await this.throwIfInstagramAuthRequired(page, "open_thread", deadlineAtMs);
+    const selectorTimeoutMs = remainingOpenTimeout();
+    await Promise.any([
+      page.waitForSelector(selectors.message_container, { timeout: selectorTimeoutMs }),
+      page.waitForSelector(selectors.composer_input, { timeout: selectorTimeoutMs }),
+      page.waitForSelector(selectors.message_item, { timeout: selectorTimeoutMs })
     ]);
 
     await this.verifyCurrentThreadIdentity(
@@ -1531,7 +2542,8 @@ export class InstagramAdapter extends BetaAdapter {
       thread,
       platformThreadId,
       requireRecipientHeader,
-      verificationPhase
+      verificationPhase,
+      deadlineAtMs
     );
 
     return platformThreadId;
@@ -1543,8 +2555,19 @@ export class InstagramAdapter extends BetaAdapter {
     thread: ThreadStub,
     platformThreadId: string,
     requireRecipientHeader: boolean,
-    phase: "open" | "before_send"
+    phase: "open" | "before_send",
+    deadlineAtMs?: number
   ): Promise<void> {
+    const remainingIdentityTimeout = (): number => {
+      if (deadlineAtMs === undefined) {
+        return 1_000;
+      }
+      const remainingMs = deadlineAtMs - Date.now();
+      if (remainingMs <= 0) {
+        throw new InstagramParsingError("send_verification_timeout");
+      }
+      return Math.min(1_000, remainingMs);
+    };
     const assertCurrentThreadUrl = (): void => {
       if (!instagramThreadUrlMatches(page.url(), platformThreadId)) {
         throw this.safeFailure(
@@ -1557,21 +2580,27 @@ export class InstagramAdapter extends BetaAdapter {
     };
     assertCurrentThreadUrl();
 
-    const headerText = await page
+    const header = page
       .locator(selectors.conversation_header ?? "header h1, header h2, header span[title]")
-      .first()
-      .getAttribute("title")
-      .catch(() => null);
+      .first();
+    const headerTimeoutMs = remainingIdentityTimeout();
+    const [headerText, headerBody] = await Promise.all([
+      header.getAttribute("title", { timeout: headerTimeoutMs }).catch(() => null),
+      header.textContent({ timeout: headerTimeoutMs }).catch(() => "")
+    ]);
+    remainingIdentityTimeout();
     assertCurrentThreadUrl();
-    const fallbackHeader = headerText
-      ? headerText
-      : await page
-          .locator(selectors.conversation_header ?? "header h1, header h2, header span[title]")
-          .first()
-          .textContent()
-          .catch(() => "");
-    assertCurrentThreadUrl();
+    const fallbackHeader = headerText || headerBody;
     const normalizedHeader = fallbackHeader?.replace(/\s+/g, " ").trim().normalize("NFKC").toLocaleLowerCase();
+    const networkCapture = this.networkMessageCaptureStatus(page);
+    const normalizedNetworkRecipient =
+      networkCapture.expectedThreadId === platformThreadId
+        ? networkCapture.recipientVerificationLabel
+            ?.replace(/\s+/g, " ")
+            .trim()
+            .normalize("NFKC")
+            .toLocaleLowerCase()
+        : undefined;
     const normalizedRecipient = thread.recipientVerificationLabel
       ?.replace(/\s+/g, " ")
       .trim()
@@ -1579,7 +2608,10 @@ export class InstagramAdapter extends BetaAdapter {
       .toLocaleLowerCase();
     const hasSpecificRecipient =
       Boolean(normalizedRecipient) && normalizedRecipient !== "instagram conversation";
-    if (requireRecipientHeader && (!hasSpecificRecipient || !normalizedHeader)) {
+    if (
+      requireRecipientHeader &&
+      (!hasSpecificRecipient || (!normalizedHeader && !normalizedNetworkRecipient))
+    ) {
       throw this.safeFailure(
         "THREAD_NOT_FOUND",
         "open_thread",
@@ -1588,6 +2620,18 @@ export class InstagramAdapter extends BetaAdapter {
       );
     }
     if (normalizedHeader && hasSpecificRecipient && normalizedHeader !== normalizedRecipient) {
+      throw this.safeFailure(
+        "THREAD_NOT_FOUND",
+        "open_thread",
+        phase === "before_send" ? "recipient_changed_before_send" : "opened_recipient_mismatch",
+        platformThreadId
+      );
+    }
+    if (
+      normalizedNetworkRecipient &&
+      hasSpecificRecipient &&
+      normalizedNetworkRecipient !== normalizedRecipient
+    ) {
       throw this.safeFailure(
         "THREAD_NOT_FOUND",
         "open_thread",
@@ -1778,9 +2822,30 @@ export class InstagramAdapter extends BetaAdapter {
     const page = await this.getPage();
     let platformThreadId: string | undefined;
     try {
-      platformThreadId = await this.openExactThread(page, selectors, thread);
-      const snapshots = await this.snapshotMessages(page, selectors);
-      if (snapshots.length === 0 && (await page.locator(selectors.composer_input).count()) === 0) {
+      platformThreadId = threadIdForStub(thread);
+      this.beginNetworkMessageCapture(page, platformThreadId);
+      await this.openExactThread(page, selectors, thread);
+      const networkReady = await this.waitForNetworkMessageCapture(page, 8_000);
+      const networkCapture = this.networkMessageCaptureStatus(page);
+      const recipientHeader = page
+        .locator(selectors.conversation_header ?? "header h1, header h2, header span[title]")
+        .first();
+      const discoveredRecipient = (
+        (networkReady ? networkCapture.recipientVerificationLabel : undefined) ??
+        (await recipientHeader.getAttribute("title", { timeout: 1_000 }).catch(() => null)) ??
+        (await recipientHeader.textContent({ timeout: 1_000 }).catch(() => null))
+      )?.replace(/\s+/g, " ").trim();
+      if (
+        discoveredRecipient &&
+        discoveredRecipient.toLocaleLowerCase() !== "instagram conversation"
+      ) {
+        thread.recipientVerificationLabel = discoveredRecipient;
+      }
+      const domSnapshots = await this.snapshotMessages(page, selectors);
+      const snapshots = networkReady && networkCapture.snapshots.length > 0
+        ? networkCapture.snapshots
+        : domSnapshots;
+      if (snapshots.length === 0) {
         throw new InstagramParsingError("message_selector_returned_no_rows");
       }
       return normalizeInstagramMessageSnapshots(platformThreadId, snapshots).slice(-limit);
@@ -1860,7 +2925,7 @@ export class InstagramAdapter extends BetaAdapter {
     action: "focus" | "type" | "send";
     expectedText: string;
     unit?: string;
-  }): Promise<{ ok: true } | { ok: false; reason: string }> {
+  }): Promise<{ ok: true; clickedAtMs?: number } | { ok: false; reason: string }> {
     return input.composer.evaluate(
       (
         composerNode,
@@ -2233,8 +3298,9 @@ export class InstagramAdapter extends BetaAdapter {
         ) {
           return fail("send_button_not_actionable");
         }
+        const clickedAtMs = Date.now();
         (sendElement as HTMLElement).click();
-        return { ok: true };
+        return { ok: true, clickedAtMs };
       },
       {
         composerConversationContainer: input.composerConversationContainer,
@@ -2257,7 +3323,7 @@ export class InstagramAdapter extends BetaAdapter {
   }
 
   private assertAtomicComposerAction(
-    result: { ok: true } | { ok: false; reason: string },
+    result: { ok: true; clickedAtMs?: number } | { ok: false; reason: string },
     platformThreadId: string
   ): void {
     if (result.ok) {
@@ -2615,53 +3681,6 @@ export class InstagramAdapter extends BetaAdapter {
     return nearby[0]!;
   }
 
-  private async countExactOutgoingBubbles(
-    page: Page,
-    selectors: SelectorRegistry,
-    text: string
-  ): Promise<number> {
-    const exactText = page.getByText(text, { exact: true });
-    const count = await exactText.count();
-    if (count === 0) {
-      return 0;
-    }
-    const containerBox = await page
-      .locator(selectors.message_container)
-      .first()
-      .boundingBox();
-    if (!containerBox) {
-      return 0;
-    }
-    const composerBox = await page
-      .locator(selectors.composer_input)
-      .first()
-      .boundingBox()
-      .catch(() => null);
-    const containerCenterX = containerBox.x + containerBox.width / 2;
-    const boxes = new Set<string>();
-    for (let index = 0; index < count; index += 1) {
-      const candidate = count === 1 ? exactText : exactText.nth(index);
-      if (!(await candidate.isVisible().catch(() => false))) continue;
-      const box = await candidate.boundingBox();
-      if (!box) continue;
-      const centerX = box.x + box.width / 2;
-      if (centerX <= containerCenterX + Math.max(12, containerBox.width * 0.08)) continue;
-      if (
-        composerBox &&
-        box.y < composerBox.y + composerBox.height &&
-        box.y + box.height > composerBox.y
-      ) {
-        continue;
-      }
-      boxes.add(
-        [box.x, box.y, box.width, box.height]
-          .map((value) => Math.round(value))
-          .join(":")
-      );
-    }
-    return boxes.size;
-  }
-
   async sendMessage(
     thread: ThreadStub,
     text: string,
@@ -2698,23 +3717,59 @@ export class InstagramAdapter extends BetaAdapter {
     const page = await this.getPage();
     let platformThreadId: string | undefined;
     let submissionMayHaveOccurred = false;
+    let dispatchStartedAt: number | null = null;
+    let sendCaptureGeneration: number | null = null;
     let composerOwnership: InstagramComposerOwnershipBinding | null = null;
+    let verificationPage: Page | null = null;
     try {
+      platformThreadId = threadIdForStub(thread);
+      this.beginNetworkMessageCapture(page, platformThreadId);
       platformThreadId = await this.openExactThread(
         page,
         selectors,
         thread,
+        false,
+        "before_send"
+      );
+      await this.verifyCurrentThreadIdentity(
+        page,
+        selectors,
+        thread,
+        platformThreadId,
         true,
         "before_send"
       );
+      const preSendNetworkReady = await this.waitForNetworkMessageCapture(page, 8_000);
+      const networkBefore = this.networkMessageCaptureStatus(page);
+      if (
+        !preSendNetworkReady ||
+        !networkBefore.matchedThread ||
+        networkBefore.expectedThreadId !== platformThreadId
+      ) {
+        throw new InstagramParsingError("message_network_capture_incomplete_before_send");
+      }
+      if (!instagramThreadUrlMatches(page.url(), platformThreadId)) {
+        throw new InstagramParsingError("thread_changed_before_send");
+      }
+      const expectedRecipient = thread.recipientVerificationLabel
+        ?.replace(/\s+/g, " ")
+        .trim()
+        .normalize("NFKC")
+        .toLocaleLowerCase();
+      const networkRecipient = networkBefore.recipientVerificationLabel
+        ?.replace(/\s+/g, " ")
+        .trim()
+        .normalize("NFKC")
+        .toLocaleLowerCase();
+      if (!expectedRecipient || expectedRecipient === "instagram conversation" || !networkRecipient) {
+        throw new InstagramParsingError("recipient_unverified_before_send");
+      }
+      if (networkRecipient !== expectedRecipient) {
+        throw new InstagramParsingError("recipient_changed_before_send");
+      }
       const before = normalizeInstagramMessageSnapshots(
         platformThreadId,
-        await this.snapshotMessages(page, selectors)
-      );
-      const exactOutgoingBefore = await this.countExactOutgoingBubbles(
-        page,
-        selectors,
-        normalizedText
+        networkBefore.snapshots
       );
       const composerLocator = await this.requireEnabled(
         page.locator(selectors.composer_input),
@@ -2801,6 +3856,11 @@ export class InstagramAdapter extends BetaAdapter {
           reading: null,
           performClick: async () => {
             await beforeDispatch?.();
+            sendCaptureGeneration = this.beginNetworkSendCapture(
+              page,
+              platformThreadId!,
+              normalizedText
+            );
             submissionMayHaveOccurred = true;
             const result = await this.runAtomicComposerAction({
               composer,
@@ -2820,6 +3880,19 @@ export class InstagramAdapter extends BetaAdapter {
             });
             if (!result.ok) {
               submissionMayHaveOccurred = false;
+            } else {
+              dispatchStartedAt = result.clickedAtMs ?? null;
+              if (
+                dispatchStartedAt === null ||
+                sendCaptureGeneration === null ||
+                !this.commitNetworkSendClick(
+                  page,
+                  sendCaptureGeneration,
+                  dispatchStartedAt
+                )
+              ) {
+                throw new InstagramParsingError("send_dispatch_timestamp_missing");
+              }
             }
             this.assertAtomicComposerAction(result, platformThreadId!);
           }
@@ -2828,47 +3901,127 @@ export class InstagramAdapter extends BetaAdapter {
         await this.disposeComposerSendBinding(boundSend);
       }
 
-      const deadline =
-        Date.now() + (this.instagramDeps.sendVerificationTimeoutMs ?? 12_000);
+      if (dispatchStartedAt === null) {
+        throw new InstagramParsingError("send_dispatch_timestamp_missing");
+      }
+      const deadline = Date.now() + (this.instagramDeps.sendVerificationTimeoutMs ?? 12_000);
+      const sendCaptureReady = await this.waitForNetworkSendCapture(
+        page,
+        Math.min(6_000, Math.max(1, deadline - Date.now()))
+      );
+      const sendCapture = this.networkSendCaptureStatus(page);
+      if (
+        !sendCaptureReady ||
+        sendCaptureGeneration === null ||
+        sendCapture.generation !== sendCaptureGeneration ||
+        sendCapture.expectedThreadId !== platformThreadId ||
+        sendCapture.unverifiableRequests !== 0 ||
+        sendCapture.matchingRequests !== 1 ||
+        sendCapture.pendingRequests !== 0 ||
+        sendCapture.failedRequests !== 0 ||
+        !sendCapture.outboundTransportBound ||
+        !sendCapture.offlineThreadingId
+      ) {
+        throw new InstagramParsingError("send_transport_not_bound");
+      }
+      const expectedPlatformMessageKey = sendCapture.acknowledgedMessageId
+        ? instagramStableMessageKey(
+            platformThreadId,
+            "native",
+            sendCapture.acknowledgedMessageId
+          )
+        : undefined;
+      verificationPage = await this.createSendVerificationPage(page);
       while (Date.now() < deadline) {
-        if (!instagramThreadUrlMatches(page.url(), platformThreadId)) {
-          throw new InstagramParsingError("thread_changed_during_send");
+        this.beginNetworkMessageCapture(verificationPage, platformThreadId);
+        await this.openExactThread(
+          verificationPage,
+          selectors,
+          thread,
+          false,
+          "before_send",
+          deadline
+        );
+        const remainingMs = deadline - Date.now();
+        if (remainingMs <= 0) {
+          throw new InstagramParsingError("send_verification_timeout");
         }
+        const postSendNetworkReady = await this.waitForNetworkMessageCapture(
+          verificationPage,
+          Math.min(6_000, remainingMs)
+        );
+        const networkAfter = this.networkMessageCaptureStatus(verificationPage);
+        if (
+          !postSendNetworkReady ||
+          !networkAfter.matchedThread ||
+          networkAfter.expectedThreadId !== platformThreadId
+        ) {
+          if (Date.now() < deadline) {
+            await verificationPage.waitForTimeout(Math.min(250, deadline - Date.now()));
+          }
+          continue;
+        }
+        await this.verifyCurrentThreadIdentity(
+          verificationPage,
+          selectors,
+          thread,
+          platformThreadId,
+          true,
+          "before_send",
+          deadline
+        );
         const after = normalizeInstagramMessageSnapshots(
           platformThreadId,
-          await this.snapshotMessages(page, selectors)
+          networkAfter.snapshots
         );
-        const sent = findNewVerifiedInstagramOutgoing(before, after, normalizedText);
+        const sent = findNewAcknowledgedInstagramOutgoing(
+          before,
+          after,
+          normalizedText,
+          dispatchStartedAt,
+          Date.now(),
+          0,
+          expectedPlatformMessageKey,
+          sendCapture.offlineThreadingId
+        );
         if (sent) {
+          const finalRemainingMs = deadline - Date.now();
+          if (finalRemainingMs <= 0) {
+            throw new InstagramParsingError("send_verification_timeout");
+          }
+          const finalCaptureReady = await this.waitForNetworkSendCapture(
+            page,
+            Math.min(1_000, finalRemainingMs)
+          );
+          const finalCapture = this.networkSendCaptureStatus(page);
+          if (
+            !finalCaptureReady ||
+            finalCapture.generation !== sendCaptureGeneration ||
+            finalCapture.expectedThreadId !== platformThreadId ||
+            finalCapture.unverifiableRequests !== 0 ||
+            finalCapture.matchingRequests !== 1 ||
+            finalCapture.pendingRequests !== 0 ||
+            finalCapture.failedRequests !== 0 ||
+            !finalCapture.outboundTransportBound ||
+            finalCapture.offlineThreadingId !== sendCapture.offlineThreadingId ||
+            finalCapture.acknowledgedMessageId !== sendCapture.acknowledgedMessageId
+          ) {
+            throw new InstagramParsingError("send_transport_not_stable");
+          }
+          if (Date.now() > deadline) {
+            throw new InstagramParsingError("send_verification_timeout");
+          }
           return {
             sentAt: new Date().toISOString(),
             acknowledgedAt: new Date().toISOString(),
-            verifiedBy: "bubble_detected",
-            platformMessageKey: sent?.platformMessageKey,
-            raw: { verification: "new_outgoing_bubble" }
+            verifiedBy: "platform_acknowledged",
+            platformMessageKey: sent.platformMessageKey,
+            raw: { verification: "mutation_bound_network_acknowledgement" }
           };
         }
-        const exactOutgoingAfter = await this.countExactOutgoingBubbles(
-          page,
-          selectors,
-          normalizedText
-        );
-        if (exactOutgoingAfter > exactOutgoingBefore) {
-          return {
-            sentAt: new Date().toISOString(),
-            acknowledgedAt: new Date().toISOString(),
-            verifiedBy: "bubble_detected",
-            platformMessageKey: instagramMessageFallbackKey(
-              platformThreadId,
-              "OUT",
-              normalizedText,
-              undefined,
-              Math.max(0, exactOutgoingAfter - 1)
-            ),
-            raw: { verification: "exact_outgoing_layout_bubble" }
-          };
+        if (Date.now() < deadline) {
+          await verificationPage.waitForTimeout(Math.min(250, deadline - Date.now()));
         }
-        await page.waitForTimeout(500);
       }
 
       throw new InstagramParsingError("submitted_message_not_observed");
@@ -2898,6 +4051,9 @@ export class InstagramAdapter extends BetaAdapter {
       if (composerOwnership) {
         await this.disposeComposerOwnershipBinding(composerOwnership);
       }
+      if (verificationPage) {
+        await verificationPage.close().catch(() => undefined);
+      }
     }
   }
 
@@ -2905,6 +4061,7 @@ export class InstagramAdapter extends BetaAdapter {
     const selectors = await this.deps.resolveSelectors();
     const page = await this.getPage();
     try {
+      this.beginNetworkMessageCapture(page, threadIdForStub(thread));
       await this.openExactThread(page, selectors, thread);
     } catch (error) {
       if (error instanceof AdapterFailure) {

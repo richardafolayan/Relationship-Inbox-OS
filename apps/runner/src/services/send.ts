@@ -330,6 +330,18 @@ export function assertInstagramManualTextSend(input: {
   }
 }
 
+export function assertInstagramRecipientEvidence(input: {
+  platform: PlatformName;
+  recipientVerificationLabel?: string;
+}): void {
+  if (input.platform === "INSTAGRAM" && !input.recipientVerificationLabel?.trim()) {
+    throw new SendPolicyError(
+      "instagram_recipient_unverified",
+      "Instagram recipient identity is not verified"
+    );
+  }
+}
+
 export function recoveryPredecessorIsDefinitelyUnsent(
   status: string,
   errorJson?: string | null
@@ -1306,6 +1318,10 @@ export function createSendService(deps: SendServiceDeps) {
         receipt = buildDemoSendReceipt();
         await persistDeliveredReceipt(receipt);
       } else {
+        assertInstagramRecipientEvidence({
+          platform: thread.platform,
+          recipientVerificationLabel: thread.recipientVerificationLabel ?? undefined
+        });
         if (!adapter) {
           throw new Error(
             `Platform ${thread.platform} is not supported by this runner. Supported platforms: ${Object.keys(deps.adapters).join(", ")}.`

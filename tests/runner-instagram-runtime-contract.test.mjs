@@ -92,7 +92,7 @@ test("Instagram selectors and adapter never use a first-row or Enter-key send fa
   assert.equal(selectors.thread_link, "a[href^='/direct/t/']");
   assert.doesNotMatch(adapterSource, /keyboard\.press\(["']Enter/);
   assert.doesNotMatch(adapterSource, /thread_item\)\.first\(\)/);
-  assert.match(adapterSource, /verifiedBy: "bubble_detected"/);
+  assert.match(adapterSource, /verifiedBy: "platform_acknowledged"/);
 });
 
 test("Instagram failures do not invoke content-bearing diagnostics", () => {
@@ -110,9 +110,34 @@ test("message identity reconciliation stays behind a platform-neutral scan capab
   );
 });
 
+test("Instagram scans and control actions use the same canonical platform lock", () => {
+  assert.match(
+    runnerSource,
+    /const scanQueue = createScanQueue\(\{[\s\S]*?platformLockKey,/
+  );
+  assert.match(scanQueueSource, /deps\.platformLockKey\?\.\(platform\)/);
+});
+
+test("Instagram post-click verification passes its deadline into exact-thread navigation", () => {
+  assert.match(
+    adapterSource,
+    /openExactThread\([\s\S]*?deadlineAtMs\?: number[\s\S]*?remainingOpenTimeout/
+  );
+  assert.match(
+    adapterSource,
+    /await this\.openExactThread\(\s*verificationPage,[\s\S]*?"before_send",\s*deadline\s*\)/
+  );
+  assert.match(
+    adapterSource,
+    /await this\.verifyCurrentThreadIdentity\(\s*verificationPage,[\s\S]*?"before_send",\s*deadline\s*\)/
+  );
+  assert.match(adapterSource, /if \(Date\.now\(\) > deadline\)/);
+});
+
 test("platform recipient verification identity is persisted separately from Person display copy", () => {
   assert.match(schemaSource, /recipientVerificationLabel\s+String\?/);
   assert.match(runnerSource, /recipientVerificationLabel: thread\.recipientVerificationLabel \?\? undefined/);
+  assert.match(runnerSource, /recipientVerificationLabel: thread\.recipientVerificationLabel \?\? null/);
   assert.match(
     scanQueueSource,
     /recipientVerificationLabel: candidate\.recipientVerificationLabel/

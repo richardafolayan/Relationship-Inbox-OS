@@ -50,6 +50,7 @@ test("scan queue keeps incomplete and capped adapters degraded without advancing
 
   const originalLastScanAt = new Date("2026-08-20T10:00:00.000Z");
   const began = new Set();
+  const acquiredLockKeys = [];
   const createAdapter = (platform, completeness, nativeStopReason) => ({
     platform,
     collectionBoundary: {
@@ -104,9 +105,14 @@ test("scan queue keeps incomplete and capped adapters degraded without advancing
     },
     aiService: {},
     platformMutex: {
-      runWithQueueOne: async (_key, run) => run(),
+      runWithQueueOne: async (key, run) => {
+        acquiredLockKeys.push(key);
+        return run();
+      },
       getQueueDepth: () => 0
     },
+    platformLockKey: (platform) =>
+      platform === "INSTAGRAM" ? "instagram:INSTAGRAM" : `default:${platform}`,
     screenshotDir: tempDir,
     domDumpDir: tempDir,
     auditLog: async () => "audit"
@@ -131,5 +137,6 @@ test("scan queue keeps incomplete and capped adapters degraded without advancing
     assert.equal(finalState.lastScanAt, originalLastScanAt);
     assert.equal(watermarkReads.get(platform), 1);
   }
+  assert.deepEqual(acquiredLockKeys, ["instagram:INSTAGRAM", "default:IMESSAGE"]);
   assert.deepEqual(settingWrites, []);
 });

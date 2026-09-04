@@ -535,6 +535,21 @@ test("send dispatch preserves the last platform-authoritative recipient label", 
   assert.equal(sentStubs[0].recipientVerificationLabel, "Current Instagram name");
 });
 
+test("worker blocks missing Instagram recipient evidence before adapter dispatch", async () => {
+  const { svc, rows, sends } = makeHarness([pendingRow()], {
+    platform: "INSTAGRAM"
+  });
+
+  await svc.processSendRequest("sr1");
+
+  assert.equal(sends.length, 0);
+  assert.equal(rows[0].status, "FAILED");
+  assert.equal(
+    JSON.parse(rows[0].errorJson).reasonCode,
+    "instagram_recipient_unverified"
+  );
+});
+
 test("worker refuses a stale scheduled Instagram row before any physical send", async () => {
   const { svc, rows, sends } = makeHarness(
     [pendingRow({ scheduledFor: new Date(Date.now() - 60_000) })],
@@ -1354,7 +1369,11 @@ test("Instagram send failures never persist private platform URLs", async () => 
   const privateUrl = "https://www.instagram.com/direct/t/private-thread-id/";
   const { svc, rows } = makeHarness(
     [pendingRow()],
-    { platform: "INSTAGRAM", adapterError: `navigation failed at ${privateUrl}` }
+    {
+      platform: "INSTAGRAM",
+      recipientVerificationLabel: "Current Instagram name",
+      adapterError: `navigation failed at ${privateUrl}`
+    }
   );
 
   await svc.processSendRequest("sr1");
@@ -1370,6 +1389,7 @@ test("Instagram send failures discard diagnostic artifacts and unsafe reason val
     [pendingRow()],
     {
       platform: "INSTAGRAM",
+      recipientVerificationLabel: "Current Instagram name",
       adapterFailure: new AdapterFailure("Instagram send failed", {
         kind: "THREAD_FETCH_FAILED",
         platform: "INSTAGRAM",
