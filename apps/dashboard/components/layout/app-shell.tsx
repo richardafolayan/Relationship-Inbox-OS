@@ -462,7 +462,11 @@ export function AppShell({ children }: { children: ReactNode }) {
       dismissCenterNotification(UPDATE_NOTICE_ID);
       return;
     }
-    const notice = buildUpdateNotice(check.latestVersion, check.applyMode);
+    const notice = buildUpdateNotice(
+      check.latestVersion,
+      check.applyMode,
+      check.hostDeviceKind ?? "computer"
+    );
     recordCenterNotifications([
       {
         id: UPDATE_NOTICE_ID,

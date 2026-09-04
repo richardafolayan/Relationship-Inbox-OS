@@ -1,5 +1,7 @@
 "use client";
 
+import type { HostDeviceKind } from "./app-update-presentation";
+
 // Update-available notices: when the runner's update check finds a newer
 // pilot build, the operator gets the same calm treatment as a new message:
 // one 30s toast plus an entry in the notification center. Clicking either
@@ -31,6 +33,7 @@ export interface UpdateCheckResponse {
   updateAvailable: boolean;
   releaseNotes: string[];
   error?: string;
+  hostDeviceKind?: HostDeviceKind;
 }
 
 export interface UpdateNotice {
@@ -41,12 +44,19 @@ export interface UpdateNotice {
 
 export function buildUpdateNotice(
   latestVersion: string,
-  applyMode: "automatic" | "replace_app" = "automatic"
+  applyMode: "automatic" | "replace_app" = "automatic",
+  hostKind: HostDeviceKind = "computer"
 ): UpdateNotice {
+  const replacementBody =
+    hostKind === "pc"
+      ? "A new Windows build is ready. Open Settings for safe install steps."
+      : hostKind === "mac"
+        ? "A new Mac build is ready. Open Settings for safe install steps."
+        : "A new build for this computer is ready. Open Settings for safe install steps.";
   return {
     title: `Update available v${latestVersion}`,
     body: applyMode === "replace_app"
-      ? "A new Mac build is ready. Open Settings for safe install steps."
+      ? replacementBody
       : "A new build is ready. Click to update and reopen the app.",
     href: UPDATE_NOTICE_HREF
   };

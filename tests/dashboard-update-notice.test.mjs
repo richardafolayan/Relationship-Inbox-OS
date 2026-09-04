@@ -60,6 +60,21 @@ test("buildUpdateNotice names the version and points at the anchored card", () =
   assert.ok(notice.body.length > 0);
 });
 
+test("replacement update notices name the actual host without guessing Mac", () => {
+  assert.equal(
+    buildUpdateNotice("0.2.0", "replace_app", "pc").body,
+    "A new Windows build is ready. Open Settings for safe install steps."
+  );
+  assert.equal(
+    buildUpdateNotice("0.2.0", "replace_app", "mac").body,
+    "A new Mac build is ready. Open Settings for safe install steps."
+  );
+  assert.equal(
+    buildUpdateNotice("0.2.0", "replace_app", "computer").body,
+    "A new build for this computer is ready. Open Settings for safe install steps."
+  );
+});
+
 test("the check cadence is quick but nowhere near the inbox poll", () => {
   assert.ok(UPDATE_CHECK_INTERVAL_MS >= 60 * 1000);
   assert.ok(UPDATE_CHECK_INTERVAL_MS <= 5 * 60 * 1000);

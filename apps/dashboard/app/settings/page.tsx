@@ -790,7 +790,11 @@ export default function SettingsPage() {
                   desc={
                     phoneLayout
                       ? "Scale the whole interface. This applies on this phone only."
-                      : "Scale the whole interface on this Mac."
+                      : host.platform === "win32"
+                        ? "Scale the whole interface on this PC."
+                        : host.platform === "darwin"
+                          ? "Scale the whole interface on this Mac."
+                          : "Scale the whole interface on this computer."
                   }
                   trailing={
                     <SegmentedControl

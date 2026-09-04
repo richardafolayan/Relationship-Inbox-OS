@@ -13,6 +13,7 @@ const SETUP_SOURCE = readFileSync(
   join(ROOT, "apps/dashboard/components/common/SetupWizard.tsx"),
   "utf8"
 );
+const SETTINGS_SOURCE = readFileSync(join(ROOT, "apps/dashboard/app/settings/page.tsx"), "utf8");
 
 test("app update card identifies the host device being updated", () => {
   assert.match(SOURCE, /hostAppTitle/);
@@ -24,6 +25,13 @@ test("app update card identifies the host device being updated", () => {
   assert.match(SOURCE, /from "@\/lib\/host-device"/);
   assert.match(SOURCE, /hostOfflineExplanation/);
   assert.match(SOURCE, /remoteAvailable/);
+});
+
+test("desktop text-size copy follows the host platform", () => {
+  assert.match(
+    SETTINGS_SOURCE,
+    /host\.platform === "win32"[\s\S]*Scale the whole interface on this PC\.[\s\S]*host\.platform === "darwin"[\s\S]*Scale the whole interface on this Mac\.[\s\S]*Scale the whole interface on this computer\./
+  );
 });
 
 test("app update card keeps pilot copy away from terminal commands", () => {
