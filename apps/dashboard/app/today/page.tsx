@@ -20,6 +20,7 @@ import { formatRelative } from "@/lib/time";
 import { isDegradedAndInUse, PLATFORM_LABEL, toDisplayRisk } from "@/lib/risk";
 import { cleanAskSummary, normalizePreview } from "@/lib/preview";
 import { isInTodayQueue, sortTodayQueue } from "@/lib/today";
+import { runConfirmedTodayAction } from "@/lib/today-action";
 import { Star } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Canvas, CaughtUp } from "@/components/common/canvas";
@@ -163,6 +164,8 @@ export default function TodayPage() {
   const [tourSeen, setTourSeen] = useState<boolean | undefined>(undefined);
   const [removedIds, setRemovedIds] = useState<Set<string>>(new Set());
   const [transitioning, setTransitioning] = useState<{ id: string; label: string } | null>(null);
+  const [heroActionPending, setHeroActionPending] = useState<"snooze" | "handled" | null>(null);
+  const heroActionInFlightRef = useRef(false);
   const transitionTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Mirror of the filtered Today queue (`rows`, computed below) so the
   // MESSAGE_SENT handler credits a send as "done" only when the thread is
@@ -312,6 +315,37 @@ export default function TodayPage() {
       void refresh({ force: true });
     }, 400);
   }, [refresh]);
+
+  const handleHeroAction = useCallback(async (
+    action: "snooze" | "handled",
+    id: string,
+    level: "RED" | "AMBER" | "GREEN"
+  ) => {
+    if (heroActionInFlightRef.current) return;
+    heroActionInFlightRef.current = true;
+    setHeroActionPending(action);
+
+    try {
+      await runConfirmedTodayAction({
+        request: () =>
+          action === "snooze"
+            ? apiPost(`/runner/control/thread/${id}/snooze`, { hours: 16 })
+            : apiPost(`/runner/control/thread/${id}/mark-done`, {}),
+        onConfirmed: () => {
+          setError(null);
+          advanceHero(
+            id,
+            action === "snooze" ? "Snoozed, next up" : "Handled, next up",
+            level
+          );
+        },
+        onFailure: setError
+      });
+    } finally {
+      heroActionInFlightRef.current = false;
+      setHeroActionPending(null);
+    }
+  }, [advanceHero]);
 
   useEffect(() => {
     const handler = (event: Event) => {
@@ -465,21 +499,15 @@ export default function TodayPage() {
         router.push(`/thread/${hero.id}`);
       } else if (key === "s") {
         event.preventDefault();
-        const id = hero.id;
-        const level = hero.riskLevel;
-        runAction(apiPost(`/runner/control/thread/${id}/snooze`, { hours: 16 }), setError, refresh);
-        advanceHero(id, "Snoozed, next up", level);
+        void handleHeroAction("snooze", hero.id, hero.riskLevel);
       } else if (key === "e") {
         event.preventDefault();
-        const id = hero.id;
-        const level = hero.riskLevel;
-        runAction(apiPost(`/runner/control/thread/${id}/mark-done`, {}), setError, refresh);
-        advanceHero(id, "Handled, next up", level);
+        void handleHeroAction("handled", hero.id, hero.riskLevel);
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [hero, router, advanceHero, refresh]);
+  }, [hero, router, handleHeroAction]);
 
   // Right-rail outline rows jump to the first live thread of their risk
   // level: the hero when it matches, otherwise its row in the queue below.
@@ -817,39 +845,27 @@ export default function TodayPage() {
                   </Button>
                   <Button
                     variant="quiet"
+                    disabled={heroActionPending !== null}
                     className="min-h-[44px] w-full justify-center gap-3 hover:border-[color-mix(in_oklch,var(--accent)_45%,transparent)] hover:bg-accent-soft hover:text-accent-ink sm:min-h-0 sm:w-auto"
-                    onClick={() => {
-                      const id = hero.id;
-                      const level = hero.riskLevel;
-                      runAction(
-                        apiPost(`/runner/control/thread/${id}/snooze`, { hours: 16 }),
-                        setError,
-                        refresh
-                      );
-                      advanceHero(id, "Snoozed, next up", level);
-                    }}
+                    onClick={() => void handleHeroAction("snooze", hero.id, hero.riskLevel)}
                   >
-                    <span className="sm:hidden">Snooze</span>
-                    <span className="hidden sm:inline">Snooze ’til tomorrow</span>
+                    <span className="sm:hidden">
+                      {heroActionPending === "snooze" ? "Snoozing..." : "Snooze"}
+                    </span>
+                    <span className="hidden sm:inline">
+                      {heroActionPending === "snooze" ? "Snoozing..." : "Snooze ’til tomorrow"}
+                    </span>
                     <span className="hidden sm:inline">
                       <KbHint label="S" />
                     </span>
                   </Button>
                   <Button
                     variant="quiet"
+                    disabled={heroActionPending !== null}
                     className="min-h-[44px] w-full justify-center gap-3 hover:border-[color-mix(in_oklch,var(--accent)_45%,transparent)] hover:bg-accent-soft hover:text-accent-ink sm:min-h-0 sm:w-auto"
-                    onClick={() => {
-                      const id = hero.id;
-                      const level = hero.riskLevel;
-                      runAction(
-                        apiPost(`/runner/control/thread/${id}/mark-done`, {}),
-                        setError,
-                        refresh
-                      );
-                      advanceHero(id, "Handled, next up", level);
-                    }}
+                    onClick={() => void handleHeroAction("handled", hero.id, hero.riskLevel)}
                   >
-                    Mark handled
+                    {heroActionPending === "handled" ? "Marking..." : "Mark handled"}
                     <span className="hidden sm:inline">
                       <KbHint label="E" />
                     </span>
