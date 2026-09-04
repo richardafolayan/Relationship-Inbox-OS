@@ -39,6 +39,11 @@ test("package config builds an unpacked NSIS app with an external Node runtime",
   );
   assert.ok(pkg.build.files.includes("scripts/lib/**/*"));
   assert.deepEqual(pkg.build.win.target[0], { target: "nsis", arch: ["x64"] });
+  assert.equal(
+    pkg.build.nsis.deleteAppDataOnUninstall,
+    false,
+    "uninstall must retain pilot data until the user deliberately removes it"
+  );
   assert.equal(pkg.build.extraResources[0].from, "build/windows-runtime/${arch}");
   assert.equal(pkg.build.extraResources[0].to, "runtime/node");
   assert.equal(

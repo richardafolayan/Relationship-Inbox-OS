@@ -136,9 +136,12 @@ shared evidence.
     Windows. Record the actual Windows update instructions.
 50. Uninstall Tovi through Windows Installed Apps.
 51. Confirm the executable, shortcuts, and background processes are removed.
-52. Record whether app data and linked-platform sessions remain. The observed
-    behaviour must match the user-facing promise.
-53. Reinstall and confirm the retained or fresh state matches that promise.
+52. Confirm `%APPDATA%\Relationship Inbox OS` remains. Uninstall intentionally
+    retains the database, settings, and saved browser sessions unless the user
+    deletes that folder separately.
+53. Reinstall and confirm the database, settings, and saved platform sessions
+    return. Record any provider that requires sign-in again because its own
+    session expired.
 54. Review logs and evidence for private-data leakage before sharing anything.
 
 ## Pass rule

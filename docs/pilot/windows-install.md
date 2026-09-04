@@ -54,3 +54,14 @@ and documents the desktop quoted-reply limitation in
 
 If startup fails, open **Tovi > Show Logs** and attach the log to a bug report.
 Do not paste private message content into the report.
+
+## Uninstall
+
+Uninstalling Tovi removes the app, shortcuts, and its background processes. It
+keeps the local Tovi data in `%APPDATA%\Relationship Inbox OS`, including the
+database, settings, and saved browser sessions, so a reinstall can restore the
+same state. A platform may still require sign-in again if its own session has
+expired.
+
+To remove the local data as well, quit Tovi, uninstall it, then delete
+`%APPDATA%\Relationship Inbox OS`. This deletion cannot be undone.
