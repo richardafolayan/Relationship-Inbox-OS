@@ -125,10 +125,31 @@ shared evidence.
 
 ## Update and uninstall
 
-46. Start from a fresh Windows user account, or fully remove the current
-    synthetic test installation and its app data, before installing a known
-    earlier candidate. Create the synthetic data and saved draft with that
-    earlier candidate so its original database schema is the upgrade source.
+The one authorised Tovi live send in steps 31 to 36 is the limit for the entire
+checklist. Resetting app data, installing an older candidate, upgrading,
+uninstalling, or reinstalling does not reset that limit. Do not use the older
+candidate, upgrade, or reinstall to send again. Use inbound-only test traffic,
+saved drafts, connection status, and session checks for the remaining steps.
+
+46. Pin and prepare the upgrade source before installing the new candidate:
+    - Record the earlier candidate commit or release identifier, installer file
+      name, SHA-256, and included-platform set.
+    - Start from a fresh Windows user account, or fully remove the current
+      synthetic test installation and its app data.
+    - Install that exact older candidate and confirm its displayed version
+      matches the recorded commit or release.
+    - Obtain explicit authorisation before connecting or reconnecting each test
+      account.
+    - Establish a real authenticated session for every included platform while
+      the older candidate is still installed. Confirm each platform reports the
+      expected test account as connected without recording credentials, tokens,
+      QR codes, or pairing URLs.
+    - Create the privacy-safe synthetic data, settings, and saved draft with the
+      older candidate so its original database schema is the upgrade source.
+    - Quit and reopen the older candidate.
+    - Confirm every included platform session is still connected before
+      installing the newer candidate. Also confirm the synthetic database,
+      settings, and saved draft are present.
 47. Install the newer Windows installer over it.
 48. Confirm the database, settings, included platform sessions, and draft
     survive.

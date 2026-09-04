@@ -114,3 +114,57 @@ test("Windows installer workflow publishes a SHA-256 beside the exact installer"
   assert.match(workflow, /dist\/windows\/Tovi-Setup-\*\.exe\.sha256/);
   assert.match(workflow, /Generate installer checksum/);
 });
+
+test("Windows upgrade validation creates real sessions under the pinned older candidate", () => {
+  const checklist = readFileSync(
+    resolve("docs/pilot/windows-physical-validation-checklist.md"),
+    "utf8"
+  );
+  const updateStart = checklist.indexOf("## Update and uninstall");
+  assert.notEqual(updateStart, -1);
+  const installNewStart = checklist.indexOf(
+    "\n47. Install the newer Windows installer",
+    updateStart
+  );
+  assert.notEqual(installNewStart, -1);
+
+  const olderCandidateSetup = checklist
+    .slice(updateStart, installNewStart)
+    .replace(/\s+/g, " ");
+  const orderedRequirements = [
+    "Record the earlier candidate commit",
+    "fully remove the current synthetic test installation and its app data",
+    "Install that exact older candidate",
+    "Obtain explicit authorisation before connecting or reconnecting",
+    "Establish a real authenticated session for every included platform",
+    "Create the privacy-safe synthetic data, settings, and saved draft",
+    "Quit and reopen the older candidate"
+  ];
+  let previous = -1;
+  for (const requirement of orderedRequirements) {
+    const current = olderCandidateSetup.indexOf(requirement);
+    assert.ok(current > previous, `${requirement} is missing or out of order`);
+    previous = current;
+  }
+
+  assert.match(
+    olderCandidateSetup,
+    /Confirm every included platform session is still connected before installing the newer candidate/
+  );
+});
+
+test("Windows upgrade validation does not grant another live send", () => {
+  const checklist = readFileSync(
+    resolve("docs/pilot/windows-physical-validation-checklist.md"),
+    "utf8"
+  );
+  const updateSection = checklist
+    .slice(checklist.indexOf("## Update and uninstall"))
+    .replace(/\s+/g, " ");
+
+  assert.match(
+    updateSection,
+    /The one authorised Tovi live send in steps 31 to 36 is the limit for the entire checklist/
+  );
+  assert.match(updateSection, /Do not use the older candidate, upgrade, or reinstall to send again/);
+});
