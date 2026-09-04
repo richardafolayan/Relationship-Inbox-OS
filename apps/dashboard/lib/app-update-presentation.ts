@@ -9,10 +9,19 @@ import {
 
 export type HostDeviceKind = "mac" | "pc" | "computer";
 
-export function hostKindToPlatform(kind: HostDeviceKind = "mac"): HostPlatformId {
+export function hostKindToPlatform(kind: HostDeviceKind = "computer"): HostPlatformId {
   if (kind === "mac") return "darwin";
   if (kind === "pc") return "win32";
   return "linux";
+}
+
+export function hostPlatformToKind(
+  platform?: HostPlatformId | null
+): HostDeviceKind | null {
+  if (platform === "darwin") return "mac";
+  if (platform === "win32") return "pc";
+  if (platform === "linux") return "computer";
+  return null;
 }
 
 export type UpdateUiState =
@@ -155,15 +164,67 @@ export function presentReleaseNotes(notes: string[]): PresentedReleaseNotes {
 }
 
 export function hostAppTitle(appName: string, hostLabel: string): string {
-  const label = hostLabel.trim() || "your Mac";
+  const label = hostLabel.trim() || "your computer";
   return `${appName} on ${label}`;
 }
 
-export function installLocationCopy(kind: HostDeviceKind = "mac"): string {
+export function installLocationCopy(kind: HostDeviceKind = "computer"): string {
   return updatesInstallLabel(hostKindToPlatform(kind));
 }
 
-export function hostOfflineCheckMessage(kind: HostDeviceKind = "mac"): string {
+export function replaceAppUpdateInstructions(
+  appName: string,
+  legacyAppName: string,
+  kind: HostDeviceKind = "computer"
+): string {
+  if (kind === "pc") {
+    return (
+      `Quit ${appName}, download and open the latest Windows installer, then follow the installer ` +
+      `steps and reopen ${appName} from the Start menu. Your messages and settings are kept.`
+    );
+  }
+  if (kind === "computer") {
+    return (
+      `Quit ${appName}, install the latest ${appName} build for this computer, then reopen it. ` +
+      "Your messages and settings are kept."
+    );
+  }
+  return (
+    `Quit ${appName}, open the latest DMG, drag ${appName} into Applications and choose Replace, ` +
+    `then reopen it. If an app named ${legacyAppName} is still in Applications, remove it. ` +
+    "Your messages and settings are kept."
+  );
+}
+
+export function setupUpdateInstructions(
+  appName: string,
+  kind: HostDeviceKind = "computer"
+): string {
+  const opening =
+    `When an update is ready, ${appName} checks automatically. ` +
+    "Keep automatic updates on in Settings. ";
+  if (kind === "pc") {
+    return (
+      opening +
+      `If ${appName} asks you to replace the app, download the new Windows installer, quit ` +
+      `${appName}, open the installer, and finish setup. Your data and choices stay in place.`
+    );
+  }
+  if (kind === "computer") {
+    return (
+      opening +
+      `If ${appName} asks you to replace the app, install the new build for this computer, ` +
+      `then reopen ${appName}. Your data and choices stay in place.`
+    );
+  }
+  return (
+    opening +
+    `If ${appName} asks you to replace the app, download the new installer, open it, and drag ` +
+    `${appName} into Applications again. Your data and choices stay in place.`
+  );
+}
+
+export function hostOfflineCheckMessage(kind: HostDeviceKind = "computer"): string {
   if (kind === "pc") {
     return "Check for updates is unavailable while this PC is offline. Open the app on the PC, then try again.";
   }
@@ -173,7 +234,7 @@ export function hostOfflineCheckMessage(kind: HostDeviceKind = "mac"): string {
   return "Check for updates is unavailable while your Mac is offline. Open the app on your Mac, then try again.";
 }
 
-export function updateRestartNotice(appName: string, kind: HostDeviceKind = "mac"): string {
+export function updateRestartNotice(appName: string, kind: HostDeviceKind = "computer"): string {
   const where =
     kind === "pc" ? "this PC" : kind === "computer" ? "this computer" : "your Mac";
   return (

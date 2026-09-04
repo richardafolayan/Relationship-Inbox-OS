@@ -787,11 +787,7 @@ export default function SettingsPage() {
               <SettingsGroup head="Display">
                 <SettingRow
                   name="Text size"
-                  desc={
-                    phoneLayout
-                      ? "Scale the whole interface. This applies on this phone only."
-                      : "Scale the whole interface on this Mac."
-                  }
+                  desc="Scale the whole interface on this device only."
                   trailing={
                     <SegmentedControl
                       options={UI_SCALE_OPTIONS}

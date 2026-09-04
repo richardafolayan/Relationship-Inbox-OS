@@ -9,10 +9,13 @@ const {
   extractPullRequestRef,
   hostAppTitle,
   hostOfflineCheckMessage,
+  hostPlatformToKind,
   installLocationCopy,
   isTechnicalReleaseNote,
   presentReleaseNotes,
   readAppUpdatesSnapshot,
+  replaceAppUpdateInstructions,
+  setupUpdateInstructions,
   technicalDetailsOpenByDefault,
   toUserFacingReleaseNote,
   updateRestartNotice,
@@ -25,13 +28,31 @@ const {
 
 test("hostAppTitle names the app and the host device", () => {
   assert.equal(hostAppTitle("Tovi", "Richard's MacBook"), "Tovi on Richard's MacBook");
-  assert.equal(hostAppTitle("Tovi", "  "), "Tovi on your Mac");
+  assert.equal(hostAppTitle("Tovi", "  "), "Tovi on your computer");
 });
 
 test("install location copy points at the host, not the phone", () => {
   assert.equal(installLocationCopy("mac"), "Updates install on your Mac");
   assert.equal(installLocationCopy("pc"), "Updates install on your PC");
   assert.equal(installLocationCopy("computer"), "Updates install on your computer");
+});
+
+test("runner platform identifiers map to update copy device kinds", () => {
+  assert.equal(hostPlatformToKind("darwin"), "mac");
+  assert.equal(hostPlatformToKind("win32"), "pc");
+  assert.equal(hostPlatformToKind("linux"), "computer");
+  assert.equal(hostPlatformToKind("freebsd"), null);
+});
+
+test("unknown host metadata stays neutral until the runner identifies its platform", () => {
+  assert.equal(installLocationCopy(), "Updates install on your computer");
+  assert.doesNotMatch(setupUpdateInstructions("Tovi"), /DMG|Applications|Windows|Start menu/);
+  assert.doesNotMatch(
+    replaceAppUpdateInstructions("Tovi", "Relationship Inbox OS"),
+    /DMG|Applications|Windows|Start menu/
+  );
+  assert.match(hostOfflineCheckMessage(), /host is offline/i);
+  assert.match(updateRestartNotice("Tovi"), /this computer/i);
 });
 
 test("host offline copy explains why Check for updates is unavailable", () => {
@@ -44,6 +65,33 @@ test("restart notice warns that phone access may disconnect", () => {
   assert.match(notice, /Phone access may disconnect/i);
   assert.match(notice, /restarts on your Mac/i);
   assert.match(notice, /messages and settings are kept/i);
+});
+
+test("replacement update instructions match the host platform", () => {
+  assert.equal(
+    replaceAppUpdateInstructions("Tovi", "Relationship Inbox OS", "mac"),
+    "Quit Tovi, open the latest DMG, drag Tovi into Applications and choose Replace, then reopen it. If an app named Relationship Inbox OS is still in Applications, remove it. Your messages and settings are kept."
+  );
+  assert.equal(
+    replaceAppUpdateInstructions("Tovi", "Relationship Inbox OS", "pc"),
+    "Quit Tovi, download and open the latest Windows installer, then follow the installer steps and reopen Tovi from the Start menu. Your messages and settings are kept."
+  );
+  assert.doesNotMatch(
+    replaceAppUpdateInstructions("Tovi", "Relationship Inbox OS", "pc"),
+    /DMG|Applications/
+  );
+});
+
+test("setup update instructions preserve macOS copy and explain Windows replacement", () => {
+  assert.equal(
+    setupUpdateInstructions("Tovi", "mac"),
+    "When an update is ready, Tovi checks automatically. Keep automatic updates on in Settings. If Tovi asks you to replace the app, download the new installer, open it, and drag Tovi into Applications again. Your data and choices stay in place."
+  );
+  assert.equal(
+    setupUpdateInstructions("Tovi", "pc"),
+    "When an update is ready, Tovi checks automatically. Keep automatic updates on in Settings. If Tovi asks you to replace the app, download the new Windows installer, quit Tovi, open the installer, and finish setup. Your data and choices stay in place."
+  );
+  assert.doesNotMatch(setupUpdateInstructions("Tovi", "pc"), /DMG|Applications/);
 });
 
 // ---------------------------------------------------------------------------
