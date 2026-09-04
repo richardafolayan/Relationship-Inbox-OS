@@ -30,6 +30,10 @@ const globals = readFileSync(
   fileURLToPath(new URL("../apps/dashboard/app/globals.css", import.meta.url)),
   "utf8"
 );
+const menu = readFileSync(
+  fileURLToPath(new URL("../apps/dashboard/components/ui/menu.tsx", import.meta.url)),
+  "utf8"
+);
 
 test("swipe-down past the threshold dismisses the action sheet (#901)", () => {
   assert.equal(shouldDismissSheetSwipe(0), false);
@@ -53,6 +57,23 @@ test("phone uses ActionSheet; desktop/tablet keeps Menu popover (#901)", () => {
   // Desktop path still mounts the existing popover Menu.
   assert.match(threadPage, /<Menu[\s\S]*items=\{overflowMenuItems\}/);
   assert.match(threadPage, /overflowMenuItems = \[/);
+});
+
+test("desktop overflow menu layer stays above the message hit area", () => {
+  const headerIdx = threadPage.indexOf('data-testid="thread-header-band"');
+  const timelineIdx = threadPage.indexOf('data-testid="thread-message-timeline"');
+  assert.ok(headerIdx > 0 && timelineIdx > headerIdx, "header must precede timeline");
+
+  const headerBlock = threadPage.slice(headerIdx, timelineIdx);
+  assert.match(headerBlock, /backdrop-blur-md/);
+  assert.match(
+    headerBlock,
+    /className="[^\"]*\brelative\b[^\"]*\bz-20\b[^\"]*"/,
+    "blurred header must establish a layer above the later timeline"
+  );
+  assert.match(menu, /absolute top-\[calc\(100%\+6px\)\] z-30/);
+  assert.match(threadPage, /"Check for new messages"/);
+  assert.match(threadPage, /apiPost\(`\/runner\/control\/thread\/\$\{thread\.id\}\/rescan`/);
 });
 
 test("touch-only iOS keeps phone composer controls even with a desktop-width viewport", () => {
